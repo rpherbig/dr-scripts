@@ -1,5 +1,11 @@
-# dr-combat-trainer
-A script for Lich (https://lichproject.org/) that will train combat skills in DragonRealms (http://www.play.net/dr/)
+# dr-scripts
+A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).
+
+## combat-trainer.lic
+This script trains a list of weapon skills, starting with whichever has the lowest amount of field experience.
+
+## combat-trainer-setup.lic
+This script sets up UserVars for use with combat-trainer.lic.
 
 # Development - symlink on Windows
 I found making a symlink made it easier to work on this script. To do this in Windows, open a command prompt with elevated privileges (run-as Administrator) and execute: `mklink /H C:\destination\combat-trainer.lic C:\source\combat-trainer.lic`

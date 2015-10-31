@@ -13,6 +13,9 @@ This script trains a list of non-combat skills, starting with whichever has the 
 ## crossing-training-setup.lic
 This script sets up UserVars for use with crossing-training.lic.
 
+## events.lic
+This script is a helper which adds support for Events and Flags to make scripting easier and more robust.
+
 # Development - symlink on Windows
 See create_symlinks.bat. Change the _Source and _Destination variables.
 

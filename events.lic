@@ -1,0 +1,183 @@
+=begin
+    Events and Flags for better scripting
+
+    Make suggestions or find other scripts at https://github.com/rpherbig/dr-scripts
+
+FLAGS: Flags are simple true false string detectors.
+    Usage Example:
+
+        Flags.add(<key>, <trigger>|[<trigger1,...,triggerN])
+
+        Flags.add('test', 'exp help')
+        Flags.add('test', 'a second message')
+        Flags.add('another', ['exp help', 'a second message'])
+            This creates a new flag "test", which will return the matched string any time you see a message containing "exp help". Note that
+            the message will be treated as a regular expression and is case insensitive (google for more info) so be careful with
+            special characters, remember to use single quote strings if you're going to use special characters.
+            Calling add with the same key will store another regex to potentially match against. Alternatively you can add an array
+            with multiple matchers. If multiple messages match the flag will be set to the first match found.
+
+        Flags.add('skillexp', '(\w[^:\(\)]+):\s+(\d+)\s\d+\.\d+%[^\(\)]*\((\d+)\/\d+\)')
+            This example will add a flag watching for the results of an exp message, specifically "exp skillname".
+            After sending "exp mech" to the game Flags['skillexp'] would contain...
+
+            ["Mechanical Lore:    146 16.82% focused       (20/34)", "Mechanical Lore", "146", "20"]
+
+            You can see the array containing entire matched string and the three capture groups containing
+            skill name, ranks, and mind state.
+
+        Flags['test']
+            Returns the match if you've seen any message matching after you called add (or reset); false otherwise
+
+        Flags['test'] = false
+        Flags.reset('test')
+            Both of these commands have the same effect, reseting a flag as if it hasn't been seen yet.
+
+        Flags.delete('test')
+            Removes a flag, stopping any tracking of it.
+
+EVENTS: Events are designed to trigger a block of code (callback, proc, block, etc) anytime a matching key is detected.
+    Usage Example:
+
+        Events.register(<key>, <trigger>) &block
+
+        Events.register('expskill', '(\w[^:\(\)]+):\s+(\d+)\s\d+\.\d+%[^\(\)]*\((\d+)\/\d+\)') {|match| echo match[1]}
+        Events.register('expskill', '(\w[^:\(\)]+):\s+(\d+)\s\d+\.\d+%[^\(\)]*\((\d+)\/\d+\)') do |match|
+            echo match[1]
+        end
+
+            These two calls are identical, they will set up an event that when an exp line is matched will echo the skill seen.
+
+        Events.delete('expskill')
+
+            Removes the event listener.
+
+        Events.register_once('castspell', 'You feel fully prepared') {|_| fput "cast" }
+
+            This listener removes itself as soon as it has matched one time. This example will try to cast the next time you see
+            the message 'you are fully prepared'. However if you then see the message again later it will not fire as the
+            listener has been deleted.
+
+
+
+
+
+=end
+
+if $SAFE > 0
+  echo "WARNING: This script may not work if not trusted and other scripts that rely on this one may not work. (;trust #{script.name.downcase})"
+end
+
+no_kill_all
+no_pause_all
+#hide_me
+setpriority(0)
+
+
+class Flags
+    @@flags = {}
+    @@matchers = {}
+
+    def self.[](key)
+        @@flags[key]
+    end
+
+    def self.[]=(key, value)
+        @@flags[key] = value
+    end
+
+    def self.add(key, matcher)
+        matcher = matcher.is_a?(Array) ? matcher : [matcher]
+        @@flags[key] = false unless @@flags.key?(key)
+        if @@matchers[key]
+            @@matchers[key] = @@matchers[key] + matcher
+        else
+            @@matchers[key] = matcher
+        end
+    end
+
+    def self.reset key
+        @@flags[key] = false
+    end
+
+    def self.delete key
+        @@matchers.delete key
+        @@flags.delete key
+    end
+
+    def self.flags
+        @@flags
+    end
+
+    def self.matchers
+        @@matchers
+    end
+end
+
+
+class Events
+    @@events = {}
+
+    def self.register key, matcher, &body
+        @@events[key] = {"regex"=>matcher, "proc"=> body, "run_once"=>false}
+    end
+
+    def self.register_once key, matcher, &body
+       @@events[key] = {"regex"=>matcher, "proc"=> body, "run_once"=>true}
+    end
+
+    def self.delete key
+        @@events.delete key
+    end
+
+    def self.events
+        @@events
+    end
+end
+
+eventsAction = proc { |server_string|
+    Thread.new(server_string.dup) {|server_string|
+        sleep 0.01
+        Flags.matchers.each do |key, regexes|
+            regexes.each do |regex|
+                if matches = server_string.match(/#{regex}/i)
+                    Flags.flags[key] = matches.to_a
+                    break
+                end
+            end
+        end
+
+        Events.events.each do |key, event|
+            if matches = server_string.match(/#{event["regex"]}/i)
+                event["proc"].call(matches)
+                Events.delete(key) if event["run_once"]
+            end
+        end
+
+    }
+    server_string
+}
+
+DownstreamHook.remove('eventsAction')
+DownstreamHook.add('eventsAction', eventsAction)
+
+before_dying {
+    DownstreamHook.remove('eventsAction');
+}
+
+while line = script.gets
+    begin
+    rescue Exception
+        echo $!
+        echo $!.backtrace.first
+        sleep 1
+    rescue ThreadError
+        echo $!
+        echo $!.backtrace.first
+        sleep 1
+    rescue
+        echo $!
+        echo $!.backtrace.first
+        sleep 1
+    end
+end

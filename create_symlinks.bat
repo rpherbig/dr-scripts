@@ -5,6 +5,8 @@ call:symlink combat-trainer
 call:symlink combat-trainer-setup
 call:symlink crossing-training
 call:symlink crossing-training-setup
+call:symlink crossing-repair
+call:symlink events
 goto:eof
 
 :symlink

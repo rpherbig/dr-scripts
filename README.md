@@ -7,6 +7,9 @@ This script trains a list of weapon skills, starting with whichever has the lowe
 ## combat-trainer-setup.lic
 This script sets up UserVars for use with combat-trainer.lic.
 
+## crossing-repair.lic
+This script repairs leather and metal gear in The Crossing.
+
 ## crossing-training.lic
 This script trains a list of non-combat skills, starting with whichever has the lowest amount of field experience.
 

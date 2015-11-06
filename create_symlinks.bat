@@ -2,10 +2,11 @@ Set _Destination=C:\[CHANGE THIS]
 
 call:symlink combat-trainer
 call:symlink combat-trainer-setup
-call:symlink crossing-training
-call:symlink crossing-training-setup
+call:symlink common
 call:symlink crossing-repair
 call:symlink crossing-repair-setup
+call:symlink crossing-training
+call:symlink crossing-training-setup
 call:symlink events
 goto:eof
 

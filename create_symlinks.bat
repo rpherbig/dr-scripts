@@ -8,6 +8,7 @@ call:symlink crossing-repair-setup
 call:symlink crossing-training
 call:symlink crossing-training-setup
 call:symlink events
+call:symlink smartlisten
 goto:eof
 
 :symlink

@@ -16,6 +16,15 @@ Helper which adds support for events via Flags to make scripting easier and more
 ## smartlisten.lic
 Automatic listener: if someone teaches you an approved class you'll start listening.
 
+## theurgy.lic
+Quick and dirty theurgy training script, works as soon as you have commune eluned.
+
+## pick.lic
+Lockpicking script for opening all the boxes in a given container.
+
+## common.lic
+A set of shared helper functions to provide reusable functionality for other scripts.
+
 ## create_symlinks.bat
 Useful if you are doing development on Windows. Change the _Destination variable.
 

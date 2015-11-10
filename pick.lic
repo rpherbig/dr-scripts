@@ -16,7 +16,7 @@
     The script will look for suitable disposal sources in the room, or drop refuse on the ground
 
     Before running this script for the first time:
-    * Download scripts "common", and "drinfomon"
+    * Download scripts "common", "events", and "drinfomon"
     * ;trust each of the above scripts.
 
     * You can turn on debug mode with ;e UserVars.lockpick_debug = true
@@ -48,18 +48,26 @@ UserVars.box_storage = variable[2]
 UserVars.stop_on_ml = variable.length == 4
 
 def main
-
     # Run helper scripts
-    %w(common drinfomon ).each do |script_name|
+    %w(common drinfomon events).each do |script_name|
         unless running?(script_name)
             start_script script_name
             pause 0.5
         end
     end
 
+    empty_hands
+    remove_armor
+    fput "remove knuckle"
+    fput "sit"
+
     boxes = get_boxes(UserVars.box_source)
 
-    echo "#{boxes}"
+    boxes.each{|box| attempt_open(box)}
+
+    fput "wear knuckle"
+    wear_armor
+    fput "stand"
 end
 
 def get_boxes(container)
@@ -68,196 +76,270 @@ def get_boxes(container)
 
     boxes_text = extract_boxes_text(result)
 
-    boxes = list_to_nouns(boxes_text)
+    list_to_nouns(boxes_text)
 end
 
 def extract_boxes_text(raw)
     raw.match(/looking for boxes and see (.*)\.$/).to_a[1]
 end
 
+def attempt_open(box)
+    echo "attempt_open(#{box})" if UserVars.lockpick_debug
+    bput("get my #{box} from my #{UserVars.box_source}", 'You get a .* from inside your ')
+
+    unless disarm(box)
+        bput("put my #{box} in my #{UserVars.box_storage}", 'You put your .* in your ')
+        return
+    end
+
+    attempt_pick(box)
+
+    #TODO loot(box)
+
+end
+
+def attempt_pick(box)
+    get_lockpick
+    until pick(box)
+end
+
+def pick(box)
+    case bput("pick my #{box} ident", *(pick_careful+pick_quick+pick_blind+pick_retry))
+    when *pick_careful
+        pick(box, 'careful')
+    when *pick_quick
+        pick(box, 'quick')
+    when *pick_blind
+        pick(box, 'blind')
+    when *pick_retry
+        pick(box)
+    end
+end
+
+def pick(box, speed)
+    Flags.add('pick-more', 'You discover another')
+    until "Roundtime" == bput("pick my #{box} speed", 'You are unable to make any progress towards opening the lock', roundtime[0] )
+        get_lockpick
+    end
+    return Flags['pick-more']
+end
+
+def get_lockpick
+    unless checkleft
+        case bput("get my lockpick", 'referring to\?', '^You get a ')
+        when 'referring to?'
+            echo "OUT OF LOCKPICKS"
+            beep
+            exit
+        end
+    end
+end
+
+def disarm(box)
+    echo "disarm(#{box})" if UserVars.lockpick_debug
+    case bput("disarm my #{box} identify", *disarm_ident_responses)
+    when *failed_ident
+        disarm_box(box)
+    when *too_hard
+        return false
+    when *(careful+roundtime)
+        disarm(box, 'careful')
+    when *quick
+        disarm(box, 'quick')
+    when *normal
+        disarm(box, 'normal')
+    end
+end
+
+def disarm(box, speed)
+    echo "disarm(#{box}, #{speed})" if UserVars.lockpick_debug
+    Flags.add('disarm-more', 'not yet fully disarmed')
+
+    case bput("disarm my #{box} #{speed}", *(failed_disarm+repeat_disarm+repeat_with_care+roundtime))
+    when *failed_disarm
+        beep
+        beep
+        echo("**SPRUNG TRAP**")
+        exit
+    when *repeat_disarm
+        disarm(box,speed)
+    when *repeat_with_care
+        disarm(box, 'careful')
+    end
+
+    analyze(box)
+
+    disarm(box) if Flags['disarm-more']
+end
+
+def analyze(box)
+    case bput("disarm #{box} analyze", /You've already analyzed/, /You are unable to determine a proper method/, roundtime[0] )
+    when /You are unable to determine a proper method/
+        analyze(box)
+        return
+    end
+    harvest(box)
+end
+
+def harvest(box)
+    case bput("disarm #{box} harvest",
+        /You fumble around with the trap apparatus/,
+        /much for it to be successfully harvested/,
+        /completely unsuitable for harvesting/,
+        /previous trap have already been completely harvested/,
+        roundtime[0])
+    when *roundtime
+        dispose_trash(checkleft)
+    else
+        harvest(box)
+        return
+    end
+end
+
+def pick_careful
+    [
+        /lock has the edge on you, but you've got a good shot at/,
+        /You have some chance of being able to/,
+        /odds are against you/,
+        /would be a longshot/,
+        /You have an amazingly minimal chance/,
+    ]
+end
+
+def pick_quick
+    [
+        /trivially constructed piece of junk barely worth your time/,
+        /will be a simple matter for you to unlock/,
+        /should not take long with your skills/,
+        /You think this lock is precisely at your skill level/,
+        /with only minor troubles/,
+    ]
+end
+
+def pick_blind
+    [
+        /trivially constructed gadget which you can take down any time/,
+        /An aged grandmother could/,
+        /you could do it blindfolded/,
+        /You really don't have any chance/,
+        /Prayer would be a good start for any/,
+        /You could just jump off a cliff and save/,
+        /You probably have the same shot as a snowball/,
+        /A pitiful snowball encased in the Flames/,
+    ]
+end
+
+def pick_retry
+    [
+        /fails to teach you anything about the lock guarding it/
+    ]
+end
+
+def disarm_ident_responses
+    failed_ident+too_hard+careful+quick+normal+roundtime
+end
+
+def failed_disarm
+    [
+        /lock springs out and stabs you painfully in the finger./,
+        /An acrid stream of sulfurous air hisses quietly/,
+        /A stream of corrosive acid sprays out from the/,
+        /With a sinister swishing noise, a deadly sharp scythe blade whips out the front of the/,
+        /There is a sudden flash of greenish light, and a huge electrical charge sends you flying/,
+        /A stoppered vial opens with a pop and cloud of thick green vapor begins to pour out of the/,
+        /breaks in half. A glass sphere on the seal begins to glow with an eerie black light/,
+        /Just as your ears register the sound of a sharp snap/,
+        /Looking at the needle, you notice with horror the rust colored coating on the tip./,
+        /You barely have time to register a faint click before a blinding flash explodes around you/,
+        /Moving with the grace of a pregnant goat, you carelessly flick at the piece of metal causing/,
+        /You make a small hole in the side of the box and take deep breath to blow the powder free but a/,
+        /With a cautious hand, you attempt to undo the string tying the bladder to the locking mechanism/,
+        /The dart flies though your fingers and plants itself solidly in your forehead\!/,
+        /Almost casually, you press on the tiny hammer set to break the tube. The hammer slips from its locked/,
+        /Nothing happened. Maybe it was a dud./,
+        /You get a feeling that something isn't right. Before you have time to think what it might be you find.../,
+        /and emits a sound like tormented souls being freed, then fades away suddenly./,
+        /has gotten much bigger\!/,
+        /and clumsily shred the fatty bladder behind it in the process./,
+        /liquid shadows/,
+        /You wiggle the milky-white tube back and forth for a few moments in an attempt to remove it from/,
+        /With a nasty look and a liberal amount of hurled, unladylike epithets, she wiggles back inside and slams/,
+        /Not sure where to start, you begin by prying off the body of the crusty scarab, hoping to break it free/,
+        /You feel like you've done a good job of blocking up the pinholes, until you peer closely to examine/,
+    ]
+end
+
+def repeat_disarm
+    [
+        /You work with the trap for a while but are unable to make any progress/
+    ]
+end
+
+def repeat_with_care
+    [
+        /something to shift/
+    ]
+end
+
+def failed_ident
+    [
+        /fails to reveal to you what type of trap protects it/,
+        /something to shift/
+    ]
+end
+
+def too_hard
+    [
+        /would be a longshot/,
+        /You have an amazingly minimal chance/,
+        /You really don't have any chance/,
+        /Prayer would be a good start for any/,
+        /You could just jump off a cliff and save/,
+        /You probably have the same shot as a snowball/,
+        /A pitiful snowball encased in the Flames/,
+    ]
+end
+
+def careful
+    [
+        /covered black scarab of some unidentifiable substance clings to the/,
+        /are covered with a thin metal circle that has been lacquered with/,
+        /with only minor troubles/,
+        /should not take long with your skills/,
+        /trap has the edge on you, but you've got a good shot at disarming/,
+        /You have some chance of being able to disarm/,
+        /odds are against you/,
+    ]
+end
+
+def quick
+    [
+        /trivially constructed gadget which you can take down any time/,
+        /This trap is a laughable matter, you could do it blindfolded/,
+        /An aged grandmother could defeat this trap in her sleep/,
+    ]
+end
+
+
+def normal
+    [
+        /will be a simple matter for you to disarm/,
+        /You think this trap is precisely at your skill level/,
+    ]
+end
+
+def roundtime
+    [
+        /Roundtime/
+    ]
+end
+
+
+
 main
 
-# var coins coin|coins
-# var keep nugget|tsavorite|zircon|quartz|chalc|diop|coral|moonstone|onyx|topaz|amber|pearl|chryso|lazuli|turquoise|bloodstone|hematite|morganite|sapphire|agate|bar|carnelian|diamond|crystal|emerald|ruby|tourmaline|tanzanite|jade|ivory|sunstone|iolite|beryl|garnet|alexandrite|amethyst|citrine|aquamarine|star-stone|crystal|kunzite|stones
-# var trash leaf|pestle|mortar|label|runestone|flower
-
-# gosub get.contents %boxbag
-
-# disarm.loop:
-# jscall box doShift("contents_n")
-# if %box <> 0 then {
-# put get %box from my %boxbag
-# goto disarm.ident
-# }
-# else goto disarm.done
-
-# disarm.ident:
-# var location disarm.ident
-# match disarm.ident fails to reveal to you what type of trap protects it
-# match disarm.ident something to shift
-# match disarm.stop would be a longshot
-# match disarm.stop You have an amazingly minimal chance
-# match disarm.stop You really don't have any chance
-# match disarm.stop Prayer would be a good start for any
-# match disarm.stop You could just jump off a cliff and save
-# match disarm.stop You probably have the same shot as a snowball
-# match disarm.stop A pitiful snowball encased in the Flames
-# match disarm.careful covered black scarab of some unidentifiable substance clings to the
-# match disarm.careful are covered with a thin metal circle that has been lacquered with
-# match disarm.quick trivially constructed gadget which you can take down any time
-# match disarm.quick This trap is a laughable matter, you could do it blindfolded
-# match disarm.quick An aged grandmother could defeat this trap in her sleep
-# match disarm.normal will be a simple matter for you to disarm
-# match disarm.normal You think this trap is precisely at your skill level
-# match disarm.careful with only minor troubles
-# match disarm.careful should not take long with your skills
-# match disarm.careful trap has the edge on you, but you've got a good shot at disarming
-# match disarm.careful You have some chance of being able to disarm
-# match disarm.careful odds are against you
-# match disarm.unknown Roundtime
-
-# put disarm my %box identify
-# goto retry
-
-# disarm.stop:
-
-# echo *** Too Hard to Disarm!
-
-# put put %box in %stowbag
-# goto disarm.loop
-
-# disarm.unknown:
-# echo *** Unknown Trap Difficulty -- using CAREFUL!
-# disarm.careful:
-# var disarmtype careful
-# goto disarm.disarm
-
-# disarm.normal:
-# var disarmtype
-# goto disarm.disarm
-
-# disarm.quick:
-# var disarmtype quick
-# goto disarm.disarm
-
-# disarm.disarm:
-# var location disarm.disarm
-# match disarm.more not yet fully disarmed.
-# match disarm.careful something to shift
-# match disarm.fail lock springs out and stabs you painfully in the finger.
-# match disarm.fail An acrid stream of sulfurous air hisses quietly
-# match disarm.fail A stream of corrosive acid sprays out from the
-# match disarm.fail With a sinister swishing noise, a deadly sharp scythe blade whips out the front of the
-# match disarm.fail There is a sudden flash of greenish light, and a huge electrical charge sends you flying
-# match disarm.fail A stoppered vial opens with a pop and cloud of thick green vapor begins to pour out of the
-# match disarm.fail breaks in half. A glass sphere on the seal begins to glow with an eerie black light
-# match disarm.fail Just as your ears register the sound of a sharp snap
-# match disarm.fail Looking at the needle, you notice with horror the rust colored coating on the tip.
-# match disarm.fail You barely have time to register a faint click before a blinding flash explodes around you
-# match disarm.fail Moving with the grace of a pregnant goat, you carelessly flick at the piece of metal causing
-# match disarm.fail You make a small hole in the side of the box and take deep breath to blow the powder free but a
-# match disarm.fail With a cautious hand, you attempt to undo the string tying the bladder to the locking mechanism
-# match disarm.fail The dart flies though your fingers and plants itself solidly in your forehead!
-# match disarm.fail Almost casually, you press on the tiny hammer set to break the tube. The hammer slips from its locked
-# match disarm.fail Nothing happened. Maybe it was a dud.
-# match disarm.fail You get a feeling that something isn't right. Before you have time to think what it might be you find...
-# match disarm.fail and emits a sound like tormented souls being freed, then fades away suddenly.
-# match disarm.fail has gotten much bigger!
-# match disarm.fail and clumsily shred the fatty bladder behind it in the process.
-# match disarm.fail "liquid shadows"
-# match disarm.fail You wiggle the milky-white tube back and forth for a few moments in an attempt to remove it from
-# match disarm.fail With a nasty look and a liberal amount of hurled, unladylike epithets, she wiggles back inside and slams
-# match disarm.fail Not sure where to start, you begin by prying off the body of the crusty scarab, hoping to break it free
-# match disarm.fail You feel like you've done a good job of blocking up the pinholes, until you peer closely to examine
-# match disarm.disarm You work with the trap for a while but are unable to make any progress.
-# match disarm.pick Roundtime
-
-# put disarm my %box %disarmtype
-# goto retry
-
-# disarm.more:
-
-# var followup disarm.ident
-# goto disarm.anal
-
-# disarm.pick:
-
-# var followup pick.getpick
-# goto disarm.anal
-
-# disarm.fail:
-# echo ***FAILED DISARM***
-# goto disarm.done
 
 
-# disarm.anal:
-# var location disarm.anal
-# match disarm.harvest You've already analyzed
-# match disarm.anal You are unable to determine a proper method
-# match disarm.harvest Roundtime
-# put disarm my %box anal
-# goto retry
-
-# disarm.harvest:
-
-# match disarm.harvest You fumble around with the trap apparatus
-# match %followup much for it to be successfully harvested.
-# match %followup completely unsuitable for harvesting.
-# match %followup previous trap have already been completely harvested.
-# match disarm.empty.left Roundtime
-
-# put disarm my %box harv
-# goto retry
-
-# disarm.empty.left:
-# if %trashbag <> 0 then put put $lefthandnoun in %trashbag
-# else put drop $lefthandnoun
-# goto %followup
-
-# pick.getpick:
-# var location pick.getpick
-# match pick.ident You get a
-# match pick.nopick referring to?
-# put get lockpick from my $lockpicks
-# goto retry
-
-# pick.nopick:
-
-# echo *** No more lockpicks, or try a different container.
-# goto disarm.done
-
-# pick.ident:
-# var location pick.ident
-# match pick.getpick Find a more appropriate tool and try again!
-# match pick.open It's not even locked, why bother?
-# match pick.ident fails to teach you anything about the lock guarding it.
-# match pick.blind trivially constructed gadget which you can take down any time
-# match pick.blind An aged grandmother could
-# match pick.blind you could do it blindfolded
-# match pick.quick trivially constructed piece of junk barely worth your time
-# match pick.quick will be a simple matter for you to unlock
-# match pick.quick should not take long with your skills
-# match pick.quick You think this lock is precisely at your skill level
-# match pick.quick with only minor troubles
-# match pick.careful lock has the edge on you, but you've got a good shot at
-# match pick.careful You have some chance of being able to
-# match pick.careful odds are against you
-# match pick.careful would be a longshot
-# match pick.careful You have an amazingly minimal chance
-# match pick.hard You really don't have any chance
-# match pick.hard Prayer would be a good start for any
-# match pick.hard You could just jump off a cliff and save
-# match pick.hard You probably have the same shot as a snowball
-# match pick.hard A pitiful snowball encased in the Flames
-# match pick.unknown Roundtime
-
-# put pick my %box identify
-# goto retry
-
-# pick.hard:
-
-# echo *** You have no chance to open this lock!
-# echo *** Proceeding to Pick Quick Anyway
 
 # goto pick.quick
 

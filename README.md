@@ -25,6 +25,9 @@ Lockpicking script for opening all the boxes in a given container.
 ## common.lic
 A set of shared helper functions to provide reusable functionality for other scripts.
 
+## healme.lic
+Self healing script for an empath.
+
 ## create_symlinks.bat
 Useful if you are doing development on Windows. Change the _Destination variable.
 

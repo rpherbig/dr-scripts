@@ -63,7 +63,10 @@ def main
 
     boxes = get_boxes(UserVars.box_source)
 
-    boxes.each{|box| attempt_open(box)}
+    boxes.each do |box|
+        break if UserVars.stop_on_ml && DRSkill.getxp('Locksmithing').to_i >= 34
+        attempt_open(box)
+    end
 
     fput "wear my knuckles"
     wear_armor
@@ -84,6 +87,7 @@ def extract_boxes_text(raw)
 end
 
 def attempt_open(box)
+    waitrt?
     echo "attempt_open(#{box})" if UserVars.lockpick_debug
     bput("get my #{box} from my #{UserVars.box_source}", 'You get a .* from inside your ')
 
@@ -94,30 +98,62 @@ def attempt_open(box)
 
     attempt_pick(box)
 
-    #TODO loot(box)
+    waitrt?
+    fput("stow left")
 
+    waitrt?
+    loot(box)
+
+    fput "dismantle my #{box}"
+end
+
+def loot(box)
+    waitrt?
+    raw_contents = bput("open my #{box}", /^In the .* you see .*\./)
+    loot = list_to_nouns(raw_contents.match(/^In the .* you see (.*)\./).to_a[1])
+
+    loot.each{|item| loot_item(item, box) }
+end
+
+def loot_item(item, box)
+    if UserVars.trash_nouns.find{|thing| item.include?(thing) }
+        dispose_trash(item)
+    elsif UserVars.loot_nouns.find{|thing| item.include?(thing) }
+        fput("get #{item} from my #{box}") #get text for bput
+        fput("stow my #{item}")
+    elsif item.include?('coin')
+        fput "get coin"
+    elsif item != ""
+        beep
+        echo("***Unrecognized Item! Stowing it.***")
+        fput("get #{item} from my #{box}") #get text for bput
+        fput("stow my #{item}")
+    end
 end
 
 def attempt_pick(box)
     get_lockpick
-    until pick(box)
+    while pick(box)
+    end
 end
 
 def pick(box)
+    waitrt?
     case bput("pick my #{box} ident", *(pick_careful+pick_quick+pick_blind+pick_retry))
     when *pick_careful
-        pick(box, 'careful')
+        pick_speed(box, 'careful')
     when *pick_quick
-        pick(box, 'quick')
+        pick_speed(box, 'quick')
     when *pick_blind
-        pick(box, 'blind')
+        pick_speed(box, 'blind')
     when *pick_retry
         pick(box)
     end
 end
 
-def pick(box, speed)
-    Flags.add('pick-more', 'You discover another')
+def pick_speed(box, speed)
+    waitrt?
+    Flags.add('pick-more', 'You discover another lock protecting')
     until "Roundtime" == bput("pick my #{box} speed", 'You are unable to make any progress towards opening the lock', roundtime[0] )
         get_lockpick
     end
@@ -125,6 +161,7 @@ def pick(box, speed)
 end
 
 def get_lockpick
+    waitrt?
     unless checkleft
         case bput("get my lockpick", 'referring to\?', '^You get a ')
         when 'referring to?'
@@ -136,22 +173,24 @@ def get_lockpick
 end
 
 def disarm(box)
+    waitrt?
     echo "disarm(#{box})" if UserVars.lockpick_debug
     case bput("disarm my #{box} identify", *disarm_ident_responses)
     when *failed_ident
-        disarm_box(box)
+        disarm(box)
     when *too_hard
         return false
     when *(careful+roundtime)
-        disarm(box, 'careful')
+        disarm_speed(box, 'careful')
     when *quick
-        disarm(box, 'quick')
+        disarm_speed(box, 'quick')
     when *normal
-        disarm(box, 'normal')
+        disarm_speed(box, 'normal')
     end
 end
 
-def disarm(box, speed)
+def disarm_speed(box, speed)
+    waitrt?
     echo "disarm(#{box}, #{speed})" if UserVars.lockpick_debug
     Flags.add('disarm-more', 'not yet fully disarmed')
 
@@ -162,17 +201,20 @@ def disarm(box, speed)
         echo("**SPRUNG TRAP**")
         exit
     when *repeat_disarm
-        disarm(box,speed)
+        disarm_speed(box,speed)
     when *repeat_with_care
-        disarm(box, 'careful')
+        disarm_speed(box, 'careful')
     end
 
-    analyze(box)
+    result = analyze(box)
 
-    disarm(box) if Flags['disarm-more']
+    result = disarm(box) if Flags['disarm-more']
+
+    result
 end
 
 def analyze(box)
+    waitrt?
     case bput("disarm my #{box} analyze", /You've already analyzed/, /You are unable to determine a proper method/, roundtime[0] )
     when /You are unable to determine a proper method/
         analyze(box)
@@ -182,6 +224,7 @@ def analyze(box)
 end
 
 def harvest(box)
+    waitrt?
     case bput("disarm my #{box} harvest",
         /You fumble around with the trap apparatus/,
         /much for it to be successfully harvested/,
@@ -189,11 +232,12 @@ def harvest(box)
         /previous trap have already been completely harvested/,
         roundtime[0])
     when *roundtime
+        waitrt?
         dispose_trash(checkleft)
-    else
+    when /You fumble around with the trap apparatus/
         harvest(box)
-        return
     end
+    true
 end
 
 def pick_careful
@@ -337,112 +381,3 @@ end
 
 
 main
-
-
-
-
-# goto pick.quick
-
-# pick.careful:
-
-# var picktype careful
-# goto pick.anal
-
-# pick.unknown:
-
-# echo *** Unknown Lock Difficulty -- using normal.
-
-# pick.normal:
-# var picktype
-
-# goto pick.anal
-
-# pick.quick:
-# var picktype quick
-
-# goto pick.anal
-
-# pick.blind:
-
-# var picktype blind
-
-# pick.anal:
-# var location pick.anal
-# match pick.anal You are unable to determine anything useful about the lock
-# match pick.lock This lock has already helpfully been analyzed...
-# match pick.lock Roundtime
-
-# put pick my %box anal
-# goto retry
-
-# pick.lock:
-# var location pick.lock
-# match pick.lock You are unable to make any progress towards opening the lock.
-# match pick.broke just broke
-# match pick.broke Find a more appropriate tool and try again!
-# match pick.ident You discover another
-# match pick.open Roundtime
-
-# put pick my %box %picktype
-# goto retry
-
-
-# pick.broke:
-
-# var location pick.broke
-# match pick.lock you get a
-# match pick.nopick referring to?
-# put get lockpick from from my $lockpicks
-# goto retry
-
-
-# pick.open:
-# store.pick:
-# var location store.pick
-# match open.loot You put
-# match open.loot What were
-# put put lockp in my $lockpicks
-
-# open.loot:
-# action var loot $1 when ^In the .+ you see (.*)\.
-# put open %box
-# waitfor In the
-
-# gosub Base.ListExtract loot loot_items void
-
-# open.item:
-# jscall item doShift("loot_items")
-# if %item <> 0 then goto loot.loot
-# else goto disarm.break
-
-# loot.loot:
-# pause 1
-# if contains("%coins", "%item") then {
-# put get coin
-# goto open.item
-# }
-# if contains("%keep", "%item") then {
-#     put get %item
-#     put stow %item
-#     goto open.item
-# }
-# if contains("%trash", "%item") then {
-#     put get %item
-#     if %trashbag <> 0 then put put %item in %trashbag
-#     else put drop %item
-#     goto open.item
-# }
-
-# echo ***New Item***
-# put get %item
-# put stow %item
-# goto open.item
-
-
-# disarm.break:
-# var location disarm.break
-# match disarm.loop Roundtime
-# PUT dismantle %box
-# goto retry
-# goto disarm.loop
-# disarm.done:

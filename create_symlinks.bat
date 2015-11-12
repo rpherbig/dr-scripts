@@ -1,5 +1,5 @@
 @ECHO OFF
-Set _Destination=C:\[CHANGE THIS]
+Set _Destination=%1
 
 FOR /f %%a IN (
  'dir /b *.lic" '

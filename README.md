@@ -28,6 +28,9 @@ A set of shared helper functions to provide reusable functionality for other scr
 ## healme.lic
 Self healing script for an empath.
 
+## tendme.lic
+Script that tends and rewraps wounds.
+
 ## sell-loot.lic
 Sells any loose gems, your bundle, and then deposits your coin in the bank. Should be used in The Crossing.
 

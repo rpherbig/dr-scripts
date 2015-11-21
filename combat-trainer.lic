@@ -1,12 +1,12 @@
 =begin
     Authored by Sheltim and Seped. Suggestions and contributions are welcome: https://github.com/rpherbig/dr-scripts
 
-    This script will train a list of skills in order of the lowest amount of field experience.
+    This script will be used by combat-trainer-setup to train a list of skills in order of the lowest amount of field experience.
 
     Before running this script for the first time:
     * Download scripts "common", "drinfomon", "events", and "spellmonitor".
-    * Set up a configuration script named "combat-trainer-setup".
-        * Download "combat-trainer-setup" for an example configuration script.
+
+    * Download "combat-trainer-setup" configure it for your use, and run it.
 =end
 
 # TODO: when no enemies in the room don't pause. Instead collect once and kick pile to train perc/outdoors.
@@ -15,6 +15,195 @@
 # Is this fixed now that there is a secondary sort on rank?
 
 # TODO: Convert "combat-trainer" to "combat-trainer-engine" and "combat-trainer-setup" to "combat-trainer". This means what was the setup script will now be the script you run. It would manage CombatVars, dependencies, etc. and feed those to the engine script.
+
+class SetupProcess
+  def initialize
+
+  end
+
+  def execute
+
+  end
+
+end
+
+class LootProcess
+  def initialize
+  end
+
+  def execute
+
+  end
+
+end
+
+class SafetyProcess
+
+  def initialize
+  end
+
+  def execute
+    fix_standing
+    in_danger?
+  end
+
+  private
+
+  def fix_standing
+    return if checkstanding
+    fput('stand')
+  end
+
+  def in_danger?
+    return false if checkhealth > 75 && !checkbleeding
+
+    fput 'exit' if checkhealth < 40
+
+    echo '***LOW ON HEALTH OR BLEEDING***'
+    escape_message = 'You are already as far away as you can get'
+    until escape_message == bput('retreat', escape_message, 'retreat')
+    end
+
+    if checkbleeding && Script.exists?('tendme') && !running?('tendme')
+      start_script('tendme')
+    end
+
+    true
+  end
+
+end
+
+class SpellProcess
+  def initialize(buffs:{}, ospells:[], camb:nil, casts:[], preps:[])
+    @buff_spells = buff_spells
+    @offensive_spells = offensive_spells
+    @cambrinth = camb
+    @casts = casts
+    @preps = preps
+
+    if (buffs.size > 0 || ospells.length > 0) && (casts.length == 0 || preps.length == 0)
+      raise(ArgumentError, 'Must provide casting/prep messages to use spells')
+    end
+
+    @prep_spell = false
+    @charges = nil
+    @previous_skill
+  end
+
+  def execute
+    check_current
+    bless_thrown unless @prep_spell
+    check_buffs unless @prep_spell
+    check_offensive unless @prep_spell
+    false
+  end
+
+  private
+
+  def bless_thrown
+    return unless @buff_spells['Bless']
+    new_skill = SetupProcess.current_skill
+    if @previous_skill != new_skill && @thrown_skills.include?[new_skill]
+      bput('prepare Bless', *@preps)
+      bput("cast #{SetupProcess.current_weapon}", *@casts)
+    end
+    @previous_skill = new_skill
+  end
+
+  def charge_cambrinth
+    false unless @charges
+
+    if @charges.length > 0
+      fput "charge #{cambrinth} #{@charges.pop}"
+      waitrt?
+    else
+      fput "invoke #{cambrinth}"
+      @charges = nil
+    end
+    true
+  end
+
+  def check_current
+    return unless @prep_spell
+    return if charge_cambrinth
+    cast if Flags['ct-spellcast']
+  end
+
+  def cast
+    case bput('cast', *([cast_messages] + [/^Your target pattern dissipates/, /roundtime/i]))
+    when /roundime/i
+      waitrt?
+    when /^Your target pattern dissipates/
+      fput("release spell")
+    end
+
+    @prep_spell = nil
+
+    if @after
+      @after.call
+      @after = nil
+    end
+  end
+
+  def check_buffs
+    _, data = @buff_spells.find{|name,data| DRSpells.active_spells[name] && DRSpells.active_spells[name] <= data['recast'] }
+    prep_spell(data)
+  end
+
+  def check_offensive
+    data = offensive_spells.sort_by { |data| DRSkill.getxp(data['skill']).to_i }.first
+    return if DRSkill.getxp(data['skill']).to_i >= 34 #make this a spell option
+    prep_spell(data)
+  end
+
+  def prepare_spell(data)
+    return unless data
+    command = 'pre'
+    command = data['skill'] == 'Debilitation' ? 'pre' : 'tar' if data['skill']
+    bput("#{command} #{data['abbrev']} #{data['mana']}", *@preps)
+    @prep_spell = true
+    @charges = data['cambrinth'].dup if data['cambrinth']
+    @after = data['after']
+    Flags.reset('ct-spellcast')
+  end
+
+end
+
+class AbilityProcesss
+  def initialize(buffs:[])
+    @buffs = buffs
+    @cooldown_timers = {}
+  end
+
+  def execute
+    check_buffs
+  end
+
+  private
+
+  def check_buffs
+    @buffs.each do |action, cooldown|
+      timer = @cooldown_timers[action]
+      next unless !timer || (Time.now - timer).to_i > cooldown
+      @cooldown_timers[action] = Time.now
+      fput action
+      waitrt?
+    end
+  end
+
+end
+
+class AttackProcess
+
+  def initialize()
+  end
+
+  def execute
+
+  end
+
+end
+
 
 def main
   setup
@@ -39,7 +228,7 @@ def main
   }
 
   dance_threshold = CombatVars.dance_threshold
-  debug_mode = CombatVars.combat_trainer_debug
+  $debug_mode = CombatVars.combat_trainer_debug
   buff_spells = CombatVars.buff_spells
   aim_fillers_stealth = CombatVars.aim_fillers_stealth
   aim_fillers = CombatVars.aim_fillers
@@ -62,7 +251,20 @@ def main
 
   check_equipment(worn_items)
 
-  last_skill = nil
+  combat_processes =   [
+    SetupProcess.new(dance_threshold:dance_threshold, dance_skill:dance_skill, stances:stances, weapon_training:weapon_training)
+    SpellProcess.new(buffs:buff_spells, ospells:offensive_spells, camb: cambrinth, casts: cast_messages),
+    AbilityProcesss.new(buffs:buff_nonspells),
+    LootProcess.new,
+    SafetyProcess.new,
+    AttackProcess.new
+  ]
+
+  loop do
+    combat_processes.each do |process|
+      break if process.execute
+    end
+  end
 
   loop do
     weapon_skill, weapon_name = determine_next_to_train(weapon_training, dance_skill, dance_threshold)
@@ -71,7 +273,7 @@ def main
 
     set_stance(weapon_skill, stances, debug_mode)
 
-    check_standing
+
 
     next if in_danger?
 
@@ -268,60 +470,6 @@ def stow_weapons(worn_weapons)
   end
 end
 
-def check_offensive_spells(offensive_spells)
-  return if DRSpells.prep_spell
-  data = offensive_spells.sort_by { |data| DRSkill.getxp(data['skill']).to_i }.first
-  return unless data
-  return if DRSkill.getxp(data['skill']).to_i >= 34
-  command = data['skill'] == 'Debilitation' ? 'pre' : 'tar'
-  fput "#{command} #{data['abbrev']} #{data['mana']}"
-  @charges = data['cambrinth'].dup if data['cambrinth']
-  Flags.reset('ct-spellcast')
-end
-
-def check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-  buff_nonspells.each do |action, cooldown|
-    timer = @cooldown_timers[action]
-    next unless !timer || (Time.now - timer).to_i > cooldown
-    @cooldown_timers[action] = Time.now
-    fput action
-    waitrt?
-  end
-
-  if DRSpells.prep_spell
-    if @charges
-      if @charges.length > 0
-        fput "charge #{cambrinth} #{@charges.pop}"
-        waitrt?
-        return false
-      else
-        fput "invoke #{cambrinth}"
-        @charges = nil
-        return false
-      end
-    end
-    if Flags['ct-spellcast']
-      bput('cast', *([cast_messages] + [/roundtime/i]))
-      waitrt?
-      if @after
-        @after.call
-        @after = nil
-      end
-      return true
-    end
-    return false
-  end
-
-  buff_spells.each do |name, data|
-    next unless !DRSpells.active_spells[name] || (DRSpells.active_spells[name] <= data['recast'])
-    fput "prepare #{data['abbrev']} #{data['mana']}"
-    @charges = data['cambrinth'].dup if data['cambrinth']
-    @after = data['after']
-    Flags.reset('ct-spellcast')
-    return true
-  end
-  false
-end
 
 def stow_lootables(lootables)
   lootables.each do |item|
@@ -424,11 +572,6 @@ def check_equipment(worn_items)
   end
 end
 
-def check_standing
-  return if checkstanding
-  fput('stand')
-end
-
 def determine_next_to_train(weapon_training, dance_skill, dance_threshold)
   if should_dance?(dance_threshold)
     weapon_skill = dance_skill
@@ -442,25 +585,6 @@ def determine_next_to_train(weapon_training, dance_skill, dance_threshold)
         .first
   end
   [weapon_skill, weapon_name]
-end
-
-def in_danger?
-  return false if checkhealth > 75 && !checkbleeding
-
-  fput 'exit' if checkhealth < 40
-
-  beep
-  echo '***LOW ON HEALTH OR BLEEDING***'
-  fput 'retreat'
-  fput 'retreat'
-
-  if checkbleeding && Script.exists?('tendme') && !running?('tendme')
-    start_script('tendme')
-  else
-    pause 5
-  end
-
-  true
 end
 
 def should_idle?(dance_threshold, dance_actions_stealth, dance_actions, buff_nonspells, cambrinth, cast_messages, buff_spells, offensive_spells, debug_mode)
@@ -481,20 +605,15 @@ def setup
     end
   end
 
-  # Configure CombatVars
-  unless start_script('combat-trainer-setup', variable.drop(1))
-    echo '***Please configure your setup script (open this script for instructions).***'
-    stop_script 'combat-trainer'
+  unless $first_combat_run
+    $first_combat_run = true
+    fput 'exp all'
+    pause 1
+    fput 'info'
+    pause 1
   end
 
-  while running? 'combat-trainer-setup'
-  end
 
-  fput 'exp all'
-  pause 1
-  fput 'info'
-
-  @cooldown_timers = {}
 
   Flags.add('ct-spellcast', '^Your formation of a targeting pattern around .+ has completed\.', '^You feel fully prepared to cast your spell\.')
 
@@ -502,15 +621,6 @@ def setup
 
   put 'stance set 100 40 40'
   pause 0.25 until Flags['last-stance']
-end
-
-def bless_thrown_weapon(buff_spells, weapon_name)
-  return unless buff_spells['Bless']
-  return if DRSpells.prep_spell
-
-  fput 'pre bless'
-  fput "cast #{weapon_name}"
-  DRSpells.prep_spell = nil
 end
 
 def get_actions(stealth_actions, nonstealth_actions, weapon_skill)

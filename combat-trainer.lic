@@ -17,27 +17,179 @@
 # TODO: Convert "combat-trainer" to "combat-trainer-engine" and "combat-trainer-setup" to "combat-trainer". This means what was the setup script will now be the script you run. It would manage CombatVars, dependencies, etc. and feed those to the engine script.
 
 class SetupProcess
-  @@dancing?
+  @@dancing
   @@weapon_skill
-  def initialize(dance_threshold:dance_threshold, dance_skill:dance_skill, stances:stances, weapon_training:weapon_training)
+
+  def initialize(dance_threshold:0, dance_skill:nil, stances:[], weapon_training:{}, worn_weapons:{})
     @dance_threshold=dance_threshold
     @dance_skill=dance_skill
     @stances=stances
     @weapon_training=weapon_training
+    @worn_weapons=worn_weapons
+
+    @@weapon_skill, @weapon_name = @weapon_training.first
+    @target = -1
+    @last_skill = nil
+    @twohanded_skills = ['Twohanded Blunt', 'Twohanded Edged', 'Bow']
   end
 
   def execute
+    determine_next_to_train
+    check_weapon if @last_skill != @@weapon_skill
+    set_stance
+    false
+  end
 
+  private
+
+  def determine_next_to_train
+    if should_dance?
+      @@weapon_skill = dance_skill
+      @weapon_name = weapon_training[dance_skill]
+      @@dancing = true
+      return
+    end
+    @@dancing = false
+    return if AttackProcess.action_count < 10 && DRSkill.getxp(@@weapon_skill).to_i < target
+
+    @last_skill = @@weapon_skill
+    AttackProcess.action_count = 0
+
+    @@weapon_skill, @weapon_name = weapon_training
+      .sort_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
+      .first
+  end
+
+  def should_dance?
+    DRRoom.npcs.length <= @dance_threshold || DRRoom.npcs.length == 0
+  end
+
+  def last_stance
+    Flags['last-stance'][0] =~ /(\d+)%.* (\d+)%.* (\d+)%.* (\d+)/
+    { 'EVASION' => Regexp.last_match(1).to_i, 'PARRY' => Regexp.last_match(2).to_i, 'SHIELD' => Regexp.last_match(3).to_i, 'SPARE' => Regexp.last_match(4).to_i }
+  end
+
+  def build_stance_string(vals)
+    "stance set #{vals['EVASION']} #{vals['PARRY']} #{vals['SHIELD']}"
+  end
+
+  def set_stance
+    vals = { 'EVASION' => 0, 'PARRY' => 0, 'SHIELD' => 0, 'SPARE' => 0 }
+    skill_map = { 'Parry Ability' => 'Parry', 'Shield Usage' => 'Shield' }
+    previous = last_stance
+    points = previous.values.inject(&:+)
+
+    if @stances[weapon_skill].nil?
+      echo("***No stance set for #{weapon_skill}, determining learning priority***") if $debug_mode
+      priority = ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| DRSkill.getxp(skill).to_i }
+    else
+      echo("***Stance order set for #{weapon_skill}***") if $debug_mode
+      priority = @stances[weapon_skill]
+    end
+
+    priority.each do |skill|
+      skill = skill_map[skill] if skill_map[skill]
+      vals[skill.upcase] = points >= 100 ? 100 : points
+      points -= vals[skill.upcase]
+    end
+
+    fput(build_stance_string(vals)) unless vals == previous
+  end
+
+  def check_weapon
+    stow_weapons
+
+    if @worn_weapons.include? @weapon_name
+      fput("remove #{weapon_name}") while checkright.nil?
+    elsif !weapon_name.empty?
+      attempt = (bput "wield #{weapon_name}", 'Wield what', "You're already", 'right hand and balancing', "right hand\.")
+      if attempt == 'Wield what'
+        echo("***Could not find weapon #{weapon_name}. Please update your config script.***")
+        stop_script('combat-trainer')
+      elsif attempt == 'right hand and balancing' && !@twohanded_skills.include?(weapon_skill)
+        echo('***Swapping 2Hander to 1Hander***') if $debug_mode
+        fput("swap #{weapon_name}")
+      elsif attempt == 'right hand.' && @twohanded_skills.include?(weapon_skill)
+        echo('***Swapping 1Hander to 2Hander***') if $debug_mode
+        fput("swap #{weapon_name}")
+      end
+    end
+
+    fput('swap') if @@weapon_skill == 'Offhand Weapon'
+  end
+
+  def stow_weapons
+    until checkright.nil?
+      if @worn_weapons.include? checkright
+        fput "wear #{checkright}"
+      else
+        fput 'stow right'
+      end
+      fput 'unload' if get =~ /^You (need to|should) unload/
+    end
+
+    until checkleft.nil?
+      if @worn_weapons.include? checkleft
+        fput "wear #{checkleft}"
+      else
+        fput 'stow left'
+      end
+      fput 'unload' if get =~ /^You (need to|should) unload/
+    end
   end
 
 end
 
 class LootProcess
-  def initialize
+  @@mob_died
+
+  def initialize(skinning:{}}, lootables:[])
+    @@mob_died = false
+    @skinning = skinning
+    @lootables = lootables
   end
 
   def execute
+    @@mob_died = false
+    dispose_body
+    stow_lootables
+  end
 
+  def stow_lootables
+    @lootables.each do |item|
+      DRRoom.room_objs.grep(/#{item}/).each { |_| fput "stow #{item}" }
+    end
+  end
+
+  def dispose_body
+    return if DRRoom.dead_npcs.length < 1
+    @@mob_died = true
+
+    if skinning['skin']
+      arranges = 0
+      arrange_message = skinning['arrange_all'] ? 'arrange all for skin' : 'arrange for skin'
+      while arranges < skinning['arrange_count']
+        arranges += 1
+        case bput(arrange_message, 'You begin to arrange', 'You continue arranging', 'You make a mistake', 'You complete arranging', 'That creature cannot', 'That has already been arranged', 'Arrange what', 'cannot be skinned')
+        when 'You complete arranging', 'That has already been arranged'
+          break
+        when 'Arrange what', 'cannot be skinned'
+          return
+        when 'That creature cannot'
+          arranges = 0
+          arrange_message = skinning['arrange_all'] ? 'arrange all' : 'arrange'
+        end
+        waitrt?
+      end
+      pause 0.25
+      waitrt?
+      fput 'skin'
+      waitrt?
+    end
+    while DRRoom.dead_npcs.length > 0
+      fput('loot')
+      pause 1
+    end
   end
 
 end
@@ -199,12 +351,146 @@ class AbilityProcesss
 end
 
 class AttackProcess
+  @@action_count=0
 
-  def initialize()
+  def initialize(
+    aim_fillers:[],aim_fillers_stealth:nil,
+    use_charged_maneuvers:false,
+    dance_actions:[],dance_actions_stealth:nil,
+    fatigue_regen_threshold:90, fatigue_regen_action:'bob'
+    )
+
+    @aim_fillers=aim_fillers
+    @aim_fillers_stealth=aim_fillers_stealth
+    @use_charged_maneuvers=use_charged_maneuvers
+    @dance_actions=dance_actions
+    @dance_actions_stealth=dance_actions_stealth
+    @fatigue_regen_threshold=fatigue_regen_threshold
+    @fatigue_regen_action=fatigue_regen_action
+
+    @thrown_skills = ['Heavy Thrown', 'Light Thrown']
+    @aim_skills = %w(Bow Slings Crossbow)
+    @twohanded_skills = ['Twohanded Blunt', 'Twohanded Edged', 'Bow']
+    @charged_maneuvers = {
+      'Brawling' => 'palmstrike',
+      'Bow' => 'powershot',
+      'Crossbow' => 'powershot',
+      'Slings' => 'powershot',
+      'Small Edged' => 'cleave',
+      'Large Edged' => 'cleave',
+      'Twohanded Edged' => 'cleave',
+      'Small Blunt' => 'crash',
+      'Large Blunt' => 'crash',
+      'Twohanded Blunt' => 'crash',
+      'Staves' => 'twirl',
+      'Polearms' => 'impale',
+    }
+
+    @action_queue = []
+    @dance_queue = []
+    @cooldown_timers = {}
+    @loaded = false
   end
 
   def execute
+      charged_maneuver = use_charged_maneuvers ? check_charged_maneuver(@charged_maneuvers[SetupProcess.weapon_skill]) : ''
+      if SetupProcess.dancing
+        dance
+      elsif fatigue_low?
+        echo("***Fatigue: #{DRStats.fatigue}***") if $debug_mode
+        echo("***Target: #{fatigue_regen_threshold}***") if $debug_mode
+        fput(@fatigue_regen_action)
+      elsif @thrown_skills.include?(SetupProcess.weapon_skill)
+        attack_thrown
+      elsif @aim_skills.include?(SetupProcess.weapon_skill)
+        attack_ranged(charged_maneuver)
+      else
+        attack_melee(charged_maneuver)
+      end
+  end
 
+  def fatigue_low?
+    return DRStats.fatigue < @fatigue_regen_threshold
+  end
+
+  def attack_melee(charged_maneuver)
+    if charged_maneuver.empty?
+      fput weapon_skill == 'Offhand Weapon' ? 'attack left' : 'attack'
+    else
+      use_charged_maneuver(charged_maneuver)
+    end
+    waitrt?
+    if reget(5, 'You aren\'t close enough to attack')
+      pause 6
+    else
+      @@action_count++
+    end
+  end
+
+  def attack_thrown(charged_maneuver)
+    weapon_name = checkright
+    fput 'lob'
+    waitrt?
+    bput("get #{weapon_name}", 'You are already holding', "You pick up.*#{weapon_name}")
+    @@action_count++
+  end
+
+  def attack_ranged(charged_maneuver)
+    if LootProcess.mob_died
+      @loaded=false
+    end
+
+    if @loaded && @action_queue.empty?
+      if charged_maneuver.empty?
+        case bput('shoot', "isn't loaded", 'There is nothing', 'But your', 'you fire', 'I could not find', 'with no effect and falls to the ground', 'Face what')
+        when 'you fire'
+          @@action_count++
+        end
+      else
+        use_charged_maneuver charged_maneuver
+        @@action_count++
+      end
+      waitrt?
+    elsif @loaded
+      fput(@action_queue.shift)
+      waitrt?
+    else
+      bput('load', 'You reach into', 'already loaded')
+      waitrt?
+      if charged_maneuver.empty?
+          @action_queue = get_actions(@aim_fillers, @aim_fillers_stealth)
+          bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?')
+      end
+    end
+  end
+
+  def get_actions(actions, stealth_actions)
+    stealth_actions && stealth_actions[weapon_skill] && DRSkill.getxp('Stealth').to_i < 34 ? stealth_actions[weapon_skill].dup : actions[weapon_skill].dup
+  end
+
+  def dance
+    @dance_queue = get_actions(@dance_actions, @dance_actions_stealth) if @dance_queue.empty?
+    fput(@dance_queue.shift)
+    waitrt?
+  end
+
+  def check_charged_maneuver(charged_maneuver)
+    timer = @cooldown_timers[charged_maneuver]
+    if timer && (Time.now - timer).to_i < 60
+      echo '***Not using charged maneuver***' if $debug_mode
+      return ''
+    else
+      echo "***Using charged maneuver: #{charged_maneuver}***" if $debug_mode
+      return charged_maneuver
+    end
+  end
+
+  def use_charged_maneuver(action)
+    fput "maneuver #{action}"
+    # Maneuvers have extra non-RT setup
+    pause 7
+    waitrt?
+    @cooldown_timers[action] = Time.now
   end
 
 end
@@ -212,25 +498,6 @@ end
 
 def main
   setup
-
-  thrown_skills = ['Heavy Thrown', 'Light Thrown']
-  aim_skills = %w(Bow Slings Crossbow)
-  twohanded_skills = ['Twohanded Blunt', 'Twohanded Edged', 'Bow']
-  charged_maneuvers = {
-    'Brawling' => 'palmstrike',
-    'Bow' => 'powershot',
-    'Crossbow' => 'powershot',
-    'Slings' => 'powershot',
-    'Small Edged' => 'cleave',
-    'Large Edged' => 'cleave',
-    'Twohanded Edged' => 'cleave',
-    'Small Blunt' => 'crash',
-    'Large Blunt' => 'crash',
-    'Twohanded Blunt' => 'crash',
-    'Staves' => 'twirl',
-    'Polearms' => 'impale',
-    # "Offhand Weapon" => "doublestrike",
-  }
 
   dance_threshold = CombatVars.dance_threshold
   $debug_mode = CombatVars.combat_trainer_debug
@@ -260,301 +527,20 @@ def main
     SetupProcess.new(dance_threshold:dance_threshold, dance_skill:dance_skill, stances:stances, weapon_training:weapon_training)
     SpellProcess.new(buffs:buff_spells, ospells:offensive_spells, camb: cambrinth, casts: cast_messages),
     AbilityProcesss.new(buffs:buff_nonspells),
-    LootProcess.new,
+    LootProcess.new(skinning:skinning, lootables:lootables),
     SafetyProcess.new,
-    AttackProcess.new
+    AttackProcess.new(
+      aim_fillers:aim_fillers,aim_fillers_stealth:aim_fillers_stealth,
+      use_charged_maneuvers:use_charged_maneuvers,
+      dance_actions:dance_actions,dance_actions_stealth:dance_actions_stealth,
+      fatigue_regen_threshold:fatigue_regen_threshold, fatigue_regen_action:fatigue_regen_action
+      )
   ]
 
   loop do
     combat_processes.each do |process|
       break if process.execute
     end
-  end
-
-  loop do
-    weapon_skill, weapon_name = determine_next_to_train(weapon_training, dance_skill, dance_threshold)
-
-    check_weapon(weapon_skill, weapon_name, worn_weapons, debug_mode, twohanded_skills) if last_skill != weapon_skill
-
-    set_stance(weapon_skill, stances, debug_mode)
-
-
-
-    next if in_danger?
-
-    check_dead_npcs(debug_mode, skinning, offensive_spells)
-    stow_lootables(lootables)
-
-    if DRSkill.getxp(weapon_skill).to_i >= 34
-      echo '***Skills capped***' if debug_mode
-    end
-
-    last_skill = weapon_skill
-
-    next if should_idle?(dance_threshold, dance_actions_stealth, dance_actions, buff_nonspells, cambrinth, cast_messages, buff_spells, offensive_spells, debug_mode)
-
-    event_loop(
-      weapon_skill,
-      weapon_name,
-      dance_threshold,
-      debug_mode,
-      buff_spells,
-      aim_fillers_stealth,
-      aim_fillers,
-      use_charged_maneuvers,
-      offensive_spells,
-      lootables,
-      buff_nonspells,
-      cambrinth,
-      cast_messages,
-      skinning,
-      fatigue_regen_threshold,
-      fatigue_regen_action,
-      thrown_skills.include?(weapon_skill),
-      aim_skills.include?(weapon_skill),
-      charged_maneuvers)
-  end
-end
-
-def event_loop(weapon_skill, weapon_name, dance_threshold, debug_mode, buff_spells, aim_fillers_stealth, aim_fillers, use_charged_maneuvers, offensive_spells, lootables, buff_nonspells, cambrinth, cast_messages, skinning, fatigue_regen_threshold, fatigue_regen_action, is_thrown_weapon, is_aimed_weapon, charged_maneuvers)
-  echo "***Attempting to train #{weapon_skill}***" if debug_mode
-  target = [34, DRSkill.getxp(weapon_skill).to_i + 3].min
-  counter = 0
-
-  while DRSkill.getxp(weapon_skill).to_i < target
-    echo "***#{weapon_skill}: #{DRSkill.getxp(weapon_skill).to_i}***" if debug_mode
-    echo "***Target: #{target}***" if debug_mode
-
-    check_standing
-
-    break if counter >= 10
-    break if DRRoom.npcs.empty? && DRRoom.dead_npcs.empty?
-    break if should_dance?(dance_threshold)
-    check_dead_npcs(debug_mode, skinning, offensive_spells)
-
-    bless_thrown_weapon(buff_spells, weapon_name) if is_thrown_weapon
-
-    cast_spell = check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-    check_offensive_spells(offensive_spells) unless cast_spell || DRRoom.npcs.empty?
-    check_fatigue(fatigue_regen_threshold, fatigue_regen_action, debug_mode)
-    stow_lootables(lootables)
-
-    counter += 1
-
-    charged_maneuver = should_use_charged_maneuver?(use_charged_maneuvers, debug_mode, charged_maneuvers[weapon_skill]) ? charged_maneuvers[weapon_skill] : ''
-
-    if is_aimed_weapon
-      bput 'load', 'You reach into', 'already loaded'
-      waitrt?
-
-      if charged_maneuver.empty?
-        bput 'aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?'
-        actions = get_actions(aim_fillers_stealth, aim_fillers, weapon_skill)
-        actions.each do |action|
-          fput action
-          waitrt?
-          check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-          check_standing
-        end
-        bput('shoot', "isn't loaded", 'There is nothing', 'But your', 'you fire', 'I could not find', 'with no effect and falls to the ground', 'Face what')
-      else
-        use_charged_maneuver charged_maneuver
-      end
-      waitrt?
-    elsif is_thrown_weapon
-      fput 'lob'
-      waitrt?
-      bput("get #{weapon_name}", 'You are already holding', "You pick up.*#{weapon_name}")
-    else
-      if charged_maneuver.empty?
-        fput weapon_skill == 'Offhand Weapon' ? 'attack left' : 'attack'
-      else
-        use_charged_maneuver charged_maneuver
-      end
-      waitrt?
-      pause 6 if reget 5, "You aren't close enough to attack"
-    end
-  end
-
-  if counter == 10
-    echo '***Weapon appears to be learning slowly, consider removing it from the training list***'
-  end
-end
-
-def should_dance?(dance_threshold)
-  DRRoom.npcs.length <= dance_threshold
-end
-
-def should_use_charged_maneuver?(use_charged_maneuvers, debug_mode, charged_maneuver)
-  timer = @cooldown_timers[charged_maneuver]
-  if !use_charged_maneuvers || (timer && (Time.now - timer).to_i < 60)
-    echo '***Not using charged maneuver***' if debug_mode
-    return false
-  else
-    echo "***Using charged maneuver: #{charged_maneuver}***" if debug_mode
-    return true
-  end
-end
-
-def use_charged_maneuver(action)
-  fput "maneuver #{action}"
-  waitrt?
-  # Maneuvers have extra non-RT setup
-  pause 7
-  @cooldown_timers[action] = Time.now
-end
-
-def idle_in_room(dance_actions_stealth, dance_actions, buff_nonspells, cambrinth, cast_messages, buff_spells, offensive_spells)
-  kill_offensive_spells(offensive_spells)
-  check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-
-  if DRRoom.npcs.length > 0
-    actions = dance_actions_stealth && DRSkill.getxp('Stealth').to_i < 34 ? dance_actions_stealth : dance_actions
-    actions.each do |action|
-      fput action
-      waitrt?
-      check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-    end
-  else
-    3.times do
-      pause 5
-      check_buffs(buff_nonspells, cambrinth, cast_messages, buff_spells)
-    end
-  end
-end
-
-def last_stance
-  Flags['last-stance'][0] =~ /(\d+)%.* (\d+)%.* (\d+)%.* (\d+)/
-  { 'EVASION' => Regexp.last_match(1).to_i, 'PARRY' => Regexp.last_match(2).to_i, 'SHIELD' => Regexp.last_match(3).to_i, 'SPARE' => Regexp.last_match(4).to_i }
-end
-
-def build_stance_string(vals)
-  "stance set #{vals['EVASION']} #{vals['PARRY']} #{vals['SHIELD']}"
-end
-
-def set_stance(weapon_skill, stances, debug_mode)
-  vals = { 'EVASION' => 0, 'PARRY' => 0, 'SHIELD' => 0, 'SPARE' => 0 }
-  skill_map = { 'Parry Ability' => 'Parry', 'Shield Usage' => 'Shield' }
-  previous = last_stance
-  points = previous.values.inject(&:+)
-
-  if stances[weapon_skill].nil?
-    echo "***No stance set for #{weapon_skill}, determining learning priority***" if debug_mode
-    priority = ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| DRSkill.getxp(skill).to_i }
-  else
-    echo "***Stance order set for #{weapon_skill}***" if debug_mode
-    priority = stances[weapon_skill]
-  end
-
-  priority.each do |skill|
-    skill = skill_map[skill] if skill_map[skill]
-    vals[skill.upcase] = points >= 100 ? 100 : points
-    points -= vals[skill.upcase]
-  end
-
-  fput build_stance_string(vals) unless vals == previous
-end
-
-def stow_weapons(worn_weapons)
-  until checkright.nil?
-    if worn_weapons.include? checkright
-      fput "wear #{checkright}"
-    else
-      fput 'stow right'
-    end
-    fput 'unload' if get =~ /^You (need to|should) unload/
-  end
-
-  until checkleft.nil?
-    if worn_weapons.include? checkleft
-      fput "wear #{checkleft}"
-    else
-      fput 'stow left'
-    end
-    fput 'unload' if get =~ /^You (need to|should) unload/
-  end
-end
-
-
-def stow_lootables(lootables)
-  lootables.each do |item|
-    DRRoom.room_objs.grep(/#{item}/).each { |_| fput "stow #{item}" }
-  end
-end
-
-def check_dead_npcs(debug_mode, skinning, offensive_spells)
-  return if DRRoom.dead_npcs.length < 1
-
-  echo "***Found dead NPCs: #{DRRoom.dead_npcs}***" if debug_mode
-
-  check_skinning(skinning)
-
-  fput 'loot'
-  kill_offensive_spells(offensive_spells)
-end
-
-def check_skinning(skinning)
-  return unless skinning['skin']
-
-  arranges = 0
-  arrange_message = skinning['arrange_all'] ? 'arrange all for skin' : 'arrange for skin'
-  while arranges < skinning['arrange_count']
-    arranges += 1
-    case bput(arrange_message, 'You begin to arrange', 'You continue arranging', 'You make a mistake', 'You complete arranging', 'That creature cannot', 'That has already been arranged', 'Arrange what', 'cannot be skinned')
-    when 'You complete arranging', 'That has already been arranged'
-      break
-    when 'Arrange what', 'cannot be skinned'
-      return
-    when 'That creature cannot'
-      arranges = 0
-      arrange_message = skinning['arrange_all'] ? 'arrange all' : 'arrange'
-    end
-    waitrt?
-  end
-  pause 0.25
-  waitrt?
-  fput 'skin'
-  waitrt?
-end
-
-def kill_offensive_spells(offensive_spells)
-  return unless DRSpells.prep_spell
-  return unless offensive_spells.count { |data| data['name'] == DRSpells.prep_spell } > 0
-  fput 'rel spel'
-  DRSpells.prep_spell = nil
-end
-
-def check_weapon(weapon_skill, weapon_name, worn_weapons, debug_mode, twohanded_skills)
-  stow_weapons(worn_weapons)
-
-  if worn_weapons.include? weapon_name
-    fput "remove #{weapon_name}" while checkright.nil?
-  elsif !weapon_name.empty?
-    attempt = bput "wield #{weapon_name}", 'Wield what', "You're already", 'right hand and balancing', "right hand\."
-
-    if attempt == 'Wield what'
-      echo "***Could not find weapon #{weapon_name}. Please update your config script.***"
-      stop_script 'combat-trainer'
-    elsif attempt == 'right hand and balancing' && !twohanded_skills.include?(weapon_skill)
-      echo '***Swapping 2Hander to 1Hander***' if debug_mode
-      fput "swap #{weapon_name}"
-    elsif attempt == 'right hand.' && twohanded_skills.include?(weapon_skill)
-      echo '***Swapping 1Hander to 2Hander***' if debug_mode
-      fput "swap #{weapon_name}"
-    end
-  end
-
-  fput 'swap' if weapon_skill == 'Offhand Weapon'
-end
-
-def check_fatigue(fatigue_regen_threshold, fatigue_regen_action, debug_mode)
-  while DRStats.fatigue < fatigue_regen_threshold
-    echo "***Fatigue: #{DRStats.fatigue}***" if debug_mode
-    echo "***Target: #{fatigue_regen_threshold}***" if debug_mode
-    break if DRRoom.npcs.empty?
-
-    fput fatigue_regen_action
-    waitrt?
   end
 end
 
@@ -575,30 +561,6 @@ def check_equipment(worn_items)
     pause
     beep
   end
-end
-
-def determine_next_to_train(weapon_training, dance_skill, dance_threshold)
-  if should_dance?(dance_threshold)
-    weapon_skill = dance_skill
-    weapon_name = weapon_training[dance_skill]
-  else
-    # The next skill to train is the one with the lowest field experience
-    # Break ties by training the one with the lowest rank
-    weapon_skill, weapon_name =
-        weapon_training
-        .sort_by { |skill, _weapon| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
-        .first
-  end
-  [weapon_skill, weapon_name]
-end
-
-def should_idle?(dance_threshold, dance_actions_stealth, dance_actions, buff_nonspells, cambrinth, cast_messages, buff_spells, offensive_spells, debug_mode)
-  return false unless should_dance?(dance_threshold)
-
-  echo '***Too few or no enemies, idling***' if debug_mode
-  idle_in_room(dance_actions_stealth, dance_actions, buff_nonspells, cambrinth, cast_messages, buff_spells, offensive_spells)
-
-  true
 end
 
 def setup
@@ -628,9 +590,6 @@ def setup
   pause 0.25 until Flags['last-stance']
 end
 
-def get_actions(stealth_actions, nonstealth_actions, weapon_skill)
-  stealth_actions && stealth_actions[weapon_skill] && DRSkill.getxp('Stealth').to_i < 34 ? stealth_actions[weapon_skill] : nonstealth_actions[weapon_skill]
-end
 
 # Call this last to avoid the need for forward declarations
 main

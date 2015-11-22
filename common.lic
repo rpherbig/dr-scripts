@@ -21,267 +21,271 @@ $ORDINALS = %w(first second third fourth fifth sixth seventh eighth ninth tenth 
 # the command until failure in a noisy room with fput.
 # bput "get box", 'you pick up', 'get what?' < lets you know with confidence if a box was picked up or if the item was missing.
 
-def bput(message, *matches)
-  timer = Time.now
-  log = []
-  matches.flatten!
-  matches.map! { |item| item.is_a?(Regexp) ? item : /#{item}/i }
-  clear
-  put message
-  while Time.now - timer < 15
-    response = get?
 
-    if response.nil?
-      pause 0.1
-      next
+module DRC
+  def bput(message, *matches)
+    timer = Time.now
+    log = []
+    matches.flatten!
+    matches.map! { |item| item.is_a?(Regexp) ? item : /#{item}/i }
+    clear
+    put message
+    while Time.now - timer < 15
+      response = get?
+
+      if response.nil?
+        pause 0.1
+        next
+      end
+
+      log += [response]
+
+      case response
+      when /(?:\.\.\.wait |Wait )([0-9]+)/
+        pause Regexp.last_match(1).to_i
+        put message
+        timer = Time.now
+        next
+      when /Sorry, you may only type ahead/
+        pause 1
+        put message
+        timer = Time.now
+        next
+      when /^You are a bit too busy performing to do that/
+        put 'stop play'
+        put message
+        timer = Time.now
+        next
+      when /^You are still stunned/
+        pause 0.5
+        put message
+        timer = Time.now
+        next
+      end
+
+      matches.each do |match|
+        if (result = response.match(match))
+          return result.to_a.first
+        end
+      end
     end
+    echo '*** No match was found after 15 seconds, dumping info'
+    echo "messages seen length: #{log.length}"
+    log.each { |message| echo "message: #{message}" }
+    echo "checked against #{matches}"
+    $FAILED_COMMAND
+  end
 
-    log += [response]
+  def self.wait_for_script_to_complete(name)
+    success = start_script name
+    if success
+      pause 2
+      pause 1 while running? name
+    end
+    success
+  end
 
-    case response
-    when /(?:\.\.\.wait |Wait )([0-9]+)/
-      pause Regexp.last_match(1).to_i
-      put message
-      timer = Time.now
-      next
-    when /Sorry, you may only type ahead/
-      pause 1
-      put message
-      timer = Time.now
-      next
-    when /^You are a bit too busy performing to do that/
-      put 'stop play'
-      put message
-      timer = Time.now
-      next
-    when /^You are still stunned/
+  def self.remove_armor(armors)
+    armors.each do |piece|
+      fput "remove my #{piece}"
+      fput "stow my #{piece}"
+      pause 0.25
+    end
+  end
+
+  def self.wear_armor(armors)
+    armors.each do |piece|
+      fput "get my #{piece}"
+      fput "wear my #{piece}"
+      pause 0.25
+    end
+  end
+
+  def self.forage(item)
+    snapshot = "#{checkright}#{checkleft}"
+    while "#{checkright}#{checkleft}" == snapshot
+      bput("forage #{item}", 'Roundtime')
+      waitrt?
+    end
+  end
+
+  def self.hand_over(items, person)
+    items.each do |item|
+      fput("get my #{item}")
+      bput("give #{item} to #{person}", '^You offer your .* to')
+      waitfor('has accepted your offer')
+    end
+  end
+
+  def self.get_boxes(container)
+    result = bput("rummage /B my #{container}", 'but there is nothing in there like that\.', 'looking for boxes and see .*')
+    return [] if result == 'but there is nothing in there like that.'
+
+    boxes_text = extract_rummage_text(result)
+
+    list_to_nouns(boxes_text)
+  end
+
+  def self.extract_rummage_text(raw)
+    raw.match(/looking for .* and see (.*)\.$/).to_a[1]
+  end
+
+  # Take a game formatted list "an arrow, silver coins and a deobar strongbox"
+  # And return an array ["an arrow", "silver coins", "a deobar strongbox"]
+  # is this ever useful compared to the list_to_nouns?
+  def self.list_to_array(list)
+    list.strip.split(/,|\sand\s/)
+  end
+
+  # Take a game formatted list "an arrow, silver coins and a deobar strongbox"
+  # And return an array of nouns ["arrow", "coins", "strongbox"]
+  def self.list_to_nouns(list)
+    list_to_array(list)
+      .map { |long_name| get_noun(long_name) }
+      .compact
+      .select { |noun| noun != '' }
+  end
+
+  def self.get_noun(long_name)
+    long_name.strip.scan(/[a-z\-]+$/i).first
+  end
+
+  def self.empty_hands
+    fput 'stow right' until checkright.nil?
+
+    fput 'stow left' until checkleft.nil?
+  end
+
+  def self.walk_to(room_num)
+    return if room_num.to_i == Room.current.id.to_i
+    fput 'retreat' if DRRoom.npcs.count > 0
+    fput 'retreat' if DRRoom.npcs.count > 0
+
+    start_script 'go2', ["#{room_num}"]
+    timer = Time.now
+    while running?('go2')
+      if (Time.now - timer) > 30
+        kill_script 'go2'
+        timer = Time.now
+        start_script 'go2', ["#{room_num}"]
+      end
       pause 0.5
-      put message
-      timer = Time.now
-      next
     end
 
-    matches.each do |match|
-      if (result = response.match(match))
-        return result.to_a.first
+    # Consider just returning this boolean and letting callers decide what to do on a failed move.
+    if room_num.to_i != Room.current.id.to_i
+      echo "Failed to navigate to room #{room_num}, attempting again"
+      walk_to room_num
+    end
+  end
+
+  # Items class. Name is the noun of the object. Leather/metal boolean. Is the item worn (defaults to true). Does it hinder lockpicking? (false)
+  # full description is the line you would see if you looked at your inventory output.
+  # combat is if the item should be worn before engaging in combat.
+  # Item.new(name:'gloves', leather:true, hinders_locks:true, description:'some coarse gargoyle-hide gloves with fitted seams', combat:true)
+  class Item
+    @name
+    @is_leather
+    @is_worn
+    @hinders_lockpicking
+    @description
+    @combat
+
+    def self.initialize(name:nil, leather:nil, worn:true, hinders_locks:nil, description:nil, combat:nil)
+      @name = name
+      @is_leather = leather
+      @is_worn = worn
+      @hinders_lockpicking = hinders_locks
+      @description = description
+      @combat = combat
+    end
+
+    def self.is_leather?
+      @is_leather
+    end
+
+    def self.is_worn?
+      @is_worn
+    end
+
+    attr_reader :name
+
+    def self.hinders_lockpicking?
+      @hinders_lockpicking
+    end
+
+    attr_reader :description
+
+    def self.combat?
+      @combat
+    end
+  end
+
+  # windows only I believe.
+  def self.beep
+    echo("\a")
+  end
+
+  def self.dispose_trash(item)
+    trashcan = DRRoom.room_objs
+               .map { |long_name| get_noun(long_name) }
+               .find { |obj| UserVars.trash_storage.include?(obj) }
+    trashcan = 'bucket' if trashcan == 'gloop'
+    if trashcan
+      bput("put my #{item} in #{trashcan}", '^You drop')
+    else
+      fput "drop my #{item}"
+    end
+  end
+
+  def self.bind_wound(part)
+    waitrt?
+    case bput("tend my #{part}", 'You work carefully at tending your wound', 'That area has already been tended to') # Are there other messages?
+    when $FAILED_COMMAND
+      pause 5
+      bind_wound(part)
+    end
+    waitrt?
+  end
+
+  def self.get_combat_items
+    bput('inv combat', 'Type INVENTORY HELP for more options')
+    data = reget(30)
+    data = data
+           .map(&:strip)
+           .drop_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
+           .reverse
+           .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
+    data.shift
+    data.pop
+    data
+  end
+
+  def self.unwrap_wound(part)
+    waitrt?
+    case bput("unwrap my #{part}", 'You unwrap your bandages') # Are there other messages?
+    when $FAILED_COMMAND
+      pause 5
+      bind_wound(part)
+    end
+    waitrt?
+  end
+
+  def self.wear_item(item)
+    $ORDINALS.each do |ordinal|
+      case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring')
+      when /^You get #{item.description}/
+        fput("wear my #{item.name}")
+        return true
+      when /^You get /
+        fput("stow my #{item.name}")
+      else
+        return false
       end
     end
   end
-  echo '*** No match was found after 15 seconds, dumping info'
-  echo "messages seen length: #{log.length}"
-  log.each { |message| echo "message: #{message}" }
-  echo "checked against #{matches}"
-  $FAILED_COMMAND
 end
 
-def wait_for_script_to_complete(name)
-  success = start_script name
-  if success
-    pause 2
-    pause 1 while running? name
-  end
-  success
-end
-
-def remove_armor(armors)
-  armors.each do |piece|
-    fput "remove my #{piece}"
-    fput "stow my #{piece}"
-    pause 0.25
-  end
-end
-
-def wear_armor(armors)
-  armors.each do |piece|
-    fput "get my #{piece}"
-    fput "wear my #{piece}"
-    pause 0.25
-  end
-end
-
-def forage(item)
-  snapshot = "#{checkright}#{checkleft}"
-  while "#{checkright}#{checkleft}" == snapshot
-    bput("forage #{item}", 'Roundtime')
-    waitrt?
-  end
-end
-
-def hand_over(items, person)
-  items.each do |item|
-    fput("get my #{item}")
-    bput("give #{item} to #{person}", '^You offer your .* to')
-    waitfor('has accepted your offer')
-  end
-end
-
-def get_boxes(container)
-  result = bput("rummage /B my #{container}", 'but there is nothing in there like that\.', 'looking for boxes and see .*')
-  return [] if result == 'but there is nothing in there like that.'
-
-  boxes_text = extract_rummage_text(result)
-
-  list_to_nouns(boxes_text)
-end
-
-def extract_rummage_text(raw)
-  raw.match(/looking for .* and see (.*)\.$/).to_a[1]
-end
-
-# Take a game formatted list "an arrow, silver coins and a deobar strongbox"
-# And return an array ["an arrow", "silver coins", "a deobar strongbox"]
-# is this ever useful compared to the list_to_nouns?
-def list_to_array(list)
-  list.strip.split(/,|\sand\s/)
-end
-
-# Take a game formatted list "an arrow, silver coins and a deobar strongbox"
-# And return an array of nouns ["arrow", "coins", "strongbox"]
-def list_to_nouns(list)
-  list_to_array(list)
-    .map { |long_name| get_noun(long_name) }
-    .compact
-    .select { |noun| noun != '' }
-end
-
-def get_noun(long_name)
-  long_name.strip.scan(/[a-z\-]+$/i).first
-end
-
-def empty_hands
-  fput 'stow right' until checkright.nil?
-
-  fput 'stow left' until checkleft.nil?
-end
-
-def walk_to(room_num)
-  return if room_num.to_i == Room.current.id.to_i
-  fput 'retreat' if DRRoom.npcs.count > 0
-  fput 'retreat' if DRRoom.npcs.count > 0
-
-  start_script 'go2', ["#{room_num}"]
-  timer = Time.now
-  while running?('go2')
-    if (Time.now - timer) > 30
-      kill_script 'go2'
-      timer = Time.now
-      start_script 'go2', ["#{room_num}"]
-    end
-    pause 0.5
-  end
-
-  # Consider just returning this boolean and letting callers decide what to do on a failed move.
-  if room_num.to_i != Room.current.id.to_i
-    echo "Failed to navigate to room #{room_num}, attempting again"
-    walk_to room_num
-  end
-end
-
-# Items class. Name is the noun of the object. Leather/metal boolean. Is the item worn (defaults to true). Does it hinder lockpicking? (false)
-# full description is the line you would see if you looked at your inventory output.
-# combat is if the item should be worn before engaging in combat.
-# Item.new(name:'gloves', leather:true, hinders_locks:true, description:'some coarse gargoyle-hide gloves with fitted seams', combat:true)
-class Item
-  @name
-  @is_leather
-  @is_worn
-  @hinders_lockpicking
-  @description
-  @combat
-
-  def initialize(name:nil, leather:nil, worn:true, hinders_locks:nil, description:nil, combat:nil)
-    @name = name
-    @is_leather = leather
-    @is_worn = worn
-    @hinders_lockpicking = hinders_locks
-    @description = description
-    @combat = combat
-  end
-
-  def is_leather?
-    @is_leather
-  end
-
-  def is_worn?
-    @is_worn
-  end
-
-  attr_reader :name
-
-  def hinders_lockpicking?
-    @hinders_lockpicking
-  end
-
-  attr_reader :description
-
-  def combat?
-    @combat
-  end
-end
-
-# windows only I believe.
-def beep
-  echo("\a")
-end
-
-def dispose_trash(item)
-  trashcan = DRRoom.room_objs
-             .map { |long_name| get_noun(long_name) }
-             .find { |obj| UserVars.trash_storage.include?(obj) }
-  trashcan = 'bucket' if trashcan == 'gloop'
-  if trashcan
-    bput("put my #{item} in #{trashcan}", '^You drop')
-  else
-    fput "drop my #{item}"
-  end
-end
-
-def bind_wound(part)
-  waitrt?
-  case bput("tend my #{part}", 'You work carefully at tending your wound', 'That area has already been tended to') # Are there other messages?
-  when $FAILED_COMMAND
-    pause 5
-    bind_wound(part)
-  end
-  waitrt?
-end
-
-def get_combat_items
-  bput('inv combat', 'Type INVENTORY HELP for more options')
-  data = reget(30)
-  data = data
-         .map(&:strip)
-         .drop_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
-         .reverse
-         .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
-  data.shift
-  data.pop
-  data
-end
-
-def unwrap_wound(part)
-  waitrt?
-  case bput("unwrap my #{part}", 'You unwrap your bandages') # Are there other messages?
-  when $FAILED_COMMAND
-    pause 5
-    bind_wound(part)
-  end
-  waitrt?
-end
-
-def wear_item(item)
-  $ORDINALS.each do |ordinal|
-    case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring')
-    when /^You get #{item.description}/
-      fput("wear my #{item.name}")
-      return true
-    when /^You get /
-      fput("stow my #{item.name}")
-    else
-      return false
-    end
-  end
-end
 
 UserVars.loot_nouns = %w(nugget tsavorite zircon quartz chalcedony diopside coral moonstone onyx topaz amber pearl chryso
                          lazuli turquoise bloodstone hematite morganite sapphire agate bar carnelian diamond crystal emerald

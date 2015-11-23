@@ -41,29 +41,31 @@ class SetupProcess
   end
 
   def execute(game_state)
-    should_dance? ? dance : determine_next_to_train(game_state)
-    check_weapon if @last_skill != @@weapon_skill
-    set_stance
-    @last_skill = @@weapon_skill
+    weapon_skill = @@weapon_skill
+    
+    should_dance? ? dance(game_state, weapon_skill) : determine_next_to_train(game_state, weapon_skill)
+    check_weapon(weapon_skill) if @last_skill != weapon_skill
+    set_stance(weapon_skill)
+    @last_skill = weapon_skill
     false
   end
 
   private
 
-  def dance
-    @last_skill = @@weapon_skill
+  def dance(game_state, weapon_skill)
+    @last_skill = weapon_skill
     @@weapon_skill = @dance_skill
     @weapon_name = @weapon_training[@dance_skill]
     game_state['dancing'] = true
   end
 
-  def determine_next_to_train(game_state)
+  def determine_next_to_train(game_state, weapon_skill)
     game_state['dancing'] = false
-    return if game_state['action_count'] < 10 && DRSkill.getxp(@@weapon_skill).to_i < @target
+    return if game_state['action_count'] < 10 && DRSkill.getxp(weapon_skill).to_i < @target
 
-    echo("new skill needed for training #{game_state['action_count']}:#{DRSkill.getxp(@@weapon_skill).to_i}:#{@target}") if $debug_mode
+    echo("new skill needed for training #{game_state['action_count']}:#{DRSkill.getxp(weapon_skill).to_i}:#{@target}") if $debug_mode
 
-    @last_skill = @@weapon_skill
+    @last_skill = weapon_skill
     game_state['action_count'] = 0
 
     @@weapon_skill, @weapon_name = @weapon_training
@@ -85,16 +87,16 @@ class SetupProcess
     "stance set #{vals['EVASION']} #{vals['PARRY']} #{vals['SHIELD']}"
   end
 
-  def set_stance
+  def set_stance(weapon_skill)
     vals = { 'EVASION' => 0, 'PARRY' => 0, 'SHIELD' => 0, 'SPARE' => 0 }
     skill_map = { 'Parry Ability' => 'Parry', 'Shield Usage' => 'Shield' }
     previous = last_stance
     points = previous.values.inject(&:+)
 
-    if @stances[@@weapon_skill].nil?
+    if @stances[weapon_skill].nil?
       priority = ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| DRSkill.getxp(skill).to_i }
     else
-      priority = @stances[@@weapon_skill]
+      priority = @stances[weapon_skill]
     end
 
     priority.each do |skill|
@@ -106,8 +108,8 @@ class SetupProcess
     fput(build_stance_string(vals)) unless vals == previous
   end
 
-  def check_weapon
-    echo("checking weapons as #{@last_skill}!=#{@@weapon_skill}") if $debug_mode
+  def check_weapon(weapon_skill)
+    echo("checking weapons as #{@last_skill}!=#{weapon_skill}") if $debug_mode
     stow_weapons
 
     if @worn_weapons.include? @weapon_name
@@ -117,16 +119,16 @@ class SetupProcess
       if attempt == 'Wield what'
         echo("***Could not find weapon #{@weapon_name}. Please update your config script.***")
         stop_script('combat-trainer')
-      elsif attempt == 'right hand and balancing' && !@twohanded_skills.include?(@@weapon_skill)
+      elsif attempt == 'right hand and balancing' && !@twohanded_skills.include?(weapon_skill)
         echo('***Swapping 2Hander to 1Hander***') if $debug_mode
         fput("swap #{@weapon_name}")
-      elsif attempt == 'right hand.' && @twohanded_skills.include?(@@weapon_skill)
+      elsif attempt == 'right hand.' && @twohanded_skills.include?(weapon_skill)
         echo('***Swapping 1Hander to 2Hander***') if $debug_mode
         fput("swap #{@weapon_name}")
       end
     end
 
-    fput('swap') if @@weapon_skill == 'Offhand Weapon'
+    fput('swap') if weapon_skill == 'Offhand Weapon'
   end
 
   def stow_weapons
@@ -426,15 +428,17 @@ class AttackProcess
       fput(@fatigue_regen_action)
       return false
     end
+    
+    weapon_skill = SetupProcess.weapon_skill
 
-    charged_maneuver = @use_charged_maneuvers ? check_charged_maneuver(@charged_maneuvers[SetupProcess.weapon_skill]) : ''
+    charged_maneuver = @use_charged_maneuvers ? check_charged_maneuver(@charged_maneuvers[weapon_skill]) : ''
 
-    if @thrown_skills.include?(SetupProcess.weapon_skill)
+    if @thrown_skills.include?(weapon_skill)
       attack_thrown(game_state)
-    elsif @aim_skills.include?(SetupProcess.weapon_skill)
-      attack_aimed(charged_maneuver, game_state)
+    elsif @aim_skills.include?(weapon_skill)
+      attack_aimed(charged_maneuver, game_state, weapon_skill)
     else
-      attack_melee(charged_maneuver, game_state)
+      attack_melee(charged_maneuver, game_state, weapon_skill)
     end
     false
   end
@@ -445,9 +449,9 @@ class AttackProcess
     DRStats.fatigue < @fatigue_regen_threshold
   end
 
-  def attack_melee(charged_maneuver, game_state)
+  def attack_melee(charged_maneuver, game_state, weapon_skill)
     if charged_maneuver.empty?
-      command = SetupProcess.weapon_skill == 'Offhand Weapon' ? 'attack left' : 'attack'
+      command = weapon_skill == 'Offhand Weapon' ? 'attack left' : 'attack'
       fput(command)
     else
       use_charged_maneuver(charged_maneuver)
@@ -470,7 +474,7 @@ class AttackProcess
     game_state['action_count'] += 1
   end
 
-  def attack_aimed(charged_maneuver, game_state)
+  def attack_aimed(charged_maneuver, game_state, weapon_skill)
     @selected_maneuver = charged_maneuver unless @loaded
     @loaded = false if game_state['mob_died']
 
@@ -495,16 +499,16 @@ class AttackProcess
       waitrt?
       @loaded = true
       if @selected_maneuver.empty?
-        @action_queue = get_actions(@aim_fillers, @aim_fillers_stealth)
+        @action_queue = get_actions(@aim_fillers, @aim_fillers_stealth, weapon_skill)
         bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target')
       end
     end
   end
 
-  def get_actions(actions, stealth_actions)
+  def get_actions(actions, stealth_actions, weapon_skill)
     echo("get_actions #{actions}:#{stealth_actions}") if $debug_mode
 
-    (stealth_actions && stealth_actions[SetupProcess.weapon_skill] && (DRSkill.getxp('Stealth').to_i < 34)) ? stealth_actions[SetupProcess.weapon_skill].dup : actions[SetupProcess.weapon_skill].dup
+    (stealth_actions && stealth_actions[weapon_skill] && (DRSkill.getxp('Stealth').to_i < 34)) ? stealth_actions[weapon_skill].dup : actions[weapon_skill].dup
   end
 
   def dance

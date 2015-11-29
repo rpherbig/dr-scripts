@@ -1,0 +1,119 @@
+=begin
+    Safely transfer wounds from the target avoiding useless injuries in fatal areas, optional argument bleed to leave external bleeders.
+=end
+
+class HealMe
+  include DRC
+
+  def initialize
+    %w(common events).each do |script_name|
+      unless running?(script_name)
+        start_script script_name
+        pause 2
+      end
+    end
+    @wound_map = {
+      'insignificant' => 1,
+      'negligible' => 2,
+      'minor' => 3,
+      'more than minor' => 4,
+      'harmful' => 5,
+      'very harmful' => 6,
+      'damaging' => 7,
+      'very damaging' => 8,
+      'severe' => 9,
+      'very severe' => 10,
+      'devastating' => 11,
+      'very devastating' => 12,
+      'useless' => 13
+    }
+
+    @deadly_wounds = %w(SKIN HEAD NECK CHEST ABDOMEN BACK)
+  end
+
+  def get_wounds(target)
+    if target == 'self'
+      bput('perc heal self', 'Roundtime')
+    else
+      bput("touch #{target}", 'vitality')
+    end
+    data = reget 100
+    data = data.reverse.take_while { |item| !(item =~ /injuries include/) }.reverse
+    wounds = {}
+    part = nil
+    data.each do |line|
+      if line =~ /Wounds to the (.+):/
+        part = Regexp.last_match(1)
+        wounds[part] = []
+      end
+      wounds[part] += [{ 'part' => part, 'location' => Regexp.last_match(2), 'type' => Regexp.last_match(1), 'level' => @wound_map[Regexp.last_match(3)] }] if line =~ /(\w+) (\w+):.*\-\- (.*)\r/
+    end
+    waitrt?
+    wounds
+  end
+
+  def take_wounds(wounds)
+    echo "healing: #{wounds}" if UserVars.healme_debug
+    if wounds.count { |wound| wound['type'] == 'Fresh' } > 0
+      heal_wound(wounds.first['part'])
+      heal_scar(wounds.first['part'])
+    else
+      heal_scar(wounds.first['part'])
+    end
+  end
+
+  def determine_safe_wounds(mine, theirs)
+    summed_wounds = mine
+    theirs.each do |part, wounds|
+      summed_wounds[part] ||= []
+      wounds.each do |wound|
+        existing = summed_wounds[part].find{|base_wound| base_wound['location'] == wound['location'] && base_wound['type'] == wound['type'] }
+        if existing
+          existing['level'] += wound['level']
+        else
+          summed_wounds[part] << wound
+        end
+
+        if wound['type'] == 'Fresh'
+          existing_scar = summed_wounds[part].find{|base_wound| base_wound['location'] == wound['location'] && base_wound['type'] == 'Scar' }
+          if existing_scar
+            existing_scar['level'] += wound['level']
+          else
+            summed_wounds[part] << { 'part' => wound['part'], 'location' => wound['location'], 'type' => 'Scar', 'level' => wound['level'] }
+          end
+        end
+      end
+    end
+
+    summed_wounds.select{|_, wounds| !wounds.find{|wound| wound['level'] > 12} }
+  end
+
+  def has_bleeder(wound_set)
+     wound_set.find { |wound| wound['type'] == 'Fresh' && wound['location'] == 'External' && wound['level'] >= 5 }
+  end
+
+  def heal_other(args)
+    my_wounds = get_wounds('self')
+    target_wounds = get_wounds(args.first)
+
+    safe_wounds = determine_safe_wounds(my_wounds, target_wounds)
+
+    if args.include?('bleed')
+      safe_wounds.each do |part, wound|
+        if has_bleeder(wound)
+          fput("transfer #{args.first} quick #{part} internal all")
+          fput("transfer #{args.first} quick #{part} external scar")
+        else
+          fput("transfer #{args.first} quick #{part} all")
+        end
+      end
+    else
+      if safe_wounds.length == target_wounds.length
+
+      fput("transfer #{args.first} quick all")
+    end
+
+  end
+end
+
+HealMe.new.heal_other(variable.drop(1))

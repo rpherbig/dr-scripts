@@ -19,9 +19,10 @@
 class SetupProcess
   include DRC
 
-  def initialize(dance_threshold:0, dance_skill:nil, stances:[], weapon_training:{}, worn_weapons:{})
+  def initialize(dance_threshold:0, dance_skill:nil, stances:[], weapon_training:{}, worn_weapons:{}, retreat_threshold:nil)
     echo("SetupProcess(#{dance_threshold},#{dance_skill}, #{stances}, #{weapon_training}, #{worn_weapons})") if $debug_mode
     @dance_threshold = dance_threshold
+    @retreat_threshold = retreat_threshold
     @dance_skill = dance_skill
     @stances = stances
     @weapon_training = weapon_training
@@ -31,6 +32,7 @@ class SetupProcess
     @target = -1
     @last_skill = nil
     @twohanded_skills = ['Twohanded Blunt', 'Twohanded Edged', 'Bow']
+    @ranged_skills = ['Heavy Thrown', 'Bow', 'Crossbow', 'Slings', 'Light Thrown']
   end
 
   def execute(game_state)
@@ -42,7 +44,14 @@ class SetupProcess
       return true
     end
     game_state['dancing'] = should_dance?
-    should_dance? ? dance(game_state) : determine_next_to_train(game_state)
+    game_state['retreating'] = should_retreat?
+    if game_state['dancing']
+      dance(game_state)
+    elsif game_state['retreating']
+      determine_next_to_train(game_state, retreat_weapons(@weapon_training))
+    else
+      determine_next_to_train(game_state, @weapon_training)
+    end
 
     weapon_skill = game_state['weapon_skill']
 
@@ -60,21 +69,30 @@ class SetupProcess
     @weapon_name = @weapon_training[@dance_skill]
   end
 
-  def determine_next_to_train(game_state)
-    return if game_state['action_count'] < 10 && DRSkill.getxp(game_state['weapon_skill']).to_i < @target
+  def retreat_weapons(weapon_training)
+    weapon_training.inject({}){|obj,info| obj[info.first] = info.last if @ranged_skills.include?(info.first); obj }
+  end
+
+  def determine_next_to_train(game_state, weapon_training)
+    return if game_state['action_count'] < 10 && DRSkill.getxp(game_state['weapon_skill']).to_i < @target && weapon_training[game_state['weapon_skill']]
 
     echo("new skill needed for training #{game_state['action_count']}:#{DRSkill.getxp(game_state['weapon_skill']).to_i}:#{@target}") if $debug_mode
 
     @last_skill = game_state['weapon_skill']
     game_state['action_count'] = 0
 
-    game_state['weapon_skill'], @weapon_name = @weapon_training.min_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
+    game_state['weapon_skill'], @weapon_name = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
 
     @target = DRSkill.getxp(game_state['weapon_skill']).to_i + 3
   end
 
   def should_dance?
     DRRoom.npcs.length <= @dance_threshold || DRRoom.npcs.empty?
+  end
+
+  def should_retreat?
+    return false unless @retreat_threshold
+    DRRoom.npcs.length >= @retreat_threshold
   end
 
   def last_stance
@@ -222,6 +240,7 @@ class SafetyProcess
   def execute(game_state)
     fix_standing
     @danger = in_danger?
+    keep_away if !@danger && game_state['retreating']
     game_state['danger'] = @danger
   end
 
@@ -230,6 +249,13 @@ class SafetyProcess
   def fix_standing
     return if checkstanding
     fput('stand')
+  end
+
+  def keep_away
+    if Flags['ct-engaged']
+      Flags.reset('ct-engaged')
+      retreat
+    end
   end
 
   def in_danger?
@@ -241,10 +267,7 @@ class SafetyProcess
 
     fput 'exit' if checkhealth < 40
 
-    if Flags['ct-engaged']
-      retreat
-      Flags.reset('ct-engaged')
-    end
+    keep_away
 
     if checkbleeding && Script.exists?('tendme') && !running?('tendme')
       start_script('tendme')
@@ -644,6 +667,7 @@ class CombatTrainer
     setup
 
     dance_threshold = combat_vars.dance_threshold
+    retreat_threshold = combat_vars.retreat_threshold
     $debug_mode = combat_vars.combat_trainer_debug
     buff_spells = combat_vars.buff_spells
     aim_fillers_stealth = combat_vars.aim_fillers_stealth
@@ -675,6 +699,7 @@ class CombatTrainer
 
     game_state = {
       'dancing' => false,
+      'retreating' => false,
       'mob_died' => false,
       'action_count' => 0,
       'weapon_skill' => '',
@@ -682,7 +707,7 @@ class CombatTrainer
     }
 
     combat_processes = [
-      SetupProcess.new(dance_threshold: dance_threshold, dance_skill: dance_skill, stances: stances, weapon_training: weapon_training, worn_weapons: worn_weapons),
+      SetupProcess.new(dance_threshold: dance_threshold, dance_skill: dance_skill, stances: stances, weapon_training: weapon_training, worn_weapons: worn_weapons, retreat_threshold:retreat_threshold),
       SpellProcess.new(buffs: buff_spells, ospells: offensive_spells, camb: cambrinth, casts: cast_messages, preps: prep_messages, is_empath: is_empath),
       AbilityProcesss.new(buffs: buff_nonspells),
       LootProcess.new(skin: skin, arrange_all: arrange_all, arrange_count: arrange_count, lootables: lootables),

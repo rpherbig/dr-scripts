@@ -1,0 +1,99 @@
+=begin
+  This script will attempt to record your movements through an area, and update the map as you travel.
+  run this script and once it's checked out the map type
+  start
+  to begin recording and type
+  stop
+  to stop recording. and upload the map. Alternatively use
+  abort
+  to cancel the whole process.
+
+=end
+
+class AutoMapperActions
+  @@actions = []
+  @@state = nil
+
+  def self.actions=(val)
+    @@actions = val
+  end
+
+  def self.actions
+    @@actions
+  end
+
+  def self.state=(val)
+    @@state = val
+  end
+
+  def self.state
+    @@state
+  end
+end
+
+action = proc do |client_string|
+  case client_string
+  when /\<c\>start\n/i
+    AutoMapperActions.state = 'run'
+    AutoMapperActions.actions = []
+    nil
+  when /\<c\>stop\n/i
+    AutoMapperActions.state = 'stop'
+    nil
+  when /\<c\>abort\n/i
+    AutoMapperActions.state = 'abort'
+    nil
+  else
+    AutoMapperActions.actions << client_string if AutoMapperActions.state == 'run'
+    client_string
+  end
+end
+UpstreamHook.remove('automapper')
+UpstreamHook.add('automapper', action)
+
+before_dying do
+  UpstreamHook.remove('automapper')
+end
+
+start_script 'repository', ['checkout-mapdb']
+while running?('repository')
+end
+
+respond('Ready to start mapping, type start to begin recording')
+
+def map_room(last_id, current_id, actions)
+  time_step = 0.2
+
+  Room[last_id].wayto ||= {}
+  if actions.length == 1
+    Room[last_id].wayto["#{current_id}"] = actions.first.gsub(/\<c\>|\n/,'')
+  else
+    movecommand = actions.pop
+    movecommand = ";move('#{movecommand.gsub(/\<c\>|\n/,'')}')"
+    commandstring = actions.map{|command| "fput('#{command.gsub(/\<c\>|\n/,'')}')" }.join(';')+movecommand
+    Room[last_id].wayto["#{current_id}"] = StringProc.new( commandstring )
+  end
+  Room[last_id].timeto["#{current_id}"] = 0.2
+end
+
+
+last_id = Room.current_or_new.id
+loop do
+  break if ['stop', 'abort'].include?(AutoMapperActions.state)
+  if AutoMapperActions.state == 'run'
+    wait_until{ last_id != Room.current_or_new.id || AutoMapperActions.state != 'run' }
+    break if AutoMapperActions.state != 'run'
+    echo("mapping new room #{AutoMapperActions.actions}")
+    map_room(last_id, Room.current_or_new.id, AutoMapperActions.actions.dup)
+    AutoMapperActions.actions = []
+  end
+  last_id = Room.current_or_new.id
+  pause 0.1
+end
+
+command = AutoMapperActions.state == 'stop' ?  'upload-mapdb' : 'release-mapdb'
+start_script 'repository', [command]
+while running?('repository')
+end
+
+Map.reload if command == 'abort'

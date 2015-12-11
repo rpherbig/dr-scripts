@@ -75,7 +75,7 @@ class CrossingTraining
       event_loop
       next unless @stop
       @running = false
-      fput('stop play')
+      stop_play
       break
     end
   end
@@ -100,7 +100,7 @@ class CrossingTraining
       return
     end
 
-    fput('stop play')
+    stop_play
     @idling = false
 
     echo "***Attempting to train #{skill}***" if UserVars.crossing_trainer_debug
@@ -184,11 +184,65 @@ class CrossingTraining
     fput UserVars.training_nonspells[skill]
   end
 
+  def calculate_mana(min, more, discern_data, cyclic)
+    total = min+more
+    discern_data['mana'] = [(total/4.0).ceil, min].max
+    remaining = total - discern_data['mana']
+    if remaining > UserVars.cambrinth_cap
+      discern_data['mana'] = discern_data['mana'] + (remaining - UserVars.cambrinth_cap)
+      remaining = total - discern_data['mana']
+    end
+    if cyclic
+      discern_data['cambrinth'] = nil
+      discern_data['mana'] = discern_data['mana'] + remaining
+    elsif remaining > 0
+      discern_data['cambrinth'] = []
+      step_size = (remaining/3.0).ceil
+      while remaining > 0
+        discern_data['cambrinth'] << [remaining, step_size].min
+        remaining = remaining - step_size
+      end
+    else
+      discern_data['cambrinth'] = nil
+    end
+  end
+
+  def set_preps(data)
+    UserVars.discerns = {} unless UserVars.discerns
+    discern_data = UserVars.discerns[data['abbrev']] || {}
+    if data['symbiosis']
+      if discern_data.empty? || discern_data['min'].nil?
+        /requires at minimum (\d+) mana streams/ =~ bput("discern #{data['abbrev']}", 'requires at minimum \d+ mana streams')
+        discern_data['mana'] = Regexp.last_match(1).to_i
+        discern_data['cambrinth'] = nil
+        discern_data['min'] = Regexp.last_match(1).to_i
+        discern_data['more'] = 0
+      end
+      calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
+    elsif discern_data.empty? || discern_data['time_stamp'] - Time.now > 24*60*60
+      discern_data['time_stamp'] = Time.now
+      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell')
+      when /you don't think you are able/i
+        discern_data['mana'] = 1
+        discern_data['cambrinth'] = nil
+      else
+        discern =~ /minimum (\d+) mana streams and you think you can reinforce it with (\d+) more/i
+        calculate_mana(Regexp.last_match(1).to_i, Regexp.last_match(2).to_i, discern_data, data['cyclic'])
+      end
+    end
+    pause 1
+    waitrt?
+    UserVars.discerns[data['abbrev']] = discern_data
+    data['mana'] = discern_data['mana']
+    data['cambrinth'] = discern_data['cambrinth']
+  end
+
   def cast_spell(skill)
     pause 0.5 while checkmana < 30
 
     Flags.reset('ct-spellcast')
     data = UserVars.training_spells[skill]
+    set_preps(data)
     if data['abbrev'] =~ /^comp/i
       walk_to 991
       fput(['\'Had this been a real compost your belongings would be gone. Composting soon', '\'Compost', '\'Compost incoming', '\'This is a code green, compost alert', '\'Pick up your valuables, compost time', '\'If it\'s on the ground it\'s gone, Compost incoming'].sample)
@@ -200,8 +254,8 @@ class CrossingTraining
       fput('cast')
     end
 
-    fput('release gj') if data['cyclic']
-    fput('release care') if data['cyclic']
+    fput('release gj') if data['cyclic']  && DRSpells.active_spells['Glythtide\'s Joy']
+    fput('release care') if data['cyclic'] && DRSpells.active_spells['Caress of the Sun']
 
     fput "remove #{UserVars.cambrinth}" if UserVars.held_cambrinth && data['cambrinth']
 
@@ -219,6 +273,8 @@ class CrossingTraining
 
     pause 0.5 until Flags['ct-spellcast']
 
+    snapshot = DRSkill.getxp(skill).to_i if data['symbiosis']
+
     while DRSpells.prep_spell
       data['before'].call if data['before']
       fput(data['cast'] || 'cast')
@@ -226,6 +282,15 @@ class CrossingTraining
     end
 
     fput "wear my #{UserVars.cambrinth}" if UserVars.held_cambrinth && data['cambrinth']
+    if data['symbiosis']
+      start = Time.now
+      until snapshot != DRSkill.getxp(skill).to_i || Time.now - start > 10
+        pause 0.5
+      end
+      if DRSkill.getxp(skill).to_i - snapshot <= 1
+        UserVars.discerns[data['abbrev']]['more'] = UserVars.discerns[data['abbrev']]['more'] + 1
+      end
+    end
   end
 
   def braid_to_fail(item)
@@ -247,7 +312,10 @@ class CrossingTraining
         forage item
       end
     end
+    pause 1
+    waitrt?
     bput("pull my #{item}", 'You tug and pull')
+    pause 1
     waitrt?
     dispose_trash(checkright) while %w(vine rope vines grass).include?(checkright)
     dispose_trash(checkleft) while %w(vine rope vines grass).include?(checkleft)
@@ -296,7 +364,7 @@ class CrossingTraining
       break if start == match
     end
     empty_hands
-    fput 'stop play'
+    stop_play
   end
 
   def train_scholarship
@@ -308,7 +376,7 @@ class CrossingTraining
       waitrt?
     end
     empty_hands
-    fput 'stop play'
+    stop_play
   end
 
   def train_mechanical_lore
@@ -328,12 +396,10 @@ class CrossingTraining
   end
 
   def train_athletics
-    play_zill
     empty_hands
     [[835, 'embrasure'], [1035, 'wall'], [1039, 'wall'], [1040, 'wall'], [691, 'wall'], [943, 'break'], [943, 'embrasure'],
      [939, 'embrasure'], [1388, 'wall'], [938, 'embrasure'], [940, 'break'], [940, 'embrasure'], [1611, 'wall'],
      [1609, 'wall'], [1387, 'wall']].each { |room_number, climb_target| break if DRSkill.getxp('Athletics').to_i >= 34; climb(room_number, climb_target) }
-    fput 'stop play'
   end
 
   def train_empathy
@@ -536,15 +602,21 @@ class CrossingTraining
     fput('put ingot in bucket')
   end
 
+  def stop_play
+    bput('stop play', 'You stop playing your song', 'In the name of') unless Flags['ct-song']
+    Flags['ct-song'] = true
+  end
+
   def play_zill
+    Flags.add('ct-song', 'you finish playing')
     UserVars.song = 'scale halt' unless UserVars.song
-    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a')
+    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty','You begin a')
     when 'dirtiness may affect your performance'
-      bput('stop play', 'You stop playing your song')
+      stop_play
       clean_zills
       play_zill
     when 'You begin a'
-      bput('stop play', 'You stop playing your song')
+      stop_play
       adjust_difficulty
       play_zill
     end

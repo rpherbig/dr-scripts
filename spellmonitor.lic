@@ -1,0 +1,97 @@
+#quiet
+=begin
+  Spell Tracking by Seped (Etreu/Menacra in DR)
+
+  Current functionality
+
+  DRSpells.prep_spell  --- Returns the string name of the currently preparing spell or nil
+  DRSpells.active_spells --- returns hash of spells keyed to duration e.g. {"Bless"=>5, "Minor Physical Protection"=>12} 0 means fading,
+                 removed from the hash is worn off.
+  #Update remove prep_time due to rare concurrency crashes, use events library for casting spells instead.
+=end
+
+
+unless XMLData.game =~ /^(?:DRF|DR|DRPlat)$/
+  echo "This script is meant for DragonRealms Prime, Platinum, or Fallen.  It will likely cause problems on whatever game you're trying to run it on..."
+  exit
+end
+
+no_kill_all
+no_pause_all
+#hide_me
+setpriority(0)
+
+class DRSpells
+  @@active_spells = {}
+  @@prep_spell = nil
+  @@refresh_data = {}
+
+  def DRSpells.active_spells;         @@active_spells;       end
+  def DRSpells.refresh_data; @@refresh_data; end
+  def DRSpells.prep_spell;       @@prep_spell;     end
+  def DRSpells.prep_spell=(val); @@prep_spell=val; end
+end
+
+spellAction = proc { |server_string|
+  Thread.new(server_string.clone) {|server_string|
+    sleep 0.01
+    if server_string =~  / exist='spell'\>(.+)\<\/spell\>\<castTime value=\'(\d+)\'/
+      echo "1-#{$1}:#{$2}" if UserVars.debug["spellmon"]
+      DRSpells.prep_spell = $1
+    elsif server_string =~  / exist='spell'\>(.+)\</
+      echo "2-#{$1}" if UserVars.debug["spellmon"]
+      DRSpells.prep_spell = $1
+    elsif server_string =~ /\<spell\>None\<\/spell\>/
+      echo "3-CLEAR" if UserVars.debug["spellmon"]
+      DRSpells.prep_spell = nil
+    elsif server_string =~ /\<clearStream id=\"percWindow\"\/\>/
+      DRSpells.refresh_data.each{|k,_| DRSpells.refresh_data[k] = false }
+      Thread.new {
+        sleep 0.5
+        DRSpells.refresh_data.each do |key, state|
+          unless state
+            DRSpells.active_spells.delete(key)
+            DRSpells.refresh_data.delete(key)
+          end
+        end
+      }
+    elsif server_string =~ /pushStream id=\"percWindow\"\/\>(.+)\<popStream\/\>\<pushStream id=\"percWindow\"\/\>  \((\d+) roisaen\)/
+      DRSpells.active_spells[$1] = $2.to_i
+      DRSpells.refresh_data[$1] = true
+    elsif server_string =~ /pushStream id=\"percWindow\"\/\>(.+)\<popStream\/\>\<pushStream id=\"percWindow\"\/\>  \((\d+) roisan\)/
+      DRSpells.active_spells[$1] = $2.to_i
+      DRSpells.refresh_data[$1] = true
+    elsif server_string =~ /pushStream id=\"percWindow\"\/\>(.+)\<popStream\/\>\<pushStream id=\"percWindow\"\/\>  \(Indefinite\)/
+      DRSpells.active_spells[$1] = 1000 #is there a better solution?
+      DRSpells.refresh_data[$1] = true
+    elsif server_string =~ /pushStream id=\"percWindow\"\/\>(.+)\<popStream\/\>\<pushStream id=\"percWindow\"\/\>  \(Fading\)/
+      DRSpells.active_spells[$1] = 0
+      DRSpells.refresh_data[$1] = true
+    end
+  }
+  server_string
+}
+
+DownstreamHook.remove('spellAction')
+DownstreamHook.add('spellAction', spellAction)
+
+before_dying {
+  DownstreamHook.remove('spellAction');
+}
+
+while line = script.gets
+  begin
+  rescue Exception
+    echo $!
+    echo $!.backtrace.first
+    sleep 1
+  rescue ThreadError
+    echo $!
+    echo $!.backtrace.first
+    sleep 1
+  rescue
+    echo $!
+    echo $!.backtrace.first
+    sleep 1
+  end
+end

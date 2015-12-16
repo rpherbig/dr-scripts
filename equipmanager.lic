@@ -1,0 +1,178 @@
+
+class EquipmentManager
+  include DRC
+
+  def initialize
+    UserVars.gear_sets = {} unless UserVars.gear_sets
+    @items = UserVars.gear
+  end
+
+  def remove_gear_by(&block)
+    combat_items = get_combat_items
+    gear = desc_to_items(combat_items).select{|item|block.call(item)}
+    gear.each{|item| remove_item(item)}
+    gear
+  end
+
+  def wear_items(items_list)
+    items_list.each{ |item| wear_item(item) }
+  end
+
+  def wear_equipment_set(set_name)
+    worn_items = desc_to_items(UserVars.gear_sets[set_name])
+    unless worn_items
+      echo("Could not find gear set #{set_name}")
+      return false
+    end
+
+    combat_items = get_combat_items
+
+    remove_unmatched_items(combat_items, worn_items)
+
+    lost_items = wear_missing_items(worn_items, combat_items)
+
+    lost_items.empty? ? true : notify_missing(lost_items)
+
+  end
+
+  def desc_to_items(descs)
+    descs.map{|description| item_by_desc(description) }.compact
+  end
+
+  def item_by_desc(description)
+    @items.find{|item| /#{item.description}/ =~ description }
+  end
+
+  def notify_missing(lost_items)
+    beep
+    echo 'MISSING EQUIPMENT: Please verify these items are in a closed container and not lost:'
+    echo "#{lost_items.map(&:description).join(', ')}"
+    pause
+    beep
+    false
+  end
+
+  def wear_missing_items(worn_items, combat_items)
+    held = bput('glance', 'You glance .*') if checkleft || checkright
+
+    missing_items = worn_items
+      .reject { |item| combat_items.include?(item.description)}
+      .reject { |item| held.include?(item.description) ? fput("wear my #{item.name}") : false }
+
+    missing_items.reject { |item| wear_item(item) }
+  end
+
+  def remove_unmatched_items(combat_items, worn_items)
+    combat_items
+      .select{|description| !worn_items.find{|item| /#{item.description}/ =~ description } }
+      .map{|description| @items.find{|item| /#{item.description}/ =~ description } }
+      .compact
+      .each{|item| remove_item(item) }
+  end
+
+  def get_combat_items
+    bput('inv combat', 'Type INVENTORY HELP for more options')
+    data = reget(30)
+    data = data
+           .map(&:strip)
+           .reverse
+           .take_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
+           .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
+           .reverse
+    data.pop
+    data
+  end
+
+  def remove_item(item)
+    bput("remove my #{item.name}", 'You ')
+    waitrt?
+    bput("stow my #{item.name}", 'You put')
+    waitrt?
+  end
+
+  def wear_item(item)
+    $ORDINALS.each do |ordinal|
+      case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring', 'You are already holding that')
+      when /^You get #{item.description}/, /You are already holding that/
+        fput("wear my #{item.name}")
+        waitrt?
+        return true
+      when /^You get /
+        fput("stow my #{item.name}")
+      else
+        return false
+      end
+    end
+  end
+
+  def wield_weapon(description, skill=nil, offhand=nil)
+    weapon = item_by_desc(description)
+    if weapon.is_worn?
+      $ORDINALS.each do |ordinal|
+        case bput("remove my #{ordinal} #{weapon.name}", "You sling #{weapon.description}", "You remove #{weapon.description}", "You sling", "You get", "Remove what")
+        when "You sling", "You get"
+          bput("wear my #{weapon.name}", "You sling", "You attach")
+        when "Remove what"
+          return false
+        else
+          swap_to_skill(weapon.name, skill) if skill && weapon.swappable
+          fput('swap') if offhand
+          return true
+        end
+      end
+    else
+      $ORDINALS.each do |ordinal|
+        case bput("get my #{ordinal} #{weapon.name}", "You get #{weapon.description}", "^You get", "^What were you referring")
+        when "You get"
+          bput("stow my #{weapon.name}", "You put")
+        when "What were you referring"
+          return false
+        else
+          swap_to_skill(weapon.name, skill) if skill && weapon.swappable
+          fput('swap') if offhand
+          return true
+        end
+      end
+    end
+  end
+
+  def swap_to_skill(noun, skill)
+    proper_skill = case skill
+      when /^he$|heavy edge|large edge/i
+        "heavy edged"
+      when /2he|^the$|twohanded edge/i
+        "two-handed edged"
+      when /2hb|^thb$|twohanded blunt/i
+        "two-handed blunt"
+      when /^hb$|heavy blunt|large blunt/i
+        "heavy blunt"
+      else
+        echo("unsupported weapon swap, please help us add this weapon")
+      end
+
+    until "#{proper_skill} weapon." == bput("swap my #{noun}", "#{proper_skill} weapon\.$", ".* weapon\.$")
+      pause 0.25
+    end
+  end
+
+  def stow_weapon(description)
+    unless description
+      return unless checkright || checkleft
+      result = bput("glance", "You glance down to see (.*) in your right hand and (.*) in your left hand")
+      result =~ /You glance down to see (.*) in your right hand and (.*) in your left hand/i
+      right,left = [Regexp.last_match(1), Regexp.last_match(2)]
+      stow_weapon(right) if checkright
+      stow_weapon(left)  if checkleft
+    end
+    weapon = item_by_desc(description)
+    return unless weapon
+    if weapon.is_worn?
+      bput("wear my #{weapon.name}", "You sling", "You attach")
+    else
+      bput("stow my #{weapon.name}", "You put")
+    end
+  end
+
+end
+
+$EquipmentManager = EquipmentManager.new

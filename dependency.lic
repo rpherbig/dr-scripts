@@ -11,6 +11,8 @@ require 'json'
 require 'net/http'
 require 'base64'
 
+toggle_unique
+
 debug = variable.include?('debug')
 
 class ScriptManager
@@ -19,6 +21,8 @@ class ScriptManager
     @git_token = '4491b4c6' + '20864db1575'+'3542a5d8729cf362acd1c'
     @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
     @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
+    @files_to_restart = %w(common.lic drinfomon.lic spellmonitor.lic events.lic)
+    @queue = []
     load_versions
   end
 
@@ -31,6 +35,18 @@ class ScriptManager
     end
   end
 
+  def queue_names(script_names)
+    @queue = script_names
+  end
+
+  def queue_empty?
+    @queue.empty?
+  end
+
+  def run_queue
+    $manager.get_script(@queue.shift) unless @queue.empty?
+  end
+
   def save_versions
     File.open('script_versions.dat', 'wb') {|file| Marshal.dump(@script_versions, file)}
   end
@@ -40,8 +56,8 @@ class ScriptManager
     download_script(filename) if @script_versions[filename].nil? || force || file_outdated?(filename)
   end
 
-  def check_scripts
-
+  def check_scripts(force = false)
+    @script_versions.each {|name, _| get_script(name, force) }
   end
 
   def download_script(filename)
@@ -52,6 +68,19 @@ class ScriptManager
     File.open("./scripts/#{filename}", 'w') {|file| file.print(Base64.decode64(blob['content']))}
     @script_versions[filename] = blob['sha']
     save_versions
+    refresh_script(filename)
+  end
+
+  def refresh_script(filename)
+    echo("refresh:#{filename}") if @debug
+    return unless @files_to_restart.include?(filename)
+    filename.sub!(/\.lic$/,'')
+    echo("refresh:#{filename}") if @debug
+    while Script.running?(filename)
+      stop_script(filename)
+      pause 0.1
+    end
+    start_script(filename)
   end
 
   def file_outdated?(filename)
@@ -92,28 +121,24 @@ class ScriptManager
   end
 end
 
-manager = ScriptManager.new(debug)
+$manager = ScriptManager.new(debug)
 
 def custom_require(script_names)
-end
-
-manager.get_script('common.lic')
-# manager.file_outdated?('common.lic')
-
-while line = script.gets
-  clear
-  begin
-  rescue Exception
-    echo $ERROR_INFO
-    echo $ERROR_INFO.backtrace.first
-    sleep 1
-  rescue ThreadError
-    echo $ERROR_INFO
-    echo $ERROR_INFO.backtrace.first
-    sleep 1
-  rescue
-    echo $ERROR_INFO
-    echo $ERROR_INFO.backtrace.first
-    sleep 1
+  $manager.queue_names(script_names)
+  until $manager.queue_empty?
+    pause 0.1
   end
 end
+
+def force_refresh_scripts
+  $manager.check_scripts(true)
+end
+
+$manager.check_scripts
+
+
+loop do
+  $manager.run_queue
+  pause 0.1
+end
+

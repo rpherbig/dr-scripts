@@ -21,18 +21,23 @@ class ScriptManager
     @git_token = '4491b4c6' + '20864db1575' + '3542a5d8729cf362acd1c'
     @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
     @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
-    @files_to_restart = %w(common.lic drinfomon.lic spellmonitor.lic events.lic)
+    @files_to_restart = %w(common.lic drinfomon.lic spellmonitor.lic events.lic roomnumbers.lic textsubs.lic smartlisten.lic)
+    @last_run_version = {}
     @queue = []
-    load_versions
   end
 
-  def load_versions
+  def get_versions
     if File.exist?('script_versions.dat')
-      @script_versions = Marshal.load(File.open('script_versions.dat', 'rb'))
+      Marshal.load(File.open('script_versions.dat', 'rb'))
     else
-      @script_versions = {}
-      save_versions
+      {}
     end
+  end
+
+  def set_version(filename, sha)
+    data = get_versions
+    data[filename] = sha
+    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
   end
 
   def queue_names(script_names)
@@ -47,17 +52,15 @@ class ScriptManager
     $manager.get_script(@queue.shift) unless @queue.empty?
   end
 
-  def save_versions
-    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(@script_versions, file) }
-  end
-
   def get_script(filename, force = false)
+    filename = filename.dup
     echo("checking:#{filename} force:#{force}") if @debug
-    download_script(filename) if @script_versions[filename].nil? || force || file_outdated?(filename)
+    download_script(filename) if get_versions[filename].nil? || force || file_outdated?(filename)
+    refresh_script(filename)
   end
 
   def check_scripts(force = false)
-    @script_versions.each { |name, _| get_script(name, force) }
+    get_versions.each { |name, _| get_script(name, force) }
   end
 
   def download_script(filename)
@@ -66,26 +69,14 @@ class ScriptManager
     echo("info:#{info}") if @debug
     blob = make_request(info['url'])
     File.open("./scripts/#{filename}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
-    add_file_to_autostart(filename) unless @script_versions[filename]
-    @script_versions[filename] = blob['sha']
-    save_versions
-    refresh_script(filename)
-  end
-
-  def add_file_to_autostart(filename)
-    return unless @files_to_restart.include?(filename)
-    filename = filename.sub(/\.lic$/, '')
-    start_script('autostart', ['remove', '--global', filename])
-    pause 0.1 while Script.running?('autostart')
-    start_script('autostart', ['remove', filename])
-    pause 0.1 while Script.running?('autostart')
-    start_script('autostart', ['add', '--global', filename])
-    pause 0.1 while Script.running?('autostart')
+    set_version(filename, blob['sha'])
   end
 
   def refresh_script(filename)
     echo("refresh:#{filename}") if @debug
     return unless @files_to_restart.include?(filename)
+    return if @last_run_version[filename] == get_versions[filename]
+    @last_run_version[filename] = get_versions[filename]
     filename.sub!(/\.lic$/, '')
     echo("refresh:#{filename}") if @debug
     while Script.running?(filename)
@@ -97,7 +88,7 @@ class ScriptManager
 
   def file_outdated?(filename)
     echo("file_outdated?:#{filename}") if @debug
-    local_version = @script_versions[filename]
+    local_version = get_versions[filename]
     echo("local:#{local_version}") if @debug
     info = get_file_status(filename)
     unless info
@@ -144,6 +135,7 @@ def force_refresh_scripts
   $manager.check_scripts(true)
 end
 
+$manager.get_script('common.lic')
 $manager.check_scripts
 
 loop do

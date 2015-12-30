@@ -123,6 +123,12 @@ class StringProc
   end
 end
 
+clase Proc
+  def self.new(string)
+    string
+  end
+end
+
 eval File.read('combat-setup.lic')
 
 result = { 'gear' => items_to_array(UserVars.gear), 'gear_sets' => UserVars.gear_sets }

@@ -1,5 +1,5 @@
 @ECHO OFF
-Set _Destination=%1
+Set _Destination=%LICH_SCRIPTS%
 
 FOR /f %%a IN (
  'dir /b *.lic *.yaml'

@@ -2,7 +2,7 @@
 Set _Destination=%1
 
 FOR /f %%a IN (
- 'dir /b *.lic" '
+ 'dir /b *.lic *.yaml'
  ) DO (
  call:symlink %%a
 )

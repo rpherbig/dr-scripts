@@ -125,7 +125,9 @@ end
 
 eval File.read('combat-setup.lic')
 
-result = { 'combat' => UserVars.export.list, 'gear' => items_to_array(UserVars.gear), 'gear_sets' => UserVars.gear_sets }
+result = { 'gear' => items_to_array(UserVars.gear), 'gear_sets' => UserVars.gear_sets }
+
+result.merge!(UserVars.export.list)
 
 UserVars.delete('export')
 UserVars.delete('gear')

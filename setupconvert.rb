@@ -123,7 +123,7 @@ class StringProc
   end
 end
 
-clase Proc
+class Proc
   def self.new(string)
     string
   end

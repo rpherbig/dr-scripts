@@ -1,21 +1,15 @@
 =begin
-    Authored by Sheltim and Seped. Suggestions and contributions are welcome: https://github.com/rpherbig/dr-scripts
+  Suggestions and contributions are welcome: https://github.com/rpherbig/dr-scripts
 
-    This script will train a list of skills in order of the lowest amount of field experience. It is intended to be used in The Crossing (https://elanthipedia.play.net/mediawiki/index.php/RanikMap1).
+  This script will train a list of skills in order of the lowest amount of field experience. It is intended to be used in The Crossing (https://elanthipedia.play.net/mediawiki/index.php/RanikMap1).
 
-    Before running this script for the first time:
-    * Download scripts "common", "drinfomon", "events", and "spellmonitor".
-    * Optionally, download scripts "pick" and/or "theurgy" if you will be training those skills.
-    * Set up a configuration script named "crossing-training-setup"
-        * Download "crossing-training-setup" for an example configuration script.
-    * You can turn on debug mode with ;e UserVars.crossing_trainer_debug = true
+  Before running this script for the first time:
+  * Set up a configuration script named "crossing-training-setup"
+    * Download "crossing-training-setup" for an example configuration script.
+  * You can turn on debug mode with ;e UserVars.crossing_trainer_debug = true
 =end
 
-# TODO: Start extracting bput success arrays for reuse
-
-# TODO: Convert "crossing-training" to "crossing-training-engine" and "crossing-training-setup" to "crossing-training". This means what was the setup script will now be the script you run. It would manage UserVars, dependencies, etc. and feed those to the engine script.
-
-custom_require(%w(common drinfomon events spellmonitor))
+custom_require(%w(common drinfomon events spellmonitor pick sell-loot theurgy forge smelt))
 
 class CrossingTraining
   include DRC
@@ -73,12 +67,6 @@ class CrossingTraining
     fput('release aewo') if DRSpells.active_spells['Aether Wolves']
 
     Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
-
-    fput 'exp all'
-    pause 0.5
-
-    fput('info')
-    pause 0.5
   end
 
   def event_loop
@@ -151,10 +139,23 @@ class CrossingTraining
       train_summoning
     when 'Performance'
       train_performance
+    when 'Sorcery'
+      train_sorcery
     else
       echo "#{skill} not implemented yet"
       pause 15
     end
+  end
+
+  def train_sorcery
+    # TODO: Generalize this once we have more data points
+    walk_to 705
+    bput('get runestone', 'You get')
+    until DRSkill.getxp('Sorcery').to_i >= 32
+      bput('focus runestone', 'You focus your magical senses')
+      waitrt?
+    end
+    bput('stow runestone', 'You put your')
   end
 
   def check_listening
@@ -165,10 +166,11 @@ class CrossingTraining
     results = reget(20, 'is teaching a class')
     waitrt?
 
-    classes = results.inject({}) do |hash, line|
+    classes = results.each_with_object({}) do |line, hash|
       matches = line.match(/(.*) is teaching a class on .* \(compared to what you already know\) (.*) which is still open to new students/)
-      hash[matches[1]] = matches[2]
-      hash
+      teacher = matches[1]
+      skill = matches[2]
+      hash[teacher] = skill unless teacher.nil? || skill.nil?
     end
 
     classes
@@ -180,7 +182,7 @@ class CrossingTraining
 
   def listen?(teacher)
     return false if teacher.nil? || teacher.empty?
-    success = ['begin to listen', 'already listening'].include? DRC.bput("listen to #{teacher}", 'begin to listen', 'already listening', 'could not find who', 'You have no idea', 'isn\'t teaching a class')
+    success = ['begin to listen', 'already listening'].include? DRC.bput("listen to #{teacher}", 'begin to listen', 'already listening', 'could not find who', 'You have no idea', 'isn\'t teaching a class', 'don\'t have the appropriate training')
     @last_teacher = teacher if success
     success
   end
@@ -191,9 +193,11 @@ class CrossingTraining
     fput 'summon admittance'
     waitrt?
     bput('summon weapon', 'You lack the resolve to summon a weapon', 'you draw out a')
+    pause 1
     waitrt?
-    dispose_trash(checkright)
-    dispose_trash(checkleft)
+    fput("break #{checkright}") until checkright.nil?
+    fput("break #{checkleft}") until checkleft.nil?
+    fput 'pathway focus damage'
   end
 
   def train_locksmithing
@@ -622,10 +626,7 @@ class CrossingTraining
   end
 
   def find_anvil
-    until find_empty_room?([8909, 8910, 8911, 8777, 8778, 760], proc { has_anvil? })
-      walk_to 8775
-      pause 30
-    end
+    find_empty_room([8909, 8910, 8911, 8777, 8778, 760], 8775, proc { has_anvil? })
   end
 
   def forge(chapter, page, item, trash_ingot)
@@ -634,7 +635,8 @@ class CrossingTraining
 
     find_anvil
 
-    wait_for_script_to_complete('forge', ['trash', 'blacksmithing', chapter, page, 'bronze', item])
+    container = UserVars.forge_container || 'backpack'
+    wait_for_script_to_complete('forge', ['trash', container, 'blacksmithing', chapter, page, 'bronze', item])
 
     # Handle the case in which forge fails (i.e. due to running out of oil)
     dispose_trash(checkright) until checkright.nil? if checkright.include? item
@@ -655,10 +657,7 @@ class CrossingTraining
   def smelt_bronze
     buy_bronze_ingot
 
-    until find_empty_room?([8774, 19_030, 8773, 8777, 8779], proc { has_crucible? })
-      walk_to 8775
-      pause 30
-    end
+    find_empty_room([8774, 19_030, 8773, 8777, 8779], 8775, proc { has_crucible? })
 
     fput('tilt cruc')
     fput('tilt cruc')

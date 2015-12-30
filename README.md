@@ -1,40 +1,51 @@
 # dr-scripts
 A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).
 
-## combat-trainer.lic and combat-trainer-setup.lic
-Train a list of weapon skills, starting with whichever has the lowest amount of field experience.
+## Training scripts
+These scripts are designed to train skill(s):
+* combat-trainer (and combat-setup) - trains combat skills
+* crossing-training (and crossing-setup) - trains non-combat skills
+* theurgy - train theurgy by working up devotion and doing some simple communes
+* training-manager - repeatedly trains non-combat and combat skills
 
-## crossing-repair.lic and crossing-repair-setup.lic
-Repair leather and metal gear in The Crossing.
+## Miscellaneous manually run scripts
+Does something specific and then exits, intended to be run by the user or another script:
+* train - trains attributes
+* circlecheck - reports your progress towards circling
+* pick (and pick-setup) - disarms and unlocks boxes
+* sell-loot - sells loot and deposits coin
+* smelt - smelts an ingot
+* forge - forges an item
+* crossing-repair (and crossing-repair-setup) - repairs items
+* favor - gets a favor from a given Immortal
+* setupaliases - adds a useful selection of aliases to the global list
+* gbox - gets all boxes from a container and gives them to a character
 
-## crossing-training.lic and crossing-training-setup.lic
-Train a list of non-combat skills, starting with whichever has the lowest amount of field experience.
+## Miscellaneous background scripts
+These run in the background to provide functionality to you, the user:
+* roomnumbers - appends the Lich room ID# to your in-game room title
+* textsubs
+* smartlisten - if someone teaches you an approved class you'll start listening
+* moonwatch - populates UserVars.moons with data related to the moons
+* afk - runs in the background to provide safety while you are afk
+* tendme (and tendother) - automatic wound tender
 
-## events.lic
-Helper which adds support for events via Flags to make scripting easier and more robust.
+## Helper scripts
+These run in the background to provide functionality to other scripts:
+* dependency
+* drinfomon
+* equipmanager
+* events
+* common
+* spellmonitor
 
-## smartlisten.lic
-Automatic listener: if someone teaches you an approved class you'll start listening.
+## Mapping assist scripts
+* addroom - add a series of rooms to the lich map
+* automap - attempts to record your movements through an area and update the map as you travel
 
-## theurgy.lic
-Quick and dirty theurgy training script, works as soon as you have commune eluned.
-
-## pick.lic
-Lockpicking script for opening all the boxes in a given container.
-
-## common.lic
-A set of shared helper functions to provide reusable functionality for other scripts.
-
-## healme.lic
-Self healing script for an empath.
-
-## tendme.lic
-Script that tends and rewraps wounds.
-
-## sell-loot.lic
-Sells any loose gems, your bundle, and then deposits your coin in the bank. Should be used in The Crossing.
+## Empath-only scripts
+* smarttransfer - safely transfer wounds from the target, avoiding useless injuries in fatal areas
+* healme - basic self healing script
 
 ## create_symlinks.bat
-Useful if you are doing development on Windows. Change the _Destination variable.
-
-Note: if you use GitHub for Windows and discard changes to a file, the symlink will be broken. Delete the symlink (the "file" in the destination path such as the Lich\scripts directory) and rerun the batch file.
+Useful if you are doing development on Windows. Pass it an argument of the path to your lich/scripts/ directory

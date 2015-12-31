@@ -1,6 +1,16 @@
 # dr-scripts
 A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).
 
+## Migration to YAML configuration files
+We're moving from our current .lic setup files to YAML files for a variety of reasons. We have a a helper ruby
+file that can convert your existing settings over to the new yaml format. setupconvert.rb.
+From a command prompt in the scripts directory run
+ruby setupconvert.rb Yourname
+
+Note that name is case sensitive. If you receive a message about ruby being an unrecognized command it is not in your path
+you must instead provide the full path to ruby, for most installs this will be
+C:\Ruby200\bin\ruby setupconvert.rb Yourname
+
 ## Training scripts
 These scripts are designed to train skill(s):
 * combat-trainer (and combat-setup) - trains combat skills

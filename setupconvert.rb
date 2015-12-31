@@ -110,7 +110,7 @@ UserVars.treasure_nouns = %w(map scroll bark parchment)
 
 UserVars.export = true
 
-def start_script
+def start_script(test = nil, test2 = nil)
 end
 
 def running?(_dummy)

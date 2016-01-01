@@ -35,7 +35,7 @@ module DRC
 end
 
 def items_to_array(items)
-  items.map { |item| { description: item.description, name: item.name, is_leather: item.is_leather, hinders_lockpicking: item.hinders_lockpicking, is_worn: item.is_worn, swappable: item.swappable } }
+  items.map { |item| { description: item.description, name: item.name, is_leather: item.is_leather, hinders_lockpicking: item.hinders_lockpicking, is_worn: item.is_worn, swappable: item.swappable, tie_to: item.tie_to } }
 end
 
 module Vars

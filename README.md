@@ -47,5 +47,8 @@ These run in the background to provide functionality to other scripts:
 * smarttransfer - safely transfer wounds from the target, avoiding useless injuries in fatal areas
 * healme - basic self healing script
 
-## create_symlinks.bat / create_symlinks.sh
-Useful if you are doing development. Pass it an argument of the path to your lich/scripts/ directory
+## create_symlinks.bat
+Useful if you are doing development on Windows. Pass it an argument of the path to your lich\scripts\ directory
+
+## create_symlinks.sh
+Useful if you are doing development on OSX or Linux. Pass it an argument of the path to your lich/scripts/ directory

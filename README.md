@@ -58,7 +58,7 @@ These run in the background to provide functionality to other scripts:
 * healme - basic self healing script
 
 ## create_symlinks.bat
-Useful if you are doing development on Windows. Pass it an argument of the path to your lich\scripts\ directory
+Useful if you are doing development on Windows. Set the LICH_SCRIPTS environment variable to the path to your lich/scripts/ directory.
 
 ## create_symlinks.sh
-Useful if you are doing development on OSX or Linux. Pass it an argument of the path to your lich/scripts/ directory
+Useful if you are doing development on OSX or Linux. Pass it an argument of the path to your lich/scripts/ directory.

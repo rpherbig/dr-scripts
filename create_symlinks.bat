@@ -7,7 +7,8 @@ FOR /f %%a IN (
  call:symlink %%a
 )
 
-mklink /h /d %_Destination%\profiles .\profiles
+rmdir %_Destination%\profiles
+mklink /h /j %_Destination%\profiles .\profiles
 
 goto:eof
 

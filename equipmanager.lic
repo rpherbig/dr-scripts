@@ -33,13 +33,14 @@ class EquipmentManager
     UserVars.gear_sets = {} unless UserVars.gear_sets
   end
 
-  attr_writer :items
+  attr_accessor :items
 
   def items
     return @items if @items
     if UserVars.use_yaml
       settings = get_settings
       UserVars.gear_sets = settings['gear_sets']
+      @armor_container = settings.armor_container
       @items = settings['gear'].map { |item| Item.new(description: item[:description], name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to]) }
     else
       @items = UserVars.gear
@@ -58,6 +59,7 @@ class EquipmentManager
   end
 
   def wear_equipment_set(set_name)
+
     worn_items = desc_to_items(UserVars.gear_sets[set_name])
     echo("expected worn items:#{worn_items.map(&:description).join(',')}") if UserVars.equipmanager_debug
     unless worn_items
@@ -146,8 +148,8 @@ class EquipmentManager
       return false
     end
     $ORDINALS.each do |ordinal|
-      case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring', 'You are already holding that')
-      when /^You get #{item.description}/, /You are already holding that/
+      case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring')
+      when /^You get #{item.description}/
         fput("wear my #{item.name}")
         waitrt?
         return true
@@ -161,44 +163,99 @@ class EquipmentManager
 
   def wield_weapon(description, skill = nil, offhand = nil)
     weapon = item_by_desc(description)
-    if weapon.is_worn?
-      $ORDINALS.each do |ordinal|
-        case bput("remove my #{ordinal} #{weapon.name}", "You sling #{weapon.description}", "You remove #{weapon.description}", 'You sling', 'You get', 'Remove what')
-        when 'You sling', 'You get'
-          bput("wear my #{weapon.name}", 'You sling', 'You attach')
-        when 'Remove what'
-          return false
+    unless weapon
+      echo("failed to match a weapon for #{description}")
+      return
+    end
+    if checkleft || checkright
+      held = bput('glance', 'You glance .*')
+      if /#{item.description}/ !~ held
+        stow_weapon
+        get_item(weapon, true)
+      end
+    end
+
+    swap_to_skill(weapon.name, skill) if skill && weapon.swappable
+    fput('swap') if offhand && checkright
+
+  end
+
+  def get_item(item)
+      if (item.tie_to && get_item_helper(item, :tied)) || (item.is_worn && get_item_helper(item, :worn)) || get_item_helper(item, :stowed)
+        true
+      else
+        echo("Could not find #{item.description} anywhere.")
+        false
+      end
+  end
+
+  def return_held_gear(gear_set)
+    return unless checkright || checkleft
+    result = bput('glance', 'You glance down to see (.*) in your right hand and (.*) in your left hand', 'You glance down to see (.*) in your left hand' , 'You glance down at your empty hands')
+    return if result == 'You glance down at your empty hands'
+    if result =~ /You glance down to see (.*) in your right hand and (.*) in your left hand/i
+      right = Regexp.last_match(1)
+      left = Regexp.last_match(2)
+    elsif result =~ /You glance down to see (.*) in your left hand/i
+      left = Regexp.last_match(1)
+    end
+    todo = []
+    todo.push(left) if checkleft
+    todo.push(right) if checkright
+
+    worn_items = desc_to_items(UserVars.gear_sets[gear_set])
+
+    todo.each do |held_item|
+      if info = worn_items.find{|item| /#{item.description}/ =~ held_item }
+        fput("wear my #{info.name}")
+      else
+        info = items.find{|item| /#{item.description}/ =~ held_item }
+        if info.tie_to
+         stow_helper("tie my #{info.name} to #{info.tie_to}", info.name, 'You attach')
         else
-          swap_to_skill(weapon.name, skill) if skill && weapon.swappable
-          fput('swap') if offhand
-          return true
+          stow_helper("stow my #{info.name}", info.name, "You put")
         end
       end
-    elsif !weapon.tie_to.nil?
-      $ORDINALS.each do |ordinal|
-        case bput("untie my #{ordinal} #{weapon.name}", "You remove #{weapon.description}", '^You remove', '^What were you referring', '^Untie what')
-        when 'You remove'
-          bput("stow my #{weapon.name}", 'You put')
-        when 'What were you referring', 'Untie what'
-          return false
-        else
-          swap_to_skill(weapon.name, skill) if skill && weapon.swappable
-          fput('swap') if offhand
-          return true
-        end
-      end
-    else
-      $ORDINALS.each do |ordinal|
-        case bput("get my #{ordinal} #{weapon.name}", "You get #{weapon.description}", '^You get', '^What were you referring')
-        when 'You get'
-          bput("stow my #{weapon.name}", 'You put')
-        when 'What were you referring'
-          return false
-        else
-          swap_to_skill(weapon.name, skill) if skill && weapon.swappable
-          fput('swap') if offhand
-          return true
-        end
+    end
+  end
+
+  def verb_data(item)
+    {
+      worn: {
+        verb:'remove',
+        matches:["You sling #{item.description}", "You .* #{item.description}", /^You (get|sling|pull|work|loosen|slide|remove) /, 'Remove what'],
+        failures:[/^You (get|sling|pull|work|slide|remove) $/],
+        failure_recovery: Proc.new{|noun| bput("wear my #{noun}", '^You ')},
+        exhausted:['Remove what']
+        },
+      tied: {
+        verb:'untie',
+        matches:["You remove #{item.description}", '^You remove', '^What were you referring', '^Untie what'],
+        failures:['You remove'],
+        failure_recovery:Proc.new{|_| stow_weapon},
+        exhausted:['What were you referring', 'Untie what']
+        },
+      stowed: {
+        verb:'get',
+        matches:["You sling #{item.description}",  "You get #{item.description}", '^You get', '^What were you referring', 'But that is already'],
+        failures:['You get', /But that is already/],
+        failure_recovery: Proc.new{|noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
+        exhausted:['What were you referring']
+        },
+    }
+  end
+
+  def get_item_helper(item, type)
+    data = verb_data(item)[type]
+    waitrt?
+    $ORDINALS.each do |ordinal|
+      case bput("#{data[:verb]} my #{ordinal} #{item.name}", *data[:matches])
+      when *data[:exhausted]
+        return false
+      when *data[:failures]
+        data[:failure_recovery].call(item.name)
+      else
+        return true
       end
     end
   end
@@ -231,13 +288,17 @@ class EquipmentManager
   def stow_weapon(description)
     unless description
       return unless checkright || checkleft
-      result = bput('glance', 'You glance down to see (.*) in your right hand and (.*) in your left hand', 'You glance down at your empty hands')
+      result = bput('glance', 'You glance down to see (.*) in your right hand and (.*) in your left hand', 'You glance down to see (.*) in your left hand' , 'You glance down at your empty hands')
       return if result == 'You glance down at your empty hands'
-      result =~ /You glance down to see (.*) in your right hand and (.*) in your left hand/i
-      right = Regexp.last_match(1)
-      left = Regexp.last_match(2)
+      if result =~ /You glance down to see (.*) in your right hand and (.*) in your left hand/i
+        right = Regexp.last_match(1)
+        left = Regexp.last_match(2)
+      elsif result =~ /You glance down to see (.*) in your left hand/i
+        left = Regexp.last_match(1)
+      end
       stow_weapon(right) if checkright
       stow_weapon(left)  if checkleft
+      return
     end
     weapon = item_by_desc(description)
     return unless weapon

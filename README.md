@@ -27,6 +27,9 @@ Here are the instructions for getting started using our scripts. We hope to auto
 * Thief: Evissam-setup.yaml
 * Trader: none yet, be the first by submitting your own!
 * Warrior Mage: Torgro-setup.yaml
+1. ;e UserVars.use_yaml = true
+1. Now you're ready to download and run any of our scripts. For each script you want (the full list is below), run:
+* ;e custom_require('script-name')
 
 ## Migration to YAML configuration files
 We're moving from our current .lic setup files to YAML files for a variety of reasons. We have a a helper ruby

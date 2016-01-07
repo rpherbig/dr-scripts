@@ -13,6 +13,10 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * Warning, if you have a shared gemstone 4 and DR lich install this migration will screw up your gemstone setups. You can manually perform this step by adding dependency to your autostart list for any DR characters and removing autostarts for any of our scripts. Then you'll want to use ;e custom_require(['list', 'of', 'ourscripts']) that you want to monitor now.
 1. Open up your lich install directory, then open the scripts folder (this is where your .lic files live)
 1. Make a new folder in there named 'profiles'
+  * Profiles holds a collection of yaml files. Yaml is a flat file format for expressing data (like xml or json).
+  * base.yaml is data that will be loaded in for every character you run
+  * Yourname-setup.yaml is settings for a single specific character, specified by Yourname
+  * Yourname-otherthing.yaml are settings that will be imported if you provide an extra argument to a script. e.g. ;crossing-training otherthing
 1. Navigate to https://github.com/rpherbig/dr-scripts/tree/master/profiles
   * Right-click on 'base.yaml'
   * Select 'Save target as...' (the exact text varies by browser)

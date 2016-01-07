@@ -47,6 +47,7 @@ These scripts are designed to train skill(s):
 * crossing-training (and crossing-setup) - trains non-combat skills
 * theurgy - train theurgy by working up devotion and doing some simple communes
 * training-manager - repeatedly trains non-combat and combat skills
+* hunting-buddy - trains combat skills (using combat-trainer) in defined hunting areas
 
 ## Miscellaneous manually run scripts
 Does something specific and then exits, intended to be run by the user or another script:

@@ -10,6 +10,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * This lets the trusted script make files on your hard drive and download stuff from the internet - make sure you trust us before running this command
 1. ;dependency
 1. ;e migrate_scripts
+  * Warning, if you have a shared gemstone 4 and DR lich install this migration will screw up your gemstone setups. You can manually perform this step by adding dependency to your autostart list for any DR characters and removing autostarts for any of our scripts. Then you'll want to use ;e custom_require(['list', 'of', 'ourscripts']) that you want to monitor now.
 1. Open up your lich install directory, then open the scripts folder (this is where your .lic files live)
 1. Make a new folder in there named 'profiles'
 1. Navigate to https://github.com/rpherbig/dr-scripts/tree/master/profiles

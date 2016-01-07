@@ -2,7 +2,7 @@
 A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).
 
 ## Getting started
-Here are the instructions for getting started using our scripts. We hope to automate some of these steps soon.
+Here are the instructions for getting started using our scripts. We hope to automate some of these steps soon. These should all be onetime steps.
 
 1. ;repos download dependency.lic
   * 'dependency.lic' is the the script that will download and keep up-to-date all of the rest of our scripts
@@ -30,6 +30,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * Trader: none yet, be the first by submitting your own!
   * Warrior Mage: Torgro-setup.yaml
 1. ;e UserVars.use_yaml = true
+  * If your UserVars become corrupted you'll need to reset this flag. We expect to remove this flag as soon as possible so hopefully this will not be an issue for long.
 1. Now you're ready to download and run any of our scripts. For each script you want (the full list is below), run:
   * ;e custom_require('script-name')
 

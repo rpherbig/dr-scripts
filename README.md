@@ -3,33 +3,34 @@ A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (htt
 
 ## Getting started
 Here are the instructions for getting started using our scripts. We hope to automate some of these steps soon.
+
 1. ;repos download dependency.lic
-* 'dependency.lic' is the the script that will download and keep up-to-date all of the rest of our scripts
+  * 'dependency.lic' is the the script that will download and keep up-to-date all of the rest of our scripts
 1. ;trust dependency
-* This lets the trusted script make files on your hard drive and download stuff from the internet - make sure you trust us before running this command
+  * This lets the trusted script make files on your hard drive and download stuff from the internet - make sure you trust us before running this command
 1. ;dependency
 1. ;e migrate_scripts
 1. Open up your lich install directory, then open the scripts folder (this is where your .lic files live)
 1. Make a new folder in there named 'profiles'
 1. Navigate to https://github.com/rpherbig/dr-scripts/tree/master/profiles
-* Right-click on 'base.yaml'
-* Select 'Save target as...' (the exact text varies by browser)
-* Save it to the profiles directory you just created
+  * Right-click on 'base.yaml'
+  * Select 'Save target as...' (the exact text varies by browser)
+  * Save it to the profiles directory you just created
 1. We have some existing characters' config files in the same location as base.yaml. You can download them by repeating the same steps above if you would like to see sample config files for various guilds (make sure to rename the file to match your character!):
-* Barbarian: Sheltim-setup.yaml
-* Bard: Thurmond-setup.yaml
-* Cleric: Menacra-setup.yaml
-* Empath: Selanas-setup.yaml
-* Moon Mage: Mooselurk-setup.yaml
-* Necromancer: none yet, be the first by submitting your own!
-* Paladin: none yet, be the first by submitting your own!
-* Ranger: Etreu-setup.yaml
-* Thief: Evissam-setup.yaml
-* Trader: none yet, be the first by submitting your own!
-* Warrior Mage: Torgro-setup.yaml
+  * Barbarian: Sheltim-setup.yaml
+  * Bard: Thurmond-setup.yaml
+  * Cleric: Menacra-setup.yaml
+  * Empath: Selanas-setup.yaml
+  * Moon Mage: Mooselurk-setup.yaml
+  * Necromancer: none yet, be the first by submitting your own!
+  * Paladin: none yet, be the first by submitting your own!
+  * Ranger: Etreu-setup.yaml
+  * Thief: Evissam-setup.yaml
+  * Trader: none yet, be the first by submitting your own!
+  * Warrior Mage: Torgro-setup.yaml
 1. ;e UserVars.use_yaml = true
 1. Now you're ready to download and run any of our scripts. For each script you want (the full list is below), run:
-* ;e custom_require('script-name')
+  * ;e custom_require('script-name')
 
 ## Migration to YAML configuration files
 We're moving from our current .lic setup files to YAML files for a variety of reasons. We have a a helper ruby

@@ -36,6 +36,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * ;e autostart('script-name', false) will start it for only this character
   * ;e echo(list_autostarts) will show you the files being autostarted on a given character
   * ;e stop_autostart('script-name') will remove an autostarted file from the list
+  * ;e autostart(['drinfomon', 'common', 'spellmonitor']) to add many scripts at once
 
 ## Training scripts
 These scripts are designed to train skill(s):

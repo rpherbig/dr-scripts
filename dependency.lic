@@ -27,26 +27,39 @@ toggle_unique
 
 debug = variable.include?('debug')
 
-start_script('common')
-
 class ScriptManager
   def initialize(debug)
     @debug = debug
     @git_token = '4491b4c6' + '20864db1575' + '3542a5d8729cf362acd1c'
-    @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master?recursive=1'
+    @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
     @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
-    UserVars.dependency_as_scripts ||= %w(common.lic drinfomon.lic spellmonitor.lic events.lic roomnumbers.lic textsubs.lic smartlisten.lic equipmanager.lic)
+    UserVars.autostart_scripts ||= []
+    Settings['autostart'] ||= []
     @developer = Settings['dependency-developer'] || false
-    @last_run_version = {}
     @queue = []
+    @add_autos = []
+    @remove_autos = []
+    update_autostarts
+  end
+
+  def update_autostarts
+    @autostarts = UserVars.autostart_scripts + Settings['autostart']
   end
 
   def toggle_developer
     @developer = !@developer
   end
 
-  def get_auto_starts
-    CharSettings['scripts']
+  def autostarts
+    @autostarts
+  end
+
+  def add_global_auto(script)
+    @add_autos << script
+  end
+
+  def remove_global_auto(script)
+    @remove_autos << script
   end
 
   def get_versions
@@ -77,21 +90,35 @@ class ScriptManager
     @queue.empty?
   end
 
+  def autos_proccessed?
+    @add_autos.empty? && @remove_autos.empty?
+  end
+
   def run_queue
-    get_script(@queue.shift) unless @queue.empty?
+    load_script(@queue.shift) unless @queue.empty?
     Settings['dependency-developer'] = @developer
+    @add_autos.each{|script| Settings['autostart'] << script }
+    @add_autos = []
+    @remove_autos.each{|script| Settings['autostart'].delete(script) }
+    @remove_autos = []
+    update_autostarts
+  end
+
+  def load_script(filename, force = false)
+    return if filename.nil? || filename.empty?
+    get_script(filename, force)
+    run_script(filename)
   end
 
   def get_script(filename, force = false)
-    return if filename.nil? || filename.empty?
     filename = filename.dup
     echo("checking:#{filename} force:#{force}") if @debug
     download_script(filename) if get_versions[filename].nil? || force || file_outdated?(filename)
-    refresh_script(filename)
   end
 
-  def check_scripts(force = false)
+  def start_scripts(force = false)
     get_versions.each { |name, _| get_script(name, force) }
+    autostarts.each { |name| run_script(name) }
   end
 
   def download_script(filename)
@@ -108,17 +135,20 @@ class ScriptManager
     set_version(filename, blob['sha'])
   end
 
-  def refresh_script(filename)
-    echo("refresh:#{filename}") if @debug
-    return unless UserVars.dependency_as_scripts.include?(filename)
-    return if @last_run_version[filename] == get_versions[filename]
-    @last_run_version[filename] = get_versions[filename]
-    filename.sub!(/\.lic$/, '')
-    echo("refresh:#{filename}") if @debug
-    while Script.running?(filename)
-      stop_script(filename)
-      pause 0.1
+  def setup_profiles
+    Dir.mkdir('./scripts/profiles') unless Dir.exists?('./scripts/profiles')
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
+    make_request(profile_tree_url)['tree'].each do |setup_file|
+      echo("downloading #{setup_file}") if @debug
+      blob = make_request(setup_file['url'])
+      File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
     end
+  end
+
+  def run_script(filename)
+    filename.sub!(/\.lic$/, '')
+    return if Script.running?(filename)
+    echo("refresh:#{filename}") if @debug
     start_script(filename)
   end
 
@@ -223,6 +253,10 @@ def custom_require(script_names)
   pause 0.1 until $manager.queue_empty?
 end
 
+def get_script(script_name)
+  $manager.get_script(format_name(script_name), true)
+end
+
 def force_refresh_scripts
   $manager.check_scripts(true)
 end
@@ -244,7 +278,7 @@ end
 def migrate_scripts
   remove_from_autostart(managed_scripts)
   add_self_to_autostart
-  custom_require(managed_scripts)
+  managed_scripts.each(&method(:get_script))
 end
 
 def managed_scripts
@@ -254,20 +288,34 @@ def managed_scripts
 end
 
 def list_autostarts
-  UserVars.dependency_as_scripts
+  $manager.autostarts
 end
 
-def add_auto(script)
+def autostart(script, global=true)
   script = format_name(script)
-  UserVars.dependency_as_scripts.push(script) unless UserVars.dependency_as_scripts.include?(script)
+  if global
+    $manager.add_global_auto(script)
+  else
+    UserVars.autostart_scripts.push(script) unless UserVars.autostart_scripts.include?(script)
+  end
+  $manager.run_script(script)
 end
 
-def stop_auto(script)
-  UserVars.dependency_as_scripts.delete(format_name(script))
+def stop_autostart(script)
+  script = format_name(script)
+  if UserVars.autostart_scripts.include?(script)
+    UserVars.autostart_scripts.delete(script)
+  else
+    $manager.remove_global_auto(script)
+  end
 end
 
 def toggle_developer_mode
   $manager.toggle_developer
+end
+
+def setup_profiles
+  $manager.setup_profiles
 end
 
 def remove_from_autostart(scripts)
@@ -284,8 +332,7 @@ def add_self_to_autostart
   pause 0.1 while running?('autostart')
 end
 
-$setupfiles.load_settings
-$manager.check_scripts
+$manager.start_scripts
 
 loop do
   $manager.run_queue

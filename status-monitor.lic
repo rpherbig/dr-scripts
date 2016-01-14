@@ -1,10 +1,61 @@
 
-
 unless HAVE_GTK
   respond
   respond 'error: ruby-gtk bindings are not installed or failed to load'
   respond
   exit
+end
+
+status_tags
+
+class GameFilter
+  def initialize
+    @settings = get_settings(['filters'])
+    @seen_lines = {}
+    @filter_strings = @settings['filter_strings'].map { |string| /#{string}/ }
+    @non_useful_tags = [
+      /\<preset id='roomDesc'\>/i,
+      /pushStream id="atmospherics"/i,
+      /pushStream id="thoughts"/i,
+      /pushStream id="talk"/i,
+      /pushStream id="percWindow"/i,
+      /component id='room/i,
+      /component id='exp/i,
+      /\<\/prompt\>$/,
+      /preset id='roomDesc'/,
+      /style id="roomName"/,
+      /\<spell exist='spell'\>/,
+      /\<spell\>None\<\/spell\>/,
+      /&lt; .*/,
+      /\<clearContainer/,
+      /\<right/,
+      /\<left/,
+      /\<indicator id='IconINVISIBLE'/
+    ]
+  end
+
+  def unseen?(line)
+    return nil if line.nil? || line.empty?
+    return nil if @filter_strings.find { |regex| line =~ regex }
+    return nil if @seen_lines[line]
+    @seen_lines[line] = true
+    line
+  end
+
+  def clean(line)
+    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line }
+    line.gsub!(/\<[^\>]+\>/, '')
+  end
+end
+
+def update_health_bar(entry)
+  hp = checkhealth
+  if hp >= 75
+    entry.modify_base(Gtk::STATE_NORMAL, Gdk::Color.parse('green'))
+  else
+    entry.modify_base(Gtk::STATE_NORMAL, Gdk::Color.parse('red'))
+  end
+  entry.text = "#{hp}%"
 end
 
 window = nil
@@ -17,17 +68,29 @@ save_window_position = nil
 save_window_width    = nil
 save_window_height   = nil
 sort_ascending = true
+healthbar_et = nil
+messages_tv = nil
 begin
   Gtk.queue do
     messages_tv = Gtk::TextView.new
+    messages_tv.editable = false
+    messages_tv.cursor_visible = false
+
     messages_sw = Gtk::ScrolledWindow.new
     messages_sw.add(messages_tv)
+    messages_sw.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC)
+
+    healthbar_et = Gtk::Entry.new
+    healthbar_et.editable = false
+    healthbar_et.xalign = 0.5
 
     vbox = Gtk::VBox.new
     vbox.pack_start(messages_sw)
+    vbox.pack_start(healthbar_et, false)
 
     window              = Gtk::Window.new
     window.title        = window_title
+    window.keep_above = true
     window.border_width = 1
     window.resize(load_window_width, load_window_height)
     unless load_window_position.empty?
@@ -43,30 +106,34 @@ begin
     end
     window.show_all
   end
-  sleep 0.1
-  wait_until { window_done }
+  prev_health = 0
+
+  filter = GameFilter.new
+
+  loop do
+    line = script.gets?
+    back = line.dup if variable.include?('debug')
+    if prev_health != checkhealth
+      prev_health = checkhealth
+      Gtk.queue { update_health_bar(healthbar_et) }
+    end
+    if filter.unseen?(filter.clean(line))
+      open('echo_log_room.txt', 'a') { |f| f.puts(back); f.puts(line) } if variable.include?('debug')
+      Gtk.queue do
+        text_buffer = messages_tv.buffer
+        text_buffer.insert(text_buffer.end_iter, line)
+        text_buffer.insert(text_buffer.end_iter, "\r\n")
+        messages_tv.scroll_to_iter(text_buffer.end_iter, 0.0, true, 0, 0)
+      end
+    else
+      pause 0.1
+    end
+    break if window_done
+  end
+
 ensure
   Settings['window_position'] = save_window_position if (save_window_position.class == Array) && (save_window_position[0].to_i >= 0) && (save_window_position[1].to_i >= 0)
   Settings['window_width']    = save_window_width    if (save_window_width.class == Fixnum) && (save_window_width > 100)
   Settings['window_height']   = save_window_height   if (save_window_height.class == Fixnum) && (save_window_height > 100)
   Gtk.queue { window.destroy }
 end
-
-# loop do
-#   line = script.gets?
-#   case line
-#   when /^(Katamba|Xibar|Yavash) sets/
-#     moon_change(Regexp.last_match(1).downcase, false)
-#   when /^(Katamba|Xibar|Yavash) slowly rises/
-#     moon_change(Regexp.last_match(1).downcase, true)
-#   end
-
-#   %w(katamba yavash xibar).each do |moon|
-#     next unless Flags["mw-#{moon}"]
-#     process_moon_meesage(moon, Flags["mw-#{moon}"].first)
-#     Flags.reset("mw-#{moon}")
-#   end
-
-#   update_moon_info(true)
-#   pause 0.1 unless line
-# end

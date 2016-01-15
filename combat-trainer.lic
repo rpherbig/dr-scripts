@@ -1,11 +1,7 @@
 =begin
   Suggestions and contributions are welcome: https://github.com/rpherbig/dr-scripts
 
-  This script will be used by combat-trainer-setup to train a list of skills in order of the lowest amount of field experience.
-
-  Before running this script for the first time:
-  * Set up a configuration script named "combat-trainer-setup"
-    * Download "combat-trainer-setup" for an example configuration script.
+  This script is used by combat-setup.lic to train a list of weapon skills in order of the lowest amount of field experience.
 =end
 
 custom_require(%w(common drinfomon events spellmonitor equipmanager))
@@ -69,7 +65,7 @@ class SetupProcess
   end
 
   def retreat_weapons(weapon_training)
-    weapon_training.inject({}) { |obj, info| obj[info.first] = info.last if $ranged_skills.include?(info.first); obj }
+    weapon_training.each_with_object({}) { |info, obj| obj[info.first] = info.last if $ranged_skills.include?(info.first) }
   end
 
   def skill_done?(game_state)
@@ -129,11 +125,9 @@ class SetupProcess
       points -= vals[skill.upcase]
     end
 
-    unless vals == previous
-      if /maximum number of points \((\d+)/ =~ bput(build_stance_string(vals), 'Setting your Evasion stance to', 'is above your maximum number of points \(\d+')
-        check_stance(weapon_skill, Regexp.last_match(1).to_i)
-      end
-    end
+    return if vals == previous
+    return unless /maximum number of points \((\d+)/ =~ bput(build_stance_string(vals), 'Setting your Evasion stance to', 'is above your maximum number of points \(\d+')
+    check_stance(weapon_skill, Regexp.last_match(1).to_i)
   end
 
   def check_weapon(weapon_skill)
@@ -146,7 +140,7 @@ end
 class LootProcess
   include DRC
 
-  def initialize(skin:false, arrange_all:false, arrange_count:0, lootables:[], arrange_types:{})
+  def initialize(skin:false, arrange_all:false, arrange_count:0, lootables:[], arrange_types:{}, ritual_type:{}, necro:false)
     @skin = skin
     @arrange_all = arrange_all
     @arrange_count = arrange_count
@@ -154,6 +148,9 @@ class LootProcess
     @arrange_types = arrange_types
     @no_skins = []
     @too_many = []
+    @constructs = []
+    @ritual_type = ritual_type
+    @necro = necro
   end
 
   def execute(game_state)
@@ -193,11 +190,52 @@ class LootProcess
   def dispose_body(game_state)
     return if DRRoom.dead_npcs.length < 1
     game_state['mob_died'] = true
-
-    check_skinning(DRRoom.dead_npcs.first) if @skin
-
+    echo("necrocheck after game_state: #{@necro}") if $debug_mode
+    if @necro
+      echo("necrocheck in dispose_body: #{@necro}") if $debug_mode
+      check_thanatology(DRRoom.dead_npcs.first) # NECRO THANATOLOGY CHECK STUFF
+      check_skinning(DRRoom.dead_npcs.first) if ['preserve'].include?(@ritual_type)
+    elsif @skin
+      check_skinning(DRRoom.dead_npcs.first)
+    end
     bput('loot', 'You search', 'I could not find what you were referring to')
     pause 0.2 while DRRoom.dead_npcs.length > 0
+  end
+
+  # partially completed, only works for a single ritual.
+  def check_thanatology(mob_noun) # NECRO THANATOLOGY RITUAL METHOD
+    echo("necrocheck2: #{@necro}") if $debug_mode
+    echo("RITUALcheck: #{@ritual_type}") if $debug_mode
+    return if @constructs.include?(mob_noun)
+    ritual_type = @ritual_type[mob_noun] || 'preserve' # I'm not sure why I need this in here, it's in check_skinning, the script is working, so I'm leaving it alone.
+    perform_message = "perform #{@ritual_type} on #{mob_noun}"
+    case bput(perform_message, 'Rituals do not work upon constructs', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
+    when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts'
+      return
+    when 'precise motions with your ritual knife'
+      waitrt?
+      fput 'drop material'
+      return
+    when 'Rituals do not work upon constructs'
+      echo("adding #{mob_noun} to constructs list: #{@constructs}") if $debug_mode
+      @constructs.push(mob_noun)
+      return
+    end
+    waitrt?
+    # Need to call something here to dispose of the harvested "thing" if perform harvest is used.
+    # Eventually need a method for self-healing that would use this same block to set it up the perform consume and prep/cast consume flesh/devour
+    pause 0.25
+    waitrt?
+    snap = [checkleft, checkright]
+    dispose_trash(checkleft) if snap.first != checkleft
+    dispose_trash(checkright) if snap.last != checkright
+
+    # perform preserve success:  You bend over the CRITTER'S 'corpse to make one long,' continuous cut with your ritual knife that just barely pierces into it.  Unseen energies seep into the creature's fluids, suspending the corpse in unnaturla statis for a time.
+    # perform dissect success:   'You carefully position the corpse' and make a cut across its length,
+    # perform consume success:   You kneel over the ADJECTIVE CRITTER's 'corpse and make a few quick precise cuts' with your ritual knife.  Your cuts follow the vital lines of the corpse, causing its residual life force to bubble forth, ready for draining.
+    # perform harvest success:   You bend over the CRITTER'S 'corpse to make a few quick,' precise motions with your ritual knife, focusing you thanatological insight intently in order to prepare it for harvesting.
+    # perform harvest fail:
+    # failure due to construct:  'Rituals do not work upon' constructs.
   end
 
   def check_skinning(mob_noun)
@@ -263,10 +301,10 @@ class SafetyProcess
   end
 
   def keep_away
-    if Flags['ct-engaged']
-      Flags.reset('ct-engaged')
-      retreat
-    end
+    return unless Flags['ct-engaged']
+
+    Flags.reset('ct-engaged')
+    retreat
   end
 
   def in_danger?
@@ -280,7 +318,7 @@ class SafetyProcess
 
     keep_away
 
-    custom_require('tendme') if checkbleeding && !running?('tendme')
+    custom_require('tendme') if checkbleeding && !Script.running?('tendme')
     true
   end
 end
@@ -307,11 +345,16 @@ class SpellProcess
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     @offensive_spells
       .select { |spell| spell['expire'] }
-      .each { |spell| Flags.add("ct-#{spell['name']}", spell['expire']); Flags["ct-#{spell['name']}"] = true }
+      .each { |spell| add_spell_flag(spell['name'], spell['expire']) }
     @buff_spells
       .select { |_name, data| data['expire'] }
-      .each { |name, data| Flags.add("ct-#{name}", data['expire']); Flags["ct-#{name}"] = true }
+      .each { |name, data| add_spell_flag(name, data['expire']) }
     @cast_timer = nil
+  end
+
+  def add_spell_flag(name, expire)
+    Flags.add("ct-#{name}", expire)
+    Flags["ct-#{name}"] = true
   end
 
   def execute(game_state)
@@ -449,7 +492,7 @@ end
 class AbilityProcess
   include DRC
 
-  def initialize(buffs:[], kneel_khri:kneel_khri, khri_preps:khri_preps)
+  def initialize(buffs:[], kneel_khri:false, khri_preps:[])
     @khri = buffs.delete('khri') || []
     @buffs = buffs
     @cooldown_timers = {}
@@ -487,7 +530,7 @@ end
 class TrainerProcess
   include DRC
 
-  def initialize(training_abilities:training_abilities)
+  def initialize(training_abilities:{})
     @training_abilities = training_abilities
     @cooldown_timers = {}
     echo("Trainer: #{@training_abilities}") if $debug_mode
@@ -545,7 +588,7 @@ end
 class AttackProcess
   include DRC
 
-  def initialize(aim_fillers:[], aim_fillers_stealth:nil, charged_maneuvers:{}, dance_actions:[], dance_actions_stealth:nil, fatigue_regen_threshold:90, fatigue_regen_action:'bob', dual_load:dual_load, is_empath:false, backstab:nil, ambush:ambush)
+  def initialize(aim_fillers:[], aim_fillers_stealth:nil, charged_maneuvers:{}, dance_actions:[], dance_actions_stealth:nil, fatigue_regen_threshold:90, fatigue_regen_action:'bob', dual_load:false, is_empath:false, backstab:nil, ambush:false)
     @aim_fillers = aim_fillers
     @aim_fillers_stealth = aim_fillers_stealth
     @charged_maneuvers = charged_maneuvers
@@ -646,7 +689,7 @@ class AttackProcess
     weapon_name = checkright
     bput('lob', 'roundtime', 'What are you trying to lob')
     waitrt?
-    bput("get #{weapon_name}", 'You are already holding', "You pick up.*#{weapon_name}")
+    bput("get my #{weapon_name}", 'You are already holding', "You pick up.*#{weapon_name}")
     game_state['action_count'] += 1
   end
 
@@ -737,7 +780,7 @@ class CombatTrainer
     @stop = true
   end
 
-  def is_running?
+  def running?
     @running
   end
 
@@ -768,6 +811,8 @@ class CombatTrainer
     arrange_all = combat_vars.skinning['arrange_all']
     arrange_count = combat_vars.skinning['arrange_count']
     arrange_types = combat_vars.skinning['arrange_types']
+    necro = combat_vars.thanatology['necro']
+    ritual_type = combat_vars.thanatology['ritual_type']
     fatigue_regen_threshold = combat_vars.fatigue_regen_threshold
     fatigue_regen_action = combat_vars.fatigue_regen_action
     worn_items = combat_vars.worn_items
@@ -797,7 +842,7 @@ class CombatTrainer
       SetupProcess.new(dance_threshold: dance_threshold, dance_skill: dance_skill, stances: stances, weapon_training: weapon_training, retreat_threshold: retreat_threshold),
       SpellProcess.new(buffs: buff_spells, ospells: offensive_spells, camb: cambrinth, casts: cast_messages, preps: prep_messages, is_empath: is_empath),
       AbilityProcess.new(buffs: buff_nonspells, kneel_khri: kneel_khri, khri_preps: khri_preps),
-      LootProcess.new(skin: skin, arrange_all: arrange_all, arrange_count: arrange_count, lootables: lootables, arrange_types: arrange_types),
+      LootProcess.new(skin: skin, arrange_all: arrange_all, arrange_count: arrange_count, lootables: lootables, arrange_types: arrange_types, ritual_type: ritual_type, necro: necro),
       SafetyProcess.new,
       TrainerProcess.new(training_abilities: training_abilities),
       AttackProcess.new(

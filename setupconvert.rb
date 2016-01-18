@@ -143,4 +143,4 @@ eval File.read('crossing-setup.lic')
 
 result.merge!(UserVars.list)
 
-File.write("profiles/#{checkname}-setup.yaml"), result.to_yaml)
+File.write("profiles/#{checkname}-setup.yaml", result.to_yaml)

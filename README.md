@@ -23,7 +23,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * Cleric: Menacra-setup.yaml
   * Empath: Selanas-setup.yaml
   * Moon Mage: Mooselurk-setup.yaml
-  * Necromancer: none yet, be the first by submitting your own!
+  * Necromancer: Aevul-setup.yaml
   * Paladin: none yet, be the first by submitting your own!
   * Ranger: Etreu-setup.yaml
   * Thief: Evissam-setup.yaml
@@ -39,9 +39,9 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * ;e autostart(['drinfomon', 'common', 'spellmonitor']) to add many scripts at once
 
 ## Training scripts
-These scripts are designed to train skill(s):
+These scripts are designed to train skills:
 * combat-trainer (and combat-setup) - trains combat skills
-* crossing-training (and crossing-setup) - trains non-combat skills
+* crossing-training - trains non-combat skills
 * theurgy - train theurgy by working up devotion and doing some simple communes
 * training-manager - repeatedly trains non-combat and combat skills
 * hunting-buddy - trains combat skills (using combat-trainer) in defined hunting areas
@@ -54,15 +54,16 @@ Does something specific and then exits, intended to be run by the user or anothe
 * sell-loot - sells loot and deposits coin
 * smelt - smelts an ingot
 * forge - forges an item
-* crossing-repair (and crossing-repair-setup) - repairs items
+* crossing-repair - repairs items
 * favor - gets a favor from a given Immortal
 * setupaliases - adds a useful selection of aliases to the global list
 * gbox - gets all boxes from a container and gives them to a character
+* safe-room - heals at a PC or NPC empath and shares items between characters by dropping them in a safe room
 
 ## Miscellaneous background scripts
 These run in the background to provide functionality to you, the user:
 * roomnumbers - appends the Lich room ID# to your in-game room title
-* textsubs
+* textsubs - provides in-game text substitution capabilities; comes defaultly with numerical substitutions for appraisal and combat messages
 * smartlisten - if someone teaches you an approved class you'll start listening
 * moonwatch - populates UserVars.moons with data related to the moons
 * afk - runs in the background to provide safety while you are afk
@@ -79,7 +80,6 @@ These run in the background to provide functionality to other scripts:
 
 ## Mapping assist scripts
 * addroom - add a series of rooms to the lich map
-* automap - attempts to record your movements through an area and update the map as you travel
 
 ## Empath-only scripts
 * smarttransfer - safely transfer wounds from the target, avoiding useless injuries in fatal areas

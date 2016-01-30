@@ -6,6 +6,8 @@ unless HAVE_GTK
   exit
 end
 
+custom_require('drinfomon')
+
 status_tags
 
 class GameFilter
@@ -13,11 +15,12 @@ class GameFilter
 
   def initialize
     @settings = get_settings(['filters'])
-    if File.exists?('seen_messages.dat')
+    if File.exist?('seen_messages.dat')
       @seen_lines = Marshal.load(File.open('seen_messages.dat', 'rb'))
     else
       @seen_lines = {}
     end
+    @room_players = []
     @filter_strings = @settings['filter_strings'].map { |string| /#{string}/ }
     @non_useful_tags = [
       /\<preset id='roomDesc'\>/i,
@@ -41,15 +44,22 @@ class GameFilter
       /\<indicator id='IconINVISIBLE'/,
       /\<roundTime value='\d+'\/\>/
     ]
+    @responses = ["'Hmmm?", "'Yes", "'Ok?"]
+    @recent_seen = []
+
+    @spam_filtered = [
+      /^You feel confident you are heading/,
+      /^(Obvious|Blazed) \w+:/
+    ]
   end
 
   def clean_seen_with_filters
-    @seen_lines.delete_if{|line,_| @filter_strings.find { |regex| line =~ regex } }
+    @seen_lines.delete_if { |line, _| @filter_strings.find { |regex| line =~ regex } }
   end
 
   def save
     base = {}
-    if File.exists?('seen_messages.dat')
+    if File.exist?('seen_messages.dat')
       base = Marshal.load(File.open('seen_messages.dat', 'rb'))
     end
     @seen_lines.merge!(base)
@@ -64,9 +74,47 @@ class GameFilter
     @seen_lines[line] = true
   end
 
+  def find_pcs(room_players)
+    room_players.sub(/ and (.*)$/) { ", #{Regexp.last_match(1)}" }
+      .split(', ')
+      .map { |obj| obj.sub(/ who is .+/, '').sub(/ \(.+\)/, '') }
+      .map { |obj| obj.strip.scan(/\w+$/).first }
+  end
+
+  def update_players(line)
+    if line =~ /\'room players\'\>Also here: (.*)\.\<\/component\>/
+      @room_players = find_pcs(Regexp.last_match(1).dup)
+    elsif line =~ /\'room players\'\>\<\/component\>/
+      @room_players = []
+    end
+  end
+
+  def spam_check(line)
+    return if line.length < 20 or @spam_filtered.find { |spam| spam =~ line }
+    @recent_seen << line
+    @recent_seen = @recent_seen[1..15] if @recent_seen.length > 15
+    counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
+    if counts.values.max >= 6
+      echo("\a")
+      pause 0.25
+      echo("\a")
+      pause 0.25
+      echo("\a")
+      pause 0.25
+      fput @responses.first if false
+      echo "#{line}"
+      echo "#{counts}"
+      @responses.shift
+      pause 10
+      @recent_seen = []
+    end
+  end
+
   def clean(line)
-    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line }
+    update_players(line)
+    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line } || @room_players.find { |name| line.include?(name) }
     line.gsub!(/\<[^\>]+\>/, '')
+    spam_check(line) unless line.empty?
     line
   end
 end
@@ -102,7 +150,6 @@ before_dying do
   Gtk.queue { window.destroy }
   filter.save
 end
-
 
 begin
   Gtk.queue do

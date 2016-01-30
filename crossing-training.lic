@@ -13,35 +13,18 @@ class CrossingTraining
 
   MOON_SPELLS = %w[col fm moonblade]
 
+  attr_reader :running, :idling
+
   def stop
     @stop = true
-  end
-
-  def running?
-    @running
-  end
-
-  def idling?
-    @idling
   end
 
   def initialize
     @stop = false
     @running = true
     @idling = false
-    @song_list = { 'scales halt' => 'scales', 'scales' => 'arpeggios halt', 'arpeggios halt' => 'arpeggios', 'arpeggios' => 'ditty halt',
-                   'ditty halt' => 'ditty', 'ditty' => 'folk halt', 'folk halt' => 'folk', 'folk' => 'ballad halt', 'ballad halt' => 'ballad', 'ballad' => 'waltz halt',
-                   'waltz halt' => 'waltz', 'waltz' => 'lullaby halt', 'lullaby halt' => 'lullaby', 'lullaby' => 'march halt', 'march halt' => 'march',
-                   'march' => 'jig halt', 'jig halt' => 'jig', 'jig' => 'lament halt', 'lament halt' => 'lament', 'lament' => 'wedding halt', 'wedding halt' => 'wedding',
-                   'wedding' => 'hymn halt', 'hymn halt' => 'hymn', 'hymn' => 'rumba halt', 'rumba halt' => 'rumba', 'rumba' => 'polka halt', 'polka halt' => 'polka',
-                   'polka' => 'battle halt', 'battle halt' => 'battle', 'battle' => 'reel halt', 'reel halt' => 'reel', 'reel' => 'elegy halt', 'elegy halt' => 'elegy',
-                   'elegy' => 'serenade halt', 'serenade halt' => 'serenade', 'serenade' => 'minuet halt', 'minuet halt' => 'minuet', 'minuet' => 'psalm halt',
-                   'psalm halt' => 'psalm', 'psalm' => 'dirgehalt', 'dirge halt' => 'dirge', 'dirge' => 'gavotte halt', 'gavotte halt' => 'gavotte',
-                   'gavotte' => 'tango halt', 'tango halt' => 'tango', 'tango' => 'tarantella halt', 'tarantella halt' => 'tarantella',
-                   'tarantella' => 'bolero halt', 'bolero halt' => 'bolero', 'bolero' => 'nocturne halt', 'nocturne halt' => 'nocturne',
-                   'nocturne' => 'requiem halt', 'requiem halt' => 'requiem', 'requiem' => 'fantasia halt', 'fantasia halt' => 'fantasia',
-                   'fantasia' => 'rondo halt', 'rondo halt' => 'rondo', 'rondo' => 'aria halt', 'aria halt' => 'aria', 'aria' => 'sonataconcerto halt',
-                   'sonataconcerto halt' => 'sonataconcerto', 'sonataconcerto' => 'sonataconcerto' }
+    @settings = get_settings(variable.drop(1) + %w(art athletics perform stealing))
+    @song_list = @settings.perform_options
   end
 
   def main
@@ -64,8 +47,6 @@ class CrossingTraining
     UserVars.crossing_timers ||= {}
     UserVars.stealing_timers ||= {}
 
-    @settings = get_settings(variable.drop(1))
-
     fput('release aewo') if DRSpells.active_spells['Aether Wolves']
 
     Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
@@ -77,7 +58,7 @@ class CrossingTraining
     # TODO: Your teacher is not here, so you are no longer learning anything.
     check_listening
 
-    empty_hands
+    $EquipmentManager.empty_hands
 
     # The next skill to train is the one with the lowest field experience
     skill = @settings.crossing_training
@@ -164,8 +145,15 @@ class CrossingTraining
   def check_listening
     return unless @settings.listen
     return if listen?(@last_teacher)
+    return unless @listen_timer.nil? || Time.now - @listen_timer > 300
 
-    bput('assess teach', 'You assess the teaching environment')
+    case bput('assess teach', 'is teaching a class', 'No one seems to be teaching')
+    when 'No one seems to be teaching'
+      @listen_timer = Time.now
+      return
+    else
+      @listen_timer = nil
+    end
     results = reget(20, 'is teaching a class')
     waitrt?
 
@@ -173,21 +161,22 @@ class CrossingTraining
       matches = line.match(/(.*) is teaching a class on .* \(compared to what you already know\) (.*) which is still open to new students/)
       teacher = matches[1]
       skill = matches[2]
-      hash[teacher] = skill unless teacher.nil? || skill.nil?
+      hash[teacher] = skill
     end
 
-    classes
-      .delete_if { |_t, s| %w(Thievery Sorcery).include? s }
-      .delete_if { |_t, s| DRStats.guild == 'Barbarian' && s == 'Arcana' }
-      .sort_by { |_t, s| [DRSkill.getxp(s).to_i, DRSkill.getrank(s).to_i] }
-      .find { |t, _s| listen?(t) }
+    @last_teacher = classes
+                    .delete_if { |t, s| t.nil? || s.nil? }
+                    .delete_if { |_t, s| %w(Thievery Sorcery).include? s }
+                    .delete_if { |_t, s| DRStats.guild == 'Barbarian' && s == 'Arcana' }
+                    .sort_by { |_t, s| [DRSkill.getxp(s).to_i, DRSkill.getrank(s).to_i] }
+                    .find { |t, _s| listen?(t) }
+                    .first
   end
 
   def listen?(teacher)
     return false if teacher.nil? || teacher.empty?
-    success = ['begin to listen', 'already listening'].include? DRC.bput("listen to #{teacher}", 'begin to listen', 'already listening', 'could not find who', 'You have no idea', 'isn\'t teaching a class', 'don\'t have the appropriate training', 'Your teacher appears to have left', 'isn\'t teaching you anymore')
-    @last_teacher = teacher if success
-    success
+    result = DRC.bput("listen to #{teacher}", 'begin to listen', 'already listening', 'could not find who', 'You have no idea', 'isn\'t teaching a class', 'don\'t have the appropriate training', 'Your teacher appears to have left', 'isn\'t teaching you anymore', 'experience differs too much from your own')
+    ['begin to listen', 'already listening'].include? result
   end
 
   def train_summoning
@@ -232,10 +221,7 @@ class CrossingTraining
     ability = @settings.training_nonspells[skill]
     echo("using ability: #{ability}") if UserVars.crossing_trainer_debug
     if ability.include?('Khri')
-      if DRSpells.active_spells[ability]
-        bput('khri med', 'You focus your mind', 'Your thoughts are clear and focused')
-        waitrt?
-      else
+      unless DRSpells.active_spells[ability]
         fput('kneel') if @settings.kneel_khri
         bput(ability, *@settings.khri_preps)
         waitrt?
@@ -270,7 +256,7 @@ class CrossingTraining
     end
   end
 
-  def set_preps(data)
+  def check_discern(data)
     UserVars.discerns = {} unless UserVars.discerns
     discern_data = UserVars.discerns[data['abbrev']] || {}
     if data['symbiosis']
@@ -305,7 +291,7 @@ class CrossingTraining
 
     Flags.reset('ct-spellcast')
     data = @settings.training_spells[skill]
-    set_preps(data)
+    check_discern(data)
     if data['abbrev'] =~ /^comp/i
       walk_to 991
       fput(['\'Had this been a real compost your belongings would be gone. Composting soon', '\'Compost', '\'Compost incoming', '\'This is a code green, compost alert', '\'Pick up your valuables, compost time', '\'If it\'s on the ground it\'s gone, Compost incoming'].sample)
@@ -362,16 +348,16 @@ class CrossingTraining
     end
 
     fput "wear my #{@settings.cambrinth}" if @settings.held_cambrinth && data['cambrinth']
-    if data['symbiosis']
-      start = Time.now
-      until snapshot != DRSkill.getxp(skill).to_i || Time.now - start > 10
-        pause 0.5
-      end
-      if Flags['ct-spell-fail']
-        fput('rel symb')
-      elsif DRSkill.getxp(skill).to_i - snapshot <= 1
-        @settings.discerns[data['abbrev']]['more'] = @settings.discerns[data['abbrev']]['more'] + 1
-      end
+    return unless data['symbiosis']
+
+    start = Time.now
+    until snapshot != DRSkill.getxp(skill).to_i || Time.now - start > 10
+      pause 0.5
+    end
+    if Flags['ct-spell-fail']
+      fput('rel symb')
+    elsif DRSkill.getxp(skill).to_i - snapshot <= 1
+      UserVars.discerns[data['abbrev']]['more'] = UserVars.discerns[data['abbrev']]['more'] + 1
     end
   end
 
@@ -453,7 +439,7 @@ class CrossingTraining
       match = Regexp.last_match(1)
       break if start == match || DRSkill.getxp('First Aid').to_i >= 34
     end
-    empty_hands
+    $EquipmentManager.empty_hands
     stop_play
   end
 
@@ -465,31 +451,37 @@ class CrossingTraining
       bput('study my book', 'roundtime')
       waitrt?
     end
-    empty_hands
+    $EquipmentManager.empty_hands
     stop_play
   end
 
   def train_mechanical_lore
-    empty_hands
+    $EquipmentManager.empty_hands
     fput "remove #{@settings.hand_armor}"
     fput "stow #{@settings.hand_armor}"
     braid_to_fail(DRSkill.getrank('Outdoorsmanship').to_i < 110 ? 'grass' : 'vine')
-    empty_hands
+    $EquipmentManager.empty_hands
     fput "get my #{@settings.hand_armor}"
     fput "wear my #{@settings.hand_armor}"
   end
 
-  def climb(room_number, climb_target)
-    walk_to room_number
-    fput "climb #{climb_target}" if DRRoom.npcs.length < 3
-    waitrt?
+  def climb?(room, targets)
+    walk_to(room)
+    return true if DRRoom.npcs.length >= 3
+
+    targets.each do |target|
+      fput "climb #{target}"
+      waitrt?
+      return false if DRSkill.getxp('Athletics').to_i >= 34
+    end
+    true
   end
 
   def train_athletics
-    empty_hands
-    [[835, 'embrasure'], [1035, 'wall'], [1039, 'wall'], [1040, 'wall'], [691, 'wall'], [943, 'break'], [943, 'embrasure'],
-     [939, 'embrasure'], [1388, 'wall'], [938, 'embrasure'], [940, 'break'], [940, 'embrasure'], [1611, 'wall'],
-     [1609, 'wall'], [1387, 'wall']].each { |room_number, climb_target| break if DRSkill.getxp('Athletics').to_i >= 34; climb(room_number, climb_target) }
+    $EquipmentManager.empty_hands
+    @settings.athletics_options.each do |data|
+      break unless climb?(data['room'], data['targets'])
+    end
   end
 
   def train_empathy
@@ -498,7 +490,7 @@ class CrossingTraining
       until 'You sense:' == bput('perceive health', 'You fail to sense', 'You sense:', 'You\'re not ready to do that again, yet')
         pause 1
         rt = waitrt?
-        train_appraisal if rt.nil? || rt == 0
+        pause 5 if rt.nil? || rt == 0
       end
       waitrt?
       break if DRSkill.getxp('Empathy').to_i >= 34
@@ -552,512 +544,9 @@ class CrossingTraining
   def train_thievery
     $EquipmentManager.wear_equipment_set('stealing')
 
-    options = [
-      # Crossing
-      # Chizili's Alchemical Goods
-      { 'room' => 19_076, 'item' => 'water', 'min' => 0, 'trivial' => 41, 'hide' => true, 'item_in' => 'in vat', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'candle mold', 'min' => 41, 'trivial' => 62, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'oil', 'min' => 62, 'trivial' => 90, 'hide' => true, 'item_in' => 'in vat', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'alcohol', 'min' => 90, 'trivial' => 1000, 'hide' => true, 'item_in' => 'in vat', 'pawnable' => false }, # still trying to find real min
-      { 'room' => 19_076, 'item' => 'scarred gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'suede-framed goggles', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'linen coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'leather apron', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => true },
-      { 'room' => 19_076, 'item' => 'dracon crystals', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in barrel', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'large cauldron', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'portable stove', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'acid-stained toolbox', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'small jar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_076, 'item' => 'large jar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-
-      # Orielda's Blossoms, Front Room
-      { 'room' => 19_077, 'item' => 'rose', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'amaryllis', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'carnation', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'chrysanthemum', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'dahlia', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'iris', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'lily', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'orchid', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'poppy', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_077, 'item' => 'bouquet', 'min' => 10, 'trivial' => 52, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'wreath', 'min' => 150, 'trivial' => 300, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'crown', 'min' => 150, 'trivial' => 300, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'corsage', 'min' => 150, 'trivial' => 300, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'wristlet', 'min' => 150, 'trivial' => 300, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'boutonniere', 'min' => 150, 'trivial' => 300, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_077, 'item' => 'potion', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # The True Bard D'Or, Fine Instruments
-      { 'room' => 19_078, 'item' => 'pick', 'min' => 30, 'trivial' => 66, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'rag', 'min' => 66, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'lute', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'mandolin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'lyre', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'fiddle', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'flute', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'ocarina', 'min' => 150, 'trivial' => 200, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'whistle', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'tambourine', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'bodhran', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'bones', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'bow', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'tipper', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'cloth', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'kit', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'refill', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'medium case', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'small case', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'case of silver', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'drum pouch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_078, 'item' => 'long pouch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_078, 'item' => 'ride', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_078, 'item' => 'kiss', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_078, 'item' => 'angel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 19_078, 'item' => 'song', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Brother Durantine's Shop
-      { 'room' => 19_073, 'item' => 'grey-brown feather', 'min' => 32, 'trivial' => 58, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'sage', 'min' => 58, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'chalice', 'min' => 70, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'habit', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'chasuble', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'collar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'skullcap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'buskins', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'sandals', 'min' => 40, 'trivial' => 62, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'vessel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'basin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'coffer', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'vial', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'bell', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'chamomile', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'lavender', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'sirese flower', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'red wine', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'incense', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_073, 'item' => 'plume feather', 'min' => 32, 'trivial' => 58, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Ragge's Locksmithing, Salesroom
-      { 'room' => 19_125, 'item' => 'slim lock', 'min' => 40, 'trivial' => 90, 'hide' => true, 'item_in' => '', 'pawnable' => false },
-      { 'room' => 19_125, 'item' => 'lockpick ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => '', 'pawnable' => false },
-      # Brisson's Haberdashery, Sales Salon
-      { 'room' => 19_376, 'item' => 'bowtie', 'min' => 53, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'doublet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'surcoat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'jerkin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'shirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'breeches', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'buckskins', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'braies', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'kilt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'overalls', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'trousers', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'greatcoat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'jacket', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'capote', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'tabard', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'tail coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'waistcoat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'beret', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'calotte', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'hat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'hood', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'peaked cap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'skullcap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'tam', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'tricorne', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'ascot', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'belt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'cravat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'cummerbund', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'kid gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'sash', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'tie', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_376, 'item' => 'vest', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Marcipur's Stichery
-      { 'room' => 19_386, 'item' => 'beret', 'min' => 40, 'trivial' => 2000, 'hide' => true, 'item_in' => '', 'pawnable' => false }, # easier stuff here
-      { 'room' => 19_386, 'item' => 'caftan', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'dress', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'frock', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'gown', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'robe', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'blouse', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'smock', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'shirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'tunic', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'culottes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'skirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'flared skirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'hoop skirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'tiered skirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'leggings', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'slim pants', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'burnoose', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'cloak', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'hooded cloak', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'jacket', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'long coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'shawl', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'bonnet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'cap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'cloche', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'hat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'hood', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'straw hat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'leather belt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'hair bow', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'long gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'fur muff', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'ribbons', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'sash', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'scarf', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'stole', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_386, 'item' => 'vest', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Talmai's Cobblery, Salesroom
-      { 'room' => 19_388, 'item' => 'anklets', 'min' => 30, 'trivial' => 65, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'hose', 'min' => 65, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'brogans', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'field shoes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'high-button shoes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'moccasins', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'pattens', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'sandals', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'shoes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'slippers', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'snowshoes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'wooden clogs', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'work shoes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'galoshes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'half boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'hip boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'hobnail boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'jack boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'riding boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'thigh boots', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'boothose', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'knee socks', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'silk stockings', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'socks', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_388, 'item' => 'tights', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Grisgonda's Gems and Jewels
-      { 'room' => 4697, 'item' => 'anklet', 'min' => 32, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false }, # easier stuff still here
-      { 'room' => 4697, 'item' => 'stud', 'min' => 70, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'band', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'signet ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'pendant', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'lavaliere', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'necklace', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'chain', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'choker', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'barrette', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'circlet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'crown', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'hairpin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'bracelet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'armbands', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'brooch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'clasp', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'pin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'earrings', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'wedding ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 4697, 'item' => 'engagement ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Berolt's Dry Goods, Showroom
-      { 'room' => 8265, 'item' => 'bundling rope', 'min' => 0, 'trivial' => 32, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'coin purse', 'min' => 32, 'trivial' => 55, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'spade', 'min' => 55, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'tinderbox', 'min' => 70, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 8265, 'item' => 'rosewood box', 'min' => 40, 'trivial' => 62, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # { 'room' => 8265, 'item' => 'cedar box', 'min' => 40, 'trivial' => 62, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'knapsack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'backpack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'tote', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'herb bag', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'small sack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'large sack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'leather sheath', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'dagger sheath', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'quiver', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'scabbard', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'torch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'stove', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'heavy rope', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'spade', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'trowel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'ice pick', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'dried meat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'acanth bark', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'taffelberries', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'woven handkerchief', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'lace handkerchief', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'flint', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'charcoal', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'hairbrush', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'razor', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8265, 'item' => 'clippers', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-
-      # Milgrym's Weapons, Showroom
-      { 'room' => 8263, 'item' => 'cougar-claw arrows', 'min' => 50, 'trivial' => 65, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      # { 'room' => 8263, 'item' => 'boar-tusk arrows', 'min' => 50, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'bolts', 'min' => 65, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'spear', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'short sword', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'dagger', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'kris', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'mace', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'hammer', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'club', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'bludgeon', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'broadsword', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'cutlass', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'scimitar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'sabre', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'shortbow', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'longbow', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'light crossbow', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'bola', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'knuckles', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on bench', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'spikes', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on bench', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'stick', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on bench', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'pike', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bin', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'cane', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bin', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'quarterstaff', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bin', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'claymore', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'greathammer', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'greataxe', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'sledgehammer', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'halberd', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'cinquedea', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 8263, 'item' => 'flail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-
-      # Tembeg's Armory, Salesroom
-      { 'room' => 7904, 'item' => 'rugged gloves', 'min' => 41, 'trivial' => 900, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'tower shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on hooks', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'kite shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on hooks', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'oval shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on hooks', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'target shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on hooks', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'rugged vambraces', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'leather mask', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'leather aventail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'leather tasset', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'leather jerkin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'rugged leathers', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'rugged greaves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'leather cowl', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in box', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain helm', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain balaclava', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain aventail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain vambraces', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain tasset', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain shirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain hauberk', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'chain greaves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in rack', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale helm', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale balaclava', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale aventail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale vambraces', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale tasset', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale shirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale greaves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'scale hauberk', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in wide counter', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'bascinet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'plate aventail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'plate vambraces', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'plate greaves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'full plate', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'metal armet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'plate gauntlets', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      { 'room' => 7904, 'item' => 'plate fauld', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on knight', 'pawnable' => false },
-      # Orem's Bathhouse, Lobby
-      { 'room' => 19_241, 'item' => 'scraping reed', 'min' => 50, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      # { 'room' => 19_241, 'item' => 'soap', 'min' => 50, 'trivial' => 62, 'hide' => true, 'item_in' => 'in basin', 'pawnable' => false },
-      { 'room' => 19_241, 'item' => 'towel', 'min' => 62, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      # { 'room' => 19_241, 'item' => 'towel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      # { 'room' => 19_241, 'item' => 'towel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      # { 'room' => 19_241, 'item' => 'towel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      # { 'room' => 19_241, 'item' => 'towel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_241, 'item' => 'bathrobe', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      # Herilo's Artifacts, Showroom
-      { 'room' => 19_152, 'item' => 'cambrinth flake', 'min' => 70, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'talisman', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth orb', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth armband', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth ring', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth scrap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth shaving', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth shard', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'cambrinth sliver', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in bucket', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'leather bag', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'statuette', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'steel staff', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'oaken staff', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'alabaster staff', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'bottle', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'inkwell', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'reticule', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'pouch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'jar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'sack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'phial', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'box', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'urn', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'vial', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on trunk', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'fine scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'white scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'plain scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'off-white scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'vellum scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'yellow scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'grey scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'lilac scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      { 'room' => 19_152, 'item' => 'parchment scroll', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on stand', 'pawnable' => false },
-      # Falken's Tannery, Supply Room
-      # skipping Falkens, there are 4 hide scrapers that respond to "hide scraper"
-      # { 'room' => 8268, 'item' => 'hide scraper', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Mauriga's Botanicals, Salesroom - 8259
-      { 'room' => 8259, 'item' => 'jadice flower', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'plovik leaf', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'nilos salve', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'hulnik grass', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'nemoih root', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'georin salve', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'sufil sap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'yelith root', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'ithor potion', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'muljin sap', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'junliar stem', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'blocil potion', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 8259, 'item' => 'riolur leaf', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Kaerna Village
-      # Greks
-      { 'room' => 19_377, 'item' => 'hat', 'min' => 30, 'trivial' => 62, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'boots', 'min' => 62, 'trivial' => 80, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'working gloves', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'tarp', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'feathered charm', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'bracers', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'skinning knife', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'hatchet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'barrel', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'small chest', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'large chest', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'pouch', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'backpack', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'smock', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'shirt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'breeches', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'cloak', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'socks', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'belt', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'garland', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'meat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'fish', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'fruit', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'sugar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'jam', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'brew', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'white cheese', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_377, 'item' => 'yellow cheese', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-
-      # Arthe Dale
-      # Quellias Thread Shop
-      { 'room' => 19_379, 'item' => 'pouch', 'min' => 30, 'trivial' => 65, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'needle', 'min' => 30, 'trivial' => 62, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'bobbin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'moonmage pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'warmage pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'trader pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'thief pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'ranger pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'cleric pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'empath pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'paladin pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'barbarian pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'bard pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'cat pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'cow pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'dolphin pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'donkey pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'dove pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'horse pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'jackal pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'snake pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'lion pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'panther pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'raccoon pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'raven pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'unicorn pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_379, 'item' => 'wolf pattern', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Barley Bulrush, Bardic Ballads
-      # { 'room' => 19_380, 'item' => 'rag', 'min' => 45, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_380, 'item' => 'cloth', 'min' => 45, 'trivial' => 90, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_380, 'item' => 'kit', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_380, 'item' => 'refill', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Bobbas Arms & Armor
-      { 'room' => 19_237, 'item' => 'butcher knife', 'min' => 38, 'trivial' => 70, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'lid', 'min' => 70, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'odd bodkin', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'long knife', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'hatchet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'short sword', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'spear', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'sling', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'vest', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'cuirass', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'coat', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'corselet', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'breastplate', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'mail', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'buckler', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'round shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'wooden shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'shell shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'wicker shield', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'hood', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'helm', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'vambraces', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'legguards', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      { 'room' => 19_237, 'item' => 'rocks', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in catalog', 'pawnable' => false },
-      # Yulugri Wala, Smoking Room
-      { 'room' => 19_385, 'item' => 'shadegrown cigar', 'min' => 32, 'trivial' => 70, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      # { 'room' => 19_385, 'item' => 'sungrown cigar', 'min' => 32, 'trivial' => 61, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'telgi cigar', 'min' => 70, 'trivial' => 90, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'pantel cigar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'cigarillo', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'silver-banded cigar', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'whiskey-laced', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in display case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'autumn tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'culebras tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'gold tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'black tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'warm tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'mountain tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'dark tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'sweet tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'brandy tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      { 'room' => 19_385, 'item' => 'spiced tobacco', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'in tobacco case', 'pawnable' => false },
-      # Feta's Kitchen
-      # { 'room' => 19_240, 'item' => 'biscuit', 'min' => 46, 'trivial' => 62, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'croissant', 'min' => 46, 'trivial' => 62, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'herb cheese', 'min' => 62, 'trivial' => 80, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'bread', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'roll', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on rack', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'milk', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'flan', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'custard', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'buttermilk', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'yogurt', 'min' => 2000, 'trivial' => 62, 'hide' => true, 'item_in' => 'on counter', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'butter cheese', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'anlibues cheese', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false },
-      { 'room' => 19_240, 'item' => 'kirm cheese', 'min' => 2000, 'trivial' => 2000, 'hide' => true, 'item_in' => 'on table', 'pawnable' => false }
-    ]
-
     thievery_skill = DRSkill.getrank('Thievery').to_i
 
-    targets = options.select { |data| data['min'] <= thievery_skill && data['trivial'] > thievery_skill && (UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']]) }
+    targets = @settings.stealing_options.select { |data| data['min'] <= thievery_skill && data['trivial'] > thievery_skill && (UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']]) }
 
     echo("Thievery targets: #{targets}") if UserVars.crossing_trainer_debug
 
@@ -1091,7 +580,32 @@ class CrossingTraining
   end
 
   def train_appraisal
-    empty_hands
+    rank = DRSkill.getrank('Appraisal').to_i
+    if rank <= 250
+      assess_zills
+    else
+      study_art
+    end
+  end
+
+  def study_art
+    @settings.art_options.each do |data|
+      break unless study?(data['room'], data['targets'])
+    end
+  end
+
+  def study?(room, targets)
+    walk_to(room)
+    targets.each do |target|
+      fput "study #{target}"
+      waitrt?
+      return false if DRSkill.getxp('Appraisal').to_i >= 34
+    end
+    true
+  end
+
+  def assess_zills
+    $EquipmentManager.empty_hands
     bput('remove my zill', 'You slide')
     bput('assess my zill', 'you carefully look them over')
     waitrt?
@@ -1115,7 +629,7 @@ class CrossingTraining
         waitrt?
         bput('predict anal', 'roundtime')
         waitrt?
-        return
+        break
       end
     end
   end
@@ -1158,16 +672,16 @@ class CrossingTraining
     end
   end
 
-  def has_crucible?
+  def crucible?
     ['nothing in there', 'molten bronze'].include?(bput('look in cruc', 'nothing in there', 'molten bronze', 'you see'))
   end
 
-  def has_anvil?
+  def anvil?
     ['surface looks clean and ready'].include?(bput('look on anvil', 'surface looks clean and ready', 'anvil you see'))
   end
 
   def find_anvil
-    find_empty_room([8909, 8910, 8911, 8777, 8778, 760], 8775, proc { has_anvil? })
+    find_empty_room([8909, 8910, 8911, 8777, 8778, 760], 8775, proc { anvil? })
   end
 
   def forge(chapter, page, item, trash_ingot)
@@ -1179,8 +693,11 @@ class CrossingTraining
     wait_for_script_to_complete('forge', ['trash', 'blacksmithing', chapter, page, 'bronze', item])
 
     # Handle the case in which forge fails (i.e. due to running out of oil)
-    dispose_trash(checkright) until checkright.nil? if checkright.include? item
-    dispose_trash(checkleft) until checkleft.nil? if checkleft.include? item
+    pause 1
+    dispose_trash(checkright) if checkright.include? item
+    pause 1
+    dispose_trash(checkleft) if checkleft.include? item
+    pause 1
 
     return unless trash_ingot
     fput('get my bronze ingot')
@@ -1197,7 +714,7 @@ class CrossingTraining
   def smelt_bronze
     buy_bronze_ingot
 
-    find_empty_room([8774, 19_030, 8773, 8777, 8779], 8775, proc { has_crucible? })
+    find_empty_room([8774, 19_030, 8773, 8777, 8779], 8775, proc { crucible? })
 
     fput('tilt cruc')
     fput('tilt cruc')
@@ -1214,7 +731,7 @@ class CrossingTraining
 
   def play_zill
     Flags.add('ct-song', 'you finish playing')
-    UserVars.song = 'scales halt' unless UserVars.song
+    UserVars.song = @song_list.first.first unless UserVars.song
     case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some')
     when 'dirtiness may affect your performance'
       stop_play
@@ -1225,12 +742,12 @@ class CrossingTraining
       adjust_difficulty
       play_zill
     when 'You struggle to begin'
-      UserVars.song = 'scales halt'
+      UserVars.song = @song_list.first.first
     end
   end
 
   def adjust_difficulty
-    UserVars.song = @song_list[UserVars.song] || 'scales halt'
+    UserVars.song = @song_list[UserVars.song] || @song_list.first.first
   end
 
   def clean_zills

@@ -11,7 +11,7 @@ custom_require('drinfomon')
 status_tags
 
 class GameFilter
-  attr_accessor :seen_lines
+  attr_accessor :seen_lines, :spam_line
 
   def initialize
     @settings = get_settings(['filters'])
@@ -21,6 +21,10 @@ class GameFilter
       @seen_lines = {}
     end
     @room_players = []
+    @monster_nouns = [
+      'beisswurm',
+      'town guard'
+    ]
     @filter_strings = @settings['filter_strings'].map { |string| /#{string}/ }
     @non_useful_tags = [
       /\<preset id='roomDesc'\>/i,
@@ -46,16 +50,6 @@ class GameFilter
     ]
     @responses = ["'Hmmm?", "'Yes", "'Ok?"]
     @recent_seen = []
-
-    @spam_filtered = [
-      /^You feel confident you are heading/,
-      /^(Obvious|Blazed) \w+:/,
-      /^  a /,
-      /^  some /,
-      /^  an /,
-      /^You are already as far away/,
-      /^\w+ just arrived/,
-    ]
   end
 
   def clean_seen_with_filters
@@ -75,6 +69,7 @@ class GameFilter
   def unseen?(line)
     return nil if line.nil? || line.empty?
     return nil if @filter_strings.find { |regex| line =~ regex }
+    spam_check(line)
     return nil if @seen_lines[line]
     @seen_lines[line] = true
   end
@@ -95,11 +90,10 @@ class GameFilter
   end
 
   def spam_check(line)
-    return if line.length < 20 or @spam_filtered.find { |spam| spam =~ line }
     @recent_seen << line
-    @recent_seen = @recent_seen[1..15] if @recent_seen.length > 15
+    @recent_seen = @recent_seen[1..10] if @recent_seen.length > 10
     counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
-    if counts.values.max >= 6
+    if counts.values.max >= 5
       echo("\a")
       pause 0.25
       echo("\a")
@@ -107,19 +101,18 @@ class GameFilter
       echo("\a")
       pause 0.25
       fput @responses.first
-      echo "#{line}"
-      echo "#{counts}"
-      @responses.shift
-      pause 10
+      @responses.rotate!
+      @spam_line = line
+      pause 2
       @recent_seen = []
     end
   end
 
   def clean(line)
     update_players(line)
-    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line } || @room_players.find { |name| line.include?(name) }
+    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line }
+    return nil if @room_players.find { |name| line.include?(name) } || @monster_nouns.find { |name| line.include?(name) }
     line.gsub!(/\<[^\>]+\>/, '')
-    spam_check(line) unless line.empty?
     line
   end
 end
@@ -214,6 +207,16 @@ begin
       end
     else
       pause 0.1 unless back
+    end
+    if filter.spam_line
+      spam = filter.spam_line.dup
+      filter.spam_line = nil
+      Gtk.queue do
+        text_buffer = messages_tv.buffer
+        text_buffer.insert(text_buffer.end_iter, "spam:'#{spam}'")
+        text_buffer.insert(text_buffer.end_iter, "\r\n")
+        messages_tv.scroll_to_iter(text_buffer.end_iter, 0.0, true, 0, 0)
+      end
     end
     break if window_done
   end

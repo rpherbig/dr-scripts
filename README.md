@@ -45,7 +45,8 @@ These scripts are designed to train skills:
 * theurgy - train theurgy by working up devotion and doing some simple communes
 * training-manager - repeatedly trains non-combat and combat skills
 * hunting-buddy - trains combat skills (using combat-trainer) in defined hunting areas
-* mining-buddy - repeatedly mines in defined mining areas
+* mining-buddy - mines in defined mining areas, up to once per room
+* mining-manager - repeatedly mines in defined mining areas (using mining-buddy)
 
 ## Miscellaneous manually run scripts
 Does something specific and then exits, intended to be run by the user or another script:

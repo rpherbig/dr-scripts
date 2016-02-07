@@ -123,6 +123,8 @@ class CrossingTraining
       train_performance
     when 'Sorcery'
       train_sorcery
+    when 'Trading'
+      train_trading
     else
       echo "#{skill} not implemented yet"
       pause 15
@@ -322,14 +324,12 @@ class CrossingTraining
       unless moon
         echo "No moon available to cast #{data['abbrev']}"
         unless Script.running? 'moonwatch'
-          echo "moonwatch is not running. Starting it now"
+          echo 'moonwatch is not running. Starting it now'
           custom_require 'moonwatch'
           echo "Run `;e autostart('moonwatch')` to avoid this in the future"
         end
-        weather = bput('weather', "inside", "You glance up at the sky.")
-        if weather =~ /inside/
-          walk_to @settings.outdoor_room
-        end
+        weather = bput('weather', 'inside', 'You glance up at the sky.')
+        walk_to @settings.outdoor_room if weather =~ /inside/
         fput('perceive moons')
         unless moon = UserVars.moons['visible'].first
           echo "Couldn't find any moons to cast #{data['abbrev']} with"
@@ -696,6 +696,130 @@ class CrossingTraining
         waitrt?
         break
       end
+    end
+  end
+
+  def train_trading
+    skills = @settings.work_order_skills(['Blacksmithing'])
+
+    skill = skills.min_by { |s| DRSkill.getxp(s).to_i }
+
+    ensure_copper_on_hand(5000)
+    work_order(skill)
+  end
+
+  def work_order(skill)
+    info = {
+      'Blacksmithing' =>         {
+        'npc' => 'Yalda',
+        'npc-rooms' => [8771, 8772, 8775, 8776, 8777, 8778, 8773, 8779, 8774, 19_030],
+        'recipes' => {
+          'a slender metal rod' => { 'noun' => 'rod', 'volume' => 1, 'chapter' => 6, 'page' => 2 },
+          'a shallow metal cup' => { 'noun' => 'cup', 'volume' => 1, 'chapter' => 6, 'page' => 1 }
+        },
+        'logbook' => 'forging',
+        'tools' => ['diagonal-peen hammer', 'tong', 'bellow', 'shovel'],
+        'finisher' => 'oil',
+        'finisher-full' => 'flask of oil',
+        'finisher-room' => 8776,
+        'finisher-number' => 6,
+        'repair-room' => 8776,
+        'repair-npc' => 'clerk',
+        'stock-volume' => 5,
+        'stock-room' => 8775,
+        'stock-number' => 11,
+        'stock-name' => 'bronze ingot',
+        'trash-room' => 8773
+
+      }
+    }[skill]
+
+    item, quantity = request_work_order(info['npc-rooms'], info['npc'], skill, info['logbook'])
+
+    recipe = info['recipes'][item]
+    items_per_stock = info['stock-volume'] / recipe['volume']
+    spare_stock = info['stock-volume'] % recipe['volume'] != 0
+
+    quantity.times do |count|
+      if count % items_per_stock == 0
+        if count > 0 && spare_stock
+          fput("get #{info['stock-name']}")
+          walk_to(info['trash-room'])
+          dispose_trash(info['stock-name'])
+        end
+        walk_to info['stock-room']
+        fput("order #{info['stock-number']}")
+        fput("order #{info['stock-number']}")
+        fput('stow right') if checkright
+        fput('stow left') if checkleft
+      end
+      if 'You can' == bput("inv search #{info['finisher-full']}", '^You can', 'Your .* is in')
+        walk_to info['finisher-room']
+        fput("order #{info['finisher-number']}")
+        fput("order #{info['finisher-number']}")
+        fput('stow right') if checkright
+        fput('stow left') if checkleft
+      end
+      if %w(Blacksmithing Weaponsmithing Armorsmithing).include?(skill)
+        find_anvil
+        wait_for_script_to_complete('forge', ['log', 'blacksmithing', recipe['chapter'], recipe['page'], 'bronze', recipe['noun']])
+      end
+    end
+
+    if quantity % items_per_stock != 0
+      fput("get #{info['stock-name']}")
+      walk_to(info['trash-room'])
+      dispose_trash(info['stock-name'])
+    end
+
+    find_npc(info['npc-rooms'], info['npc'])
+    bput("get my #{info['logbook']} logbook", 'You get')
+    fput("give log to #{info['npc']}")
+    fput('stow logbook')
+
+    walk_to info['repair-room']
+    info['tools'].each do |tool_name|
+      fput("get my #{tool_name}")
+      case bput("give #{info['repair-npc']}", "There isn't a scratch on that", 'Just give it to me again')
+      when /scratch/
+        fput("stow my #{tool_name}")
+      when /give/
+        fput("give #{info['repair-npc']}")
+        fput('stow ticket')
+      end
+    end
+    while 'You get' == bput('get my ticket', 'You get', 'What were')
+      pause 30 until 'should be ready by now' == bput('look at my ticket')
+      fput("give my ticket to #{info['repair-npc']}")
+      pause 1
+      fput('stow right') if checkright
+      fput('stow left') if checkleft
+    end
+  end
+
+  def request_work_order(npc_rooms, npc, skill, logbook)
+    find_npc(npc_rooms, npc)
+    bput("get my #{logbook} logbook", 'You get')
+
+    loop do
+      case bput("ask #{npc} for challenging #{skill} work", '^To whom', 'order for .* I need \d+ of .* quality')
+      when 'To whom'
+        find_npc(npc_rooms, npc)
+      when /order for (.*)\. I need (\d+) of .* quality/
+        item = Regexp.last_match(1)
+        quantity = Regexp.last_match(2).to_i
+        if quantity <= 3
+          fput('stow logbook')
+          return [item, quantity]
+        end
+      end
+    end
+  end
+
+  def find_npc(room_list, npc)
+    room_list.each do |room_id|
+      walk_to(room_id)
+      return if DRRoom.npcs.include?(npc)
     end
   end
 

@@ -40,7 +40,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
 
 ## Training scripts
 These scripts are designed to train skills:
-* combat-trainer (and combat-setup) - trains combat skills
+* combat-trainer - trains combat skills
 * crossing-training - trains non-combat skills
 * theurgy - train theurgy by working up devotion and doing some simple communes
 * training-manager - repeatedly trains non-combat and combat skills

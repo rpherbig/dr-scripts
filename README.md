@@ -27,7 +27,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * Paladin: none yet, be the first by submitting your own!
   * Ranger: Etreu-setup.yaml
   * Thief: Evissam-setup.yaml
-  * Trader: none yet, be the first by submitting your own!
+  * Trader: Cidemon-setup.yaml
   * Warrior Mage: Torgro-setup.yaml
 1. Now you're ready to download and run any of our scripts. For each script you want (the full list is below), run:
   * ;e get_script('script-name')

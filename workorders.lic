@@ -1,0 +1,160 @@
+# quiet
+
+custom_require(%w(common drinfomon))
+
+class WorkOrders
+  include DRC
+
+  def initialize(args)
+    ensure_copper_on_hand(5000)
+    work_order(args.first)
+  end
+
+  def work_order(discipline)
+    info = get_settings(['crafting'])[discipline]
+
+    item, quantity = request_work_order(info['npc-rooms'], info['npc'], discipline, info['logbook'], info['recipes'])
+
+    if %w(Blacksmithing Weaponsmithing Armorsmithing).include?(discipline)
+      forge_items(info, item, quantity)
+    elsif 'Tailoring' == discipline
+      sew_items(info, item, quantity)
+    end
+
+    find_npc(info['npc-rooms'], info['npc'])
+    bput("get my #{info['logbook']} logbook", 'You get')
+    fput("give log to #{info['npc']}")
+    fput('stow logbook')
+
+    repair_items(info)
+  end
+
+  def repair_items(info)
+    walk_to info['repair-room']
+    info['tools'].each do |tool_name|
+      fput("get my #{tool_name}")
+      if /roundtime/i =~ bput("anal my #{tool_name}", 'practically in mint', 'pristine condition', 'Roundtime')
+        waitrt?
+        case bput("give #{info['repair-npc']}", "There isn't a scratch on that", 'Just give it to me again')
+        when /scratch/
+          fput("stow my #{tool_name}")
+        when /give/
+          fput("give #{info['repair-npc']}")
+          fput('stow ticket')
+        end
+      else
+        waitrt?
+        bput("stow my #{tool_name}", 'You put')
+      end
+    end
+    while 'You get' == bput('get my ticket', 'You get', 'What were')
+      pause 30 until 'should be ready by now' == bput('look at my ticket', 'should be ready by now', 'Looking at the')
+      fput("give my ticket to #{info['repair-npc']}")
+      pause 1
+      fput('stow right') if checkright
+      fput('stow left') if checkleft
+    end
+  end
+
+  def sew_items(info, item, quantity)
+    recipe = info['recipes'][item]
+
+    if 'What were' == bput('get yarn', 'What were', 'You get')
+      walk_to info['stock-room']
+      fput("order #{info['stock-number']}")
+      fput("order #{info['stock-number']}")
+    else
+      length = bput('count my yarn', 'You count out \d+ yards').scan(/\d+/).first.to_i
+      if length < recipe['volume'] * quantity
+        fput("order #{info['stock-number']}")
+        fput("order #{info['stock-number']}")
+        fput('combine yarn with yarn')
+      end
+    end
+    fput('stow right') if checkright
+    fput('stow left') if checkleft
+
+    find_sewing_room
+
+    quantity.times do
+      wait_for_script_to_complete('sew', ['log', 'knitting', recipe['chapter'], recipe['page'], recipe['noun']])
+    end
+  end
+
+  def forge_items(info, item, quantity)
+    recipe = info['recipes'][item]
+    items_per_stock = info['stock-volume'] / recipe['volume']
+    spare_stock = info['stock-volume'] % recipe['volume'] != 0
+
+    quantity.times do |count|
+      if count % items_per_stock == 0
+        if count > 0 && spare_stock
+          fput("get #{info['stock-name']}")
+          walk_to(info['trash-room'])
+          dispose_trash(info['stock-name'])
+        end
+        walk_to info['stock-room']
+        fput("order #{info['stock-number']}")
+        fput("order #{info['stock-number']}")
+        fput('stow right') if checkright
+        fput('stow left') if checkleft
+      end
+      if 'You can' == bput("inv search #{info['finisher-full']}", '^You can', 'Your .* is in')
+        walk_to info['finisher-room']
+        fput("order #{info['finisher-number']}")
+        fput("order #{info['finisher-number']}")
+        fput('stow right') if checkright
+        fput('stow left') if checkleft
+      end
+
+      find_anvil
+      wait_for_script_to_complete('forge', ['log', info['pattern-book'], recipe['chapter'], recipe['page'], 'bronze', recipe['noun']])
+    end
+
+    if quantity % items_per_stock != 0
+      fput("get #{info['stock-name']}")
+      walk_to(info['trash-room'])
+      dispose_trash(info['stock-name'])
+    end
+  end
+
+  def request_work_order(npc_rooms, npc, discipline, logbook, recipes)
+    find_npc(npc_rooms, npc)
+    bput("get my #{logbook} logbook", 'You get')
+
+    loop do
+      case bput("ask #{npc} for challenging #{discipline} work", '^To whom', 'order for .* I need \d+ of .* quality')
+      when 'To whom'
+        find_npc(npc_rooms, npc)
+      when /order for (.*)\. I need (\d+) of .* quality/
+        item = Regexp.last_match(1)
+        quantity = Regexp.last_match(2).to_i
+        if quantity <= 3 && recipes[item]
+          fput('stow logbook')
+          return [item, quantity]
+        end
+      end
+    end
+  end
+
+  def find_npc(room_list, npc)
+    room_list.each do |room_id|
+      walk_to(room_id)
+      return if DRRoom.npcs.include?(npc)
+    end
+  end
+
+  def anvil?
+    ['surface looks clean and ready'].include?(bput('look on anvil', 'surface looks clean and ready', 'anvil you see'))
+  end
+
+  def find_sewing_room
+    find_empty_room([19_037, 19_036, 16_670, 19_063, 19_064, 19_065], 16_661)
+  end
+
+  def find_anvil
+    find_empty_room([8909, 8910, 8911, 8777, 8778, 760], 8775, proc { anvil? })
+  end
+end
+
+WorkOrders.new(variable.drop(1))

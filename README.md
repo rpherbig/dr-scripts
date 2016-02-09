@@ -24,7 +24,7 @@ Here are the instructions for getting started using our scripts. We hope to auto
   * Empath: Selanas-setup.yaml
   * Moon Mage: Mooselurk-setup.yaml
   * Necromancer: Aevul-setup.yaml
-  * Paladin: none yet, be the first by submitting your own!
+  * Paladin: Tekronn-setup.yaml
   * Ranger: Etreu-setup.yaml
   * Thief: Evissam-setup.yaml
   * Trader: Cidemon-setup.yaml

@@ -63,6 +63,7 @@ Does something specific and then exits, intended to be run by the user or anothe
 * safe-room - heals at a PC or NPC empath and shares items between characters by dropping them in a safe room
 * mine (and danger) - mines a room and watches for dangerous events
 * smelt-deeds - combines deeds of like metals to save inventory space
+* workorders - completes a workorder for the given discipline
 
 ## Miscellaneous background scripts
 These run in the background to provide functionality to you, the user:

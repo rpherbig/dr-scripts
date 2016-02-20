@@ -57,7 +57,8 @@ class EquipmentManager
     @use_short_gear = settings.use_short_gear(false)
     UserVars.gear_sets = settings['gear_sets']
     @armor_container = settings.armor_container
-    @items = settings['gear'].map { |item| Item.new(description: item[:description], name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to]) }
+    @items = settings['gear'].map { |item| Item.new(description: item[:description], name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective]) } if @use_short_gear
+    @items = settings['gear'].map { |item| Item.new(description: item[:description], name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to]) } unless @use_short_gear
   end
 
   def remove_gear_by(&block)
@@ -73,7 +74,7 @@ class EquipmentManager
 
   def wear_equipment_set(set_name)
     worn_items = desc_to_items(UserVars.gear_sets[set_name])
-    echo("expected worn items:#{worn_items.map(&:description).join(',')}") if UserVars.equipmanager_debug
+    echo("expected worn items:#{worn_items.map(&:short_name).join(',')}") if UserVars.equipmanager_debug
     unless worn_items
       echo("Could not find gear set #{set_name}")
       return false
@@ -93,13 +94,14 @@ class EquipmentManager
   end
 
   def item_by_desc(description)
-    items.find { |item| /#{item.description}/ =~ description }
+    items.find { |item| get_item_regex(item) =~ description }
   end
 
   def notify_missing(lost_items)
     beep
     echo 'MISSING EQUIPMENT: Please verify these items are in a closed container and not lost:'
-    echo "#{lost_items.map(&:description).join(', ')}"
+    echo "#{lost_items.map(&:description).join(', ')}" unless @use_short_gear
+    echo "#{lost_items.map(&:short_name).join(', ')}" if @use_short_gear
     pause
     beep
     false
@@ -109,13 +111,14 @@ class EquipmentManager
     if UserVars.equipmanager_debug
       echo('wearing missing items between these two sets')
       echo("#{combat_items.join(',')}")
-      echo("#{worn_items.map(&:description).join(',')}")
+      echo("#{worn_items.map(&:description).join(',')}") unless @use_short_gear
+      echo("#{worn_items.map(&:short_name).join(',')}") if @use_short_gear
     end
     held = bput('glance', 'You glance .*') if checkleft || checkright
 
     missing_items = worn_items
-                    .reject { |item| combat_items.find { |c_item| /#{item.description}/ =~ c_item } }
-                    .reject { |item| /#{item.description}/ =~ held ? (stow_weapon(item.description) || true) : false }
+                    .reject { |item| combat_items.find { |c_item| get_item_regex(item) =~ c_item } }
+                    .reject { |item| get_item_regex(item) =~ held ? (stow_weapon(item.short_name || item.description) || true) : false }
 
     echo("wear missing items #{missing_items}") if !missing_items.empty? && UserVars.equipmanager_debug
     missing_items.reject { |item| wear_item(item) }
@@ -125,13 +128,15 @@ class EquipmentManager
     if UserVars.equipmanager_debug
       echo('removing unmatched items between these two sets')
       echo("#{combat_items.join(',')}")
-      echo("#{worn_items.map(&:description).join(',')}")
+      echo("#{worn_items.map(&:description).join(',')}") unless @use_short_gear
+      echo("#{worn_items.map(&:short_name).join(',')}") if @use_short_gear
     end
     combat_items
-      .select { |description| !worn_items.find { |item| /#{item.description}/ =~ description } }
-      .map { |description| items.find { |item| /#{item.description}/ =~ description } }
+      .select { |description| !worn_items.find { |item| get_item_regex(item) =~ description } }
+      .map { |description| items.find { |item| get_item_regex(item) =~ description } }
       .compact
       .each { |item| remove_item(item) }
+
   end
 
   def get_combat_items
@@ -146,10 +151,10 @@ class EquipmentManager
   end
 
   def remove_item(item)
-    bput("remove my #{item.name}", 'You ')
+    bput("remove my #{item.short_name || item.name}", 'You ')
     waitrt?
-    if /more room/ =~ bput("stow my #{item.name}", 'You put', 'There isn\'t any more room')
-      bput("wear my #{item.name}", 'You ')
+    if /more room/ =~ bput("stow my #{item.short_name || item.name}", 'You put', 'There isn\'t any more room')
+      bput("wear my #{item.short_name || item.name}", 'You ')
     end
     waitrt?
   end
@@ -159,18 +164,35 @@ class EquipmentManager
       echo('failed to match an item, try turning on debugging with ;e UserVars.equipmanager_debug = true')
       return false
     end
-    $ORDINALS.each do |ordinal|
-      case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring')
-      when /^You get #{item.description}/
-        fput("wear my #{item.name}")
+    if @use_short_gear
+      case bput("get my #{item.short_name}", item.short_regex, '^You get ', '^What were you referring')
+      when item.short_regex
+        fput("wear my #{item.short_name}")
         waitrt?
         return true
       when /^You get /
-        fput("stow my #{item.name}")
+        fput("stow my #{item.short_name}")
       else
         return false
       end
+    else
+      $ORDINALS.each do |ordinal|
+        case bput("get my #{ordinal} #{item.name}", "^You get #{item.description}", '^You get ', '^What were you referring')
+        when /^You get #{item.description}/
+          fput("wear my #{item.name}")
+          waitrt?
+          return true
+        when /^You get /
+          fput("stow my #{item.name}")
+        else
+          return false
+        end
+      end
     end
+  end
+
+  def get_item_regex(item)
+    @use_short_gear ? item.short_regex : /#{item.description}/
   end
 
   def wield_weapon(description, skill = nil)
@@ -182,7 +204,8 @@ class EquipmentManager
     end
     if checkleft || checkright
       held = bput('glance', 'You glance .*')
-      if /#{weapon.description}/ !~ held
+
+      if get_item_regex(weapon) !~ held
         stow_weapon
         get_item(weapon)
       end
@@ -198,7 +221,8 @@ class EquipmentManager
     if (item.tie_to && get_item_helper(item, :tied)) || (item.is_worn && get_item_helper(item, :worn)) || get_item_helper(item, :stowed)
       true
     else
-      echo("Could not find #{item.description} anywhere.")
+      echo("Could not find #{item.description} anywhere.") unless @use_short_gear
+      echo("Could not find #{item.short_name} anywhere.") if @use_short_gear
       false
     end
   end
@@ -220,10 +244,10 @@ class EquipmentManager
     worn_items = desc_to_items(UserVars.gear_sets[gear_set])
 
     todo.all? do |held_item|
-      if info = worn_items.find { |item| /#{item.description}/ =~ held_item }
+      if info = worn_items.find { |item| get_item_regex(item) =~ held_item }
         stow_helper("wear my #{info.name}", info.name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', '^You ')
         true
-      elsif info = items.find { |item| /#{item.description}/ =~ held_item }
+      elsif info = items.find { |item| get_item_regex(item) =~ held_item }
         if info.tie_to
           stow_helper("tie my #{info.name} to #{info.tie_to}", info.name, 'You attach')
         else
@@ -249,21 +273,21 @@ class EquipmentManager
     {
       worn: {
         verb: 'remove',
-        matches: ["You sling #{item.description}", "You .* #{item.description}", /^You (get|sling|pull|work|loosen|slide|remove) /, 'Remove what', "You aren't wearing that"],
+        matches: [get_item_regex(item), /^You (get|sling|pull|work|loosen|slide|remove) /, 'Remove what', "You aren't wearing that"],
         failures: [/^You (get|sling|pull|work|slide|remove) $/],
         failure_recovery: proc { |noun| bput("wear my #{noun}", '^You ') },
         exhausted: ['Remove what', "You aren't wearing that"]
       },
       tied: {
         verb: 'untie',
-        matches: ["You remove #{item.description}", '^You remove', '^What were you referring', '^Untie what'],
+        matches: [get_item_regex(item), '^You remove', '^What were you referring', '^Untie what'],
         failures: ['You remove'],
         failure_recovery: proc { |_| stow_weapon },
         exhausted: ['What were you referring', 'Untie what']
       },
       stowed: {
         verb: 'get',
-        matches: ["You sling #{item.description}", "You get #{item.description}", '^You get', '^What were you referring', 'But that is already', 'You are already'],
+        matches: [get_item_regex(item), '^You get', '^What were you referring', 'But that is already', 'You are already'],
         failures: ['You get', /But that is already/],
         failure_recovery: proc { |noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
         exhausted: ['What were you referring']
@@ -274,8 +298,19 @@ class EquipmentManager
   def get_item_helper(item, type)
     data = verb_data(item)[type]
     waitrt?
-    $ORDINALS.each do |ordinal|
-      case bput("#{data[:verb]} my #{ordinal} #{item.name}", *data[:matches])
+    unless @use_short_gear
+      $ORDINALS.each do |ordinal|
+        case bput("#{data[:verb]} my #{ordinal} #{item.name}", *data[:matches])
+        when *data[:exhausted]
+          return false
+        when *data[:failures]
+          data[:failure_recovery].call(item.name)
+        else
+          return true
+        end
+      end
+    else
+      case bput("#{data[:verb]} my #{item.short_name}", *data[:matches])
       when *data[:exhausted]
         return false
       when *data[:failures]

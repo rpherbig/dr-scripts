@@ -8,6 +8,6 @@ class TestValidYaml < Minitest::Test
       count += 1
       YAML.load_file file
     end
-    refute_equal count, 0, "Expected to load and parse at least one YAML file"
+    refute_equal count, 0, 'Expected to load and parse at least one YAML file'
   end
 end

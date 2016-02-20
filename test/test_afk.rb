@@ -3,7 +3,7 @@ require 'minitest/autorun'
 module Harness
   class Script
     def gets?
-      ""
+      ''
     end
   end
 
@@ -107,4 +107,3 @@ class TestAfk < Minitest::Test
     assert_sends_messages expected_messages
   end
 end
-

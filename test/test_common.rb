@@ -1,4 +1,5 @@
 require 'minitest/autorun'
+require 'timecop'
 
 module UserVars
   def UserVars.trash_storage=(val)
@@ -59,7 +60,7 @@ module Harness2
   def clear; end
 
   def run_script_with_proc(script, test)
-    Thread.abort_on_exception=true
+    # Thread.abort_on_exception=true
     thread = Thread.new do
       script = "#{script}.lic" unless script.end_with?('.lic')
       load script
@@ -105,10 +106,15 @@ include UserVars
 class TestCommon < Minitest::Test
   def setup
     sent_messages.clear
+    @result = nil
+  end
+
+  def teardown
+    @test.join if @test
   end
 
   def test_bput_sends_message
-    run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc {
       DRC.bput('a test message')
     })
 
@@ -118,7 +124,7 @@ class TestCommon < Minitest::Test
   def test_bput_returns_a_match
     $history = ['A result string']
 
-    run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc {
       assert_equal 'result', DRC.bput('a test message', 'result')
     })
 
@@ -127,24 +133,23 @@ class TestCommon < Minitest::Test
   def test_bput_returns_a_match_with_other_data
     $history = [nil,'not the correct string', '', 'A result string']
 
-    run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc {
       assert_equal 'result', DRC.bput('a test message', 'result')
     })
 
   end
 
-  # def test_bput_returns_error_code_after_timeout
-  #   $history = [nil,'not the correct string', '']
-  #   $time_stubs = [0,1,2,3,15]
+  def test_bput_returns_error_code_after_timeout
+    $history = [nil,'not the correct string', '']
 
-  #   Time.stub :now, proc {$time_stubs.shift} do
-  #     run_script_with_proc('common', proc {
-  #       assert_equal true, false
-  #     })
+    @test = run_script_with_proc('common', proc {
+      assert_equal $FAILED_COMMAND, DRC.bput('a test message', 'result')
+    })
 
-  #     assert_sends_messages ['a test message']
-  #   end
+    Timecop.scale(30)
+    sleep 1
+    Timecop.return
 
-  # end
+  end
 
 end

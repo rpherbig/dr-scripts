@@ -2,7 +2,7 @@ require 'minitest/autorun'
 require 'timecop'
 
 module UserVars
-  def UserVars.trash_storage=(val)
+  def self.trash_storage=(_val)
   end
 end
 
@@ -114,9 +114,9 @@ class TestCommon < Minitest::Test
   end
 
   def test_bput_sends_message
-    @test = run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc do
       DRC.bput('a test message')
-    })
+    end)
 
     assert_sends_messages ['a test message']
   end
@@ -124,29 +124,27 @@ class TestCommon < Minitest::Test
   def test_bput_returns_a_match
     $history = ['A result string']
 
-    @test = run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc do
       assert_equal 'result', DRC.bput('a test message', 'result')
-    })
-
+    end)
   end
 
   def test_bput_returns_a_match_with_other_data
-    $history = [nil,'not the correct string', '', 'A result string']
+    $history = [nil, 'not the correct string', '', 'A result string']
 
-    @test = run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc do
       assert_equal 'result', DRC.bput('a test message', 'result')
-    })
-
+    end)
   end
 
   def test_bput_returns_error_code_after_timeout
-    $history = [nil,'not the correct string', '']
+    $history = [nil, 'not the correct string', '']
 
-    @test = run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc do
       start = Time.now
       assert_equal $FAILED_COMMAND, DRC.bput('a test message', 'result')
-      Thread.current.thread_variable_set('runtime', Time.now-start)
-    })
+      Thread.current.thread_variable_set('runtime', Time.now - start)
+    end)
 
     Timecop.scale(30)
     sleep 1
@@ -155,13 +153,13 @@ class TestCommon < Minitest::Test
   end
 
   def test_bput_delays_timeout_for_wait
-    $history = [nil,'not the correct string', '']
+    $history = [nil, 'not the correct string', '']
 
-    @test = run_script_with_proc('common', proc {
+    @test = run_script_with_proc('common', proc do
       start = Time.now
       assert_equal $FAILED_COMMAND, DRC.bput('a test message', 'result')
-      Thread.current.thread_variable_set('runtime', Time.now-start)
-    })
+      Thread.current.thread_variable_set('runtime', Time.now - start)
+    end)
 
     sleep 1
     $history << '...wait 9 seconds'
@@ -169,7 +167,5 @@ class TestCommon < Minitest::Test
     sleep 1
     Timecop.return
     assert_in_delta 16, @test.thread_variable_get('runtime'), 0.1
-
   end
-
 end

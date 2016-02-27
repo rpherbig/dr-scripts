@@ -9,10 +9,22 @@ module Harness
     Script.new
   end
 
+  def custom_require(*); end
+
   def pause(*); end
 
   def echo(message)
-    # puts message
+    print(message.to_s + "\n") if $audible
+    displayed_messages << message
+  end
+
+  def respond(message = '')
+    print(message.to_s + "\n") if $audible
+    displayed_messages << message
+  end
+
+  def displayed_messages
+    $displayed_messages ||= []
   end
 
   def checkdead
@@ -49,7 +61,19 @@ module Harness
     $history ? $history.shift : nil
   end
 
+  def get
+    get?
+  end
+
   def clear; end
+
+  def get_character_setting
+    $character_setting
+  end
+
+  def save_character_profile(data)
+    $save_character_profile = data
+  end
 
   def run_script(script)
     thread = Thread.new do

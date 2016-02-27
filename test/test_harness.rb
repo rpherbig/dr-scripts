@@ -106,4 +106,3 @@ module UserVars
   def self.trash_storage=(_val)
   end
 end
-

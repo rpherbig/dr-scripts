@@ -22,6 +22,7 @@ class CrossingTraining
     @running = true
     @idling = false
     @settings = get_settings(variable.drop(1) + %w(art athletics perform stealing))
+    @use_research = @settings.use_research(false)
     @settings.outdoor_room ||= 793
     @song_list = @settings.perform_options
     @settings.storage_containers([]).each { |container| fput("open my #{container}") }
@@ -69,6 +70,7 @@ class CrossingTraining
     # The next skill to train is the one with the lowest field experience
     skill = @settings.crossing_training
                      .select { |s| ready_to_use?(s) }
+                     .select { |s| not_research_blocked?(s) }
                      .min_by { |s| [DRSkill.getxp(s).to_i, DRSkill.getrank(s).to_i] }
 
     unless requires_movement?(skill)
@@ -79,19 +81,26 @@ class CrossingTraining
     end
 
     if skill.empty? || DRSkill.getxp(skill).to_i >= 28
-      echo '***Skills capped, sleeping***' if UserVars.crossing_trainer_debug
-      fput 'exit' if @settings.exit_on_skills_capped
-      # Output a harmless command to prevent being logged out
-      fput 'tdp'
-      @idling = true
-      play_song?
-      return
+      if @researching
+        pause 30 if skill.empty?
+        fput 'tdp'
+      else
+        echo '***Skills capped, sleeping***' if UserVars.crossing_trainer_debug
+        fput 'exit' if @settings.exit_on_skills_capped
+        # Output a harmless command to prevent being logged out
+        fput 'tdp'
+        @idling = true
+        play_song?
+        return
+      end
     end
 
-    stop_play
+    stop_play unless @researching
     @idling = false
 
     echo "***Attempting to train #{skill}***" if UserVars.crossing_trainer_debug
+
+    check_research
 
     update_timer(skill)
 
@@ -100,6 +109,8 @@ class CrossingTraining
       train_outdoorsmanship
     when 'Augmentation', 'Warding', 'Utility', 'Debilitation'
       train_magic skill
+    when 'Arcana', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic'
+      do_research skill
     when 'First Aid'
       train_first_aid
     when 'Scholarship'
@@ -242,7 +253,23 @@ class CrossingTraining
   end
 
   def train_magic(skill)
-    @settings.train_with_spells ? cast_spell(skill) : cast_nonspell(skill)
+    if @settings.train_with_spells
+      return if checkmana < 40
+      @use_research ? do_research(skill) : cast_spell(@settings.training_spells[skill])
+    else
+      cast_nonspell(skill)
+    end
+  end
+
+  def not_research_blocked?(skill)
+    return true unless @use_research
+    return ['Summoning', 'Attunement', 'Athletics', 'Outdoorsmanship', 'Perception', 'Appraisal', 'Empathy' ].include?(skill) if @researching
+    if ['Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Arcana'].include?(skill)
+      return DRSkill.getxp(skill).to_i < 18
+    elsif ['Warding', 'Utility', 'Augmentation'].include?(skill)
+      return DRSkill.getxp(skill).to_i < 9
+    end
+    true
   end
 
   def ready_to_use?(skill)
@@ -327,11 +354,36 @@ class CrossingTraining
     data['cambrinth'] = discern_data['cambrinth']
   end
 
-  def cast_spell(skill)
-    return if checkmana < 40
+  def check_research
+    return unless @researching
+    if Flags['research-partial']
+      Flags.reset('research-partial')
+      fput("research #{@researching} 300")
+    elsif Flags['research-complete']
+      Flags.reset('research-complete')
+      @researching = nil
+    end
+  end
 
+  def do_research(skill)
+    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough')
+    Flags.add('research-complete', '^Breakthrough!')
+
+    until DRSpells.active_spells['Gauge Flow'] > 20
+      cast_spell({'abbrev' => 'GAF'})
+      pause 5
+    end
+    @researching = case skill
+    when 'Arcana', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic'
+      'FUNDAMENTAL'
+    else
+      skill.upcase
+    end
+    fput("research #{@researching} 300")
+  end
+
+  def cast_spell(data)
     Flags.reset('ct-spellcast')
-    data = @settings.training_spells[skill]
     check_discern(data)
     if data['abbrev'] =~ /^comp/i
       walk_to 991
@@ -542,10 +594,11 @@ class CrossingTraining
   end
 
   def train_athletics
-    if DRSkill.getrank('Athletics').to_i >= 400
+    if DRSkill.getrank('Athletics').to_i >= 400 && !@researching
       swim_segoltha
     else
       @settings.athletics_options.each do |data|
+        check_research
         break unless climb?(data['room'], data['targets'])
       end
     end
@@ -592,6 +645,7 @@ class CrossingTraining
         pause 1
         rt = waitrt?
         pause 5 if rt.nil? || rt == 0
+        check_research
       end
       waitrt?
       break if DRSkill.getxp('Empathy').to_i >= 30
@@ -701,7 +755,7 @@ class CrossingTraining
   end
 
   def assess_zills?
-    return false if DRSkill.getrank('Appraisal').to_i >= 250
+    return false if DRSkill.getrank('Appraisal').to_i >= 250 && !@researching
 
     EquipmentManager.instance.empty_hands
     case bput('remove my zill', 'You slide', 'Remove what')

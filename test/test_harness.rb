@@ -125,6 +125,3 @@ module Harness
     assert_empty expected_messages, "Expected script to send #{expected_messages}"
   end
 end
-
-module UserVars
-end

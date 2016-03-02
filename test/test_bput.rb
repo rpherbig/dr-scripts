@@ -3,7 +3,6 @@ load 'test/test_harness.rb'
 require 'timecop'
 
 include Harness
-include UserVars
 
 class TestCommon < Minitest::Test
   def setup

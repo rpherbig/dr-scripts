@@ -1,8 +1,6 @@
 require 'minitest/autorun'
 load 'test/test_harness.rb'
 
-include UserVars
-
 class TestItems < Minitest::Test
   def setup
     load('common.lic')

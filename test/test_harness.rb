@@ -106,11 +106,7 @@ module Harness
 
         if message == expected_messages.first
           expected_messages.pop
-          if expected_messages.any?
-            next
-          else
-            break
-          end
+          break unless expected_messages.any?
         end
 
         sleep 0.1

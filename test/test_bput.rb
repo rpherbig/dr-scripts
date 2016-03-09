@@ -48,7 +48,7 @@ class TestCommon < Minitest::Test
     end)
 
     Timecop.scale(30)
-    sleep 1
+    sleep 0.1 until @test.thread_variable_get('runtime')
     Timecop.return
     assert_in_delta 15, @test.thread_variable_get('runtime'), 0.25
   end
@@ -65,7 +65,7 @@ class TestCommon < Minitest::Test
     sleep 1
     $history << '...wait 9 seconds'
     Timecop.scale(30)
-    sleep 1
+    sleep 0.5
     Timecop.return
     assert_in_delta 16, @test.thread_variable_get('runtime'), 0.25
   end

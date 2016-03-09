@@ -12,6 +12,7 @@ class TestSetupConfig < Minitest::Test
   end
 
   def teardown
+    $save_character_profile = nil
     # $audible = false
   end
 

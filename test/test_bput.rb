@@ -48,7 +48,7 @@ class TestCommon < Minitest::Test
     end)
 
     Timecop.scale(30)
-    sleep 0.5
+    sleep 0.1 until @test.thread_variable_get('runtime')
     Timecop.return
     assert_in_delta 15, @test.thread_variable_get('runtime'), 0.25
   end

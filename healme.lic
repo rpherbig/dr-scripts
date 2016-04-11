@@ -10,23 +10,7 @@
 
 # ***BEGIN USER CONFIG***
 
-# Specify how much mana to prepare your spells with, and how much to charge into a cambrinth item.
-# "mana"=>5, "cambrinth"=> [6,7]
-# The above would 'prep spell 5', 'charge my item 6', 'charge my item 7', 'invoke my item'
-UserVars.my_spells = {
-  'HW' => { 'abbrev' => 'HW', 'mana' => 5,
-            'cambrinth' => [5, 5]
-      },
-  'HS' => { 'abbrev' => 'HS', 'mana' => 10,
-            'cambrinth' => [7, 7]
-      }
-}
-
-# Set one of these two items
-UserVars.held_cambrinth = nil # Worn item that needs to be held to charge
-UserVars.worn_cambrinth = 'armband' # cambrinth you can charge while wearing.
-
-UserVars.healme_debug = false # turn on echos in the script
+UserVars.healme_debug ||= false # turn on echos in the script
 
 # ***END USER CONFIG***
 
@@ -53,6 +37,7 @@ class HealMe
     }
 
     @deadly_wounds = %w(SKIN HEAD NECK CHEST ABDOMEN BACK)
+    @settings = get_settings
   end
 
   def check_wounds
@@ -76,16 +61,35 @@ class HealMe
     wounds.map { |wound| wound['level'] }.inject(&:+)
   end
 
-  def cast_spell(data, part, internal = false)
+  def spam_heal(base, camb)
+    Flags.add('hm-heal-done', 'Your body is completely healed')
+    until Flags['hm-heal-done']
+      pause 1 while checkmana < 25
+      Flags.reset('hm-spellcast')
+      bput("prepare heal #{base}", '^With tense movements ')
+      unless camb.empty?
+        camb.each do |mana|
+          bput("charge my #{@settings.cambrinth} #{mana}", '^You harness a', 'You are in no condition to do that')
+          waitrt?
+        end
+        bput("invoke my #{@settings.cambrinth}", 'You reach for its center', 'You are in no condition to do that', 'intact')
+      end
+      pause 0.5 until Flags['hm-spellcast']
+      bput('cast', '^You gesture')
+      pause 0.5
+    end
+  end
+
+  def cast_spell(spell, preps, part, internal = false)
     pause 1 while checkmana < 25
     Flags.reset('hm-spellcast')
-    bput("prepare #{data['abbrev']} #{data['mana']}", '^With tense movements ')
-    if data['cambrinth']
-      data['cambrinth'].each do |mana|
-        bput("charge my #{UserVars.cambrinth} #{mana}", '^You harness a', 'You are in no condition to do that')
+    bput("prepare #{spell} #{preps.first}", '^With tense movements ')
+    unless preps[1..-1].empty?
+      preps[1..-1].each do |mana|
+        bput("charge my #{@settings.cambrinth} #{mana}", '^You harness a', 'You are in no condition to do that')
         waitrt?
       end
-      bput("invoke my #{UserVars.cambrinth}", 'You reach for its center', 'You are in no condition to do that', 'intact')
+      bput("invoke my #{@settings.cambrinth}", 'You reach for its center', 'You are in no condition to do that', 'intact')
     end
     pause 0.5 until Flags['hm-spellcast']
     Flags.reset('hm-partial-heal')
@@ -100,11 +104,11 @@ class HealMe
   end
 
   def heal_wound(part, internal)
-    pause 0.5 while cast_spell(UserVars.my_spells['HW'], part, internal)
+    pause 0.5 while cast_spell('HW', @settings.empath_healing['HW'], part, internal)
   end
 
   def heal_scar(part)
-    pause 0.5 while cast_spell(UserVars.my_spells['HS'], part)
+    pause 0.5 while cast_spell('HS', @settings.empath_healing['HS'], part)
   end
 
   def heal_wounds(wounds, skip_parts)
@@ -116,7 +120,7 @@ class HealMe
     heal_scar(wounds.first['part'])
   end
 
-  def heal_self
+  def heal_self(skip_parts)
     Flags.delete('hm-spellcast')
     Flags.add('hm-spellcast', '^You feel fully prepared to cast your spell\.')
 
@@ -132,28 +136,31 @@ class HealMe
               'appear considerably better\.'
              )
 
-    fput "remove #{UserVars.held_cambrinth}" if UserVars.held_cambrinth
-    UserVars.cambrinth = UserVars.held_cambrinth || UserVars.worn_cambrinth
-    wounds = check_wounds
+    fput("remove #{@settings.cambrinth}") if @settings.held_cambrinth
+    fput("get my #{@settings.cambrinth}") if @settings.stored_cambrinth
 
-    skip_parts = variable[1..-1]
+    if @settings.empath_healing['HEAL'] && skip_parts.empty?
+      spam_heal(@settings.empath_healing['HEAL'].first, @settings.empath_healing['HEAL'][1..-1])
+    else
+      wounds = check_wounds
 
-    skip_parts.map!(&:upcase)
+      skip_parts.map!(&:upcase)
 
-    echo("wounds: #{wounds}") if UserVars.healme_debug
-    echo("dw: #{@deadly_wounds}") if UserVars.healme_debug
-    danger_wounds = wounds.select { |part, _| @deadly_wounds.include?(part) }.sort_by { |_, val| severity(val) }.reverse
+      echo("wounds: #{wounds}") if UserVars.healme_debug
+      echo("dw: #{@deadly_wounds}") if UserVars.healme_debug
+      danger_wounds = wounds.select { |part, _| @deadly_wounds.include?(part) }.sort_by { |_, val| severity(val) }.reverse
 
-    echo("bad wounds: #{danger_wounds}") if UserVars.healme_debug
+      echo("bad wounds: #{danger_wounds}") if UserVars.healme_debug
 
-    danger_wounds.each do |part, _|
-      heal_wounds(wounds[part], skip_parts)
-      wounds.delete(part)
+      danger_wounds.each do |part, _|
+        heal_wounds(wounds[part], skip_parts)
+        wounds.delete(part)
+      end
+
+      wounds.sort_by { |_, val| severity(val) }.reverse_each { |_, wound| heal_wounds(wound, skip_parts) }
     end
-
-    wounds.sort_by { |_, val| severity(val) }.reverse_each { |_, wound| heal_wounds(wound, skip_parts) }
-    fput "wear #{UserVars.held_cambrinth}" if UserVars.held_cambrinth
+    fput("wear #{@settings.cambrinth}") if @settings.held_cambrinth
+    fput("stow #{@settings.cambrinth}") if @settings.stored_cambrinth
   end
 end
-
-HealMe.new.heal_self
+HealMe.new.heal_self(variable.drop(1))

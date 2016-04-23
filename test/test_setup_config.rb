@@ -8,7 +8,7 @@ class TestSetupConfig < Minitest::Test
   def setup
     # $audible = true
     $history = ['quit']
-    load('setupconfig.lic')
+    load('edityaml.lic')
   end
 
   def teardown

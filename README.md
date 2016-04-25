@@ -2,7 +2,7 @@
 A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).
 
 ## Getting started
-See the setup guide on the wiki: https://github.com/rpherbig/dr-scripts/wiki/Setup-Process
+See the setup guides on the wiki: https://github.com/rpherbig/dr-scripts/wiki
 
 ## Training scripts
 These scripts are designed to train skills:

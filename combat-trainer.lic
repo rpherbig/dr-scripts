@@ -340,7 +340,9 @@ class LootProcess
     pause 1
     waitrt?
     if @need_bundle && snap != [checkleft, checkright]
-      EquipmentManager.instance.stow_weapon(game_state['weapon_name']) unless game_state['weapon_skill'] == 'Brawling'
+      unless DRStats.moon_mage? && 'telekinetic' == bput('wear moon', 'telekinetic', 'wear what')
+        EquipmentManager.instance.stow_weapon(game_state['weapon_name']) unless game_state['weapon_skill'] == 'Brawling'
+      end
       if 'You get' == bput('get bundling rope', 'You get', 'What were you referring to', 'You need a free hand')
         fput('bundle')
         fput('wear bundle')
@@ -351,7 +353,9 @@ class LootProcess
         end
       end
       @need_bundle = false
-      EquipmentManager.instance.wield_weapon(game_state['weapon_name'], game_state['weapon_skill']) unless game_state['weapon_skill'] == 'Brawling'
+      unless DRStats.moon_mage? && 'you grab' == bput('get moon', 'you grab', 'What were')
+        EquipmentManager.instance.wield_weapon(game_state['weapon_name'], game_state['weapon_skill']) unless game_state['weapon_skill'] == 'Brawling'
+      end
     end
     dispose_trash(checkleft) if snap.first != checkleft
     dispose_trash(checkright) if snap.last != checkright
@@ -402,7 +406,7 @@ class SpellProcess
   include DRC
   include DRCS
 
-  def initialize(buffs:{}, ospells:[], camb:nil, casts:[], preps:[], is_empath:false)
+  def initialize(buffs:{}, ospells:[], camb:nil, casts:[], preps:[], is_empath:false, empath_spells: {})
     echo("SpellProcess(#{buffs}, #{ospells}, #{camb}, #{casts}, #{preps})") if $debug_mode
     @buff_spells = buffs
     @offensive_spells = ospells
@@ -410,6 +414,7 @@ class SpellProcess
     @casts = casts
     @preps = preps
     @is_empath = is_empath
+    @empath_spells = empath_spells
 
     if (!buffs.empty? || !ospells.empty?) && (casts.empty? || preps.empty?)
       raise(ArgumentError, 'Must provide casting/prep messages to use spells')
@@ -447,6 +452,7 @@ class SpellProcess
     unless @prep_spell
       bless_thrown(game_state['weapon_skill'])
       ignite_weapon(game_state['weapon_skill'])
+      check_health if @is_empath
       check_buffs
       @previous_skill = game_state['weapon_skill']
     end
@@ -553,6 +559,13 @@ class SpellProcess
     end
     echo("found buff missing: #{name}") if $debug_mode && name
     data['name'] = name
+    prepare_spell(data)
+  end
+
+  def check_health
+    return if checkhealth > 91
+    echo('Healing') if $debug_mode
+    data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
     prepare_spell(data)
   end
 
@@ -712,6 +725,8 @@ class TrainerProcess
       moon_mage_perc unless game_state['retreating']
     when 'Perc'
       bput('perc', 'You reach out') unless game_state['retreating']
+    when 'Perc Health'
+      bput('perc heal', 'You close your eyes')
     when 'Astro'
       astrology unless game_state['retreating']
     when 'App'
@@ -720,6 +735,8 @@ class TrainerProcess
       appraise(game_state, 'quick')
     when 'App Careful'
       appraise(game_state, 'careful')
+    when 'Tactics'
+      bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'You must be closer') unless DRRoom.npcs.empty?
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state['retreating']
     when 'Pray'
@@ -767,7 +784,6 @@ class TrainerProcess
   end
 
   def check_ability(name, ability_info)
-    echo("check ability: #{name} #{ability_info}") if $debug_mode
     expcheck = ability_info[:check].nil? || DRSkill.getxp(ability_info[:check]).to_i < 30
     return expcheck unless @cooldown_timers[name]
     Time.now - @cooldown_timers[name] >= ability_info[:cooldown] ? expcheck : false
@@ -1003,7 +1019,11 @@ class CombatTrainer
     args.delete(darg) if darg
     rarg = args.find { |arg| arg =~ /r\d+/ }
     args.delete(rarg) if rarg
+    construct = args.delete('construct')
+
     settings = get_settings(args)
+
+    settings.construct = construct
 
     debug(settings) if should_debug
     set_dance(darg, settings) if darg
@@ -1060,8 +1080,8 @@ class CombatTrainer
       'danger' => false,
       'parrying' => false
     }
-    @combat_processes = make_processes(settings)
     $debug_mode = settings.combat_trainer_debug
+    @combat_processes = make_processes(settings)
     $target_increment = settings.combat_trainer_target_increment || 3
     $action_count = settings.combat_trainer_action_count || 10
   end
@@ -1080,7 +1100,7 @@ class CombatTrainer
 
     [
       SetupProcess.new(dance_threshold: settings.dance_threshold, dance_skill: settings.dance_skill, stances: settings.stances, weapon_training: settings.weapon_training, retreat_threshold: settings.retreat_threshold, summoned_weapons: summoned_weapons, summoned_weapons_element: summoned_weapons_element),
-      SpellProcess.new(buffs: settings.buff_spells({}), ospells: settings.offensive_spells([]), camb: settings.cambrinth, casts: settings.cast_messages, preps: settings.prep_messages, is_empath: settings.empath),
+      SpellProcess.new(buffs: settings.buff_spells({}), ospells: settings.offensive_spells([]), camb: settings.cambrinth, casts: settings.cast_messages, preps: settings.prep_messages, is_empath: settings.empath, empath_spells: settings.empath_healing),
       AbilityProcess.new(buffs: settings.buff_nonspells({}), kneel_khri: settings.kneel_khri, khri_preps: settings.khri_preps),
       LootProcess.new(
         skin: skin,
@@ -1100,7 +1120,7 @@ class CombatTrainer
         dance_actions: settings.dance_actions, dance_actions_stealth: settings.dance_actions_stealth([]),
         fatigue_regen_threshold: settings.fatigue_regen_threshold, fatigue_regen_action: settings.fatigue_regen_action,
         dual_load: settings.dual_load,
-        is_empath: settings.is_empath,
+        is_empath: settings.is_empath && !settings.construct,
         backstab: settings.backstab,
         ambush: settings.ambush,
         use_stealth_attacks: settings.use_stealth_attacks

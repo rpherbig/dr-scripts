@@ -64,7 +64,12 @@ class ScriptManager
     @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
     @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
     UserVars.autostart_scripts ||= []
-    Settings['autostart'] ||= []
+    UserVars.autostart_scripts.uniq!
+    Settings['autostart'] ||= ['drinfomon', 'events', 'equipmanager', 'spellmonitor']
+    Settings['autostart'].uniq!
+
+    Settings['base_versions'] ||= {}
+
     @developer = Settings['dependency-developer'] || false
     @class_defs = { 'equipmanager' => :EquipmentManager, 'common' => :DRC }
     @queue = []
@@ -185,13 +190,29 @@ class ScriptManager
     set_version(filename, blob['sha'])
   end
 
+  def verify_or_make_dir(path)
+    Dir.mkdir(path) unless Dir.exist?(path)
+  end
+
   def setup_profiles
-    Dir.mkdir('./scripts/profiles') unless Dir.exist?('./scripts/profiles')
+    verify_or_make_dir './scripts/profiles'
     profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
     make_request(profile_tree_url)['tree'].each do |setup_file|
       echo("downloading #{setup_file}") if @debug
       blob = make_request(setup_file['url'])
       File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    end
+  end
+
+  def check_base_files
+    verify_or_make_dir './scripts/profiles'
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
+    make_request(profile_tree_url)['tree'].select{|data| /^base.+yaml/ =~ data['path'] }.each do |setup_file|
+      next if data['sha'] == Settings['base_versions'][data['path']]
+      echo("downloading #{setup_file}") if @debug
+      blob = make_request(setup_file['url'])
+      File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+      Settings['base_versions'][data['path']] = data['sha']
     end
   end
 
@@ -384,14 +405,35 @@ def download_once(filename)
   stop_updating_script(name)
 end
 
+def full_install
+  respond 'Removing lich autostarts for existing scripts...'
+  remove_from_autostart(managed_scripts)
+  respond 'Adding dependency.lic to lich autostart'
+  add_self_to_autostart
+  respond 'Creating a /profiles directory and downloading default profiles'
+  setup_profiles
+  respond 'backing up existing scripts and replacing with latest versions'
+  replace_all
+end
+
 def migrate_scripts
   remove_from_autostart(managed_scripts)
   add_self_to_autostart
   managed_scripts.each(&method(:get_script))
 end
 
+def replace_all
+  respond 'Renaming existing scripts to replaced-script.lic.bak'
+  managed_scripts.each{|script| File.rename('./scripts/'+script, './scripts/'+script+'.bak') }
+  respond 'Downloading all scripts'
+  repo_scripts.each(&method(:get_script))
+end
+
+def repo_scripts
+  $manager.get_status['tree'].map { |element| element['path'] }.select { |file| file.include?('.lic') && !file.include?('-setup') }
+end
+
 def managed_scripts
-  repo_scripts = $manager.get_status['tree'].map { |element| element['path'] }.select { |file| file.include?('.lic') && !file.include?('-setup') }
   local_scripts = Dir['./scripts/*.lic'].map { |item| File.basename(item) }
   repo_scripts & local_scripts
 end
@@ -446,6 +488,7 @@ def add_self_to_autostart
   pause 0.1 while Script.running?('autostart')
 end
 
+$manager.check_base_files
 $manager.start_scripts(true)
 
 loop do

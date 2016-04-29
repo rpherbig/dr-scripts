@@ -39,6 +39,7 @@ These run in the background to provide functionality to you, the user:
 * moonwatch - populates UserVars.moons with data related to the moons
 * afk - runs in the background to provide safety while you are afk
 * tendme (and tendother) - automatic wound tender
+* performance-monitor - logs combat data for later parsing
 
 ## Helper scripts
 These run in the background to provide functionality to other scripts:

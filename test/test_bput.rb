@@ -43,7 +43,7 @@ class TestCommon < Minitest::Test
 
     @test = run_script_with_proc('common', proc do
       start = Time.now
-      assert_equal $FAILED_COMMAND, DRC.bput('a test message', 'result')
+      assert_equal false, DRC.bput('a test message', 'result')
       Thread.current.thread_variable_set('runtime', Time.now - start)
     end)
 
@@ -58,7 +58,7 @@ class TestCommon < Minitest::Test
 
     @test = run_script_with_proc('common', proc do
       start = Time.now
-      assert_equal $FAILED_COMMAND, DRC.bput('a test message', 'result')
+      assert_equal false, DRC.bput('a test message', 'result')
       Thread.current.thread_variable_set('runtime', Time.now - start)
     end)
 

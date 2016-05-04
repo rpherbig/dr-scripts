@@ -67,15 +67,11 @@ class ScriptManager
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
     Settings['autostart'] ||= []
-    Settings['autostart'] = %w(drinfomon events equipmanager common common-money common-travel common-summoning common-crafting) | Settings['autostart']
     Settings['autostart'].uniq!
 
     Settings['base_versions'] ||= {}
 
     @developer = Settings['dependency-developer'] || false
-    @class_defs = { 'equipmanager' => :EquipmentManager, 'common' => :DRC }
-    @queue = []
-    @verify = []
     @add_autos = []
     @remove_autos = []
     update_autostarts
@@ -119,30 +115,11 @@ class ScriptManager
     File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
   end
 
-  def queue_names_for_verify(script_names)
-    @verify = script_names
-  end
-
-  def queue_names(script_names)
-    @queue = script_names
-  end
-
-  def queue_empty?
-    @queue.empty?
-  end
-
-  def verify_done?
-    @verify.empty?
-  end
-
   def autos_proccessed?
     @add_autos.empty? && @remove_autos.empty?
   end
 
   def run_queue
-    load_script(@queue.shift) unless @queue.empty?
-    get_script(@verify.shift) unless @verify.empty?
-
     Settings['dependency-developer'] = @developer
     update = false
 
@@ -241,8 +218,9 @@ class ScriptManager
 
   def run_script(filename)
     filename.sub!(/\.lic$/, '')
-    return if Script.running?(filename) || (@class_defs[filename] && Scripting.constants.include?(@class_defs[filename]))
     echo("refresh:#{filename}") if @debug
+    stop_script(filename) if Script.running?(filename)
+    pause 0.1 while Script.running?(filename)
     start_script(filename)
   end
 
@@ -380,29 +358,25 @@ def format_yaml_name(name)
   name =~ /\.yaml$/ ? name : "#{name}.yaml"
 end
 
-def custom_require(script_names)
-  script_names = [script_names] unless script_names.is_a?(Array)
-  script_names.map!(&method(:format_name))
-  $manager.queue_names(script_names)
-  pause 0.1 until $manager.queue_empty?
-end
-
-def custom_require2()
-  lambda.new do |args|
+def custom_require
+  lambda do |script_names|
     script_names = [script_names] unless script_names.is_a?(Array)
     force_start_script('bootstrap', script_names)
-    pause 0.1
-    while Script.running?('bootstrap')
-      pause 0.1
-    end
+    pause 0.05
+    pause 0.05 while Script.running?('bootstrap')
   end
 end
 
 def verify_script(script_names)
   script_names = [script_names] unless script_names.is_a?(Array)
-  script_names.map!(&method(:format_name))
-  $manager.queue_names_for_verify(script_names)
-  pause 0.1 until $manager.verify_done?
+  state = true
+  script_names.each do |name|
+    next if Script.exists?(name)
+    echo "*** Failed to find #{name} ***"
+    echo '*** Please report this to Etreu, Torgro, or https://github.com/rpherbig/dr-scripts/issues  ***'
+    state = false
+  end
+  state
 end
 
 def get_script(script_name)
@@ -419,12 +393,6 @@ end
 
 def list_tracked_scripts
   $manager.get_versions.sort
-end
-
-def download_once(filename)
-  name = format_name(filename)
-  custom_require([name])
-  stop_updating_script(name)
 end
 
 def full_install
@@ -472,7 +440,6 @@ def autostart(script_names, global = true)
 end
 
 def stop_autostart(script)
-  script = format_name(script)
   if UserVars.autostart_scripts.include?(script)
     UserVars.autostart_scripts.delete(script)
   else

@@ -9,7 +9,9 @@ module Harness
     Script.new
   end
 
-  def custom_require(*); end
+  def custom_require(*)
+    proc { |args| }
+  end
 
   def pause(*); end
 

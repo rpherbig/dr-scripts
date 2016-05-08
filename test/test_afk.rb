@@ -3,6 +3,18 @@ load 'test/test_harness.rb'
 
 include Harness
 
+class Room
+  def self.current
+    return Map.new
+  end
+end
+
+class Map
+  def id
+    return 1
+  end
+end
+
 class TestAfk < Minitest::Test
   def setup
     self.dead = false
@@ -20,7 +32,7 @@ class TestAfk < Minitest::Test
   end
 
   def test_exits_if_low_health
-    expected_messages = ['exit']
+    expected_messages = %w(health exit)
     self.health = 20
 
     run_script('afk')

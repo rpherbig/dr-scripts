@@ -5,13 +5,13 @@ include Harness
 
 class Room
   def self.current
-    return Map.new
+    Map.new
   end
 end
 
 class Map
   def id
-    return 1
+    1
   end
 end
 

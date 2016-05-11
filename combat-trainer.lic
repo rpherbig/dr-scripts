@@ -818,28 +818,21 @@ class AttackProcess
     @ambush = settings.ambush(false)
     @use_stealth_attacks = settings.use_stealth_attacks(false)
 
-    @action_queue = []
-    @dance_queue = []
-    @cooldown_timers = {}
-    @no_stab_mobs = []
-    @no_stab_current_mob = false
-    @loaded = false
-    @selected_maneuver = ''
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
   end
 
   def execute(game_state)
-    if DRRoom.npcs.uniq.length == 1 && @no_stab_mobs.include?(DRRoom.npcs.uniq.first)
-      @no_stab_current_mob = true
-    elsif game_state.mob_died && @no_stab_current_mob
-      @no_stab_current_mob = false
+    if DRRoom.npcs.uniq.length == 1 && game_state.no_stab_mobs.include?(DRRoom.npcs.uniq.first)
+      game_state.no_stab_current_mob = true
+    elsif game_state.mob_died && game_state.no_stab_current_mob
+      game_state.no_stab_current_mob = false
     end
     if game_state.dancing
       if game_state.finish_killing?
         echo('AttackProcess::clean_up') if $debug_mode
         game_state.next_clean_up_step
       else
-        dance
+        dance(game_state)
       end
       return false
     end
@@ -855,15 +848,15 @@ class AttackProcess
 
     weapon_skill = game_state.weapon_skill
 
-    charged_maneuver = check_charged_maneuver(@charged_maneuvers[weapon_skill])
+    charged_maneuver = check_charged_maneuver(@charged_maneuvers[weapon_skill], game_state)
 
     if $thrown_skills.include?(weapon_skill)
-      @loaded = false
+      game_state.loaded = false
       attack_thrown(game_state)
     elsif $aim_skills.include?(weapon_skill)
       attack_aimed(charged_maneuver, game_state)
     else
-      @loaded = false
+      game_state.loaded = false
       attack_melee(charged_maneuver, game_state)
     end
     false
@@ -885,10 +878,10 @@ class AttackProcess
         pause 1
         waitrt?
         if is_offhand && @backstab
-          hidden_attack = @no_stab_current_mob || !is_offhand ? 'attack left back' : 'backstab left'
+          hidden_attack = game_state.no_stab_current_mob || !is_offhand ? 'attack left back' : 'backstab left'
           command = checkhidden ? hidden_attack : 'attack left'
         else
-          hidden_attack = @no_stab_current_mob || !@backstab.include?(weapon_skill) ? 'attack back' : 'backstab'
+          hidden_attack = game_state.no_stab_current_mob || !@backstab.include?(weapon_skill) ? 'attack back' : 'backstab'
           command = checkhidden ? hidden_attack : 'attack'
         end
       else
@@ -896,16 +889,16 @@ class AttackProcess
       end
       fput(command)
     else
-      use_charged_maneuver(charged_maneuver)
+      use_charged_maneuver(charged_maneuver, game_state)
     end
 
     waitrt?
 
     if reget(5, 'You can\'t backstab that')
       if DRRoom.npcs.uniq.length == 1
-        @no_stab_mobs.push(DRRoom.npcs.first)
+        game_state.no_stab_mobs.push(DRRoom.npcs.first)
       else
-        @no_stab_current_mob = true
+        game_state.no_stab_current_mob = true
       end
     end
 
@@ -929,12 +922,12 @@ class AttackProcess
   end
 
   def attack_aimed(charged_maneuver, game_state)
-    @selected_maneuver = charged_maneuver unless @loaded
-    @loaded = false if game_state.mob_died
-    @action_queue = [] if Flags['ct-ranged-ready']
+    game_state.selected_maneuver = charged_maneuver unless game_state.loaded
+    game_state.loaded = false if game_state.mob_died
+    game_state.action_queue = [] if Flags['ct-ranged-ready']
 
-    if @loaded && @action_queue.empty?
-      if @selected_maneuver.empty?
+    if game_state.loaded && game_state.action_queue.empty?
+      if game_state.selected_maneuver.empty?
         command = 'shoot'
         if @use_stealth_attacks && DRSkill.getxp('Stealth') < 32
           until checkhidden
@@ -949,13 +942,13 @@ class AttackProcess
           game_state.action_count += 1
         end
       else
-        use_charged_maneuver @selected_maneuver
+        use_charged_maneuver(game_state.selected_maneuver, game_state)
         game_state.action_count += 1
       end
-      @loaded = false
+      game_state.loaded = false
       waitrt?
-    elsif @loaded
-      fput(@action_queue.shift)
+    elsif game_state.loaded
+      fput(game_state.action_queue.shift)
       waitrt?
     else
       if @dual_load && DRSpells.active_spells['Hands of Lirisa']
@@ -965,9 +958,9 @@ class AttackProcess
       end
 
       waitrt?
-      @loaded = true
-      if @selected_maneuver.empty?
-        @action_queue = get_actions(@aim_fillers, @aim_fillers_stealth, game_state.weapon_skill)
+      game_state.loaded = true
+      if game_state.selected_maneuver.empty?
+        game_state.action_queue = get_actions(@aim_fillers, @aim_fillers_stealth, game_state.weapon_skill)
         bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target')
         Flags.reset('ct-ranged-ready')
       end
@@ -980,31 +973,31 @@ class AttackProcess
     (stealth_actions && stealth_actions[weapon_skill] && (DRSkill.getxp('Stealth').to_i < 34)) ? stealth_actions[weapon_skill].dup : actions[weapon_skill].dup
   end
 
-  def dance
+  def dance(game_state)
     if DRRoom.npcs.empty?
       pause 1
     else
-      if @dance_queue.empty?
+      if game_state.dance_queue.empty?
         actions = @dance_actions_stealth && !@dance_actions_stealth.empty? && DRSkill.getxp('Stealth').to_i < 34 ? @dance_actions_stealth.dup : @dance_actions.dup
-        @dance_queue = actions
+        game_state.dance_queue = actions
       end
-      fput(@dance_queue.shift)
+      fput(game_state.dance_queue.shift)
       waitrt?
     end
   end
 
-  def check_charged_maneuver(charged_maneuver)
+  def check_charged_maneuver(charged_maneuver, game_state)
     return '' unless charged_maneuver
 
-    timer = @cooldown_timers[charged_maneuver]
+    timer = game_state.cooldown_timers[charged_maneuver]
     return '' if timer && (Time.now - timer).to_i < 60
 
     echo "***Ready to use charged maneuver: #{charged_maneuver}***" if $debug_mode
     charged_maneuver
   end
 
-  def use_charged_maneuver(action)
-    @cooldown_timers[action] = Time.now
+  def use_charged_maneuver(action, game_state)
+    game_state.cooldown_timers[action] = Time.now
     attempt = bput("maneuver #{action}", 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet')
     return if attempt == 'rest a bit longer'
 
@@ -1120,7 +1113,7 @@ class CombatTrainer
 end
 
 class GameState
-  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_skill, :weapon_name, :target_weapon_skill, :danger, :parrying, :casting, :no_skins, :too_many, :constructs, :need_bundle, :cooldown_timers
+  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_skill, :weapon_name, :target_weapon_skill, :danger, :parrying, :casting, :no_skins, :too_many, :constructs, :need_bundle, :cooldown_timers, :action_queue, :dance_queue , :no_stab_mobs, :no_stab_current_mob, :loaded, :selected_maneuver
 
   def initialize
     @dancing = false
@@ -1140,6 +1133,12 @@ class GameState
     @constructs = []
     @need_bundle = true
     @cooldown_timers = {}
+    @action_queue = []
+    @dance_queue = []
+    @no_stab_mobs = []
+    @no_stab_current_mob = false
+    @loaded = false
+    @selected_maneuver = ''
 
     # private
     @clean_up_step = nil

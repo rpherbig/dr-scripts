@@ -21,17 +21,18 @@ class SetupProcess
   include DRCS
   include DRCT
 
-  def initialize(dance_threshold:0, dance_skill:nil, stances:[], weapon_training:{}, retreat_threshold:nil, summoned_weapons:[], summoned_weapons_element: nil)
-    echo("SetupProcess(#{dance_threshold},#{dance_skill}, #{stances}, #{weapon_training})") if $debug_mode
-    @dance_threshold = dance_threshold
-    @retreat_threshold = retreat_threshold
-    @dance_skill = dance_skill
-    @stances = stances
-    @weapon_training = weapon_training
-    @summoned_weapons = summoned_weapons
-    @summoned_weapons_element = summoned_weapons_element
+  def initialize(settings)
+    echo('New SetupProcess') if $debug_mode
+    @dance_threshold = settings.dance_threshold(0)
+    @dance_skill = settings.dance_skill(nil)
+    @stances = settings.stances([])
+    @weapon_training = settings.weapon_training({})
+    @retreat_threshold = settings.retreat_threshold(nil)
+    @summoned_weapons = settings.summoned_weapons([])
+    @summoned_weapons_element = settings.summoned_weapons_element(nil)
+    @target_increment = settings.combat_trainer_target_increment(3)
+    @action_count = settings.combat_trainer_action_count(10)
 
-    @weapon_name = ''
     @target = -1
     @last_skill = nil
     @was_retreating = false
@@ -72,14 +73,14 @@ class SetupProcess
     end
 
     weapon_skill = game_state['weapon_skill']
-    game_state['weapon_name'] = @weapon_name
+    weapon_name = game_state['weapon_name']
 
     if game_state['parrying']
-      check_stance(weapon_skill, game_state)
-      check_weapon(weapon_skill) if @last_skill != weapon_skill
+      check_stance(game_state)
+      check_weapon(weapon_skill, weapon_name) if @last_skill != weapon_skill
     else
-      check_weapon(weapon_skill) if @last_skill != weapon_skill
-      check_stance(weapon_skill, game_state)
+      check_weapon(weapon_skill, weapon_name) if @last_skill != weapon_skill
+      check_stance(game_state)
     end
     @last_skill = weapon_skill
     false
@@ -90,7 +91,7 @@ class SetupProcess
   def dance(game_state)
     @last_skill = game_state['weapon_skill']
     game_state['weapon_skill'] = @dance_skill
-    @weapon_name = @weapon_training[@dance_skill]
+    game_state['weapon_name'] = @weapon_training[@dance_skill]
   end
 
   def retreat_weapons(weapon_training)
@@ -98,7 +99,7 @@ class SetupProcess
   end
 
   def skill_done?(game_state)
-    game_state['action_count'] >= $action_count || DRSkill.getxp(game_state['weapon_skill']).to_i >= @target
+    game_state['action_count'] >= @action_count || DRSkill.getxp(game_state['weapon_skill']).to_i >= @target
   end
 
   def ending_ranged?(game_state)
@@ -117,9 +118,9 @@ class SetupProcess
       echo('skipping summoned weapons because no moonblade available') if $debug_mode
       weapon_training = weapon_training.reject { |key, _| summoned_info(key) }
     end
-    game_state['weapon_skill'], @weapon_name = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
+    game_state['weapon_skill'], game_state['weapon_name'] = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
 
-    @target = [34, DRSkill.getxp(game_state['weapon_skill']).to_i + $target_increment].min
+    @target = [34, DRSkill.getxp(game_state['weapon_skill']).to_i + @target_increment].min
   end
 
   def should_dance?
@@ -140,16 +141,16 @@ class SetupProcess
     "stance set #{vals['EVASION']} #{vals['PARRY']} #{vals['SHIELD']}"
   end
 
-  def check_stance(weapon_skill, game_state, override = nil)
+  def check_stance(game_state, override = nil)
     vals = { 'EVASION' => 0, 'PARRY' => 0, 'SHIELD' => 0, 'SPARE' => 0 }
     skill_map = { 'Parry Ability' => 'Parry', 'Shield Usage' => 'Shield' }
     previous = last_stance
     points = override || previous.values.inject(&:+)
 
-    priority = if @stances[weapon_skill].nil?
+    priority = if @stances[game_state['weapon_skill']].nil?
                  ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| DRSkill.getxp(skill).to_i }
                else
-                 @stances[weapon_skill]
+                 @stances[game_state['weapon_skill']]
                end
 
     game_state['parrying'] = priority.index('Parry Ability') < 2
@@ -162,10 +163,10 @@ class SetupProcess
 
     return if vals == previous
     return unless /maximum number of points \((\d+)/ =~ bput(build_stance_string(vals), 'Setting your Evasion stance to', 'is above your maximum number of points \(\d+')
-    check_stance(weapon_skill, game_state, Regexp.last_match(1).to_i)
+    check_stance(game_state, Regexp.last_match(1).to_i)
   end
 
-  def check_weapon(weapon_skill)
+  def check_weapon(weapon_skill, weapon_name)
     echo("checking weapons as #{@last_skill.inspect}!=#{weapon_skill}") if $debug_mode
 
     last_summoned = summoned_info(@last_skill)
@@ -191,7 +192,7 @@ class SetupProcess
       push_summoned_weapon if next_summoned['push']
       pull_summoned_weapon if next_summoned['pull']
     else
-      EquipmentManager.instance.wield_weapon(@weapon_name, weapon_skill)
+      EquipmentManager.instance.wield_weapon(weapon_name, weapon_skill)
     end
   end
 end
@@ -199,18 +200,20 @@ end
 class LootProcess
   include DRC
 
-  def initialize(skin:false, arrange_all:false, arrange_count:0, lootables:[], arrange_types:{}, ritual_type:{}, necro:false, tie_bundle:false)
-    @skin = skin
-    @arrange_all = arrange_all
-    @arrange_count = arrange_count
-    @lootables = lootables
-    @arrange_types = arrange_types
+  def initialize(settings)
+    echo('New LootProcess') if $debug_mode
+    @skin = settings.skinning({})['skin'] || false
+    @arrange_all = settings.skinning({})['arrange_all'] || false
+    @arrange_count = settings.skinning({})['arrange_count'] || 0
+    @tie_bundle = settings.skinning({})['tie_bundle'] || false
+    @arrange_types = settings.skinning({})['arrange_types'] || {}
+    @lootables = settings.lootables([])
+    @ritual_type = settings.thanatology({})['ritual_type'] || {}
+    @necro = settings.thanatology({})['necro'] || false
+
     @no_skins = []
     @too_many = []
     @constructs = []
-    @ritual_type = ritual_type
-    @necro = necro
-    @tie_bundle = tie_bundle
     @need_bundle = false
     setup_bundle
   end
@@ -415,17 +418,17 @@ class SpellProcess
   include DRC
   include DRCS
 
-  def initialize(buffs:{}, ospells:[], camb:nil, casts:[], preps:[], is_empath:false, empath_spells: {})
-    echo("SpellProcess(#{buffs}, #{ospells}, #{camb}, #{casts}, #{preps})") if $debug_mode
-    @buff_spells = buffs
-    @offensive_spells = ospells
-    @cambrinth = camb
-    @casts = casts
-    @preps = preps
-    @is_empath = is_empath
-    @empath_spells = empath_spells
+  def initialize(settings)
+    echo('New SpellProcess') if $debug_mode
+    @buff_spells = settings.buff_spells({})
+    @offensive_spells = settings.offensive_spells([])
+    @cambrinth = settings.cambrinth(nil)
+    @casts = settings.cast_messages([])
+    @preps = settings.prep_messages([])
+    @is_empath = settings.is_empath(false)
+    @empath_spells = settings.empath_healing({})
 
-    if (!buffs.empty? || !ospells.empty?) && (casts.empty? || preps.empty?)
+    if (!@buff_spells.empty? || !@offensive_spells.empty?) && (@casts.empty? || @preps.empty?)
       raise(ArgumentError, 'Must provide casting/prep messages to use spells')
     end
 
@@ -652,12 +655,14 @@ class AbilityProcess
   include DRC
   include DRCT
 
-  def initialize(buffs:[], kneel_khri:false, khri_preps:[])
-    @khri = buffs.delete('khri') || []
-    @buffs = buffs
+  def initialize(settings)
+    echo('New AbilityProcess') if $debug_mode
+    @buffs = settings.buff_nonspells({})
+    @khri = @buffs.delete('khri') || []
+    @kneel_khri = settings.kneel_khri(false)
+    @khri_preps = settings.khri_preps([])
+
     @cooldown_timers = {}
-    @kneel_khri = kneel_khri
-    @khri_preps = khri_preps
   end
 
   def execute(game_state)
@@ -692,9 +697,10 @@ class ManipulateProcess
   include DRC
   include DRCT
 
-  def initialize(threshold:nil)
-    echo("Manipulate :#{threshold}") if $debug_mode
-    @threshold = threshold
+  def initialize(settings)
+    echo('New ManipulateProcess') if $debug_mode
+    @threshold = settings.manipulate_threshold(nil)
+
     @last_manip = Time.now - 200
   end
 
@@ -721,10 +727,11 @@ class TrainerProcess
   include DRC
   include DRCT
 
-  def initialize(training_abilities:{})
-    @training_abilities = training_abilities
+  def initialize(settings)
+    echo('New TrainerProcess') if $debug_mode
+    @training_abilities = settings.training_abilities({})
+
     @cooldown_timers = {}
-    echo("Trainer: #{@training_abilities}") if $debug_mode
   end
 
   def execute(game_state)
@@ -802,19 +809,20 @@ end
 class AttackProcess
   include DRC
 
-  def initialize(aim_fillers:[], aim_fillers_stealth:{}, charged_maneuvers:{}, dance_actions:[], dance_actions_stealth:[], fatigue_regen_threshold:90, fatigue_regen_action:'bob', dual_load:false, is_empath:false, backstab:nil, ambush:false, use_stealth_attacks:false)
-    @aim_fillers = aim_fillers
-    @aim_fillers_stealth = aim_fillers_stealth
-    @charged_maneuvers = charged_maneuvers
-    @dance_actions = dance_actions
-    @dance_actions_stealth = dance_actions_stealth
-    @fatigue_regen_threshold = fatigue_regen_threshold
-    @fatigue_regen_action = fatigue_regen_action
-    @dual_load = dual_load
-    @is_empath = is_empath
-    @backstab = backstab
-    @ambush = ambush
-    @use_stealth_attacks = use_stealth_attacks
+  def initialize(settings)
+    echo('New AttackProcess') if $debug_mode
+    @aim_fillers = settings.aim_fillers([])
+    @aim_fillers_stealth = settings.aim_fillers_stealth({})
+    @charged_maneuvers = settings.charged_maneuvers({})
+    @dance_actions = settings.dance_actions([])
+    @dance_actions_stealth = settings.dance_actions_stealth([])
+    @fatigue_regen_threshold = settings.fatigue_regen_threshold(90)
+    @fatigue_regen_action = settings.fatigue_regen_action('bob')
+    @dual_load = settings.dual_load(false)
+    @is_empath = settings.is_empath(false) && !settings.construct(false)
+    @backstab = settings.backstab(nil)
+    @ambush = settings.ambush(false)
+    @use_stealth_attacks = settings.use_stealth_attacks(false)
 
     @action_queue = []
     @dance_queue = []
@@ -1091,49 +1099,18 @@ class CombatTrainer
     }
     $debug_mode |= UserVars.combat_trainer_debug
     @combat_processes = make_processes(settings)
-    $target_increment = settings.combat_trainer_target_increment(3)
-    $action_count = settings.combat_trainer_action_count(10)
   end
 
   def make_processes(settings)
-    # TODO: pass all these through as one object
-    skin = settings.skinning['skin']
-    arrange_all = settings.skinning['arrange_all']
-    arrange_count = settings.skinning['arrange_count']
-    arrange_types = settings.skinning['arrange_types']
-    tie_bundle = settings.skinning['tie_bundle']
-    necro = settings.thanatology({})['necro']
-    ritual_type = settings.thanatology({})['ritual_type']
-    summoned_weapons = settings.summoned_weapons([])
-    summoned_weapons_element = settings.summoned_weapons_element(nil)
-
     [
-      SetupProcess.new(dance_threshold: settings.dance_threshold, dance_skill: settings.dance_skill, stances: settings.stances, weapon_training: settings.weapon_training({}), retreat_threshold: settings.retreat_threshold, summoned_weapons: summoned_weapons, summoned_weapons_element: summoned_weapons_element),
-      SpellProcess.new(buffs: settings.buff_spells({}), ospells: settings.offensive_spells([]), camb: settings.cambrinth, casts: settings.cast_messages, preps: settings.prep_messages, is_empath: settings.is_empath, empath_spells: settings.empath_healing),
-      AbilityProcess.new(buffs: settings.buff_nonspells({}), kneel_khri: settings.kneel_khri(false), khri_preps: settings.khri_preps),
-      LootProcess.new(
-        skin: skin,
-        arrange_all: arrange_all,
-        arrange_count: arrange_count,
-        lootables: settings.lootables,
-        tie_bundle: tie_bundle,
-        arrange_types: arrange_types,
-        ritual_type: ritual_type,
-        necro: necro),
+      SetupProcess.new(settings),
+      SpellProcess.new(settings),
+      AbilityProcess.new(settings),
+      LootProcess.new(settings),
       SafetyProcess.new,
-      ManipulateProcess.new(threshold: settings.manipulate_threshold(nil)),
-      TrainerProcess.new(training_abilities: settings.training_abilities({})),
-      AttackProcess.new(
-        aim_fillers: settings.aim_fillers, aim_fillers_stealth: settings.aim_fillers_stealth({}),
-        charged_maneuvers: settings.charged_maneuvers({}),
-        dance_actions: settings.dance_actions, dance_actions_stealth: settings.dance_actions_stealth([]),
-        fatigue_regen_threshold: settings.fatigue_regen_threshold, fatigue_regen_action: settings.fatigue_regen_action,
-        dual_load: settings.dual_load(false),
-        is_empath: settings.is_empath(false) && !settings.construct,
-        backstab: settings.backstab(nil),
-        ambush: settings.ambush(false),
-        use_stealth_attacks: settings.use_stealth_attacks(false)
-      )
+      ManipulateProcess.new(settings),
+      TrainerProcess.new(settings),
+      AttackProcess.new(settings)
     ]
   end
 

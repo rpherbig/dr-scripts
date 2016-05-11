@@ -39,8 +39,9 @@ class SetupProcess
   end
 
   def execute(game_state)
-    return true if game_state.clean_up == 'done'
-    if game_state.clean_up == 'stow'
+    return true if game_state.clean_up_done?
+    if game_state.clean_up_stow?
+      echo('SetupProcess::clean_up') if $debug_mode
       retreat
       skill = game_state.weapon_skill
       if summoned_info(skill)
@@ -53,7 +54,7 @@ class SetupProcess
       else
         EquipmentManager.instance.stow_weapon(@weapon_training[skill])
       end
-      game_state.clean_up = 'done'
+      game_state.next_clean_up
       return true
     end
     game_state.dancing = should_dance?
@@ -230,10 +231,11 @@ class LootProcess
     game_state.mob_died = false
     dispose_body(game_state)
     stow_lootables
-    if (game_state.mob_died || DRRoom.npcs.empty?) && game_state.clean_up == 'kill'
-      game_state.clean_up = 'clear_magic'
+    if (game_state.mob_died || DRRoom.npcs.empty?) && game_state.clean_up_kill?
+      echo('LootProcess::clean_up') if $debug_mode
+      game_state.next_clean_up
     end
-    return true if %w(clear_magic stow).include?(game_state.clean_up)
+    return true if game_state.clean_up_clear_magic? || game_state.clean_up_stow?
     false
   end
 
@@ -449,7 +451,7 @@ class SpellProcess
   end
 
   def execute(game_state)
-    return true if game_state.clean_up == 'stow'
+    return true if game_state.clean_up_stow?
     check_timer(game_state)
     if Flags['ct-spelllost']
       game_state.casting = false
@@ -465,8 +467,9 @@ class SpellProcess
     end
     check_offensive(game_state.dancing, game_state) unless game_state.casting || DRRoom.npcs.empty?
     check_current(game_state) if game_state.casting
-    if game_state.clean_up == 'clear_magic' && !game_state.casting
-      game_state.clean_up = 'stow'
+    if game_state.clean_up_clear_magic? && !game_state.casting
+      echo('SpellProcess::clean_up') if $debug_mode
+      game_state.next_clean_up
       fput('release dalu') if DRSpells.active_spells['Damaris\' Lullaby']
       return true
     end
@@ -839,8 +842,9 @@ class AttackProcess
       @no_stab_current_mob = false
     end
     if game_state.dancing
-      if game_state.clean_up == 'kill'
-        game_state.clean_up = 'clear_magic'
+      if game_state.clean_up_kill?
+        echo('AttackProcess::clean_up') if $debug_mode
+        game_state.next_clean_up
       else
         dance
       end
@@ -1111,18 +1115,19 @@ class CombatTrainer
         break if process.execute(@game_state)
       end
       pause 0.1
-      if @game_state.clean_up == 'done'
+      if @game_state.clean_up_done?
+        echo('CombatTrainer::clean_up') if $debug_mode
         @running = false
         stop_script('tendme') if Script.running?('tendme')
         break
       end
-      @game_state.clean_up = 'kill' if @stop && !@game_state.clean_up
+      @game_state.next_clean_up if @stop && @game_state.clean_up_none?
     end
   end
 end
 
 class GameState
-  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_skill, :weapon_name, :target_weapon_skill, :danger, :parrying, :clean_up, :casting
+  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_skill, :weapon_name, :target_weapon_skill, :danger, :parrying, :casting
 
   def initialize
     @dancing = false
@@ -1136,9 +1141,48 @@ class GameState
     @target_weapon_skill = -1
     @danger = false
     @parrying = false
-    @clean_up = nil
     @casting = false
+
+    # private
+    @clean_up = nil
   end
+
+  def next_clean_up
+    case @clean_up
+    when nil
+      @clean_up = 'kill'
+    when 'kill'
+      @clean_up = 'clear_magic'
+    when 'clear_magic'
+      @clean_up = 'stow'
+    when 'stow'
+      @clean_up = 'done'
+    end
+  end
+
+  def clean_up_none?
+    @clean_up.nil?
+  end
+
+  def clean_up_kill?
+    @clean_up == 'kill'
+  end
+
+  def clean_up_clear_magic?
+    @clean_up == 'clear_magic'
+  end
+
+  def clean_up_stow?
+    @clean_up == 'stow'
+  end
+
+  def clean_up_done?
+    @clean_up == 'done'
+  end
+
+  private
+
+  attr_accessor :clean_up
 end
 
 $COMBAT_TRAINER = CombatTrainer.new(args: variable.drop(1))

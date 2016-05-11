@@ -428,7 +428,6 @@ class SpellProcess
       raise(ArgumentError, 'Must provide casting/prep messages to use spells')
     end
 
-    @prep_spell = false
     @charges = nil
     @previous_skill = nil
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
@@ -451,23 +450,22 @@ class SpellProcess
 
   def execute(game_state)
     return true if game_state.clean_up == 'stow'
-    check_timer
+    check_timer(game_state)
     if Flags['ct-spelllost']
-      @prep_spell = false
+      game_state.casting = false
       Flags.reset('ct-spelllost')
     end
     @offensive_spells.select { |spell| spell['expire'] }.each { |spell| Flags["ct-#{spell['name']}"] = true } if game_state.mob_died
-    unless @prep_spell
+    unless game_state.casting
       bless_thrown(game_state.weapon_skill)
       ignite_weapon(game_state.weapon_skill)
-      check_health if @is_empath
-      check_buffs
+      check_health(game_state) if @is_empath
+      check_buffs(game_state)
       @previous_skill = game_state.weapon_skill
     end
-    check_offensive(game_state.dancing) unless @prep_spell || DRRoom.npcs.empty?
-    check_current if @prep_spell
-    game_state.casting = @prep_spell
-    if game_state.clean_up == 'clear_magic' && !@prep_spell
+    check_offensive(game_state.dancing, game_state) unless game_state.casting || DRRoom.npcs.empty?
+    check_current(game_state) if game_state.casting
+    if game_state.clean_up == 'clear_magic' && !game_state.casting
       game_state.clean_up = 'stow'
       fput('release dalu') if DRSpells.active_spells['Damaris\' Lullaby']
       return true
@@ -478,11 +476,11 @@ class SpellProcess
 
   private
 
-  def check_timer
+  def check_timer(game_state)
     return if @cast_timer.nil? || (Time.now - @cast_timer) <= 60
 
     @cast_timer = nil
-    @prep_spell = false
+    game_state.casting = false
     fput('release spell')
   end
 
@@ -520,19 +518,19 @@ class SpellProcess
     true
   end
 
-  def check_current
+  def check_current(game_state)
     return if charge_cambrinth
-    cast if Flags['ct-spellcast']
+    cast(game_state) if Flags['ct-spellcast']
   end
 
-  def cast
+  def cast(game_state)
     case bput(@custom_cast || 'cast', *([@casts] + [/^Your target pattern dissipates/, /^You can't cast that at yourself/]))
     when /^Your target pattern dissipates/, /^You can't cast that at yourself/
       fput('release spell')
     end
     @custom_cast = nil
 
-    @prep_spell = nil
+    game_state.casting = false
     @cast_timer = nil
     if @casting_moonblade
       @last_moonblade_cast = Time.now
@@ -549,7 +547,7 @@ class SpellProcess
     @after = nil
   end
 
-  def check_buffs
+  def check_buffs(game_state)
     return if checkmana < 30
     recastable_buffs = @buff_spells
                        .select { |_, data| data['recast'] || data['recast_every'] }
@@ -567,28 +565,28 @@ class SpellProcess
     end
     echo("found buff missing: #{name}") if $debug_mode && name
     data['name'] = name
-    prepare_spell(data)
+    prepare_spell(data, game_state)
   end
 
-  def check_health
+  def check_health(game_state)
     return if checkhealth > 91
     echo('Healing') if $debug_mode
     data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
-    prepare_spell(data)
+    prepare_spell(data, game_state)
   end
 
-  def check_offensive(dancing)
+  def check_offensive(dancing, game_state)
     return if checkmana < 40
     data = @offensive_spells
            .select { |spell| spell['expire'] ? Flags["ct-#{spell['name']}"] : true }
            .select { |spell| dancing ? spell['harmless'] : true }
            .min_by { |spell| DRSkill.getxp(spell['skill']).to_i }
     return if DRSkill.getxp(data['skill']).to_i >= 34 && checkmana < 70 # make this a spell option
-    prepare_spell(data)
+    prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
   end
 
-  def prepare_spell(data)
+  def prepare_spell(data, game_state)
     return unless data
     @cast_timer = Time.now
     echo("prepare spell: #{data}") if $debug_mode
@@ -637,7 +635,7 @@ class SpellProcess
       end
     end
     bput("#{command} #{data['abbrev']} #{data['mana']}", *(@preps + ['You are already preparing']))
-    @prep_spell = true
+    game_state.casting = true
     @charges = data['cambrinth'].dup if data['cambrinth']
     @custom_cast = data['cast']
     @after = data['after']
@@ -1139,7 +1137,7 @@ class GameState
     @danger = false
     @parrying = false
     @clean_up = nil
-    @casting = nil
+    @casting = false
   end
 end
 

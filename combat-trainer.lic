@@ -12,7 +12,6 @@ pause 0.05
 
 $thrown_skills = ['Heavy Thrown', 'Light Thrown']
 $aim_skills = %w(Bow Slings Crossbow)
-$ranged_skills = $thrown_skills + $aim_skills
 EquipmentManager.instance.refresh
 
 class SetupProcess
@@ -22,19 +21,8 @@ class SetupProcess
 
   def initialize(settings)
     echo('New SetupProcess') if $debug_mode
-    @dance_threshold = settings.dance_threshold(0)
-    @dance_skill = settings.dance_skill(nil)
-    @stances = settings.stances([])
     @weapon_training = settings.weapon_training({})
-    @retreat_threshold = settings.retreat_threshold(nil)
-    @summoned_weapons = settings.summoned_weapons([])
     @summoned_weapons_element = settings.summoned_weapons_element(nil)
-    @target_increment = settings.combat_trainer_target_increment(3)
-    @target_action_count = settings.combat_trainer_action_count(10)
-  end
-
-  def summoned_info(weapon_skill)
-    @summoned_weapons.find { |summoned_skill| summoned_skill['name'] == weapon_skill }
   end
 
   def execute(game_state)
@@ -42,7 +30,7 @@ class SetupProcess
     if game_state.stowing?
       echo('SetupProcess::clean_up') if $debug_mode
       retreat
-      if summoned_info(game_state.weapon_skill)
+      if game_state.summoned_info(game_state.weapon_skill)
         if DRStats.moon_mage?
           bput('wear moon', 'telekinetic')
         else
@@ -55,12 +43,11 @@ class SetupProcess
       game_state.next_clean_up_step
       return true
     end
-    game_state.dancing = should_dance?
-    game_state.now_retreating = should_retreat?
+    game_state.update_room_npcs(DRRoom.npcs.length)
     if game_state.dancing
-      dance(game_state)
+      game_state.dance(@weapon_training)
     elsif game_state.now_retreating
-      determine_next_to_train(game_state, retreat_weapons(@weapon_training))
+      determine_next_to_train(game_state, game_state.retreat_weapons(@weapon_training))
       game_state.was_retreating = true
     else
       determine_next_to_train(game_state, @weapon_training)
@@ -75,55 +62,27 @@ class SetupProcess
       check_stance(game_state)
     end
 
-    game_state.new_weapon_skill(game_state.weapon_skill)
+    game_state.update_weapon_skill(game_state.weapon_skill)
     false
   end
 
   private
 
-  def dance(game_state)
-    game_state.new_weapon_skill(@dance_skill)
-    game_state.weapon_name = @weapon_training[@dance_skill]
-  end
-
-  def retreat_weapons(weapon_training)
-    weapon_training.each_with_object({}) { |info, obj| obj[info.first] = info.last if $ranged_skills.include?(info.first) }
-  end
-
-  def skill_done?(game_state)
-    game_state.action_count >= @target_action_count || DRSkill.getxp(game_state.weapon_skill).to_i >= game_state.target_weapon_skill
-  end
-
-  def ending_ranged?(game_state)
-    game_state.was_retreating && !game_state.now_retreating
-  end
-
   def determine_next_to_train(game_state, weapon_training)
-    return unless skill_done?(game_state) || !weapon_training[game_state.weapon_skill] || ending_ranged?(game_state)
+    return unless game_state.skill_done?(DRSkill.getxp(game_state.weapon_skill).to_i) || !weapon_training[game_state.weapon_skill] || game_state.ending_ranged?
 
     echo('new skill needed for training') if $debug_mode
-    echo("action count: #{game_state.action_count} vs #{@target_action_count}") if $debug_mode
-    echo("skill ranks: #{DRSkill.getxp(game_state.weapon_skill).to_i} vs #{game_state.target_weapon_skill}") if $debug_mode
 
     game_state.action_count = 0
 
     if DRStats.moon_mage? && moon_used_to_summon_weapon.nil?
       echo('skipping summoned weapons because no moonblade available') if $debug_mode
-      weapon_training = weapon_training.reject { |key, _| summoned_info(key) }
+      weapon_training = weapon_training.reject { |skill, _| game_state.summoned_info(skill) }
     end
     new_weapon_skill, game_state.weapon_name = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill).to_i, DRSkill.getrank(skill).to_i] }
-    game_state.new_weapon_skill(new_weapon_skill)
+    game_state.update_weapon_skill(new_weapon_skill)
 
-    game_state.target_weapon_skill = [34, DRSkill.getxp(game_state.weapon_skill).to_i + @target_increment].min
-  end
-
-  def should_dance?
-    DRRoom.npcs.length <= @dance_threshold || DRRoom.npcs.empty?
-  end
-
-  def should_retreat?
-    return false unless @retreat_threshold
-    DRRoom.npcs.length >= @retreat_threshold
+    game_state.update_target_weapon_skill(DRSkill.getxp(game_state.weapon_skill).to_i)
   end
 
   def last_stance
@@ -141,10 +100,10 @@ class SetupProcess
     previous = last_stance
     points = override || previous.values.inject(&:+)
 
-    priority = if @stances[game_state.weapon_skill].nil?
+    priority = if game_state.current_weapon_stance.nil?
                  ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| DRSkill.getxp(skill).to_i }
                else
-                 @stances[game_state.weapon_skill]
+                 game_state.current_weapon_stance
                end
 
     game_state.parrying = priority.index('Parry Ability') < 2
@@ -165,8 +124,8 @@ class SetupProcess
 
     echo("checking weapons as #{game_state.last_weapon_skill.inspect}!=#{game_state.weapon_skill}") if $debug_mode
 
-    last_summoned = summoned_info(game_state.last_weapon_skill)
-    next_summoned = summoned_info(game_state.weapon_skill)
+    last_summoned = game_state.summoned_info(game_state.last_weapon_skill)
+    next_summoned = game_state.summoned_info(game_state.weapon_skill)
 
     # Clean up the previous weapon
     if !last_summoned
@@ -263,7 +222,7 @@ class LootProcess
 
   # partially completed, only works for a single ritual.
   def check_thanatology(mob_noun, ritual, game_state)
-    return if game_state.constructs.include?(mob_noun)
+    return if game_state.construct?(mob_noun)
 
     perform_message = "perform #{ritual} on #{mob_noun}"
     case bput(perform_message, 'Rituals do not work upon constructs', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
@@ -274,7 +233,7 @@ class LootProcess
       fput 'drop material'
       return
     when 'Rituals do not work upon constructs'
-      game_state.constructs.push(mob_noun)
+      game_state.construct(mob_noun)
       return
     end
     waitrt?
@@ -288,7 +247,7 @@ class LootProcess
 
   def arrange_mob(mob_noun, game_state)
     return unless @arrange_count > 0
-    return if game_state.no_skins.include?(mob_noun)
+    return unless game_state.skinnable?(mob_noun)
 
     arranges = 0
     type = @arrange_types[mob_noun] || 'skin'
@@ -299,8 +258,8 @@ class LootProcess
       when 'You complete arranging', 'That has already been arranged'
         break
       when 'Arrange what', 'cannot be skinned'
-        echo("adding #{mob_noun} to no skin list: #{game_state.no_skins}") if $debug_mode
-        game_state.no_skins.push(mob_noun)
+        # echo("adding #{mob_noun} to no skin list: #{game_state.no_skins}") if $debug_mode
+        game_state.unskinnable(mob_noun)
         return
       when 'That creature cannot'
         arranges = 0
@@ -311,7 +270,7 @@ class LootProcess
   end
 
   def check_skinning(mob_noun, game_state)
-    return if game_state.no_skins.include?(mob_noun)
+    return unless game_state.skinnable?(mob_noun)
 
     pause 0.25
     waitrt?
@@ -337,8 +296,8 @@ class LootProcess
       fput 'drop skin'
       fput 'skin'
     when 'cannot be skinned'
-      echo("adding #{mob_noun} to no skin list: #{game_state.no_skins}") if $debug_mode
-      game_state.no_skins.push(mob_noun)
+      # echo("adding #{mob_noun} to no skin list: #{game_state.no_skins}") if $debug_mode
+      game_state.unskinnable(mob_noun)
       return
     end
     pause 1
@@ -448,11 +407,11 @@ class SpellProcess
     unless game_state.casting
       bless_thrown(game_state)
       ignite_weapon(game_state)
-      check_health(game_state) if @is_empath
+      check_health(game_state)
       check_buffs(game_state)
     end
-    check_offensive(game_state.dancing, game_state) unless game_state.casting || DRRoom.npcs.empty?
-    check_current(game_state) if game_state.casting
+    check_offensive(game_state)
+    check_current(game_state)
     if game_state.finish_spell_casting? && !game_state.casting
       echo('SpellProcess::clean_up') if $debug_mode
       game_state.next_clean_up_step
@@ -493,7 +452,7 @@ class SpellProcess
     bput("cast #{checkright}", 'Tendrils of flame dart along your hand', 'The flames dancing along your fingertips', 'Currently lacking the skill', 'You don\'t think you can manage to ignite')
   end
 
-  def charge_cambrinth(game_state)
+  def charge_cambrinth?(game_state)
     return false unless game_state.charges
     echo("charge_camb: #{game_state.charges}") if $debug_mode
 
@@ -508,7 +467,9 @@ class SpellProcess
   end
 
   def check_current(game_state)
-    return if charge_cambrinth(game_state)
+    return unless game_state.casting
+    return if charge_cambrinth?(game_state)
+
     cast(game_state) if Flags['ct-spellcast']
   end
 
@@ -558,17 +519,21 @@ class SpellProcess
   end
 
   def check_health(game_state)
+    return unless @is_empath
     return if checkhealth > 91
+
     echo('Healing') if $debug_mode
     data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
     prepare_spell(data, game_state)
   end
 
-  def check_offensive(dancing, game_state)
+  def check_offensive(game_state)
+    return if game_state.casting
+    return if DRRoom.npcs.empty?
     return if checkmana < 40
     data = @offensive_spells
            .select { |spell| spell['expire'] ? Flags["ct-#{spell['name']}"] : true }
-           .select { |spell| dancing ? spell['harmless'] : true }
+           .select { |spell| game_state.dancing ? spell['harmless'] : true }
            .min_by { |spell| DRSkill.getxp(spell['skill']).to_i }
     return if DRSkill.getxp(data['skill']).to_i >= 34 && checkmana < 70 # make this a spell option
     prepare_spell(data, game_state)
@@ -806,7 +771,7 @@ class AttackProcess
   end
 
   def execute(game_state)
-    if DRRoom.npcs.uniq.length == 1 && game_state.no_stab_mobs.include?(DRRoom.npcs.uniq.first)
+    if DRRoom.npcs.uniq.length == 1 && !game_state.stabbable?(DRRoom.npcs.uniq.first)
       game_state.no_stab_current_mob = true
     elsif game_state.mob_died && game_state.no_stab_current_mob
       game_state.no_stab_current_mob = false
@@ -877,7 +842,7 @@ class AttackProcess
 
     if reget(5, 'You can\'t backstab that')
       if DRRoom.npcs.uniq.length == 1
-        game_state.no_stab_mobs.push(DRRoom.npcs.first)
+        game_state.unstabbable(DRRoom.npcs.first)
       else
         game_state.no_stab_current_mob = true
       end
@@ -1058,7 +1023,7 @@ class CombatTrainer
 
     @stop = false
     @running = true
-    @game_state = GameState.new
+    @game_state = GameState.new(settings)
     $debug_mode |= UserVars.combat_trainer_debug
     @combat_processes = make_processes(settings)
   end
@@ -1095,28 +1060,25 @@ class CombatTrainer
 end
 
 class GameState
-  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_name, :target_weapon_skill, :danger, :parrying, :casting, :no_skins, :too_many, :constructs, :need_bundle, :cooldown_timers, :action_queue, :dance_queue, :no_stab_mobs, :no_stab_current_mob, :loaded, :selected_maneuver, :charges, :last_moonblade_cast, :cast_timer, :casting_moonblade
+  $ranged_skills = $thrown_skills + $aim_skills
 
-  def initialize
+  attr_accessor :dancing, :now_retreating, :was_retreating, :mob_died, :action_count, :last_weapon_skill, :weapon_name, :danger, :parrying, :casting, :too_many, :need_bundle, :cooldown_timers, :action_queue, :dance_queue, :no_stab_current_mob, :loaded, :selected_maneuver, :charges, :last_moonblade_cast, :cast_timer, :casting_moonblade
+
+  def initialize(settings)
     @dancing = false
     @now_retreating = false
     @was_retreating = false
     @mob_died = false
-    @target_action_count = 0
     @last_weapon_skill = nil
     @weapon_name = nil
-    @target_weapon_skill = -1
     @danger = false
     @parrying = false
     @casting = false
-    @no_skins = []
     @too_many = []
-    @constructs = []
     @need_bundle = true
     @cooldown_timers = {}
     @action_queue = []
     @dance_queue = []
-    @no_stab_mobs = []
     @no_stab_current_mob = false
     @loaded = false
     @selected_maneuver = ''
@@ -1127,7 +1089,17 @@ class GameState
 
     # private
     @clean_up_step = nil
-    @weapon_skill = nil
+    @target_weapon_skill = -1
+    @no_skins = []
+    @constructs = []
+    @no_stab_mobs = []
+    @dance_skill = settings.dance_skill(nil)
+    @target_action_count = settings.combat_trainer_action_count(10)
+    @dance_threshold = settings.dance_threshold(0)
+    @retreat_threshold = settings.retreat_threshold(nil)
+    @summoned_weapons = settings.summoned_weapons([])
+    @target_increment = settings.combat_trainer_target_increment(3)
+    @stances = settings.stances([])
   end
 
   def next_clean_up_step
@@ -1163,7 +1135,7 @@ class GameState
     @clean_up_step == 'done'
   end
 
-  def new_weapon_skill(skill)
+  def update_weapon_skill(skill)
     @last_weapon_skill = @current_weapon_skill
     @current_weapon_skill = skill
   end
@@ -1176,9 +1148,71 @@ class GameState
     @last_weapon_skill != @current_weapon_skill
   end
 
+  def dance(weapon_training)
+    update_weapon_skill(@dance_skill)
+    @weapon_name = weapon_training[@dance_skill]
+  end
+
+  def skill_done?(exp)
+    echo("action count: #{@action_count} vs #{@target_action_count}") if $debug_mode
+    echo("skill ranks: #{exp} vs #{@target_weapon_skill}") if $debug_mode
+
+    @action_count >= @target_action_count || exp >= @target_weapon_skill
+  end
+
+  def ending_ranged?
+    @was_retreating && !@now_retreating
+  end
+
+  def update_room_npcs(npc_count)
+    @dancing = npc_count <= @dance_threshold || npc_count == 0
+    @now_retreating = @retreat_threshold && npc_count >= @retreat_threshold
+  end
+
+  def retreat_weapons(weapon_training)
+    weapon_training.select { |skill, _| $ranged_skills.include?(skill) }
+  end
+
+  def summoned_info(weapon_skill)
+    @summoned_weapons.find { |summoned_skill| summoned_skill['name'] == weapon_skill }
+  end
+
+  def update_target_weapon_skill(current_exp)
+    @target_weapon_skill = [34, current_exp + @target_increment].min
+  end
+
+  def current_weapon_stance
+    @stances[@current_weapon_skill]
+  end
+
+  def skinnable?(mob_noun)
+    !@no_skins.include?(mob_noun)
+  end
+
+  def unskinnable(mob_noun)
+    @no_skins.push(mob_noun)
+  end
+
+  def construct?(mob_noun)
+    @constructs.include?(mob_noun)
+  end
+
+  def construct(mob_noun)
+    @constructs.push(mob_noun)
+  end
+
+  def stabbable?(mob_noun)
+    !@no_stab_mobs.include?(mob_noun)
+  end
+
+  def unstabbable(mob_noun)
+    @no_stab_mobs.push(mob_noun)
+  end
+
   private
 
-  attr_accessor :clean_up_step, :current_weapon_skill
+  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances
 end
 
 $COMBAT_TRAINER = CombatTrainer.new(args: variable.drop(1))

@@ -6,68 +6,105 @@
   Mines until the room is empty, then uses 'prospect careful' and mines out the rest of the room.
 =end
 
-custom_require.call(%w(common equipmanager))
+custom_require.call(%w(common equipmanager common-travel))
 
 class Mine
   include DRC
+  include DRCT
 
   def initialize
     setup
 
-    # TODO: prospect and check quantity to determine how many times to mine
-    # 2-3 * quantity?
-
     bput("get my #{@mining_implement}", 'You get')
 
-    mine
-    bput('prospect careful', '') # todo
-    mine
+    bput('prospect', 'roundtime')
+
+    @multiplier = @mining_implement =~ /pick/i ? 3 : 4
+
+    mine(@multiplier*get_resource_level) unless get_resource_level == 0
+    while /roundtime/i =~ bput('prospect careful', 'Your analysis has revealed no additional resources to be unearthed here', 'roundtime')
+      waitrt?
+      bput('prospect', 'roundtime')
+      mine(@multiplier*get_resource_level)
+    end
   end
 
-  def mine
-    fput('mine')
+  def get_resource_level
+    case Flags['resource-level'].first
+    when 'certain a scattering of resources'
+      0
+    when 'enormous quantity remains to be found'
+      5
+    when 'substantial quantity remains to be found'
+      4
+    when 'good quantity remains to be found'
+      3
+    when 'decent quantity remains to be found'
+      2
+    when 'small quantity remains to be found'
+      1
+    end
+  end
 
+  def handle_danger
     fput('exit') if Flags['mine-exit']
-
     fix_standing
 
+    if checkbleeding
+      snapshot = Room.current.id
+      wait_for_script_to_complete('safe-room')
+      walk_to(snapshot)
+    end
+
     if Flags['mine-danger']
-      bput('prospect danger', 'find nothing of concern')
+      waitrt?
+      until /danger/ =~ bput('prospect danger', 'Unfortunately', 'shown a way to significantly reduce the danger')
+        pause
+        waitrt?
+      end
       Flags.reset('mine-danger')
     end
 
-    # TODO: I think this only tries to stow nouns, we may need an adjective too
+  end
+
+  def mine(count)
+    waitrt?
+    handle_danger
+
+    if count == 0
+      bput('prospect', 'roundtime')
+      mine(@multiplier*get_resource_level) unless get_resource_level == 0
+      return
+    end
+
+    bput('mine', 'roundtime')
+    waitrt?
+
     @loot_list.each do |item|
-      matches = DRRoom.room_objs.grep(/\b#{item}/)
-      matches.each do |_|
+      matches = DRRoom.room_objs.grep(/\b#{item}/i)
+      matches.each do |match|
         if @use_packet && packet?
-          bput("stow #{@mine_implement}", 'You put')
-          bput("get #{item}", 'You get')
-          bput("push my #{item} with my packet", 'You push')
-          bput('stow my deed', 'You put')
-          bput('stow my packet', 'You put') # TODO: What happens if that was your last deed in the packet?
-          bput("get my #{@mine_implement}", 'You get')
+          bput("push #{match.scan(/\w+/).last} with my packet", 'You push')
+          bput('stow my packet', 'You put', 'Stow what')
+          bput('stow deed', 'You put')
         else
           bput("stow #{item}", 'You put')
         end
       end
     end
+    mine(count - 1)
   end
 
   def packet?
-    case bput('get my packet', 'You get', 'What were you referring to')
-    when 'What were you referring to'
-      return false
-    end
-    true
+    'You get' == bput('get my packet', 'You get', 'What were you referring to')
   end
 
   def setup
     EquipmentManager.instance.empty_hands
-    # TODO: What is 'hazardous'?
-    Flags.add('mine-danger', 'The ground rumbles ominously', 'A bitter smell seeps into the air', 'The floor shudders briefly')
-    Flags.add('mine-stand', 'clear away enough rubble to lever yourself free', 'You probably would have better luck while standing', 'You peacefully awaken, feeling refreshed', 'The world slowly comes into focus again, followed swiftly by a throbbing headache')
+    Flags.add('mine-danger', 'The ground rumbles ominously', 'A bitter smell seeps into the air', 'The floor shudders briefly', 'continued mining .* hazardous', 'slightly dangerous because the ground')
+    # Flags.add('mine-stand', 'clear away enough rubble to lever yourself free', 'You probably would have better luck while standing', 'You peacefully awaken, feeling refreshed', 'The world slowly comes into focus again, followed swiftly by a throbbing headache')
     Flags.add('mine-exit', 'The entire wall of rock fractures at your blow and comes crashing down atop you')
+    Flags.add('resource-level', 'certain a scattering of resources', 'enormous quantity remains to be found','substantial quantity remains to be found', 'good quantity remains to be found', 'decent quantity remains to be found','small quantity remains to be found')
 
     settings = get_settings
     @mining_implement = settings.mine_implement('shovel')

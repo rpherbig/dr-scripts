@@ -15,9 +15,9 @@ class TestValidYaml < Minitest::Test
     base = YAML.load_file('./profiles/base.yaml').keys
 
     nonbase = Dir.glob('./profiles/*.yaml')
-                 .delete_if { |item| item == '.' }
-                 .delete_if { |item| item == '..' }
-                 .delete_if { |item| item.include?('base') }
+                 .reject { |item| item == '.' }
+                 .reject { |item| item == '..' }
+                 .reject { |item| item.include?('base') }
                  .map { |item| YAML.load_file(item) }
                  .each_with_object({}) { |item, obj| obj.merge!(item) }
                  .keys

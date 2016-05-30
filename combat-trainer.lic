@@ -74,7 +74,7 @@ class SetupProcess
 
     echo('new skill needed for training') if $debug_mode_ct
 
-    game_state.action_count = 0
+    game_state.reset_action_count
 
     if DRStats.moon_mage? && moon_used_to_summon_weapon.nil?
       echo('skipping summoned weapons because no moonblade available') if $debug_mode_ct
@@ -826,17 +826,11 @@ class AttackProcess
     @aim_fillers_stealth = settings.aim_fillers_stealth({})
     echo("  @aim_fillers_stealth: #{@aim_fillers_stealth}") if $debug_mode_ct
 
-    @charged_maneuvers = settings.charged_maneuvers({})
-    echo("  @charged_maneuvers: #{@charged_maneuvers}") if $debug_mode_ct
-
     @dance_actions = settings.dance_actions([])
     echo("  @dance_actions: #{@dance_actions}") if $debug_mode_ct
 
     @dance_actions_stealth = settings.dance_actions_stealth([])
     echo("  @dance_actions_stealth: #{@dance_actions_stealth}") if $debug_mode_ct
-
-    @fatigue_regen_threshold = settings.fatigue_regen_threshold(90)
-    echo("  @fatigue_regen_threshold: #{@fatigue_regen_threshold}") if $debug_mode_ct
 
     @fatigue_regen_action = settings.fatigue_regen_action('bob')
     echo("  @fatigue_regen_action: #{@fatigue_regen_action}") if $debug_mode_ct
@@ -866,16 +860,14 @@ class AttackProcess
       return false
     end
 
-    if fatigue_low?
-      echo("***Fatigue: #{DRStats.fatigue}***") if $debug_mode_ct
-      echo("***Target: #{@fatigue_regen_threshold}***") if $debug_mode_ct
+    if game_state.fatigue_low?
       fput(@fatigue_regen_action)
       return false
     end
 
     return false if @is_empath
 
-    charged_maneuver = check_charged_maneuver(@charged_maneuvers[game_state.weapon_skill], game_state)
+    charged_maneuver = check_charged_maneuver(game_state)
 
     if game_state.thrown_skill?
       game_state.loaded = false
@@ -890,10 +882,6 @@ class AttackProcess
   end
 
   private
-
-  def fatigue_low?
-    DRStats.fatigue < @fatigue_regen_threshold
-  end
 
   def attack_melee(charged_maneuver, game_state)
     waitrt?
@@ -933,7 +921,7 @@ class AttackProcess
       fput('eng')
       pause 6
     else
-      game_state.action_count += 1
+      game_state.action_taken
     end
   end
 
@@ -949,7 +937,7 @@ class AttackProcess
       end
     end
     bput(retrieve_action, 'You are already holding', 'You pick up', 'You get', 'You catch')
-    game_state.action_count += 1
+    game_state.action_taken
   end
 
   def attack_aimed(charged_maneuver, game_state)
@@ -969,13 +957,13 @@ class AttackProcess
         case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', 'you fire', 'you poach', 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you poach if you are not hidden')
         when 'How can you poach if you are not hidden'
           fput('shoot')
-          game_state.action_count += 1
+          game_state.action_taken
         when 'you fire', 'you poach'
-          game_state.action_count += 1
+          game_state.action_taken
         end
       else
         use_charged_maneuver(game_state.selected_maneuver, game_state)
-        game_state.action_count += 1
+        game_state.action_taken
       end
       game_state.loaded = false
       waitrt?
@@ -1018,14 +1006,14 @@ class AttackProcess
     end
   end
 
-  def check_charged_maneuver(charged_maneuver, game_state)
-    return '' unless charged_maneuver
+  def check_charged_maneuver(game_state)
+    return '' unless game_state.charged_maneuver
 
-    timer = game_state.cooldown_timers[charged_maneuver]
+    timer = game_state.cooldown_timers[game_state.charged_maneuver]
     return '' if timer && (Time.now - timer).to_i < 60
 
-    echo "***Ready to use charged maneuver: #{charged_maneuver}***" if $debug_mode_ct
-    charged_maneuver
+    echo "***Ready to use charged maneuver: #{game_state.charged_maneuver}***" if $debug_mode_ct
+    game_state.charged_maneuver
   end
 
   def use_charged_maneuver(action, game_state)
@@ -1146,13 +1134,12 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :action_count, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :action_queue, :dance_queue, :no_stab_current_mob, :loaded, :selected_maneuver, :charges, :last_moonblade_cast, :cast_timer, :casting_moonblade, :stance_override
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :action_queue, :dance_queue, :no_stab_current_mob, :loaded, :selected_maneuver, :charges, :last_moonblade_cast, :cast_timer, :casting_moonblade, :stance_override
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
     # public
     @mob_died = false
-    @action_count = 0
     @last_weapon_skill = nil
     @danger = false
     @parrying = false
@@ -1180,6 +1167,7 @@ class GameState
     @current_weapon_name = nil
     @dancing = false
     @retreating = false
+    @action_count = 0
 
     @dance_skill = settings.dance_skill(nil)
     echo("  @dance_skill: #{@dance_skill}") if $debug_mode_ct
@@ -1213,6 +1201,12 @@ class GameState
 
     @backstab = settings.backstab(nil)
     echo("  @backstab: #{@backstab}") if $debug_mode_ct
+
+    @charged_maneuvers = settings.charged_maneuvers({})
+    echo("  @charged_maneuvers: #{@charged_maneuvers}") if $debug_mode_ct
+
+    @fatigue_regen_threshold = settings.fatigue_regen_threshold(90)
+    echo("  @fatigue_regen_threshold: #{@fatigue_regen_threshold}") if $debug_mode_ct
   end
 
   def next_clean_up_step
@@ -1373,10 +1367,28 @@ class GameState
     @retreating
   end
 
+  def charged_maneuver
+    @charged_maneuvers[@current_weapon_skill]
+  end
+
+  def fatigue_low?
+    echo("***Fatigue: #{DRStats.fatigue}***") if $debug_mode_ct
+    echo("***Target: #{@fatigue_regen_threshold}***") if $debug_mode_ct
+    DRStats.fatigue < @fatigue_regen_threshold
+  end
+  
+  def reset_action_count
+    @action_count = 0
+  end
+  
+  def action_taken
+    @action_count += 1
+  end
+
   private
 
-  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :current_weapon_name, :dancing, :retreating
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab
+  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :current_weapon_name, :dancing, :retreating, :action_count
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold
 end
 
 $COMBAT_TRAINER = CombatTrainer.new(args: variable.drop(1))

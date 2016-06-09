@@ -12,7 +12,6 @@ class WorkOrders
   include DRCT
 
   def initialize(args)
-    ensure_copper_on_hand(5000)
     work_order(args.first)
   end
 
@@ -45,14 +44,19 @@ class WorkOrders
       carve_items(info, item, quantity)
     end
 
+    complete_work_order(info)
+
+    repair_items(info, tools)
+  end
+
+  def complete_work_order(info)
+    stow_hands
     bput("get my #{info['logbook']} logbook", 'You get')
     loop do
       find_npc(info['npc-rooms'], info['npc_last_name'])
       break if 'You can' != bput("give log to #{info['npc']}", 'You hand', 'You can', 'Apparently the work order time limit has expired')
     end
     bput('stow logbook', 'You put')
-
-    repair_items(info, tools)
   end
 
   def get_tool(name)
@@ -106,6 +110,7 @@ class WorkOrders
   end
 
   def carve_items(info, item, quantity)
+    ensure_copper_on_hand(5000)
     recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
 
     quantity.times do |count|
@@ -130,7 +135,7 @@ class WorkOrders
             order_item(info['polish-room'], info['polish-number'])
           end
         end
-        empty_hands
+        stow_hands
         find_shaping_room
       end
 
@@ -144,13 +149,8 @@ class WorkOrders
     end
   end
 
-  def dispose(item, trash_room = nil)
-    walk_to(trash_room) unless trash_room.nil?
-    fput("get my #{item}")
-    dispose_trash(item.to_s)
-  end
-
   def shape_items(info, item, quantity)
+    ensure_copper_on_hand(5000)
     recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
 
     quantity.times do |count|
@@ -162,7 +162,6 @@ class WorkOrders
           pause 0.5 until Room.current.id
         end
         order_item(info['stock-room'], info['stock-number'])
-        empty_hands
         find_shaping_room
       end
 
@@ -176,29 +175,26 @@ class WorkOrders
     end
   end
 
-  def order_item(room, item_number)
-    walk_to(room)
-    fput("order #{item_number}")
-    fput("order #{item_number}")
-  end
-
   def combine_yarn
-    pause
-    if checkleft =~ /yarn/ && checkright =~ /yarn/
-      fput('combine yarn with yarn')
-    end
+    pause 1
+    # Ordinals break when containers are involved, so we cannot 'get first yarn' and 'get second yarn'
+    return if 'What were you' == bput("get yarn from #{@bag}", 'You get', 'What were you')
+    return if 'What were you' == bput("get yarn from #{@bag}", 'You get', 'What were you')
+    bput('combine yarn with yarn', 'You combine')
   end
 
   def order_yarn(stock_room, stock_needed, stock_number)
     return unless stock_needed > 0
 
-    stock_needed.times do |_|
+    stock_needed.times do |_count|
       order_item(stock_room, stock_number)
       combine_yarn
     end
+    stow_hands
   end
 
   def sew_items(info, item, quantity)
+    ensure_copper_on_hand(5000)
     recipe = @recipes.find { |r| r['name'] == item }
 
     existing = if 'What were' == bput('get yarn', 'What were', 'You get')
@@ -208,7 +204,6 @@ class WorkOrders
                end
     stock_needed = ((quantity * recipe['volume'] - existing) / 100.0).ceil
     order_yarn(info['stock-room'], stock_needed, info['stock-number'])
-    empty_hands
 
     find_sewing_room
 
@@ -218,53 +213,31 @@ class WorkOrders
   end
 
   def forge_items(info, item, quantity)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    recipe, = find_recipe(info, item, quantity)
 
-    if recipe['part']
-      walk_to info['part-room']
-      quantity.times do
-        recipe['part'].each do |part|
-          fput("buy #{part}")
-          bput("stow #{part}", 'You put')
-        end
-      end
+    quantity.times do
+      wait_for_script_to_complete('smith', ['bronze', item, 'buy'])
+
+      bundle_item(recipe['noun'], info)
     end
-
-    quantity.times do |count|
-      if count % items_per_stock == 0
-        if count > 0 && spare_stock
-          dispose(info['stock-name'], info['trash-room'])
-        end
-        order_item(info['stock-room'], info['stock-number'])
-        empty_hands
-      end
-      if 'You can' == bput("inv search #{info['finisher-full']}", '^You can', 'Your .* is in')
-        order_item(info['finisher-room'], info['finisher-number'])
-        empty_hands
-      end
-
-      find_anvil(8775)
-      args = ['log', info['pattern-book'], recipe['chapter'], item, 'bronze', recipe['noun']]
-      wait_for_script_to_complete('forge', args)
-    end
-
-    dispose(info['stock-name'], info['trash-room']) if scrap
   end
 
-  def empty_hands
-    pause 1
-    bput('stow right', 'You put') if checkright
-    bput('stow left', 'You put') if checkleft
+  def bundle_item(noun, info)
+    bput("get my #{info['logbook']} logbook", 'You get')
+    if /requires items of/ =~ bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality')
+      dispose(noun)
+    end
+    stow_hands
   end
 
   def request_work_order(npc_rooms, npc, npc_last_name, discipline, logbook)
+    stow_hands
     bput("get my #{logbook} logbook", 'You get')
 
     match_names = @recipes.map { |x| x['name'] }
 
     loop do
       find_npc(npc_rooms, npc_last_name)
-
       case bput("ask #{npc} for challenging #{discipline} work", '^To whom', 'order for .* I need \d+ of .* quality', 'You realize you have items bundled with the logbook', 'You want to ask about shadowlings')
       when 'You want to ask about shadowlings'
         pause 10

@@ -10,7 +10,7 @@ module Harness
   end
 
   def custom_require(*)
-    proc { |args| }
+    proc { |_args| }
   end
 
   def pause(*); end

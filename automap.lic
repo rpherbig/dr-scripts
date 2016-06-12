@@ -1,0 +1,73 @@
+class AutoMapperActions
+  @@actions = []
+  @@state = nil
+
+  def self.actions=(val)
+    @@actions = val
+  end
+
+  def self.actions
+    @@actions
+  end
+
+  def self.state=(val)
+    @@state = val
+  end
+
+  def self.state
+    @@state
+  end
+end
+
+action = proc do |client_string|
+  case client_string.strip
+  when '<c>start'
+    AutoMapperActions.state = 'run'
+    AutoMapperActions.actions = []
+    nil
+  when '<c>stop'
+    AutoMapperActions.state = 'stop'
+    nil
+  when '<c>abort'
+    AutoMapperActions.state = 'abort'
+    nil
+  else
+    AutoMapperActions.actions << client_string if AutoMapperActions.state == 'run'
+    client_string
+  end
+end
+UpstreamHook.remove('automapper')
+UpstreamHook.add('automapper', action)
+
+before_dying do
+  UpstreamHook.remove('automapper')
+end
+
+respond('Ready to start mapping, type start to begin recording')
+respond('type stop when finished, or abort to end mapping and reset all changes to the map db')
+wait_until { AutoMapperActions.state == 'run' }
+respond('Starting')
+
+def map_room(last_id, current_id, actions)
+  time_step = 0.2
+  Room[last_id].wayto ||= {}
+  Room[last_id].wayto["#{current_id}"] = actions.last.gsub(/\<c\>|\n/, '')
+  Room[last_id].timeto["#{current_id}"] = 0.2
+  current_id
+end
+
+last_id = Room.current_or_new.id
+last_count = XMLData.room_count
+loop do
+  break if %w(stop abort).include?(AutoMapperActions.state)
+  if AutoMapperActions.state == 'run'
+    wait_until { XMLData.room_count > last_count || AutoMapperActions.state != 'run' }
+    break if AutoMapperActions.state != 'run'
+    last_id = map_room(last_id, Room.current_or_new.id, AutoMapperActions.actions.dup)
+    last_count = XMLData.room_count
+    AutoMapperActions.actions = []
+  end
+  pause 0.1
+end
+
+Map.reload if AutoMapperActions.state == 'abort'

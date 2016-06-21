@@ -15,7 +15,7 @@ module Harness
 
   def pause(*); end
 
-  def parse_args(dummy, dumber)
+  def parse_args(_dummy, _dumber)
     args = OpenStruct.new
     args.flex = 'test'
     args

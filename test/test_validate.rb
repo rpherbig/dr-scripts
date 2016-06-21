@@ -16,7 +16,6 @@ class TestValidate < Minitest::Test
     $test_settings = OpenStruct.new(settings)
   end
 
-
   def test_parse_args
     setup_settings({})
     load('validate.lic')
@@ -32,26 +31,25 @@ class TestValidate < Minitest::Test
   end
 
   def test_gear_set_item_existence
-    setup_settings({"gear"=> [
+    setup_settings('gear' => [
+                     {
+                       adjective: 'chain', name: 'balaclava'
+                     },
         {
-          :adjective=> "chain", :name=> "balaclava",
+          adjective: 'mail', name: 'gloves'
         },
         {
-          :adjective=> "mail", :name=> "gloves",
-        },
-        {
-          :adjective=> "small", :name=> "shield",
+          adjective: 'small', name: 'shield'
         }
-      ],
-      "gear_sets"=> {
-        "standard"=> [
-          "chain balaclava",
-          "mail gloves",
-          "small shield",
-          "padded hauberk"
+                   ],
+                    'gear_sets' => {
+        'standard' => [
+          'chain balaclava',
+          'mail gloves',
+          'small shield',
+          'padded hauberk'
         ]
-      }
-    })
+      }})
 
     load('validate.lic')
 

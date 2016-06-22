@@ -49,10 +49,31 @@ class TestValidate < Minitest::Test
           'small shield',
           'padded hauberk'
         ]
-      }})
+      })
 
     load('validate.lic')
 
     assert $error_msgs.grep(/padded hauberk/), 'Expected warning for missing item'
   end
+
+  def test_weapon_training_item_existence
+    setup_settings('gear' => [
+                     {
+                       adjective: 'robe', name: 'sword'
+                     },
+                   ],
+                    'weapon_training' => {
+        'Large Edged' => 'robe sword',
+        'Twohanded Edged' => 'moonblade',
+        'Small Blunt' => 'missing item'
+      },
+      'summoned_weapons' => [{'name' => 'Twohanded Edged'}
+      ])
+
+    load('validate.lic')
+
+    assert $error_msgs.grep(/Small Blunt: missing item/), 'Expected warning for missing item'
+    assert $error_msgs.grep(/moonblade/).empty?, "Expected no warning for summoned gear, found #{$error_msgs.grep(/moonblade/)}"
+  end
+
 end

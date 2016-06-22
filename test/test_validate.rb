@@ -67,8 +67,7 @@ class TestValidate < Minitest::Test
                      'Twohanded Edged' => 'moonblade',
                      'Small Blunt' => 'missing item'
                    },
-                   'summoned_weapons' => [{ 'name' => 'Twohanded Edged' }
-      ])
+                   'summoned_weapons' => [{ 'name' => 'Twohanded Edged' }])
 
     load('validate.lic')
 

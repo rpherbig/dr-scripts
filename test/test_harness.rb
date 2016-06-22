@@ -15,9 +15,25 @@ module Harness
 
   def pause(*); end
 
+  def parse_args(_dummy, _dumber)
+    args = OpenStruct.new
+    args.flex = 'test'
+    args
+  end
+
+  def get_settings(dummy)
+    $settings_called_with = dummy
+    $test_settings
+  end
+
   def echo(message)
     print(message.to_s + "\n") if $audible
     displayed_messages << message
+    if message =~ /^WARNING:/
+      $warn_msgs << message
+    elsif message =~ /^ERROR:/
+      $error_msgs << message
+    end
   end
 
   def respond(message = '')

@@ -9,8 +9,6 @@
 
 custom_require.call(%w(common common-summoning common-travel drinfomon equipmanager events spellmonitor))
 
-EquipmentManager.instance.refresh
-
 class SetupProcess
   include DRC
   include DRCS
@@ -216,7 +214,7 @@ class LootProcess
 
   def stow_loot(item, game_state)
     Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into')
-    bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit')
+    bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours')
     pause 0.25
     return unless Flags['pouch-full']
     bput("drop my #{item}", 'You drop', 'What were')
@@ -237,7 +235,8 @@ class LootProcess
     tried_loot = false
     @lootables.each do |item|
       next unless game_state.lootable?(item)
-      matches = DRRoom.room_objs.grep(/\b#{item}$/)
+      item_reg = item.split.join('.*')
+      matches = DRRoom.room_objs.grep(/\b#{item_reg}$/)
       tried_loot ||= !matches.empty?
       matches.each { |_| stow_loot(item, game_state); }
     end
@@ -269,7 +268,10 @@ class LootProcess
     elsif @skin
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    bput('loot', 'You search', 'I could not find what you were referring to')
+    while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
+      pause
+      waitrt?
+    end
     pause 0.2 until DRRoom.dead_npcs.empty?
   end
 
@@ -327,7 +329,7 @@ class LootProcess
     pause 0.25
     waitrt?
     if game_state.need_bundle
-      case bput('tap bundle', 'You tap a \w+ bundle that you are wearing', 'I could not find what you were referring to')
+      case bput('tap my bundle', 'You tap a \w+ bundle that you are wearing', 'I could not find what you were referring to')
       when /lumpy/
         if @tie_bundle
           bput('tie bundle', 'TIE the bundle again')
@@ -451,7 +453,7 @@ class SpellProcess
     @preps = settings.prep_messages([])
     echo("  @preps: #{@preps}") if $debug_mode_ct
 
-    @is_empath = settings.is_empath(false)
+    @is_empath = settings.is_empath(false) || DRStats.empath?
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
     @empath_spells = settings.empath_healing({})
@@ -461,7 +463,7 @@ class SpellProcess
       raise(ArgumentError, 'Must provide casting/prep messages to use spells')
     end
 
-    @osrel_timer = settings.osrel_timer
+    @osrel_timer = Time.now - 1000
     echo("  @osrel_timer: #{settings.osrel_timer}") if $debug_mode_ct
 
     @osrel_amount = settings.osrel_amount
@@ -470,15 +472,13 @@ class SpellProcess
     @osrel_no_harness = settings.osrel_no_harness
     echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
 
-    @osrel_timer = Time.now - 1000
-
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     @offensive_spells
       .select { |spell| spell['expire'] }
-      .each { |spell| add_spell_flag(spell['name'], spell['expire']) }
+      .each { |spell| add_spell_flag(spell['abbrev'], spell['expire']) }
     @buff_spells
       .select { |_name, data| data['expire'] }
-      .each { |name, data| add_spell_flag(name, data['expire']) }
+      .each { |_name, data| add_spell_flag(data['abbrev'], data['expire']) }
   end
 
   def add_spell_flag(name, expire)
@@ -495,7 +495,7 @@ class SpellProcess
       Flags.reset('ct-spelllost')
     end
     check_osrel(game_state)
-    @offensive_spells.select { |spell| spell['expire'] }.each { |spell| Flags["ct-#{spell['name']}"] = true } if game_state.mob_died
+    @offensive_spells.select { |spell| spell['expire'] }.each { |spell| Flags["ct-#{spell['abbrev']}"] = true } if game_state.mob_died
     bless_thrown(game_state)
     ignite_weapon(game_state)
     check_health(game_state)
@@ -530,7 +530,7 @@ class SpellProcess
   end
 
   def check_timer(game_state)
-    return if game_state.cast_timer.nil? || (Time.now - game_state.cast_timer) <= 60
+    return if game_state.cast_timer.nil? || (Time.now - game_state.cast_timer) <= 70
 
     game_state.cast_timer = nil
     game_state.casting = false
@@ -586,7 +586,7 @@ class SpellProcess
 
   def check_current(game_state)
     return unless game_state.casting
-    return if check_charging?(game_state)
+    return if check_charging?(game_state) && check_charging?(game_state)
 
     cast(game_state) if Flags['ct-spellcast']
   end
@@ -632,7 +632,6 @@ class SpellProcess
       end
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
-    data['name'] = name
     prepare_spell(data, game_state)
   end
 
@@ -651,7 +650,7 @@ class SpellProcess
     return if game_state.npcs.empty?
     return if checkmana < 40
     data = @offensive_spells
-           .select { |spell| spell['expire'] ? Flags["ct-#{spell['name']}"] : true }
+           .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
            .select { |spell| game_state.dancing? ? spell['harmless'] : true }
            .min_by { |spell| DRSkill.getxp(spell['skill']) }
     return if DRSkill.getxp(data['skill']) >= 34 && checkmana < 70 # make this a spell option
@@ -673,18 +672,18 @@ class SpellProcess
     if data['moon']
       moon = UserVars.moons['visible'].first
       unless moon
-        echo "No moon available to cast #{data['abbrev']}"
+        echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
         unless Script.running? 'moonwatch'
           echo 'moonwatch is not running. Starting it now'
           custom_require.call('moonwatch')
           echo "Run `;e autostart('moonwatch')` to avoid this in the future"
         end
-        weather = bput('weather', 'inside', 'You glance up at the sky.')
-        if weather =~ /inside/
+        @weather = bput('weather', 'inside', 'You glance up at the sky.') unless @weather
+        if @weather =~ /inside/
           echo "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
         end
         unless moon = UserVars.moons['visible'].first
-          echo "Couldn't find any moons to cast #{data['abbrev']} with"
+          echo "Couldn't find any moons to cast #{data['abbrev']} with" if $debug_mode_ct
           return
         end
       end
@@ -709,7 +708,7 @@ class SpellProcess
     game_state.cambrinth_charges(data['cambrinth'])
     @custom_cast = data['cast']
     @after = data['after']
-    Flags.reset("ct-#{data['name']}") if data['expire']
+    Flags.reset("ct-#{data['abbrev']}") if data['expire']
     Flags.reset('ct-spellcast')
     @before = data['before']
   end
@@ -805,6 +804,12 @@ class TrainerProcess
     @training_abilities = settings.training_abilities({})
     echo("  @training_abilities: #{@training_abilities}") if $debug_mode_ct
 
+    @skill_map = { 'Hunt' => 'Perception', 'Pray' => 'Theurgy', 'PercMana' => 'Attunement',
+                   'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal',
+                   'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics',
+                   'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
+                   'Stealth' => 'Stealth' }
+
     @no_app = []
   end
 
@@ -883,9 +888,11 @@ class TrainerProcess
     if game_state.casting
       return false if ['PercMana', 'App Careful'].include?(name)
     end
-    expcheck = ability_info[:check].nil? || DRSkill.getxp(ability_info[:check]) < 32
+    check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
+    cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
+    expcheck = check.nil? || DRSkill.getxp(check) < 32
     return expcheck unless game_state.cooldown_timers[name]
-    Time.now - game_state.cooldown_timers[name] >= ability_info[:cooldown] ? expcheck : false
+    Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false
   end
 end
 
@@ -901,7 +908,7 @@ class AttackProcess
     @dual_load = settings.dual_load(false)
     echo("  @dual_load: #{@dual_load}") if $debug_mode_ct
 
-    @is_empath = settings.is_empath(false) && !settings.construct(false)
+    @is_empath = (settings.is_empath(false) || DRStats.empath?) && !settings.construct(false)
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
@@ -1145,8 +1152,8 @@ class CombatTrainer
 
     @stop = false
     @running = true
-    @game_state = GameState.new(settings)
     $debug_mode_ct = UserVars.combat_trainer_debug || settings.debug_mode
+    @game_state = GameState.new(settings)
     @combat_processes = make_processes(settings)
   end
 
@@ -1239,6 +1246,17 @@ class GameState
 
     @stances = settings.stances([])
     echo("  @stances: #{@stances}") if $debug_mode_ct
+
+    if @stances.find { |_key, stances| !(stances & %w(evasion parry shield)).empty? }
+      echo 'Please update to the latest version of stance: settings!'
+      @stances.keys do |key|
+        settings = @stances[key]
+        settings.map! { |x| { 'parry' => 'Parry Ability', 'shield' => 'Shield Usage', 'evasion' => 'Evasion' }[x] }
+        (['Parry Ability', 'Shield Usage', 'Evasion'] - settings).each { |x| settings << x }
+        @stances[key] = settings
+      end
+      echo "Modified stances: #{@stances}"
+    end
 
     @weapons_to_train = settings.weapon_training({})
     echo("  @weapons_to_train: #{@weapons_to_train}") if $debug_mode_ct

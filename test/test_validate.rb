@@ -74,4 +74,19 @@ class TestValidate < Minitest::Test
     assert $error_msgs.grep(/Small Blunt: missing item/), 'Expected warning for missing item'
     assert $error_msgs.grep(/moonblade/).empty?, "Expected no warning for summoned gear, found #{$error_msgs.grep(/moonblade/)}"
   end
+
+  def test_stop_on_weapon_skills_in_weapon_training
+    setup_settings('hunting_info' => [
+                     {
+                       'stop_on' => [
+                        'Brawling'
+                       ]
+                     }
+                   ],
+                   'weapon_training' => {})
+
+    load('validate.lic')
+
+    assert $error_msgs.grep(/stop_on: weapon skill Brawling not in weapon_training: setting/), 'Expected warning for missing skill'
+  end
 end

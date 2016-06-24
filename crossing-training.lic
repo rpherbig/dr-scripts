@@ -743,21 +743,52 @@ class CrossingTraining
     hide_in 992
   end
 
+  def thievery_is_appropriate(data, skill, lower, upper = nil)
+    return true if data[lower].nil?
+    if upper
+      skill >= data[lower] && (data[upper].nil || skill < data[upper])
+    else
+      skill >= data[lower]
+    end
+  end
+
   def train_thievery
     start_script('jail-buddy') unless Script.running?('jail-buddy')
 
     EquipmentManager.instance.wear_equipment_set?('stealing')
 
+    @stealing_attempts = @settings.stealing_attempts
+
     thievery_skill = DRSkill.getrank('Thievery')
 
-    targets = @settings.stealing_options.select { |data| data['min'] <= thievery_skill && data['trivial'] > thievery_skill && (UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']]) }
+    attempt_keys = ['poorly', 'acceptably','rather','very','exceptionally']
+
+    targets = [[],[],[],[],[]]
+
+    @settings.stealing_options.each do |data|
+      next unless UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']]
+
+      if @stealing_attempts[0] > 0 && thievery_is_appropriate(data,thievery_skill, 'poorly', 'acceptably')
+        targets[0] << data
+      elsif @stealing_attempts[1] > 0 && thievery_is_appropriate(data,thievery_skill, 'acceptably', 'rather')
+        targets[1] << data
+      elsif @stealing_attempts[2] > 0 && thievery_is_appropriate(data,thievery_skill, 'rather', 'very')
+        targets[2] << data
+      elsif @stealing_attempts[3] > 0 && thievery_is_appropriate(data,thievery_skill, 'very', 'exceptionally')
+        targets[3] << data
+      elsif @stealing_attempts[4] > 0 && thievery_is_appropriate(data,thievery_skill, 'exceptionally')
+        targets[4] << data
+      end
+    end
 
     per_room_target = {}
 
-    targets.each do |data|
-      per_room_target[data['room']] ||= data
-      if per_room_target[data['room']]['min'] > data['min']
-        per_room_target[data['room']] = data
+    targets.each do |set|
+      set.each do |data|
+        per_room_target[data['room']] ||= data
+        if per_room_target[data['room']]['trivial'] > data['trivial']
+          per_room_target[data['room']] = data
+        end
       end
     end
 
@@ -800,10 +831,41 @@ class CrossingTraining
     waitrt?
   end
 
-  def make_grab(item, in_message, count)
+  def update_target(target, observed_difficulty)
+    skill = DRSkill.getrank('Thievery')
+    difficulty_keys = ['trivial', 'poorly', 'acceptably','rather','very','exceptionally']
+    difficulty = difficulty_keys[observed_difficulty]
+
+    return if skill >= target[difficulty]
+
+    echo("update required for :#{target}") if UserVars.crossing_trainer_debug
+
+    lower_keys = difficulty_keys[0..difficulty_keys.index(difficulty)] - [difficulty]
+    upper_keys = difficulty_keys[difficulty_keys.index(difficulty)+1..-1]
+
+    update = {}
+    lower_keys.each{|key| update[key] = skill - 1 if target[key].nil || target[key] >= skill }
+    update[difficulty] = skill
+    upper_keys.each{|key| update[key] = skill + 1 if target[key].nil || target[key] <= skill }
+
+    settings.stealing_options.each{|data| data.merge!(update) if data['id'] == target['id']}
+
+    submit_thieving_update(target['id'], update)
+  end
+
+  def make_grab(target, count)
+    item = target['item']
+    in_message = target['item_in']
     waitrt?
     count += 1
-    case bput("steal #{item} #{in_message}", 'You learned exceptionally well from this nearly impossible theft', 'You learned very well from this extremely difficult theft', 'You learned rather well from this difficult theft', 'You learned acceptably from this theft', "You don't feel you learned anything useful from this trivial theft", 'You learned somewhat poorly from this simple theft', 'Roundtime')
+    case bput("steal #{item} #{in_message}",
+      'You learned exceptionally well from this nearly impossible theft',
+      'You learned very well from this extremely difficult theft',
+      'You learned rather well from this difficult theft',
+      'You learned acceptably from this theft',
+      "You don't feel you learned anything useful from this trivial theft",
+      'You learned somewhat poorly from this simple theft',
+      'Roundtime')
     when /trivial theft/
       bin_item(checkright)
       beep
@@ -812,35 +874,31 @@ class CrossingTraining
       UserVars.trivial_steal_log.push("Adjust trivial level for #{item} in #{Room.current.id} to #{DRSkill.getrank('Thievery')}")
     when /somewhat poorly/
       bin_item(checkright)
-      make_grab(item, in_message, count) if count < 2
-      UserVars.trivial_steal_log ||= []
-      UserVars.trivial_steal_log.push("Low Learning level for #{item} in #{Room.current.id} to #{DRSkill.getrank('Thievery')}")
+      make_grab(target, count) if count < @settings.stealing_attempts[0]
     when /learned acceptably/
       bin_item(checkright)
-      if count < 1 && !DRStats.thief?
-        make_grab(item, in_message, count)
-      elsif count < 2 && DRStats.thief?
+      if count < @settings.stealing_attempts[1]
         make_grab(item, in_message, count)
       end
     when /learned rather well/
       bin_item(checkright)
-      UserVars.mid_steal_log ||= []
-      UserVars.mid_steal_log.push("Possibly adjust trivial level for #{item} in #{Room.current.id} upwards, still difficult at #{DRSkill.getrank('Thievery')}")
-      # make_grab(item, in_message, count) if count < 2 && DRStats.thief?
+      if count < @settings.stealing_attempts[2]
+        make_grab(item, in_message, count)
+      end
     when /learned very well/
       bin_item(checkright)
-      echo("Adjust trivial level for #{item} in #{Room.current.id} upwards, still exceptionally difficult at #{DRSkill.getrank('Thievery')}")
-      UserVars.challenging_steal_log ||= []
-      UserVars.challenging_steal_log.push("Adjust trivial level for #{item} in #{Room.current.id} upwards, still exceptionally difficult at #{DRSkill.getrank('Thievery')}")
+      if count < @settings.stealing_attempts[3]
+        make_grab(item, in_message, count)
+      end
     when /learned exceptionally/
       bin_item(checkright)
-      echo("Adjust trivial level for #{item} in #{Room.current.id} upwards, still exceptionally difficult at #{DRSkill.getrank('Thievery')}")
-      UserVars.challenging_steal_log ||= []
-      UserVars.challenging_steal_log.push("Adjust trivial level for #{item} in #{Room.current.id} upwards, still IMPOSSIBLY difficult at #{DRSkill.getrank('Thievery')}")
+      if count < @settings.stealing_attempts[4]
+        make_grab(item, in_message, count)
+      end
     else
       bin_item(checkright)
       beep
-      echo('new learning message')
+      echo('new learning message: PLEASE SUBMIT')
     end
   end
 
@@ -858,7 +916,7 @@ class CrossingTraining
       waitrt?
     end
     waitrt?
-    make_grab(target['item'], target['item_in'], 0)
+    make_grab(target, 0)
     move 'out'
   end
 

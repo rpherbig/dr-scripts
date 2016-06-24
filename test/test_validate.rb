@@ -79,7 +79,7 @@ class TestValidate < Minitest::Test
     setup_settings('hunting_info' => [
                      {
                        'stop_on' => [
-                        'Brawling'
+                         'Brawling'
                        ]
                      }
                    ],

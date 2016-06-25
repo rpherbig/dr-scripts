@@ -743,13 +743,23 @@ class CrossingTraining
     hide_in 992
   end
 
-  def thievery_is_appropriate(data, skill, lower, upper = nil)
-    return true if data[lower].nil?
-    if upper
-      skill >= data[lower] && (data[upper].nil || skill < data[upper])
-    else
-      skill >= data[lower]
+  def thievery_is_appropriate(data, skill, target)
+    lower_keys = @difficulty_keys[0..@difficulty_keys.index(target)] - [target]
+    upper_keys = @difficulty_keys[@difficulty_keys.index(target) + 1..-1]
+
+    echo("looking at #{data}") if UserVars.crossing_trainer_debug
+
+    if data["#{target}_min"] <= skill && data["#{target}_max"] >= skill
+      return true
     end
+
+    upper_bound = upper_keys.map{|diff| data["#{diff}_min"]}.min || 2000
+    lower_bound = lower_keys.map{|diff| data["#{diff}_max"]}.max || -1
+
+    if upper_bound >= skill && lower_bound <= skill
+      return true
+    end
+    false
   end
 
   def train_thievery
@@ -761,22 +771,23 @@ class CrossingTraining
 
     thievery_skill = DRSkill.getrank('Thievery')
 
-    attempt_keys = %w(poorly acceptably rather very exceptionally)
+    @difficulty_keys = %w(exceptionally very rather acceptably poorly trivial)
+
 
     targets = [[], [], [], [], []]
 
     @settings.stealing_options.each do |data|
       next unless UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']]
 
-      if @stealing_attempts[0] > 0 && (thievery_is_appropriate(data, thievery_skill, 'poorly', 'acceptably') || data['trivial'] == 0 || data['trivial'] < thievery_skill)
+      if @stealing_attempts[0] > 0 &&  thievery_is_appropriate(data, thievery_skill, @difficulty_keys[4])
         targets[0] << data
-      elsif @stealing_attempts[1] > 0 && thievery_is_appropriate(data, thievery_skill, 'acceptably', 'rather')
+      elsif @stealing_attempts[1] > 0 && thievery_is_appropriate(data, thievery_skill, @difficulty_keys[3])
         targets[1] << data
-      elsif @stealing_attempts[2] > 0 && thievery_is_appropriate(data, thievery_skill, 'rather', 'very')
+      elsif @stealing_attempts[2] > 0 && thievery_is_appropriate(data, thievery_skill, @difficulty_keys[2])
         targets[2] << data
-      elsif @stealing_attempts[3] > 0 && thievery_is_appropriate(data, thievery_skill, 'very', 'exceptionally')
+      elsif @stealing_attempts[3] > 0 && thievery_is_appropriate(data, thievery_skill, @difficulty_keys[1])
         targets[3] << data
-      elsif @stealing_attempts[4] > 0 && thievery_is_appropriate(data, thievery_skill, 'exceptionally')
+      elsif @stealing_attempts[4] > 0 && thievery_is_appropriate(data, thievery_skill, @difficulty_keys[0])
         targets[4] << data
       end
     end
@@ -831,24 +842,35 @@ class CrossingTraining
     waitrt?
   end
 
-  def update_target(target, observed_difficulty)
+  def update_target(target, difficulty)
     skill = DRSkill.getrank('Thievery')
-    difficulty_keys = %w(trivial poorly acceptably rather very exceptionally)
-    difficulty = difficulty_keys[observed_difficulty]
 
-    return if skill >= target[difficulty]
+    return if skill >= target["#{difficulty}_min"] && skill <= target["#{difficulty}_max"]
 
     echo("update required for :#{target}") if UserVars.crossing_trainer_debug
 
-    lower_keys = difficulty_keys[0..difficulty_keys.index(difficulty)] - [difficulty]
-    upper_keys = difficulty_keys[difficulty_keys.index(difficulty) + 1..-1]
+    lower_keys = @difficulty_keys[0..@difficulty_keys.index(difficulty)] - [difficulty]
+    upper_keys = @difficulty_keys[@difficulty_keys.index(difficulty) + 1..-1]
 
     update = {}
-    lower_keys.each { |key| update[key] = 0 if target[key].nil || target[key] >= skill }
-    update[difficulty] = skill
-    upper_keys.each { |key| update[key] = 1750 if target[key].nil || target[key] <= skill }
+
+    if skill < target["#{difficulty}_min"]
+      update["#{difficulty}_min"] = skill
+      lower_keys.each do |diff|
+        update["#{diff}_min"] = skill - 1 if target["#{diff}_min"] >= skill
+        update["#{diff}_max"] = skill - 1 if target["#{diff}_max"] >= skill
+      end
+    elsif skill > target["#{difficulty}_max"]
+      target["#{difficulty}_max"] = skill
+      upper_keys.each do |diff|
+        update["#{diff}_min"] = skill + 1 if target["#{diff}_min"] <= skill
+        update["#{diff}_max"] = skill + 1 if target["#{diff}_max"] <= skill
+      end
+    end
 
     settings.stealing_options.each { |data| data.merge!(update) if data['id'] == target['id'] }
+
+    echo("update:#{update}") if UserVars.crossing_trainer_debug
 
     submit_thieving_update(target['id'], update)
   end
@@ -867,26 +889,26 @@ class CrossingTraining
               'You learned somewhat poorly from this simple theft',
               'Roundtime')
     when /trivial theft/
+      update_target(target, 'trivial')
       bin_item(checkright)
-      update_target(target, 0)
     when /somewhat poorly/
-      update_target(target, 1)
+      update_target(target, 'poorly')
       bin_item(checkright)
       make_grab(target, count) if count < @settings.stealing_attempts[0]
     when /learned acceptably/
-      update_target(target, 2)
+      update_target(target, 'acceptably')
       bin_item(checkright)
       make_grab(target, count) if count < @settings.stealing_attempts[1]
     when /learned rather well/
-      update_target(target, 3)
+      update_target(target, 'rater')
       bin_item(checkright)
       make_grab(target, count) if count < @settings.stealing_attempts[2]
     when /learned very well/
-      update_target(target, 4)
+      update_target(target, 'very')
       bin_item(checkright)
       make_grab(target, count) if count < @settings.stealing_attempts[3]
     when /learned exceptionally/
-      update_target(target, 5)
+      update_target(target, 'exceptionally')
       bin_item(checkright)
       make_grab(target, count) if count < @settings.stealing_attempts[4]
     else

@@ -79,6 +79,8 @@ module Harness
     $history ? $history.shift : nil
   end
 
+  def no_pause_all; end
+
   def get
     get?
   end
@@ -136,6 +138,6 @@ module Harness
     end
 
     $threads.last.kill
-    assert_empty expected_messages, "Expected script to send #{expected_messages}"
+    assert_empty expected_messages, "Expected script to send #{expected_messages}."
   end
 end

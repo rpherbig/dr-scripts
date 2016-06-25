@@ -28,11 +28,13 @@ class TestAfk < Minitest::Test
 
     run_script('afk')
 
+    Timecop.return
+
     assert_sends_messages expected_messages
   end
 
   def test_exits_if_low_health
-    expected_messages = %w(health exit)
+    expected_messages = ['health', 'avoid all', 'exit']
     self.health = 20
 
     run_script('afk')

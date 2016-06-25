@@ -479,6 +479,8 @@ class SpellProcess
     @buff_spells
       .select { |_name, data| data['expire'] }
       .each { |_name, data| add_spell_flag(data['abbrev'], data['expire']) }
+
+    @spell_timers = {}
   end
 
   def add_spell_flag(name, expire)
@@ -601,8 +603,8 @@ class SpellProcess
 
     game_state.casting = false
     game_state.cast_timer = nil
+
     if game_state.casting_moonblade
-      game_state.last_moonblade_cast = Time.now
       if checkleft =~ /moon/ || game_state.weapon_skill == 'Brawling' || game_state.weapon_skill == 'Offhand Weapon'
         # The moonblade was summoned or refreshed while training something else
         bput('wear moon', 'telekinetic')
@@ -616,6 +618,10 @@ class SpellProcess
     @after = nil
   end
 
+  def check_spell_timer(data)
+    Time.now - (@spell_timers[data['abbrev']] || Time::at(0)) >= data['recast_every']
+  end
+
   def check_buffs(game_state)
     return if game_state.casting
     return if checkmana < 30
@@ -625,8 +631,8 @@ class SpellProcess
                        .select { |name, data| data['expire'] ? Flags["ct-#{name}"] : true }
 
     name, data = recastable_buffs.find do |name, data|
-      if data['abbrev'] == 'moonblade'
-        (Time.now - game_state.last_moonblade_cast) >= data['recast_every']
+      if data['recast_every']
+        check_spell_timer(data)
       else
         !DRSpells.active_spells[name] || DRSpells.active_spells[name].to_i <= data['recast']
       end
@@ -652,6 +658,7 @@ class SpellProcess
     data = @offensive_spells
            .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
            .select { |spell| game_state.dancing? ? spell['harmless'] : true }
+           .select { |spell| spell['recast_every'] ?  check_spell_timer(spell) : true }
            .min_by { |spell| DRSkill.getxp(spell['skill']) }
     return if DRSkill.getxp(data['skill']) >= 34 && checkmana < 70 # make this a spell option
     prepare_spell(data, game_state)
@@ -669,6 +676,11 @@ class SpellProcess
     command = 'pre'
     command = data['skill'] == 'Debilitation' ? 'pre' : 'tar' if data['skill']
     command = data['prep_type'] if data['prep_type']
+
+    if data['recast_every']
+      @spell_timers[data['abbrev']] = Time.now
+    end
+
     if data['moon']
       moon = UserVars.moons['visible'].first
       unless moon
@@ -1193,7 +1205,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :last_moonblade_cast, :cast_timer, :casting_moonblade
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1208,7 +1220,6 @@ class GameState
     @no_stab_current_mob = false
     @loaded = false
     @selected_maneuver = ''
-    @last_moonblade_cast = Time.at(0)
     @cast_timer = nil
     @casting_moonblade = false
 

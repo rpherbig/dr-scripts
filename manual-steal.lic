@@ -1,0 +1,121 @@
+
+custom_require.call(%w(drinfomon events common))
+
+class ManualStealLogger
+  include DRC
+
+  def initialize
+        arg_definitions = [
+      [
+        { name: 'item', regex:/\w+|\w+\s\w+/, variable: true, description: 'item to steal' },
+        { name: 'container', regex: /.+/i, variable: true, description: 'Where the item is to steal e.g in catalog, on counter' },
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    @settings = get_settings(['stealing'])
+    @difficulty_keys = %w(exceptionally very rather acceptable poorly trivial)
+
+    target = build_target_data(args)
+
+    make_grab(target) if target
+  end
+
+  def build_target_data(args)
+    tracked_items_in_shop = @settings.stealing_options.select{|x| x['room'] == Room.current.id}
+    return build_new(args) if tracked_items_in_shop.empty?
+
+    data = tracked_items_in_shop.find{ |x| x['item'] == args.item && x['item_in'] =~ /#{args.container}/ }
+
+    data || build_new(args)
+  end
+
+  def build_new(args)
+    echo("This appears to be a new item, ;send yes  if this is correct, or no to cancel")
+
+    loop do
+      line = get
+      return nil if line =~ /^no/i
+      break if line =~ /^yes/i
+    end
+
+    {
+      'new'=> true, 'room'=> Room.current.id, 'province' => 'zoluren',
+      'item' => args.item, 'item_in' => args.container, 'pawnable' => false,
+      'id' => @settings.stealing_options.map{|x| x['id'].to_i }.max + 1
+    }
+  end
+
+  def update_target(target, difficulty)
+    skill = DRSkill.getrank('Thievery')
+
+    return if target["#{difficulty}_min"] && skill >= target["#{difficulty}_min"] && skill <= target["#{difficulty}_max"]
+
+    echo("update required for :#{target}") if UserVars.crossing_trainer_debug
+
+    lower_keys = @difficulty_keys[0..@difficulty_keys.index(difficulty)] - [difficulty]
+    upper_keys = @difficulty_keys[@difficulty_keys.index(difficulty) + 1..-1]
+
+    update = target['new'] ? target.dup : {}
+
+    if target["#{difficulty}_min"].nil? || skill < target["#{difficulty}_min"]
+      update["#{difficulty}_min"] = skill
+      lower_keys.each do |diff|
+        update["#{diff}_min"] = skill - 1 if target["#{diff}_min"] && target["#{diff}_min"] >= skill
+        update["#{diff}_max"] = skill - 1 if target["#{diff}_max"] && target["#{diff}_max"] >= skill
+      end
+    end
+    if target["#{difficulty}_max"].nil? || skill > target["#{difficulty}_max"]
+      update["#{difficulty}_max"] = skill
+      upper_keys.each do |diff|
+        update["#{diff}_min"] = skill + 1 if target["#{diff}_min"] && target["#{diff}_min"] <= skill
+        update["#{diff}_max"] = skill + 1 if target["#{diff}_max"] && target["#{diff}_max"] <= skill
+      end
+    end
+
+    if update['trivial_max']
+      update['trivial_max'] = 1750
+    end
+
+    echo("update:#{update}") if UserVars.crossing_trainer_debug
+
+    @settings.stealing_options.each { |data| data.merge!(update) if data['id'] == target['id'] }
+    submit_thieving_update(target['id'], update)
+  end
+
+  def make_grab(target)
+    item = target['item']
+    in_message = target['item_in']
+    waitrt?
+    case bput("steal #{item} #{in_message}",
+              'You learned exceptionally well from this nearly impossible theft',
+              'You learned very well from this extremely difficult theft',
+              'You learned rather well from this difficult theft',
+              'You learned acceptably from this theft',
+              "You don't feel you learned anything useful from this trivial theft",
+              'You learned somewhat poorly from this simple theft',
+              'realize that you are being watched and should back off',
+              'Roundtime')
+    when /trivial theft/
+      update_target(target, 'trivial')
+    when /somewhat poorly/
+      update_target(target, 'poorly')
+    when /learned acceptably/
+      update_target(target, 'acceptable')
+    when /learned rather well/
+      update_target(target, 'rather')
+    when /learned very well/
+      update_target(target, 'very')
+    when /learned exceptionally/
+      update_target(target, 'exceptionally')
+    when /back off/
+    else
+      beep
+      echo('new learning message: PLEASE SUBMIT')
+    end
+  end
+end
+
+
+ManualStealLogger.new

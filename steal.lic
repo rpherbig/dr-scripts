@@ -1,0 +1,293 @@
+=begin
+  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#steal
+=end
+
+custom_require.call(%w(common common-travel drinfomon equipmanager))
+
+class Steal
+  include DRC
+  include DRCT
+
+  def setup
+    start_script('jail-buddy') unless Script.running?('jail-buddy')
+
+    UserVars.stealing_timers ||= {}
+
+    settings = get_settings(['stealing'])
+    @stealing_attempts = settings.stealing_attempts
+    @stealing_options = settings.stealing_options
+    @stealing_bag = settings.stealing_bag
+    @bin_stolen = settings.bin_stolen(false)
+    @hide_to_steal = settings.hide_to_steal
+    @stealing_low_acceptable_count = settings.stealing_low_acceptable_count
+    @stealing_high_acceptable_count = settings.stealing_high_acceptable_count
+    @steal_past_mindlock = settings.steal_past_mindlock
+
+    @difficulty_keys = %w(exceptionally very rather acceptable poorly vpoorly nearly trivial)
+
+    @bin_items = []
+  end
+
+  def initialize    
+    arg_definitions = [
+      [],
+      [
+        { name: 'item', regex: /\w+|\w+\s\w+/, variable: true, description: 'item to steal' },
+        { name: 'container', regex: /.+/i, variable: true, description: 'Where the item is to steal e.g in catalog, on counter' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    setup
+
+    targets = find_targets(args.item, args.container)
+    return if targets.empty?
+
+    EquipmentManager.instance.wear_equipment_set?('stealing')
+    targets.each { |target| steal(target) }
+    EquipmentManager.instance.wear_equipment_set?('standard')
+
+    bin_items
+  end
+
+  def bin_items
+    return if @bin_items.empty?
+
+    walk_to 6017
+    move('tap knocker')
+    move('north')
+
+    @bin_items.each do |item|
+      fput("get #{item} from my #{@stealing_bag}")
+      fput("put #{item} in bin")
+      stow_hands
+    end
+
+    move('south')
+    move('go door')
+  end
+
+  def find_targets(item, container)
+    if item && container
+      [build_target_data(item, container)]
+    else
+      find_all_targets
+    end
+  end
+
+  def build_target_data(item, container)
+    tracked_items_in_shop = @stealing_options.select { |x| x['room'] == Room.current.id }
+    return build_new(item, container) if tracked_items_in_shop.empty?
+
+    data = tracked_items_in_shop.find { |x| x['item'] == item && x['item_in'] =~ /#{container}/ }
+
+    data || build_new(item, container)
+  end
+
+  def build_new(item, container)
+    echo('This appears to be a new item, ;send yes  if this is correct, or no to cancel')
+
+    loop do
+      line = get
+      return nil if line =~ /^no/i
+      break if line =~ /^yes/i
+    end
+
+    {
+      'new' => true, 'room' => Room.current.id, 'province' => 'zoluren',
+      'item' => item, 'item_in' => container, 'pawnable' => false,
+      'id' => @stealing_options.map { |x| x['id'].to_i }.max + 1
+    }
+  end
+
+  def find_all_targets
+    thievery_skill = DRSkill.getrank('Thievery')
+
+    targets = [[], [], []]
+
+    @stealing_options
+      .select { |data| UserVars.stealing_timers[data['room']].nil? || Time.now > UserVars.stealing_timers[data['room']] }
+      .each { |data| thievery_is_appropriate(data, thievery_skill, targets) }
+
+    per_room_target = {}
+
+    targets.each do |set|
+      set.each do |data|
+        per_room_target[data['room']] ||= data
+      end
+    end
+
+    per_room_target.values
+  end
+
+  def thievery_is_appropriate(data, skill, targets)
+    upper_keys = @difficulty_keys[0..2]
+
+    if data['acceptable_min'] && data['acceptable_min'] <= skill && data['acceptable_max'] >= skill
+      if (data['acceptable_max'] + data['acceptable_min']) / 2 <= skill
+        targets[0] << data
+      else
+        targets[1] << data
+      end
+      return
+    end
+
+    if data['trivial_min'] && data['trivial_min'] <= skill && data['trivial_max'] >= skill
+      return
+    end
+
+    upper_keys
+      .reverse
+      .select { |diff| data["#{diff}_min"] }
+      .each_with_index do |diff, index|
+        if (data["#{diff}_min"] + data["#{diff}_max"]) / 2 + (skill * 0.10 * index) < skill
+          targets[1] << data
+          return
+        end
+      end
+
+    if data['acceptable_max'] && data['acceptable_max'] + 1 == skill && data['poorly_min'] != skill
+      targets[0] << data
+      return
+    end
+    if data['acceptable_min'] && data['acceptable_min'] - 1 == skill && data['rather_max'] != skill
+      targets[1] << data
+      return
+    end
+
+    if data['acceptable_max'] && skill > data['acceptable_max']
+      targets[2] << data
+    end
+  end
+
+  def bin_item
+    waitrt?
+    # Account for being arrested
+    # Items can end up in different hands and you may have an items from a previous theft
+    [checkright, checkleft]
+      .select { |item| item }
+      .each do |item|
+        if @bin_stolen
+          @bin_items.push(item)
+          bput("put my #{item} in my #{@stealing_bag}", 'You put')
+        else
+          fput "drop my #{item}"
+        end
+      end
+    waitrt?
+  end
+
+  def update_target(target, difficulty)
+    skill = DRSkill.getrank('Thievery')
+
+    return if target["#{difficulty}_min"] && skill >= target["#{difficulty}_min"] && skill <= target["#{difficulty}_max"]
+
+    echo("update required for :#{target}") if UserVars.thievery_debug
+
+    lower_keys = @difficulty_keys[0..@difficulty_keys.index(difficulty)] - [difficulty]
+    upper_keys = @difficulty_keys[@difficulty_keys.index(difficulty) + 1..-1]
+
+    update = target['new'] ? target.dup : {}
+
+    if target["#{difficulty}_min"].nil? || skill < target["#{difficulty}_min"]
+      update["#{difficulty}_min"] = skill
+      lower_keys.each do |diff|
+        update["#{diff}_min"] = skill - 1 if target["#{diff}_min"] && target["#{diff}_min"] >= skill
+        update["#{diff}_max"] = skill - 1 if target["#{diff}_max"] && target["#{diff}_max"] >= skill
+      end
+    end
+    if target["#{difficulty}_max"].nil? || skill > target["#{difficulty}_max"]
+      update["#{difficulty}_max"] = skill
+      upper_keys.each do |diff|
+        update["#{diff}_min"] = skill + 1 if target["#{diff}_min"] && target["#{diff}_min"] <= skill
+        update["#{diff}_max"] = skill + 1 if target["#{diff}_max"] && target["#{diff}_max"] <= skill
+      end
+    end
+
+    update['trivial_max'] = 1750 if update['trivial_max']
+
+    echo("update:#{update}") if UserVars.thievery_debug
+
+    @stealing_options.each { |data| data.merge!(update) if data['id'] == target['id'] }
+    submit_thieving_update(target['id'], update)
+  end
+
+  def make_grab(target, count)
+    hide? if @hide_to_steal
+    item = target['item']
+    in_message = target['item_in']
+    waitrt?
+    count += 1
+    case bput("steal #{item} #{in_message}",
+              'You learned exceptionally well from this nearly impossible theft',
+              'You learned very well from this extremely difficult theft',
+              'You learned rather well from this difficult theft',
+              'You learned acceptably from this theft',
+              "You don't feel you learned anything useful from this trivial theft",
+              'You learned somewhat poorly from this simple theft',
+              'You learned very poorly from this very simple theft',
+              'You learned quite badly from this nearly trivial theft',
+              'realize that you are being watched and should back off',
+              'Roundtime')
+    when /this trivial theft/
+      update_target(target, 'trivial')
+      bin_item
+    when /nearly trivial theft/
+      update_target(target, 'nearly')
+      bin_item
+      steal(target, count) if count < 4
+    when /very poorly/
+      update_target(target, 'vpoorly')
+      bin_item
+      steal(target, count) if count < 3
+    when /somewhat poorly/
+      update_target(target, 'poorly')
+      bin_item
+      steal(target, count) if count < 3
+    when /learned acceptably/
+      update_target(target, 'acceptable')
+      bin_item
+      if (target['acceptable_max'] + target['acceptable_min']) / 2 <= DRSkill.getrank('Thievery')
+        steal(target, count) if count < @stealing_low_acceptable_count
+      elsif count < @stealing_high_acceptable_count
+        steal(target, count)
+      end
+    when /learned rather well/
+      update_target(target, 'rather')
+      bin_item
+    when /learned very well/
+      update_target(target, 'very')
+      bin_item
+    when /learned exceptionally/
+      update_target(target, 'exceptionally')
+      bin_item
+    when /back off/
+    else
+      bin_item
+      beep
+      echo('new learning message: PLEASE SUBMIT')
+    end
+  end
+
+  def steal(target, count = 0)
+    return if stop_stealing?
+
+    if walk_to(target['room'], false)
+      UserVars.stealing_timers[target['room']] = Time.now + 60 * 60
+      echo("putting target on cooldown :#{target}") if UserVars.thievery_debug
+      waitrt?
+      make_grab(target, count)
+    else
+      UserVars.stealing_timers[target['room']] = Time.now + 60 * 10
+      echo("night pause for #{target}") if UserVars.thievery_debug
+    end
+  end
+
+  def stop_stealing?
+    DRSkill.getxp('Thievery') >= 30 && !@steal_past_mindlock
+  end
+end
+
+# Call this last to avoid the need for forward declarations
+Steal.new

@@ -14,89 +14,55 @@ args = parse_args(arg_definitions)
 
 $debug_mode_mm = UserVars.moon_debug || args.debug
 
-UserVars.moons = { 'katamba' => {}, 'yavash' => {}, 'xibar' => {}, 'visible' => [] } unless UserVars.moons
+UserVars.moons = { 'katamba' => {}, 'yavash' => {}, 'xibar' => {}, 'visible' => [] }
+UserVars.sun = {}
 
 Settings['xibar'] ||= Time.now
 Settings['yavash'] ||= Time.now
 Settings['katamba'] ||= Time.now
 
-Settings['yavash-rise'] = 175 * 60
-Settings['yavash-set'] = 177 * 60
-Settings['xibar-rise'] = 172 * 60
-Settings['xibar-set'] = 174 * 60
-Settings['katamba-rise'] = 174 * 60
-Settings['katamba-set'] = 177 * 60
+Settings['rise'] = {}
 
-def moon_change(moon, is_up, time = nil)
+Settings['rise']['yavash'] = 175 * 60
+Settings['rise']['xibar'] = 172 * 60
+Settings['rise']['katamba'] = 174 * 60
+
+#Time until moon sets after rising
+
+Settings['set'] = {}
+
+Settings['set']['yavash'] = 177 * 60
+Settings['set']['xibar'] = 174 * 60
+Settings['set']['katamba'] = 177 * 60
+
+def moon_change(moon, is_up)
   echo("moon_change #{moon}:#{is_up}") if $debug_mode_mm
-  Settings[moon] = time || Time.now
-  Settings["#{moon}-is-up"] = is_up
+  snapshot = Time.now
+  snapshot = (snapshot - snapshot.sec).utc.to_s
+  update_moon_data(moon, {'time'=> snapshot, 'event'=> is_up ? 'set' : 'rise' })
 end
 
-def get_moon_event_time(moon)
-  moon_is_up = "#{moon}-is-up"
-  Settings["#{moon}-#{Settings[moon_is_up] ? 'set' : 'rise'}"]
-end
-
-def update_moon_info(advance_time)
-  echo('update moon info') if $debug_mode_mm
+def update_moon_info(latest_data)
   %w(katamba yavash xibar).each do |moon|
-    while Time.now - Settings[moon] > get_moon_event_time(moon) && advance_time
-      moon_change(moon, !Settings["#{moon}-is-up"], Settings[moon] + get_moon_event_time(moon))
+    data = latest_data[moon]
+    event = data['event']
+    coming_event = (['rise', 'set'] - [event]).first
+    snapshot = Time.parse(data['time']).localtime
+
+    if UserVars.moons[moon][event] || UserVars.moons[moon][coming_event].nil?
+      UserVars.moons[moon].delete(event)
+      UserVars.moons[moon][coming_event] = snapshot + Settings[coming_event][moon]
     end
-    if Settings["#{moon}-is-up"]
-      UserVars.moons[moon]['rise'] = nil
-      UserVars.moons[moon]['set'] = ((get_moon_event_time(moon) - (Time.now - Settings[moon])) / 60).to_i
-      UserVars.moons[moon]['pretty'] = "#{moon} is up for #{UserVars.moons[moon]['set']} minutes"
+
+    if event == 'rise'
+      UserVars.moons[moon]['pretty'] = "#{moon} is up for #{((UserVars.moons[moon][coming_event] - Time.now) / 60).to_i} minutes"
       UserVars.moons['visible'].push(moon) unless UserVars.moons['visible'].include?(moon)
     else
-      UserVars.moons[moon]['set'] = nil
-      UserVars.moons[moon]['rise'] = ((get_moon_event_time(moon) - (Time.now - Settings[moon])) / 60).to_i
-      UserVars.moons[moon]['pretty'] = "#{moon} will rise in #{UserVars.moons[moon]['rise']} minutes"
+      UserVars.moons[moon]['pretty'] = "#{moon} will rise in #{((UserVars.moons[moon][coming_event] - Time.now) / 60).to_i} minutes"
       UserVars.moons['visible'].delete(moon) if UserVars.moons['visible'].include?(moon)
     end
   end
 end
-
-def text_to_time(degrees, bearing, magnitude)
-  val_map = { 'one' => 1, 'two' => 2, 'three' => 3, 'four' => 4, 'five' => 5, 'six' => 6, 'seven' => 7, 'eight' => 8, 'nine' => 9, 'ten' => 10, 'eleven' => 11, 'twelve' => 12, 'thirteen' => 13, 'fourteen' => 14, 'fifteen' => 15, 'sixteen' => 16, 'seventeen' => 17, 'eighteen' => 18, 'nineteen' => 19, 'twenty' => 20, 'thirty' => 30, 'fourty' => 40, 'fifty' => 50, 'sixty' => 60, 'seventy' => 70, 'eighty' => 80, 'ninety' => 90 }
-  value = degrees.scan(/one|two|three|four\b|five\b|six\b|seven\b|eight\b|nine\b|ten\b|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety/)
-  value = value.map { |item| val_map[item] }.inject(&:+)
-  scaled_time = if bearing == 'eastern'
-                  magnitude - (value / 90.0) * (magnitude / 2)
-                else
-                  magnitude / 2 - (1 - value / 90.0) * (magnitude / 2)
-                end
-  magnitude - scaled_time
-end
-
-def process_moon_meesage(moon, message)
-  if message =~ /should rise in about (\d+) (anlaen|anlas)|less than an anlas/
-    echo("should rise #{moon}:#{Regexp.last_match(1)}") if $debug_mode_mm
-    offset = Regexp.last_match(1) ? Regexp.last_match(1).to_i : 1
-    Settings[moon] = Time.now - (Settings["#{moon}-rise"] - offset * 30 * 60)
-    Settings["#{moon}-is-up"] = false
-  else
-    if message =~ /is (.*) degree.* (western|eastern)/
-      echo("degrees above #{moon}:#{Regexp.last_match(1)}:#{Regexp.last_match(2)}") if $debug_mode_mm
-      offset = text_to_time(Regexp.last_match(1), Regexp.last_match(2), Settings["#{moon}-set"])
-      echo("offset: #{offset}") if $debug_mode
-    elsif message =~ /dipping below the horizon/
-      offset = Settings["#{moon}-set"] - 60
-    elsif message =~ /exactly at zenith/
-      offset = Settings["#{moon}-set"] / 2
-    end
-    Settings[moon] = Time.now - offset
-    Settings["#{moon}-is-up"] = true
-  end
-  echo("settings for #{moon}:#{Settings[moon]}:#{Settings["#{moon}-is-up"]}") if $debug_mode_mm
-end
-
-update_moon_info(true)
-
-Flags.add('mw-katamba', 'Katamba .* it should rise in .*', 'Katamba is .* degree.* above the (western|eastern) horizon', 'Katamba .* dipping below the horizon', 'Katamba .* exactly at zenith')
-Flags.add('mw-yavash', 'Yavash .* it should rise in .*', 'Yavash is .* degree.* above the (western|eastern) horizon', 'Yavash .* dipping below the horizon', 'Yavash .* exactly at zenith')
-Flags.add('mw-xibar', 'Xibar .* it should rise in .*', 'Xibar is .* degree.* above the (western|eastern) horizon', 'Xibar .* dipping below the horizon', 'Xibar .* exactly at zenith')
 
 loop do
   line = script.gets?
@@ -105,14 +71,11 @@ loop do
     moon_change(Regexp.last_match(1).downcase, false)
   when /^(Katamba|Xibar|Yavash) slowly rises/
     moon_change(Regexp.last_match(1).downcase, true)
-  end
+  # when /heralding another fine day|rises to create the new day|as the sun rises, hidden|as the sun rises behind it|faintest hint of the rising sun|The rising sun slowly/
 
-  %w(katamba yavash xibar).each do |moon|
-    next unless Flags["mw-#{moon}"]
-    process_moon_meesage(moon, Flags["mw-#{moon}"].first)
-    Flags.reset("mw-#{moon}")
-  end
+  # when /The sun sinks below the horizon|night slowly drapes its starry banner|sun slowly sinks behind the scattered clouds and vanishes|grey light fades into a heavy mantle of black/
 
-  update_moon_info(true)
+  end
+  update_moon_info(get_all_moon_data())
   pause 0.1 unless line
 end

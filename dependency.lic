@@ -26,6 +26,13 @@ require 'rest-firebase'
 toggle_unique
 no_pause_all
 
+class Object
+  #IMPORT FUTURE LAWLZ
+  def itself
+    self
+  end
+end
+
 class ArgParser
   def parse_args(data, flex_args = false)
     raw_args = variable.first
@@ -565,8 +572,74 @@ class SetupFiles
   end
 end
 
+class MoonWatch
+  attr_reader :moon_data
+
+  def initialize(debug)
+    @debug = debug
+    @moon_data = {}
+    @firebase_url = 'https://dr-scripts.firebaseio.com/'
+    start
+  end
+
+  def start
+    return if @f
+    @f = RestFirebase.new :site => @firebase_url, :log_method => nil,:timeout => 10,:max_retries => 3,:retry_exceptions =>[IOError, SystemCallError, Timeout::Error],:error_callback => method(:echo),:auth_ttl => false,:auth => false
+    @reconnect = true
+
+    @moon_source = @f.event_source('moon_data')
+    @moon_source.onmessage{ |event, data, sock| update_moon_state(data) if ['put', 'patch'].include? event }
+    @moon_source.onerror  { |error, sock| echo(error) }
+
+    @moon_source.start
+    # Update users/tom.json
+    # p f.put('users/tom', :some => 'data')
+    # p f.post('users/tom', :some => 'other')
+    @f.get('moon_data')
+    # p f.delete('users/tom')
+  rescue => e
+    echo("error in moonwatch #{e.inspect}")
+  end
+
+  def close
+    @reconnect = false
+    @moon_source.close
+  end
+
+  def queue_update(moon,data)
+    return unless @f
+    @queue = [moon, data]
+  end
+
+  def run_queue
+    return unless @queue
+    update_moon(@queue.first, @queue.last)
+    @queue = nil
+  end
+
+  private
+
+  def update_moon(moon, data)
+    echo("updating #{moon} with #{data}") if @debug
+    @moon_data[moon] = data
+    @f.put("moon_data/#{moon}", data)
+  end
+
+  def update_moon_state(raw_data)
+    echo("#{raw_data}") if @debug
+    key = raw_data['path'][1..-1]
+    data = raw_data['data']
+    if key.nil? || key.empty?
+      @moon_data = data
+    else
+      @moon_data[key] = data
+    end
+  end
+end
+
 $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
+$moon_watch = MoonWatch.new(debug)
 
 def get_settings(options = [])
   $setupfiles.request_settings(options)
@@ -747,6 +820,14 @@ def reset_stealing
   UserVars.trivial_steal_log = []
 end
 
+def get_all_moon_data
+  $moon_watch.moon_data
+end
+
+def update_moon_data(moon, data)
+  $moon_watch.queue_update(moon, data)
+end
+
 full_install if install
 
 $manager.check_base_files
@@ -757,8 +838,13 @@ if $manager.updated_dependency?
   update_d
 end
 
+before_dying do
+ $moon_watch.close
+end
+
 loop do
   $manager.run_queue
   $setupfiles.run_queue
+  $moon_watch.run_queue
   pause 0.1
 end

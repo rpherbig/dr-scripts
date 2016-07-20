@@ -22,14 +22,10 @@ nonbase.each do |pair|
 
   if additional.any?
     puts 'loot_additions:'
-    additional.each do |addition|
-      puts "- #{addition}"
-    end
+    additional.each { |addition| puts "- #{addition}" }
   end
 
   next unless excluded.any?
   puts 'loot_subtractions:'
-  excluded.each do |exclusion|
-    puts "- #{exclusion}"
-  end
+  excluded.each { |exclusion| puts "- #{exclusion}" }
 end

@@ -1,0 +1,127 @@
+
+custom_require.call(%w(common common-money common-travel))
+script.want_downstream_xml = true
+
+class ShopUpdater
+  include DRC
+  include DRCM
+  include DRCT
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'plaza_room', regex: /\d+/, optional: true, description: 'Id of plaza room shop is in' },
+        { name: 'shop_entrance', regex: /\w+/i, optional: true, description: 'shop entrance noun' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+
+    crossing_shop_rooms = [7907, 7910, 7912, 7911, 7913, 7915, 7916, 7908, 7909, 7920, 7918, 7917, 7914, 7938, 7939, 7940, 7945, 7944, 7943, 7942, 7941, 7932, 7933, 7934, 7935, 7936, 7937]
+    @coin_type = 'Kronars'
+    @city = 'Crossing'
+    if args.plaza_room && args.shop_entrance
+      walk_to(args.plaza_room)
+      @current_room = args.plaza_room
+      visit_shop(args.shop_entrance)
+    else
+      crossing_shop_rooms.each{|room_id| visit_plaza_room(room_id) }
+    end
+  end
+
+  def visit_plaza_room(room_id)
+    walk_to(room_id)
+    @current_room = room_id
+    %w(door entrance arch).each{|entrance| visit_shop(entrance)}
+  end
+
+  def visit_shop(entrance)
+    shop_data = {:entrance => entrance, :root_room => @current_room, :city => @city, :updated_at => Time.now.utc  }
+    store_listing = bput("look #{entrance}", "'.*'.* open .*") #and will be open whenever Martyen is in attendance
+    if store_listing =~ /'(.*)' is owned by (\w+)/
+      shop_data[:name] = $1
+      shop_data[:owner] = $2
+    elsif store_listing =~ /'(.*)'s Shop' will be open /
+      shop_data[:name] = "#{$1}'s Shop"
+      shop_data[:owner] = $1
+    else
+      echo("empty shop?")
+      return
+    end
+
+    if store_listing =~ /open between (\w+) and (\w+) Eastern time/
+      shop_data[:open_time] = $1
+      shop_data[:close_time] = $2
+    elsif store_listing =~ /is in attendance/
+      shop_data[:open_time] = nil
+      shop_data[:close_time] = nil
+    end
+
+    if /obvious exits/i =~ bput("go #{entrance}", 'An attendant approaches you and says', 'obvious exits')
+      shop_data[:room => Room.current.id]
+      update_shop(shop_data)
+      bput('out', 'obvious exits')
+    end
+
+    submit_shop_data(shop_data)
+  end
+
+  def update_shop(shop_data)
+    clear
+    room_objs = []
+    fput('shop')
+    until (line = get) =~ /to see what's on it|There is nothing to buy here/
+      if line =~ /cmd='(shop .*)'>/
+        room_objs << $1
+      end
+    end
+    shop_data[:surfaces] = {}
+    room_objs.each{|cmd| update_surface(shop_data, cmd)}
+  end
+
+  def update_surface(shop_data, cmd)
+    clear
+    surface_objs = []
+    surface_name = nil
+    fput(cmd)
+    until (line = get) =~ /to see some details/
+      if line =~ /cmd='(shop .*)'>(.*) for (.*) #{@coin_type}</
+        surface_objs << [$1,$2,$3]
+      end
+      if line =~ /cmd='shop'>(.*)</
+        surface_name = $1
+      end
+    end
+    shop_data[:surfaces][surface_name] = surface_objs.map{|cmd, long_name, fallback_cost| build_item_data(shop_data, cmd, long_name, fallback_cost)}
+  end
+
+  def build_item_data(shop_data, cmd, long_name, fallback_cost)
+    item_data = {:long => long_name}
+
+    clear
+    waitrt?
+    fput(cmd)
+    last_index = nil
+    until (line = get.chomp.strip) =~ /if you like/
+      if line =~ /USAGE:/
+        item_data['cost'] = fallback_cost
+        return item_data
+      end
+      next if line =~ /<pushBold/
+      next if line =~ /You'll have to hold the \w+ to read it/
+      next if line =~ /You see nothing unusual|There is nothing there to read/
+      if line =~ /(Short|Cost|Read|Look|Worn):\s+(.*)/
+        item_data[$1.downcase] = $2.strip
+        last_index = $1.downcase
+      elsif item_data[last_index] && line =~ /^([^<].+)$/
+        item_data[last_index] += "\n#{$1}" unless item_data[last_index].include?(line)
+      end
+    end
+
+    item_data['cost'] = item_data['cost'].to_i
+
+    item_data
+  end
+
+end
+
+ShopUpdater.new

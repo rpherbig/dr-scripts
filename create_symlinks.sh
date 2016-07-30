@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 if [ $# -lt 1 ]; then
   echo "Usage: ./create_symlinks.sh path/to/lich/scripts"
   exit 1

@@ -10,5 +10,5 @@ destination=$1
 find $1 -maxdepth 1 -type l -exec rm -f {} \;
 
 # Link all the things
-ln -s -f `pwd`/*.lic $1
-ln -s -f `pwd`/profiles/ $1
+ln -s `pwd`/*.lic $1
+ln -s `pwd`/profiles/ $1

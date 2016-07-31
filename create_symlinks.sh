@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 if [ $# -lt 1 ]; then
   echo "Usage: ./create_symlinks.sh path/to/lich/scripts"
   exit 1
@@ -10,5 +9,5 @@ destination=$1
 find $1 -maxdepth 1 -type l -exec rm -f {} \;
 
 # Link all the things
-ln -s -f `pwd`/*.lic $1
-ln -s -f `pwd`/profiles/ $1
+ln -s `pwd`/*.lic $1
+ln -s `pwd`/profiles/ $1

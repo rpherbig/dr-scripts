@@ -180,6 +180,8 @@ class LootProcess
     @ritual_type = thanatology['ritual_type'] || {}
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
 
+    @last_ritual = nil
+
     @heal = thanatology['heal'] || false
     echo("  @heal: #{@heal}") if $debug_mode_ct
 
@@ -279,18 +281,27 @@ class LootProcess
 
   def dispose_body(game_state)
     return unless @loot_bodies
-    return if DRRoom.dead_npcs.empty?
+    if DRRoom.dead_npcs.empty?
+      @last_ritual = nil
+      return
+    end
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
-    healing = false
-    if @necro
+    echo "game_state.casting_consume: #{game_state.casting_consume}"
+    echo "game_state.prepare_consume: #{game_state.prepare_consume}"
+    healing = game_state.casting_consume || game_state.prepare_consume
+    echo "healing: #{healing}"
+    if @necro && @last_ritual.nil?
       if @heal
         wounds = check_wounds
         echo "Severity to Wounds: #{wounds}" if $debug_mode_ct
-        unless wounds.empty?
+        if !wounds.empty? && !healing
+          game_state.prepare_consume = true
           healing = true
-          consume(DRRoom.dead_npcs.first, game_state, wounds)
+          game_state.healing_target = wounds[wounds.keys.max].first
+          check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
+          check_thanatology(DRRoom.dead_npcs.first, 'consume', game_state)
         end
       end
       if @ritual_type == 'harvest' && !healing
@@ -305,9 +316,12 @@ class LootProcess
       arrange_mob(DRRoom.dead_npcs.first, game_state)
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
-      pause
-      waitrt?
+    unless healing
+      while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
+        @last_ritual = nil
+        pause
+        waitrt?
+      end
     end
     @loot_timer = Time.now
   end
@@ -318,13 +332,8 @@ class LootProcess
       bput('release spell', '')
       game_state.casting = false
       game_state.cast_timer = nil
+
     end
-    bput("prepare cf", @settings.prep_messages)
-    game_state.casting = true
-    waitcastrt?
-    pause 0.5
-    fput("cast #{wounds[wounds.keys.max].first}")
-    game_state.casting = false
   end
 
   # partially completed, only works for a single ritual.
@@ -334,8 +343,10 @@ class LootProcess
     perform_message = "perform #{ritual} on #{mob_noun}"
     case bput(perform_message, 'Rituals do not work upon constructs', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
     when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts'
+      @last_ritual = ritual
       return
     when 'precise motions with your ritual knife'
+      @last_ritual = ritual
       waitrt?
       fput 'drop material'
       return
@@ -516,6 +527,9 @@ class SpellProcess
     @preps = settings.prep_messages([])
     echo("  @preps: #{@preps}") if $debug_mode_ct
 
+    @is_necro = settings.thanatology['necro'] || false
+    echo("  @is_necro: #{@is_necro}") if $debug_mode_ct
+
     @is_empath = settings.is_empath(false) || DRStats.empath?
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
@@ -578,6 +592,7 @@ class SpellProcess
         .each { |spell| Flags["ct-#{spell['abbrev']}"] = true }
     end
     check_slivers(game_state)
+    check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
     check_health(game_state)
@@ -685,8 +700,9 @@ class SpellProcess
     @before.each { |action| bput(action['message'], action['matches']) } if @before
 
     @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
+    @custom_cast = "cast #{game_state.healing_target}" if game_state.casting_consume
     case bput(@custom_cast || 'cast', @casts)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume./
       fput('release spell')
     end
     @custom_cast = nil
@@ -695,6 +711,11 @@ class SpellProcess
     game_state.cast_timer = nil
 
     game_state.casting_ignite = false
+
+    game_state.casting_consume = false
+    game_state.prepare_consume = false
+    game_state.healing_target = nil
+
     if game_state.casting_moonblade
       if checkleft =~ /moon/ || game_state.brawling? || game_state.offhand?
         # The moonblade was summoned or refreshed while training something else
@@ -749,6 +770,24 @@ class SpellProcess
 
     echo('Healing') if $debug_mode_ct
     data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
+    prepare_spell(data, game_state)
+  end
+
+  def interrupt_casting(game_state)
+    fput('release spell') if game_state.casting
+    game_state.casting = false
+    game_state.cast_timer = nil
+  end
+
+  def check_consume(game_state)
+    return unless @is_necro
+    return if !game_state.prepare_consume
+    if game_state.casting && !game_state.casting_consume
+      interrupt_casting(game_state)
+    end
+    data = {'abbrev' => 'cf', 'mana' => 15} # Hardcoded minprep for proof of concept
+    game_state.casting_consume = true
+    game_state.prepare_consume = false
     prepare_spell(data, game_state)
   end
 
@@ -1423,7 +1462,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :healing_target
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1442,6 +1481,9 @@ class GameState
     @casting_moonblade = false
     @casting_ignite = false
     @use_charged_maneuvers = false
+    @casting_consume = false
+    @prepare_consume = false
+    @healing_target = nil
 
     # private
     @clean_up_step = nil

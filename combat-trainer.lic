@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#combat-trainer
 =end
 
-custom_require.call(%w(common common-arcana common-items common-summoning common-travel drinfomon equipmanager events spellmonitor))
+custom_require.call(%w(common common-arcana common-healing common-items common-summoning common-travel drinfomon equipmanager events spellmonitor))
 
 class SetupProcess
   include DRC
@@ -148,6 +148,7 @@ class LootProcess
   include DRC
   include DRCI
   include DRCS
+  include DRCH
 
   def initialize(settings)
     echo('New LootProcess') if $debug_mode_ct
@@ -175,6 +176,12 @@ class LootProcess
     @ritual_type = thanatology['ritual_type'] || {}
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
 
+    @last_ritual = nil
+    echo("  @last_ritual: #{@last_ritual}") if $debug_mode_ct
+
+    @heal = thanatology['heal'] || false
+    echo("  @heal: #{@heal}") if $debug_mode_ct
+
     @necro = thanatology['necro'] || false
     echo("  @necro: #{@necro}") if $debug_mode_ct
 
@@ -183,6 +190,9 @@ class LootProcess
 
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
+
+    @loot_timer = Time.now - 5
+    echo("  @loot_timer: #{@loot_timer}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -241,35 +251,57 @@ class LootProcess
   end
 
   def dispose_body(game_state)
-    return if DRRoom.dead_npcs.empty?
-
+    if DRRoom.dead_npcs.empty?
+      @last_ritual = nil
+      return
+    end
+    return if Time.now - @loot_timer < 5
     game_state.mob_died = true
-    arrange_mob(DRRoom.dead_npcs.first, game_state)
-    if @necro
+    healing = game_state.casting_consume || game_state.prepare_consume
+    if @necro && @last_ritual.nil?
+      if @heal
+        wounds = check_wounds
+        echo "Severity to Wounds: #{wounds}" if $debug_mode_ct
+        if !wounds.empty?
+          game_state.prepare_consume = true
+          healing = true
+          game_state.healing_target = wounds[wounds.keys.max].first
+          check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
+          check_thanatology(DRRoom.dead_npcs.first, 'consume', game_state)
+        end
+      end
       if @ritual_type == 'harvest'
         check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
       end
-      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state)
-      check_skinning(DRRoom.dead_npcs.first, game_state) if ['preserve'].include?(@ritual_type)
+      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state) if !healing
+      if ['preserve'].include?(@ritual_type) && !healing
+        arrange_mob(DRRoom.dead_npcs.first, game_state)
+        check_skinning(DRRoom.dead_npcs.first, game_state)
+      end
     elsif @skin
+      arrange_mob(DRRoom.dead_npcs.first, game_state)
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
-      pause
-      waitrt?
+    unless healing
+      while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
+        @last_ritual = nil
+        @loot_timer = Time.now
+        pause
+        waitrt?
+      end
     end
-    pause 0.2 until DRRoom.dead_npcs.empty?
   end
 
-  # partially completed, only works for a single ritual.
   def check_thanatology(mob_noun, ritual, game_state)
     return if game_state.construct?(mob_noun)
 
     perform_message = "perform #{ritual} on #{mob_noun}"
     case bput(perform_message, 'Rituals do not work upon constructs', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
     when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts'
+      @last_ritual = ritual
       return
     when 'precise motions with your ritual knife'
+      @last_ritual = ritual
       waitrt?
       fput 'drop material'
       return
@@ -278,7 +310,6 @@ class LootProcess
       return
     end
     waitrt?
-    # Eventually need a method for self-healing that would use this same block to set it up the perform consume and prep/cast consume flesh/devour
     pause 0.25
     waitrt?
     snap = [checkleft, checkright]
@@ -462,6 +493,12 @@ class SpellProcess
     @preps = settings.prep_messages([])
     echo("  @preps: #{@preps}") if $debug_mode_ct
 
+    @is_necro = settings.thanatology['necro'] || false
+    echo("  @is_necro: #{@is_necro}") if $debug_mode_ct
+
+    @necromancer_healing = settings.necromancer_healing({})
+    echo("  @necromancer_healing: #{@necromancer_healing}") if $debug_mode_ct
+
     @is_empath = settings.is_empath(false) || DRStats.empath?
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
@@ -480,8 +517,6 @@ class SpellProcess
 
     @osrel_no_harness = settings.osrel_no_harness
     echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
-
-    @cast_only_to_train = settings.cast_only_to_train
 
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
@@ -517,6 +552,7 @@ class SpellProcess
         .reject { |spell| spell['cyclic'] }
         .each { |spell| Flags["ct-#{spell['abbrev']}"] = true }
     end
+    check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
     check_health(game_state)
@@ -574,20 +610,21 @@ class SpellProcess
   def check_charging?(game_state)
     return false unless game_state.charge_cambrinth?
 
-    find_cambrinth3(@cambrinth, @held_cambrinth)
     if game_state.done_charging?
       echo('check_charging?: done') if $debug_mode_ct
 
       game_state.cambrinth_charges(nil)
+      find_cambrinth3(@cambrinth, @held_cambrinth)
       invoke(@cambrinth, @invoke_messages)
+      stow_cambrinth4(@cambrinth, @held_cambrinth)
     else
       next_charge = game_state.next_charge
       echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
+      find_cambrinth3(@cambrinth, @held_cambrinth)
       charge(@cambrinth, next_charge, @charge_messages)
+      stow_cambrinth4(@cambrinth, @held_cambrinth)
     end
-    stow_cambrinth4(@cambrinth, @held_cambrinth)
-
     true
   end
 
@@ -606,8 +643,9 @@ class SpellProcess
     @before.each { |action| bput(action['message'], action['matches']) } if @before
 
     @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
+    @custom_cast = "cast #{game_state.healing_target}" if game_state.casting_consume
     case bput(@custom_cast || 'cast', @casts)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume./
       fput('release spell')
     end
     @custom_cast = nil
@@ -616,6 +654,11 @@ class SpellProcess
     game_state.cast_timer = nil
 
     game_state.casting_ignite = false
+
+    game_state.casting_consume = false
+    game_state.prepare_consume = false
+    game_state.healing_target = nil
+
     if game_state.casting_moonblade
       if checkleft =~ /moon/ || game_state.weapon_skill == 'Brawling' || game_state.weapon_skill == 'Offhand Weapon'
         # The moonblade was summoned or refreshed while training something else
@@ -673,6 +716,24 @@ class SpellProcess
     prepare_spell(data, game_state)
   end
 
+  def interrupt_casting(game_state)
+    fput('release spell') if game_state.casting
+    game_state.casting = false
+    game_state.cast_timer = nil
+  end
+
+  def check_consume(game_state)
+    return unless @is_necro
+    return if !game_state.prepare_consume
+    if game_state.casting && !game_state.casting_consume
+      interrupt_casting(game_state)
+    end
+    data = @necromancer_healing['Consume Flesh']
+    game_state.casting_consume = true
+    game_state.prepare_consume = false
+    prepare_spell(data, game_state)
+  end
+
   def check_offensive(game_state)
     return if game_state.casting
     return if game_state.npcs.empty?
@@ -681,14 +742,13 @@ class SpellProcess
                    .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
                    .select { |spell| game_state.dancing? ? spell['harmless'] : true }
                    .select { |spell| spell['recast_every'] ? check_spell_timer(spell) : true }
-                   .select { |spell| @cast_only_to_train ? DRSkill.getxp(spell['skill']) <= 32 : true }
     data = if @offensive_spell_cycle.empty?
              ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
            else
-             name = @offensive_spell_cycle.find { |spell_name| ready_spells.find { |spell| spell['name'] == spell_name } }
+             name = @offensive_spell_cycle.find { |name| ready_spells.find { |spell| spell['name'] == name } }
              @offensive_spell_cycle.rotate!
              ready_spells.find { |spell| spell['name'] == name }
-           end
+          end
     return if DRSkill.getxp(data['skill']) >= 34 && checkmana < 70 # make this a spell option
     prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
@@ -1275,7 +1335,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :casting_consume, :prepare_consume, :healing_target
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1293,6 +1353,9 @@ class GameState
     @cast_timer = nil
     @casting_moonblade = false
     @casting_ignite = false
+    @casting_consume = false
+    @prepare_consume = false
+    @healing_target = nil
 
     # private
     @clean_up_step = nil

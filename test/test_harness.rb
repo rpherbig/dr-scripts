@@ -49,7 +49,7 @@ module Harness
     $dead || false
   end
 
-  def checkhealth
+  def health
     $health || 100
   end
 

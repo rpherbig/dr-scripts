@@ -45,11 +45,11 @@ module Harness
     $displayed_messages ||= []
   end
 
-  def checkdead
+  def dead?
     $dead || false
   end
 
-  def checkhealth
+  def health
     $health || 100
   end
 

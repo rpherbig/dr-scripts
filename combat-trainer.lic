@@ -391,7 +391,7 @@ class SafetyProcess
   end
 
   def execute(game_state)
-    custom_require.call('tendme') if checkbleeding && !Script.running?('tendme')
+    custom_require.call('tendme') if bleeding? && !Script.running?('tendme')
     fix_standing
     tend_lodged
     game_state.danger = in_danger?(game_state.danger)
@@ -413,14 +413,14 @@ class SafetyProcess
   end
 
   def in_danger?(danger)
-    return false if checkhealth >= 75
+    return false if health >= 75
 
     unless danger
       Flags.reset('ct-engaged')
       retreat
     end
 
-    fput 'exit' if checkhealth < 40
+    fput 'exit' if health < 40
 
     keep_away
     true
@@ -480,6 +480,8 @@ class SpellProcess
 
     @osrel_no_harness = settings.osrel_no_harness
     echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
+
+    @cast_only_to_train = settings.cast_only_to_train
 
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
@@ -572,21 +574,20 @@ class SpellProcess
   def check_charging?(game_state)
     return false unless game_state.charge_cambrinth?
 
+    find_cambrinth3(@cambrinth, @held_cambrinth)
     if game_state.done_charging?
       echo('check_charging?: done') if $debug_mode_ct
 
       game_state.cambrinth_charges(nil)
-      find_cambrinth3(@cambrinth, @held_cambrinth)
       invoke(@cambrinth, @invoke_messages)
-      stow_cambrinth4(@cambrinth, @held_cambrinth)
     else
       next_charge = game_state.next_charge
       echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
-      find_cambrinth3(@cambrinth, @held_cambrinth)
       charge(@cambrinth, next_charge, @charge_messages)
-      stow_cambrinth4(@cambrinth, @held_cambrinth)
     end
+    stow_cambrinth4(@cambrinth, @held_cambrinth)
+
     true
   end
 
@@ -641,7 +642,7 @@ class SpellProcess
 
   def check_buffs(game_state)
     return if game_state.casting
-    return if checkmana < 40
+    return if mana < 40
 
     recastable_buffs = @buff_spells
                        .select { |_, data| data['recast'] || data['recast_every'] || data['expire'] }
@@ -665,7 +666,7 @@ class SpellProcess
   def check_health(game_state)
     return if game_state.casting
     return unless @is_empath
-    return if checkhealth > 91
+    return if health > 91
 
     echo('Healing') if $debug_mode_ct
     data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
@@ -675,19 +676,20 @@ class SpellProcess
   def check_offensive(game_state)
     return if game_state.casting
     return if game_state.npcs.empty?
-    return if checkmana < 40
+    return if mana < 40
     ready_spells = @offensive_spells
                    .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
                    .select { |spell| game_state.dancing? ? spell['harmless'] : true }
                    .select { |spell| spell['recast_every'] ? check_spell_timer(spell) : true }
+                   .select { |spell| @cast_only_to_train ? DRSkill.getxp(spell['skill']) <= 32 : true }
     data = if @offensive_spell_cycle.empty?
              ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
            else
-             name = @offensive_spell_cycle.find { |name| ready_spells.find { |spell| spell['name'] == name } }
+             name = @offensive_spell_cycle.find { |spell_name| ready_spells.find { |spell| spell['name'] == spell_name } }
              @offensive_spell_cycle.rotate!
              ready_spells.find { |spell| spell['name'] == name }
-          end
-    return if DRSkill.getxp(data['skill']) >= 34 && checkmana < 70 # make this a spell option
+           end
+    return if DRSkill.getxp(data['skill']) >= 34 && mana < 70 # make this a spell option
     prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
   end
@@ -1026,7 +1028,7 @@ class AttackProcess
       end
 
       command = game_state.offhand? ? 'attack left' : 'attack'
-      if (game_state.backstab? || game_state.ambush?) && checkhidden
+      if (game_state.backstab? || game_state.ambush?) && hiding?
         if (game_state.backstab? && game_state.no_stab_current_mob) || (game_state.ambush? && !game_state.backstab?)
           command += ' back'
         else
@@ -1387,7 +1389,7 @@ class GameState
   def next_clean_up_step
     case @clean_up_step
     when nil
-      @clean_up_step = if @stop_on_bleeding && checkbleeding
+      @clean_up_step = if @stop_on_bleeding && bleeding?
                          'clear_magic'
                        else
                          'kill'

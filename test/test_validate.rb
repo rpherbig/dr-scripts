@@ -75,7 +75,7 @@ class TestValidate < Minitest::Test
     assert $error_msgs.grep(/moonblade/).empty?, "Expected no warning for summoned gear, found #{$error_msgs.grep(/moonblade/)}"
   end
 
-  def test_stop_on_weapon_skills_in_weapon_training
+  def test_stop_on_weapon_skills_are_in_weapon_training
     setup_settings('hunting_info' => [
                      {
                        'stop_on' => [

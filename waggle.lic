@@ -25,247 +25,78 @@ class Waggle
 
   end
 
-  def execute(check_spells)
-
-  end
-
-  private
-
-  def check_slivers(game_state)
-    return if game_state.casting
-    return if @tk_ammo
-    return unless @tk_spell
-    return if DRSpells.slivers
-    return if UserVars.moons['visible'].empty?
-
-    fput('pre moonblade')
-    pause
-    fput("cast #{UserVars.moons['visible'].first}")
-    fput('break moonblade')
-  end
-
-  def check_osrel(game_state)
-    return if game_state.casting
-    return unless @osrel_amount && DRSpells.active_spells['Osrel Meraud']
-    return unless Time.now - @osrel_timer > 300
-    @osrel_timer = Time.now
-    infuse_om(!@osrel_no_harness, @osrel_amount)
-  end
-
-  def check_timer(game_state)
-    return if game_state.cast_timer.nil? || (Time.now - game_state.cast_timer) <= 70
-
-    game_state.cast_timer = nil
-    fput('release spell') if game_state.casting
-    game_state.casting = false
-  end
-
-  def check_bless(game_state)
-    return if game_state.casting
-    return unless @buff_spells['Bless']
-    return unless Flags['ct-need-bless']
-    Flags.reset('ct-need-bless')
-
-    bput('prepare Bless', @preps)
-    bput("cast #{checkright || checkleft}", @casts)
-  end
-
-  def check_ignite(game_state)
-    return if @last_seen_weapon_name == game_state.weapon_name
-    @last_seen_weapon_name = game_state.weapon_name
-    return unless DRSpells.active_spells['Ignite']
-
-    # Release the spell on the character
-    bput('release ignite', 'The warm feeling in your hand goes away', 'Release what')
-    # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
-    pause 1
-  end
-
-  def check_charging?(game_state)
-    return false unless game_state.charge_cambrinth?
-
-    game_state.find_cambrinth
-    if game_state.done_charging?
-      echo('check_charging?: done') if $debug_mode_ct
-
-      game_state.cambrinth_charges(nil)
-      game_state.invoke_cambrinth
-    else
-      next_charge = game_state.next_charge
-      echo("check_charging?: #{next_charge}") if $debug_mode_ct
-
-      game_state.charge_cambrinth(next_charge)
-    end
-    game_state.stow_cambrinth
-
-    true
-  end
-
-  def ready_to_cast?(game_state)
-    Flags['ct-spellcast'] || (@prep_time && Time.now - game_state.cast_timer >= @prep_time)
-  end
-
-  def check_current(game_state)
-    return unless game_state.casting
-    return if check_charging?(game_state) && check_charging?(game_state)
-
-    cast(game_state) if ready_to_cast?(game_state)
-  end
-
-  def cast(game_state)
-    @before.each { |action| bput(action['message'], action['matches']) } if @before
-
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
-    case bput(@custom_cast || 'cast', @casts)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/
-      fput('release spell')
-    end
-    @custom_cast = nil
-
-    game_state.casting = false
-    game_state.cast_timer = nil
-
-    game_state.casting_ignite = false
-    if game_state.casting_moonblade
-      if checkleft =~ /moon/ || game_state.brawling? || game_state.offhand?
-        # The moonblade was summoned or refreshed while training something else
-        bput('wear moon', 'telekinetic')
+  def check_spells(spells)
+    check_osrel
+    spells.each do |name, data|
+      next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
+      while mana < 40
+        pause 15
+        echo('Waiting on mana...')
       end
-
-      game_state.casting_moonblade = false
+      cast_spell(data)
     end
-
-    return unless @after
-    @after.each { |action| bput(action['message'], action['matches']) }
-    @after = nil
   end
 
-  def check_spell_timer(data)
-    Time.now - (@spell_timers[data['abbrev']] || Time.at(0)) >= data['recast_every']
+  def check_osrel
+    return unless DRSpells.active_spells['Osrel Meraud'] && DRSpells.active_spells['Osrel Meraud'] < 90
+    infuse_om(!@settings.osrel_no_harness, @settings.osrel_amount)
   end
 
-  def check_buff_conditions?(name, _data, game_state)
-    return false if name == 'Ignite' && game_state.aimed_skill?
-
-    true
-  end
-
-  def check_buffs(game_state)
-    return if game_state.casting
-    return if mana < 40
-
-    recastable_buffs = @buff_spells
-                       .select { |_, data| data['recast'] || data['recast_every'] || data['expire'] }
-                       .select { |_name, data| data['expire'] ? Flags["ct-#{data['abbrev']}"] : true }
-                       .select { |name, data| check_buff_conditions?(name, data, game_state) }
-
-    name, data = recastable_buffs.find do |name, data|
-      if data['recast_every']
-        check_spell_timer(data)
-      elsif data['expire']
-        true
-      else
-        !DRSpells.active_spells[name] || DRSpells.active_spells[name].to_i <= data['recast']
-      end
-    end
-    echo("found buff missing: #{name}") if $debug_mode_ct && name
-    game_state.casting_ignite = true if name == 'Ignite'
-    prepare_spell(data, game_state)
-  end
-
-  def check_health(game_state)
-    return if game_state.casting
-    return unless @is_empath
-    return if health > 91
-
-    echo('Healing') if $debug_mode_ct
-    data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
-    prepare_spell(data, game_state)
-  end
-
-  def check_offensive(game_state)
-    return if game_state.casting
-    return if game_state.npcs.empty?
-    return if mana < 40
-    ready_spells = @offensive_spells
-                   .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
-                   .select { |spell| game_state.dancing? ? spell['harmless'] : true }
-                   .select { |spell| spell['recast_every'] ? check_spell_timer(spell) : true }
-                   .select { |spell| @cast_only_to_train ? DRSkill.getxp(spell['skill']) <= 32 : true }
-                   .select { |spell| spell['cyclic'] ? !DRSpells.active_spells['spell'][spell['name']] : true }
-                   .select { |spell| spell['night'] ? UserVars.sun['night'] : true }
-                   .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
-                   .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
-    data = if @offensive_spell_cycle.empty?
-             ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
-           else
-             name = @offensive_spell_cycle.find { |spell_name| ready_spells.find { |spell| spell['name'] == spell_name } }
-             @offensive_spell_cycle.rotate!
-             ready_spells.find { |spell| spell['name'] == name }
-           end
-    return if DRSkill.getxp(data['skill']) >= 34 && mana < 70 # make this a spell option
-    prepare_spell(data, game_state)
-    Flags.reset('ct-spelllost')
-  end
-
-  def prepare_spell(data, game_state)
-    return unless data
-    game_state.cast_timer = Time.now
-    @prep_time = data['prep_time']
-    echo("prepare spell: #{data}") if $debug_mode_ct
-    if data['cyclic']
-      fput('release care') if DRSpells.active_spells['Caress of the Sun']
-      fput("release #{data['abbrev']}") # make bputs. better spells
-    end
-    command = 'pre'
-    command = data['skill'] == 'Debilitation' ? 'pre' : 'tar' if data['skill']
-    command = data['prep_type'] if data['prep_type']
-
-    @spell_timers[data['abbrev']] = Time.now if data['recast_every']
+  def cast_spell(data)
+    Flags.add('w-spellcast', '^You feel fully prepared to cast your spell\.')
+    Flags.add('w-spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires')
 
     if data['moon']
-      moon = UserVars.moons['visible'].first
-      unless moon
-        echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
+      # Look for a moon that will be up for the next few minutes
+      unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
+        echo "No moon available to cast #{data['abbrev']}"
         unless Script.running? 'moonwatch'
           echo 'moonwatch is not running. Starting it now'
           custom_require.call('moonwatch')
           echo "Run `;e autostart('moonwatch')` to avoid this in the future"
         end
 
-        @weather = bput('weather', 'inside', 'You glance up at the sky.') unless @weather
-        if @weather =~ /inside/
-          echo "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
-        end
-
-        unless moon = UserVars.moons['visible'].first
-          echo "Couldn't find any moons to cast #{data['abbrev']} with" if $debug_mode_ct
+        unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
+          echo "Couldn't find any moons to cast #{data['abbrev']} with"
           return
         end
       end
-      if data['abbrev'] == 'moonblade'
-        game_state.casting_moonblade = true
-        last_moon = moon_used_to_summon_weapon
-        data['before'] = [{ 'message' => 'get moon', 'matches' => ['already holding that', 'You grab', 'referring to'] }]
-        if UserVars.moons['visible'].include?(last_moon) && UserVars.moons[last_moon]['timer'] >= 4
-          moon = last_moon
-          data['cast'] = "cast #{moon} refresh"
-        else
-          data['before'] << { 'message' => 'drop moon', 'matches' => ['open your hand', 'referring to'] }
-          data['cast'] = "cast #{moon}"
-        end
-      else
-        data['cast'] = "cast #{moon}"
-      end
+      data['cast'] = "cast #{moon}"
     end
-    bput("#{command} #{data['abbrev']} #{data['mana']}", @preps)
-    game_state.casting = true
-    game_state.cambrinth_charges(data['cambrinth'])
-    @custom_cast = data['cast']
-    @after = data['after']
-    Flags.reset("ct-#{data['abbrev']}") if data['expire']
-    Flags.reset('ct-spellcast')
-    @before = data['before']
+
+    fput('release gj') if data['cyclic'] && DRSpells.active_spells['Glythtide\'s Joy']
+    fput('release care') if data['cyclic'] && DRSpells.active_spells['Caress of the Sun']
+    fput('release bes') if data['cyclic'] && DRSpells.active_spells['Bear Strength']
+
+    bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if data['symbiosis']
+    if /Something in the area interferes/ =~ bput("prepare #{data['abbrev']} #{data['mana']}", @settings.prep_messages)
+      fput('rel symb') if data['symbiosis']
+      return
+    end
+
+    if data['cambrinth']
+      find_cambrinth(@settings)
+
+      charge_and_invoke(@settings, data['cambrinth'])
+
+      stow_cambrinth(@settings)
+    end
+
+    pause 0.5 until Flags['w-spellcast']
+
+    Flags.reset('w-spell-fail')
+
+    while DRSpells.prep_spell
+      data['before'].each { |action| bput(action['message'], action['matches']) }
+      fput(data['cast'] || 'cast')
+      data['after'].each { |action| bput(action['message'], action['matches']) }
+    end
+
+    return unless data['symbiosis']
+
+    if Flags['w-spell-fail']
+      fput('rel symb')
+    end
   end
 end
 

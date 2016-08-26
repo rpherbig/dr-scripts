@@ -5,17 +5,19 @@
 
 custom_require.call(%w(common events))
 
-def setup
-  DRC.bput('sleep', 'You relax', 'You are already')
-  stop_script('smartlisten') if Script.running?('smartlisten')
+def setup(announce, sleep, greet)
+  DRC.bput('sleep', 'You relax', 'You are already') if sleep
+  stop_script('smartlisten') if Script.running?('smartlisten') && sleep
 
   Flags.add('give-accepted', '.* has accepted your offer and is now holding .*')
   Flags.add('give-expired', 'Your offer to .* has expired\.')
 
   @lnet = (Script.running + Script.hidden).find { |val| val.name == 'lnet' }
-  @validating_character = false
+  @validated_characters = []
+  @last_room_list = []
+  @greet = greet
 
-  chat("Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.")
+  chat("Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.") if announce
 end
 
 def accept
@@ -55,78 +57,80 @@ def chat(text)
 end
 
 def who(character)
+  echo "Attempting to validate: #{character}"
   @lnet.unique_buffer.push("who #{character}")
 end
 
 def help(character)
   fput "whisper #{character} Supported commands are:"
   fput "whisper #{character}   help - this list"
-  fput "whisper #{character}   inventory - view the items I have available"
-  fput "whisper #{character}   giveme [item] - take an item from me"
+  fput "whisper #{character}   (inv|inventory) - view the items I have available"
+  fput "whisper #{character}   (give me|giveme) [item] - take an item from me"
   fput "whisper #{character} I will also accept and stow any item you trade me"
+end
+
+def greet(character)
+  return unless @greet
+
+  fput "whisper #{character} Hi! I'm your friendly neighborhood lichbot. Whisper me 'help' for more details. Don't worry, I've memorized your name so you won't see this message again."
 end
 
 arg_definitions = [
   [
-    { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up lichbot' }
+    { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up lichbot' },
+    { name: 'announce', regex: /announce/i, optional: true, description: 'If arg is present, lichbot will announce its presence in LNet' },
+    { name: 'sleep', regex: /sleep/i, optional: true, description: 'If arg is present, lichbot will sleep so as not to gain experience' },
+    { name: 'greet', regex: /greet/i, optional: true, description: 'If arg is present, lichbot will greet characters after validating (but only once)' }
   ]
 ]
 
 args = parse_args(arg_definitions)
 
-setup
+setup(args.announce, args.sleep, args.greet)
 
 loop do
   line = script.gets?
   pause 0.05 unless line
 
   if line =~ /^(.*) offers you (.*).  Enter ACCEPT to accept the offer or DECLINE to decline it.  The offer will expire in 30 seconds.$/
-    temp_character = Regexp.last_match(1)
+    character = Regexp.last_match(1)
 
-    if @validating_character && temp_character != @character
-      fput("whisper #{temp_character} I'm sorry, I'm busy right now")
-      next
+    if @validated_characters.include?(character)
+      accept
+    else
+      fput("whisper #{@character} Sorry, I was unable to validate you")
     end
+  elsif line =~ /^(.*) whispers, "(giveme|give me|inv|inventory|help)(.*)"$/i
+    character = Regexp.last_match(1)
+    command = Regexp.last_match(2)
+    item = Regexp.last_match(3)
 
-    @character = temp_character
-    @command = 'accept'
-    @validating_character = true
-    who(@character)
-  elsif line =~ /^(.*) whispers, "(giveme|inventory|help)(.*)"$/
-    temp_character = Regexp.last_match(1)
-
-    if @validating_character && temp_character != @character
-      fput("whisper #{temp_character} I'm sorry, I'm busy right now")
-      next
+    if @validated_characters.include?(character)
+      case command.downcase
+      when 'giveme', 'give me'
+        give(character, item)
+      when 'inventory', 'inv'
+        inventory(character)
+      when 'help'
+        help(character)
+      end
+    else
+      fput("whisper #{character} Sorry, I was unable to validate you")
     end
+  elsif DRRoom.pcs != @last_room_list
+    new_characters = DRRoom.pcs - @last_room_list
 
-    @character = temp_character
-    @command = Regexp.last_match(2)
-    @item = Regexp.last_match(3)
-    @validating_character = true
-    who(@character)
-  elsif @validating_character && line =~ /^\[server\]: "(.*)"$/
+    new_characters
+      .reject { |character| @validated_characters.include?(character) }
+      .each { |character| who(character) }
+    @last_room_list = DRRoom.pcs
+  elsif line =~ /^\[server\]: "(.*)"$/
     result = Regexp.last_match(1)
 
-    if result =~ /no such channel or user/
-      fput("whisper #{@character} Sorry, I was unable to validate you")
-      @validating_character = false
-      next
-    elsif result =~ /.*#{@character} is tuned to the following channels/
-      @validating_character = false
-    else
-      next
-    end
+    next unless result =~ /DR:(.*) is tuned to the following channels/
 
-    case @command
-    when 'giveme'
-      give(@character, @item)
-    when 'inventory'
-      inventory(@character)
-    when 'accept'
-      accept
-    when 'help'
-      help(@character)
-    end
+    character = Regexp.last_match(1)
+    @validated_characters << character
+    greet(character)
   end
 end

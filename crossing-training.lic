@@ -64,6 +64,10 @@ class CrossingTraining
 
   def main
     walk_to(@settings.safe_room)
+    if (@settings.waggle_sets || {})['town-training']
+      pause 10
+      wait_for_script_to_complete('buff', ['town-training'])
+    end
     loop do
       event_loop
       if @idling
@@ -78,8 +82,9 @@ class CrossingTraining
   end
 
   def empty_trash
-    dispose_trash(checkright) while @settings.trash_nouns([]).include?(checkright)
-    dispose_trash(checkleft) while @settings.trash_nouns([]).include?(checkleft)
+    trash_nouns = get_data('items').trash_nouns
+    dispose_trash(checkright) while trash_nouns.include?(checkright)
+    dispose_trash(checkleft) while trash_nouns.include?(checkleft)
   end
 
   def event_loop
@@ -345,7 +350,7 @@ class CrossingTraining
     ability = @settings.training_nonspells({})[skill]
     echo("using ability: #{ability}") if UserVars.crossing_trainer_debug
     if ability.include?('Khri')
-      activate_khri?(@settings.kneel_khri, @settings.khri_preps, ability)
+      activate_khri?(@settings.kneel_khri, ability)
     else
       fput ability
     end
@@ -390,8 +395,8 @@ class CrossingTraining
       calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
     elsif discern_data.empty? || discern_data['time_stamp'] && Time.now - discern_data['time_stamp'] > 24 * 60 * 60
       discern_data['time_stamp'] = Time.now
-      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell')
-      when /you don't think you are able/i
+      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
+      when /you don't think you are able/i, 'You have no idea how to cast that spell'
         discern_data['mana'] = 1
         discern_data['cambrinth'] = nil
       else
@@ -414,11 +419,20 @@ class CrossingTraining
   end
 
   def research
+    if @settings.cyclic_research_skills
+      research_skill_cyclic = @settings.cyclic_research_skills([])
+                                       .min_by { |s| DRSkill.getxp(s) }
+      cyclic_research(research_skill_cyclic)
+    end
     if 'You cannot begin' == bput("research #{@researching} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin')
       fput('research cancel')
       fput('research cancel')
       research
     end
+  end
+
+  def cyclic_research(research_skill_cyclic)
+    cast_spell(@settings.research_training_spells({})[research_skill_cyclic], research_skill_cyclic)
   end
 
   def check_research
@@ -501,18 +515,12 @@ class CrossingTraining
 
     bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if data['symbiosis']
     scaled_prep_mana = data['mana']
-    if /Something in the area interferes/ =~ bput("prepare #{data['abbrev']} #{scaled_prep_mana}", @settings.prep_messages)
+    if /Something in the area interferes/ =~ prepare(data['abbrev'], scaled_prep_mana)
       fput('rel symb') if data['symbiosis']
       return
     end
 
-    if data['cambrinth']
-      find_cambrinth(@settings)
-
-      charge_and_invoke(@settings, data['cambrinth'])
-
-      stow_cambrinth(@settings)
-    end
+    find_charge_invoke_stow(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap, data['cambrinth'])
 
     pause 0.5 until Flags['ct-spellcast']
 
@@ -703,6 +711,7 @@ class CrossingTraining
           walk_to(19_464)
           check_osrel unless @researching
           check_research
+          break if DRSkill.getxp('Athletics') >= 29
           train_outdoorsmanship
           train_outdoorsmanship
           train_outdoorsmanship
@@ -730,25 +739,7 @@ class CrossingTraining
   end
 
   def train_scouting
-    if @settings.trail_override
-      start_room, return_room = @settings.trail_override
-    elsif DRSkill.getrank('Scouting') < 50
-      fput('hunt')
-      return
-    else
-      start_room, return_room = DRSkill.getrank('Scouting') < 600 ? [991, 1378] : [3476, 4336]
-    end
-
-    walk_to start_room
-    bput 'scout trail', 'You notice a trailmarker'
-    bput 'go trail', 'You set off into the wild', 'That would be difficult'
-    waitfor 'As your journey ends'
-    pause 0.5 until Room.current.id
-    walk_to return_room
-    bput 'scout trail', 'You notice a trailmarker'
-    bput 'go trail', 'You set off into the wild', 'That would be difficult'
-    waitfor 'As your journey ends'
-    pause 0.5 until Room.current.id
+    wait_for_script_to_complete('scouting')
   end
 
   def train_attunement
@@ -762,11 +753,12 @@ class CrossingTraining
       waitrt?
       return
     end
-    %w(815 814 802 800 799 801 817 818).each do |roomid|
+    start_timer = Time.now
+    %w(815 814 802 800 799 801 817 818 816 761 757 756 748 747 746 729).each do |roomid|
       walk_to roomid
       bput('perc', 'You reach out')
       waitrt?
-      break if DRSkill.getxp('Attunement') >= 30
+      break if DRSkill.getxp('Attunement') >= 30 || start_timer - Time.now > 90
     end
   end
 

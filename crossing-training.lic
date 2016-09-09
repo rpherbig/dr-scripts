@@ -1,5 +1,5 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#crossing-training
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#crossing-training
 =end
 
 custom_require.call(%w(drinfomon equipmanager events spellmonitor common common-arcana common-crafting common-items common-money common-travel common-summoning))
@@ -27,10 +27,12 @@ class CrossingTraining
 
     args = parse_args(arg_definitions, true)
 
-    @settings = get_settings(args.flex + %w(art athletics perform))
+    @settings = get_settings(args.flex)
+    @athletics_options = get_data('athletics').athletics_options
+    @song_list = get_data('perform').perform_options
+
     @use_research = @settings.use_research(false)
     @settings.outdoor_room ||= 793
-    @song_list = @settings.perform_options
     @settings.storage_containers([]).each { |container| fput("open my #{container}") }
     @disciplines_to_skill = {
       'Blacksmithing' => 'Forging',
@@ -38,14 +40,34 @@ class CrossingTraining
       'Armorsmithing' => 'Forging',
       'Tailoring' => 'Outfitting',
       'Shaping' => 'Engineering',
-      'Carving' => 'Engineering'
+      'Carving' => 'Engineering',
+      'Remedies' => 'Alchemy'
     }
     @skills_requiring_movement = @settings.crossing_training_requires_movement(%w(Appraisal Athletics Attunement Empathy Engineering Forging Outfitting Scouting Sorcery Stealth Thievery Theurgy Trading))
+    @bad_classes = %w(Thievery Sorcery)
+    @bad_classes += ['Arcana'] if DRStats.barbarian?
+    @bad_classes += ['Arcana', 'Inner Magic', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Utility', 'Augmentation', 'Debilitation', 'Warding'] if DRStats.trader?
+    @bad_classes += ['Arcana', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Warding'] if DRStats.thief?
+
+    EquipmentManager.instance.refresh(@settings)
+
+    UserVars.crossing_timers ||= {}
+
+    release_cyclics
+
+    Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
+    Flags.add('ct-song', 'you finish playing')
+    Flags.add('ct-spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires')
+    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were')
+    Flags.add('research-complete', '^Breakthrough!')
   end
 
   def main
-    setup
-
+    walk_to(@settings.safe_room)
+    if (@settings.waggle_sets || {})['town-training']
+      pause 10
+      wait_for_script_to_complete('buff', ['town-training'])
+    end
     loop do
       event_loop
       if @idling
@@ -59,30 +81,10 @@ class CrossingTraining
     end
   end
 
-  def setup
-    # Configure UserVars
-
-    EquipmentManager.instance.refresh(@settings)
-
-    UserVars.crossing_timers ||= {}
-
-    fput('release aewo') if DRSpells.active_spells['Aether Wolves']
-
-    Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
-    Flags.add('ct-song', 'you finish playing')
-    Flags.add('ct-spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires')
-    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were')
-    Flags.add('research-complete', '^Breakthrough!')
-
-    @bad_classes = %w(Thievery Sorcery)
-    @bad_classes += ['Arcana'] if DRStats.barbarian?
-    @bad_classes += ['Arcana', 'Inner Magic', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Utility', 'Augmentation', 'Debilitation', 'Warding'] if DRStats.trader?
-    @bad_classes += ['Arcana', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Warding'] if DRStats.thief?
-  end
-
   def empty_trash
-    dispose_trash(checkright) while @settings.trash_nouns([]).include?(checkright)
-    dispose_trash(checkleft) while @settings.trash_nouns([]).include?(checkleft)
+    trash_nouns = get_data('items').trash_nouns
+    dispose_trash(checkright) while trash_nouns.include?(checkright)
+    dispose_trash(checkleft) while trash_nouns.include?(checkleft)
   end
 
   def event_loop
@@ -93,6 +95,7 @@ class CrossingTraining
     skill = @settings.crossing_training([])
                      .select { |s| ready_to_use?(s) }
                      .select { |s| not_research_blocked?(s) }
+                     .reject { |s| @settings.crossing_training_stationary_skills_only && @skills_requiring_movement.include?(s) }
                      .min_by { |s| DRSkill.getxp(s) }
 
     check_tithe
@@ -156,7 +159,11 @@ class CrossingTraining
     when 'Mechanical Lore'
       train_mechanical_lore
     when 'Outdoorsmanship'
-      train_outdoorsmanship
+      if @settings.mine_for_outdoorsmanship
+        train_mining
+      else
+        train_outdoorsmanship
+      end
     when 'Outfitting'
       train_outfitting
     when 'Perception'
@@ -179,6 +186,8 @@ class CrossingTraining
       train_thievery
     when 'Trading'
       train_trading
+    when 'Alchemy'
+      train_alchemy
     else
       echo "#{skill} not implemented yet"
       pause 15
@@ -205,6 +214,7 @@ class CrossingTraining
     if DRSkill.getrank('Sorcery') < 50 && @settings.crossing_training_sorcery.nil?
       focus_runestone
     else
+      return if @researching
       walk_to @settings.crossing_training_sorcery_room(1137)
       spell = @settings.crossing_training_sorcery(nil)
       return if spell.nil? || spell.empty?
@@ -212,6 +222,7 @@ class CrossingTraining
       3.times do
         break if DRSkill.getxp('Sorcery') >= 30
         fput "prep #{spell}"
+        pause 3
         waitcastrt?
         fput 'cast'
       end
@@ -284,6 +295,7 @@ class CrossingTraining
     wait_for_script_to_complete('pick')
     if Time.now - start_time > 15
       wait_for_script_to_complete('sell-loot')
+      walk_to(@settings.safe_room)
     else
       echo '***UNABLE TO TRAIN LOCKSMITHING, REMOVING IT FROM THE TRAINING LIST***'
       @settings.crossing_training([]).delete('Locksmithing')
@@ -292,6 +304,10 @@ class CrossingTraining
 
   def train_theurgy
     wait_for_script_to_complete('theurgy')
+  end
+
+  def train_mining
+    wait_for_script_to_complete('mining-buddy')
   end
 
   def train_magic(skill)
@@ -334,7 +350,7 @@ class CrossingTraining
     ability = @settings.training_nonspells({})[skill]
     echo("using ability: #{ability}") if UserVars.crossing_trainer_debug
     if ability.include?('Khri')
-      activate_khri?(@settings.kneel_khri, @settings.khri_preps, ability)
+      activate_khri?(@settings.kneel_khri, ability)
     else
       fput ability
     end
@@ -379,8 +395,8 @@ class CrossingTraining
       calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
     elsif discern_data.empty? || discern_data['time_stamp'] && Time.now - discern_data['time_stamp'] > 24 * 60 * 60
       discern_data['time_stamp'] = Time.now
-      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell')
-      when /you don't think you are able/i
+      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
+      when /you don't think you are able/i, 'You have no idea how to cast that spell'
         discern_data['mana'] = 1
         discern_data['cambrinth'] = nil
       else
@@ -403,11 +419,20 @@ class CrossingTraining
   end
 
   def research
+    if @settings.cyclic_research_skills
+      research_skill_cyclic = @settings.cyclic_research_skills([])
+                                       .min_by { |s| DRSkill.getxp(s) }
+      cyclic_research(research_skill_cyclic)
+    end
     if 'You cannot begin' == bput("research #{@researching} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin')
       fput('research cancel')
       fput('research cancel')
       research
     end
+  end
+
+  def cyclic_research(research_skill_cyclic)
+    cast_spell(@settings.research_training_spells({})[research_skill_cyclic], research_skill_cyclic)
   end
 
   def check_research
@@ -453,6 +478,7 @@ class CrossingTraining
     check_discern(data)
     if data['abbrev'] =~ /^comp/i
       walk_to 991
+      return unless DRRoom.npcs.empty?
       fput(['\'Had this been a real compost your belongings would be gone. Composting soon', '\'Compost', '\'Compost incoming', '\'This is a code green, compost alert', '\'Pick up your valuables, compost time', '\'If it\'s on the ground it\'s gone, Compost incoming'].sample)
     end
 
@@ -485,25 +511,16 @@ class CrossingTraining
       data['cast'] = "cast #{moon}"
     end
 
-    fput('release gj') if data['cyclic'] && DRSpells.active_spells['Glythtide\'s Joy']
-    fput('release care') if data['cyclic'] && DRSpells.active_spells['Caress of the Sun']
-    fput('release bes') if data['cyclic'] && DRSpells.active_spells['Bear Strength']
-    fput('release fg') if data['cyclic'] && DRSpells.active_spells['Faenella\'s Grace']
+    release_cyclics if data['cyclic']
 
     bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if data['symbiosis']
     scaled_prep_mana = data['mana']
-    if /Something in the area interferes/ =~ bput("prepare #{data['abbrev']} #{scaled_prep_mana}", @settings.prep_messages)
+    if /Something in the area interferes/ =~ prepare(data['abbrev'], scaled_prep_mana)
       fput('rel symb') if data['symbiosis']
       return
     end
 
-    if data['cambrinth']
-      find_cambrinth(@settings)
-
-      charge_and_invoke(@settings, data['cambrinth'])
-
-      stow_cambrinth(@settings)
-    end
+    find_charge_invoke_stow(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap, data['cambrinth'])
 
     pause 0.5 until Flags['ct-spellcast']
 
@@ -581,7 +598,7 @@ class CrossingTraining
 
   def train_first_aid
     play_song?
-    fput 'get my compendium'
+    bput('get my compendium', 'You get')
     start_text = bput('look my compendium', '^The compendium lies open to the section on .* physiology')
     start_text =~ /^The compendium lies open to the section on (.*) physiology/i
     start = Regexp.last_match(1)
@@ -653,9 +670,29 @@ class CrossingTraining
       climb_branch
     else
       play_song?
-      @settings.athletics_options.each do |data|
+      @athletics_options.each do |data|
         check_research
         break unless climb?(data['room'], data['targets'])
+      end
+    end
+  end
+
+  def practice_branch
+    while DRSkill.getxp('Athletics') < 29
+      check_osrel unless @researching
+      check_research
+      loop do
+        break if hide?
+      end
+      bput('climb practice branch', 'You begin to practice ')
+      Flags.add('ct-climbing', 'You finish practicing')
+      loop do
+        pause 1
+        break if Flags['ct-climbing']
+        if DRSkill.getxp('Athletics') > 28
+          fput('stop climb')
+          break
+        end
       end
     end
   end
@@ -665,23 +702,24 @@ class CrossingTraining
     check_research
     if DRSkill.getxp('Athletics') < 29
       walk_to(2245)
-      check_research
-      loop do
-        break if hide?
-      end
-      while DRSkill.getxp('Athletics') < 29
-        bput('climb practice branch', 'You begin to practice ')
-        Flags.add('ct-climbing', 'You finish practicing')
-        loop do
-          pause 1
-          break if Flags['ct-climbing']
-          if DRSkill.getxp('Athletics') > 28
-            fput('stop climb')
-            break
-          end
+      if UserVars.athletics < 540
+        practice_branch
+      else
+        walk_to(19_464)
+        while DRSkill.getxp('Athletics') < 29
+          walk_to(2245)
+          walk_to(19_464)
+          check_osrel unless @researching
+          check_research
+          break if DRSkill.getxp('Athletics') >= 29
+          train_outdoorsmanship
+          train_outdoorsmanship
+          train_outdoorsmanship
+          train_outdoorsmanship
         end
       end
     end
+    check_osrel unless @researching
     check_research
     walk_to(1894)
   end
@@ -701,23 +739,7 @@ class CrossingTraining
   end
 
   def train_scouting
-    if @settings.trail_override
-      start_room, return_room = @settings.trail_override
-    else
-      return if DRSkill.getrank('Scouting') < 50
-      start_room, return_room = DRSkill.getrank('Scouting') < 600 ? [991, 1378] : [3476, 4336]
-    end
-
-    walk_to start_room
-    bput 'scout trail', 'You notice a trailmarker'
-    bput 'go trail', 'You set off into the wild', 'That would be difficult'
-    waitfor 'As your journey ends'
-    pause 0.5 until Room.current.id
-    walk_to return_room
-    bput 'scout trail', 'You notice a trailmarker'
-    bput 'go trail', 'You set off into the wild', 'That would be difficult'
-    waitfor 'As your journey ends'
-    pause 0.5 until Room.current.id
+    wait_for_script_to_complete('scouting')
   end
 
   def train_attunement
@@ -731,11 +753,12 @@ class CrossingTraining
       waitrt?
       return
     end
-    %w(815 814 802 800 799 801 817 818).each do |roomid|
+    start_timer = Time.now
+    %w(815 814 802 800 799 801 817 818 816 761 757 756 748 747 746 729).each do |roomid|
       walk_to roomid
       bput('perc', 'You reach out')
       waitrt?
-      break if DRSkill.getxp('Attunement') >= 30
+      break if DRSkill.getxp('Attunement') >= 30 || start_timer - Time.now > 90
     end
   end
 
@@ -762,38 +785,8 @@ class CrossingTraining
 
   def train_appraisal
     return if @researching
-    study_art unless assess_zills?
-  end
 
-  def study_art
-    @settings.art_options.each do |data|
-      break unless study?(data['room'], data['targets'])
-    end
-  end
-
-  def study?(room, targets)
-    walk_to(room)
-    targets.each do |target|
-      fput "study #{target}"
-      waitrt?
-      return false if DRSkill.getxp('Appraisal') >= 30
-    end
-    true
-  end
-
-  def assess_zills?
-    return false if DRSkill.getrank('Appraisal') >= 250
-
-    EquipmentManager.instance.empty_hands
-    case bput('remove my zill', 'You slide', 'Remove what')
-    when 'Remove what'
-      return false
-    end
-    bput('assess my zill', 'you carefully look them over')
-    waitrt?
-    bput('wear my zill', 'You slide')
-
-    true
+    wait_for_script_to_complete('appraisal')
   end
 
   def train_astrology
@@ -805,6 +798,7 @@ class CrossingTraining
       return unless money_for_training?(5000, 'Outfitting')
       wait_for_script_to_complete('workorders', ['Tailoring'])
       wait_for_script_to_complete('sell-loot')
+      walk_to(@settings.safe_room)
       return
     end
 
@@ -832,6 +826,7 @@ class CrossingTraining
     return unless money_for_training?(5000, 'Engineering')
     wait_for_script_to_complete('workorders', ['Shaping'])
     wait_for_script_to_complete('sell-loot')
+    walk_to(@settings.safe_room)
   end
 
   def train_trading
@@ -850,14 +845,16 @@ class CrossingTraining
     return unless money_for_training?(5000, 'Trading')
     wait_for_script_to_complete('workorders', [discipline])
     wait_for_script_to_complete('sell-loot')
+    walk_to(@settings.safe_room)
   end
 
-  # https://elanthipedia.play.net/mediawiki/index.php/Blacksmithing_Products
+  # https://elanthipedia.play.net/Blacksmithing_Products
   def train_forging
     if @settings.train_workorders([]).include?('Blacksmithing')
       return unless money_for_training?(5000, 'Forging')
       wait_for_script_to_complete('workorders', ['Blacksmithing'])
       wait_for_script_to_complete('sell-loot')
+      walk_to(@settings.safe_room)
       return
     end
 
@@ -891,6 +888,24 @@ class CrossingTraining
     else # Tier 12 - Extremely Difficult
       echo('*** NOT YET IMPLEMENTED ***')
       # Master book: trapezoidal wire sieve
+    end
+  end
+
+  # https://elanthipedia.play.net/Remedies_products
+  def train_alchemy
+    if @settings.train_workorders([]).include?('Remedies')
+      return unless money_for_training?(5000, 'Alchemy')
+      wait_for_script_to_complete('workorders', ['Remedies'])
+      wait_for_script_to_complete('sell-loot')
+      walk_to(@settings.safe_room)
+      return
+    end
+
+    rank = DRSkill.getrank('Alchemy')
+    if rank <= 25 # Tier 1 - Extremely Easy
+      # remedy('')
+      beep
+      echo('*** NOT YET IMPLEMENTED ***')
     end
   end
 
@@ -937,9 +952,11 @@ class CrossingTraining
   end
 
   def play_song?(blocking = false)
-    return if @researching
+    return true if @researching
+    return false if @no_instrument
+    return true if DRSkill.getxp('Performance') >= 28
+
     UserVars.song = @song_list.first.first unless UserVars.song
-    return if @no_instrument
     @did_play = true
     case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
     when 'Play on what instrument'
@@ -981,9 +998,17 @@ class CrossingTraining
     bput('remove my zills', 'You slide')
     bput("get my #{cloth}", 'You get')
 
-    until /not in need of drying/i =~ bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying')
+    loop do
+      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
+      when 'not in need of drying'
+        break
+      when 'You should be sitting up'
+        fix_standing
+        next
+      end
       pause 1
       waitrt?
+
       until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
         pause 1
         waitrt?

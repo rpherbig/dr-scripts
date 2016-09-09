@@ -1,8 +1,8 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#combat-trainer
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#combat-trainer
 =end
 
-custom_require.call(%w(common common-arcana common-items common-summoning common-travel drinfomon equipmanager events spellmonitor))
+custom_require.call(%w(common common-arcana common-healing common-items common-summoning common-travel drinfomon equipmanager events spellmonitor))
 
 class SetupProcess
   include DRC
@@ -89,7 +89,7 @@ class SetupProcess
     if @stance_override
       pause
       waitrt?
-      fput("stance set #{@stance_override}")
+      bput("stance set #{@stance_override}", 'Setting your')
       @override_done = true
       return
     end
@@ -152,6 +152,7 @@ class LootProcess
   include DRC
   include DRCI
   include DRCS
+  include DRCH
 
   def initialize(settings)
     echo('New LootProcess') if $debug_mode_ct
@@ -179,8 +180,17 @@ class LootProcess
     @ritual_type = thanatology['ritual_type'] || {}
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
 
+    @last_ritual = nil
+    echo("  @last_ritual: #{@last_ritual}") if $debug_mode_ct
+
+    @heal = thanatology['heal'] || false
+    echo("  @heal: #{@heal}") if $debug_mode_ct
+
     @necro = thanatology['necro'] || false
     echo("  @necro: #{@necro}") if $debug_mode_ct
+
+    @gem_nouns = get_data('items').gem_nouns
+    echo("  @gem_nouns: #{@gem_nouns}") if $debug_mode_ct
 
     @spare_gem_pouch_container = settings.spare_gem_pouch_container
     echo("  @spare_gem_pouch_container: #{@spare_gem_pouch_container}") if $debug_mode_ct
@@ -197,9 +207,17 @@ class LootProcess
 
     @loot_specials = settings.loot_specials
     echo("  @loot_specials: #{@loot_specials}") if $debug_mode_ct
+
+    @dump_junk = settings.dump_junk
+    echo("  @dump_junk: #{@dump_junk}") if $debug_mode_ct
+    @dump_timer = Time.now - 300
   end
 
   def execute(game_state)
+    if (Time.now - @dump_timer > 300) && @dump_junk && DRRoom.room_objs.count >= 13
+      fput 'DUMP JUNK'
+      @dump_timer = Time.now
+    end
     game_state.mob_died = false
     dispose_body(game_state)
     stow_lootables(game_state)
@@ -224,8 +242,12 @@ class LootProcess
       return
     end
 
-    if 'already in your inventory' == bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
-      bput("stow other #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
+    if 'already in your inventory' == bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything')
+      if @gem_nouns.include?(item)
+        bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
+      else
+        bput("stow other #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
+      end
     end
     pause 0.25
     return unless Flags['pouch-full']
@@ -275,50 +297,71 @@ class LootProcess
 
   def dispose_body(game_state)
     return unless @loot_bodies
-    return if DRRoom.dead_npcs.empty?
+    if DRRoom.dead_npcs.empty?
+      @last_ritual = nil
+      return
+    end
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
-    arrange_mob(DRRoom.dead_npcs.first, game_state)
-    if @necro
+    healing = game_state.casting_consume || game_state.prepare_consume
+    if @necro && @last_ritual.nil?
+      if @heal
+        game_state.wounds = check_health
+        echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
+        unless game_state.wounds.empty?
+          game_state.prepare_consume = healing = check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state) && check_thanatology(DRRoom.dead_npcs.first, 'consume', game_state)
+        end
+      end
       if @ritual_type == 'harvest'
         check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
       end
-      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state)
-      check_skinning(DRRoom.dead_npcs.first, game_state) if ['preserve'].include?(@ritual_type)
-    elsif @skin
+      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state) unless healing
+      if ['preserve'].include?(@ritual_type) && !healing
+        arrange_mob(DRRoom.dead_npcs.first, game_state)
+        check_skinning(DRRoom.dead_npcs.first, game_state)
+      end
+    elsif @skin && !%w(consume harvest dissect).include?(@last_ritual)
+      arrange_mob(DRRoom.dead_npcs.first, game_state)
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
-      pause
-      waitrt?
+    unless healing
+      while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
+        pause
+        waitrt?
+      end
+      @last_ritual = nil
     end
     @loot_timer = Time.now
   end
 
-  # partially completed, only works for a single ritual.
   def check_thanatology(mob_noun, ritual, game_state)
-    return if game_state.construct?(mob_noun)
+    return false if game_state.construct?(mob_noun)
 
     perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
-    when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts'
-      return
+    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
+    when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'Your cuts follow the vital lines of the corpse'
+      @last_ritual = ritual
+      return true
     when 'precise motions with your ritual knife'
+      @last_ritual = ritual
       waitrt?
       fput 'drop material'
-      return
+      return true
     when 'Rituals do not work upon constructs'
       game_state.construct(mob_noun)
-      return
+      return false
+    when 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse'
+      return false
     end
+    @last_ritual = ritual
     waitrt?
-    # Eventually need a method for self-healing that would use this same block to set it up the perform consume and prep/cast consume flesh/devour
     pause 0.25
     waitrt?
     snap = [checkleft, checkright]
     dispose_trash(checkleft) if snap.first != checkleft
     dispose_trash(checkright) if snap.last != checkright
+    true
   end
 
   def arrange_mob(mob_noun, game_state)
@@ -479,21 +522,20 @@ class SpellProcess
     @offensive_spell_cycle = settings.offensive_spell_cycle
     echo("  @offensive_spell_cycle: #{@offensive_spell_cycle}") if $debug_mode_ct
 
-    @casts = settings.cast_messages([])
+    @casts = get_data('spells').cast_messages
     echo("  @casts: #{@casts}") if $debug_mode_ct
 
-    @preps = settings.prep_messages([])
-    echo("  @preps: #{@preps}") if $debug_mode_ct
+    @is_necro = settings.thanatology['necro'] || false
+    echo("  @is_necro: #{@is_necro}") if $debug_mode_ct
+
+    @necromancer_healing = settings.necromancer_healing({})
+    echo("  @necromancer_healing: #{@necromancer_healing}") if $debug_mode_ct
 
     @is_empath = settings.is_empath(false) || DRStats.empath?
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
     @empath_spells = settings.empath_healing({})
     echo("  @empath_spells: #{@empath_spells}") if $debug_mode_ct
-
-    if (!@buff_spells.empty? || !@offensive_spells.empty?) && (@casts.empty? || @preps.empty?)
-      raise(ArgumentError, 'Must provide casting/prep messages to use spells')
-    end
 
     @osrel_timer = Time.now - 1000
     echo("  @osrel_timer: #{settings.osrel_timer}") if $debug_mode_ct
@@ -547,6 +589,7 @@ class SpellProcess
         .each { |spell| Flags["ct-#{spell['abbrev']}"] = true }
     end
     check_slivers(game_state)
+    check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
     check_health(game_state)
@@ -556,7 +599,7 @@ class SpellProcess
     if game_state.finish_spell_casting? && !game_state.casting
       echo('SpellProcess::clean_up') if $debug_mode_ct
       game_state.next_clean_up_step
-      fput('release dalu') if DRSpells.active_spells['Damaris\' Lullaby']
+      release_cyclics
       if @tk_ammo
         waitrt?
         pause
@@ -604,7 +647,7 @@ class SpellProcess
     return unless Flags['ct-need-bless']
     Flags.reset('ct-need-bless')
 
-    bput('prepare Bless', @preps)
+    prepare('Bless', 1)
     bput("cast #{checkright || checkleft}", @casts)
   end
 
@@ -619,33 +662,13 @@ class SpellProcess
     pause 1
   end
 
-  def check_charging?(game_state)
-    return false unless game_state.charge_cambrinth?
-
-    game_state.find_cambrinth
-    if game_state.done_charging?
-      echo('check_charging?: done') if $debug_mode_ct
-
-      game_state.cambrinth_charges(nil)
-      game_state.invoke_cambrinth
-    else
-      next_charge = game_state.next_charge
-      echo("check_charging?: #{next_charge}") if $debug_mode_ct
-
-      game_state.charge_cambrinth(next_charge)
-    end
-    game_state.stow_cambrinth
-
-    true
-  end
-
   def ready_to_cast?(game_state)
     Flags['ct-spellcast'] || (@prep_time && Time.now - game_state.cast_timer >= @prep_time)
   end
 
   def check_current(game_state)
     return unless game_state.casting
-    return if check_charging?(game_state) && check_charging?(game_state)
+    return if game_state.check_charging? && game_state.check_charging?
 
     cast(game_state) if ready_to_cast?(game_state)
   end
@@ -654,8 +677,9 @@ class SpellProcess
     @before.each { |action| bput(action['message'], action['matches']) } if @before
 
     @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
+    @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}" if game_state.casting_consume
     case bput(@custom_cast || 'cast', @casts)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
       fput('release spell')
     end
     @custom_cast = nil
@@ -664,6 +688,8 @@ class SpellProcess
     game_state.cast_timer = nil
 
     game_state.casting_ignite = false
+    game_state.casting_consume = false if game_state.casting_consume
+
     if game_state.casting_moonblade
       if checkleft =~ /moon/ || game_state.brawling? || game_state.offhand?
         # The moonblade was summoned or refreshed while training something else
@@ -721,17 +747,30 @@ class SpellProcess
     prepare_spell(data, game_state)
   end
 
+  def check_consume(game_state)
+    return unless @is_necro
+    return if game_state.casting
+    return unless game_state.prepare_consume
+
+    data = @necromancer_healing['Consume Flesh']
+    game_state.casting_consume = true
+    game_state.prepare_consume = false
+    prepare_spell(data, game_state)
+  end
+
   def check_offensive(game_state)
     return if game_state.casting
     return if game_state.npcs.empty?
     return if mana < 40
     ready_spells = @offensive_spells
+                   .select { |spell| spell['target_enemy'] ? game_state.npcs.include?(spell['target_enemy']) : true }
                    .select { |spell| spell['min_threshold'] ? game_state.npcs.length >= spell['min_threshold'] : true }
                    .select { |spell| spell['max_threshold'] ? game_state.npcs.length <= spell['max_threshold'] : true }
                    .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
                    .select { |spell| game_state.dancing? ? spell['harmless'] : true }
                    .select { |spell| spell['recast_every'] ? check_spell_timer(spell) : true }
                    .select { |spell| @cast_only_to_train ? DRSkill.getxp(spell['skill']) <= 32 : true }
+                   .select { |spell| spell['cast_only_to_train'] ? DRSkill.getxp(spell['skill']) <= 32 : true }
                    .select { |spell| spell['cyclic'] ? !DRSpells.active_spells['spell'][spell['name']] : true }
                    .select { |spell| spell['night'] ? UserVars.sun['night'] : true }
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
@@ -753,10 +792,11 @@ class SpellProcess
     game_state.cast_timer = Time.now
     @prep_time = data['prep_time']
     echo("prepare spell: #{data}") if $debug_mode_ct
-    if data['cyclic']
-      fput('release care') if DRSpells.active_spells['Caress of the Sun']
-      fput("release #{data['abbrev']}") # make bputs. better spells
+    if data['target_enemy']
+      echo("  Target found: #{data['target_enemy']}") if $debug_mode_ct
+      fput("face #{data['target_enemy']}")
     end
+    release_cyclics if data['cyclic']
     command = 'pre'
     command = data['skill'] == 'Debilitation' ? 'pre' : 'tar' if data['skill']
     command = data['prep_type'] if data['prep_type']
@@ -798,7 +838,7 @@ class SpellProcess
         data['cast'] = "cast #{moon}"
       end
     end
-    bput("#{command} #{data['abbrev']} #{data['mana']}", @preps)
+    prepare(data['abbrev'], data['mana'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     @custom_cast = data['cast']
@@ -823,9 +863,6 @@ class AbilityProcess
 
     @kneel_khri = settings.kneel_khri(false)
     echo("  @kneel_khri: #{@kneel_khri}") if $debug_mode_ct
-
-    @khri_preps = settings.khri_preps([])
-    echo("  @khri_preps: #{@khri_preps}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -849,7 +886,7 @@ class AbilityProcess
       .each do |name|
         timer = game_state.cooldown_timers[name]
         next unless !timer || (Time.now - timer).to_i > 30
-        game_state.cooldown_timers[name] = Time.now if activate_khri?(@kneel_khri, @khri_preps, name)
+        game_state.cooldown_timers[name] = Time.now if activate_khri?(@kneel_khri, name)
       end
   end
 end
@@ -892,7 +929,6 @@ class TrainerProcess
 
   def initialize(settings)
     echo('New TrainerProcess') if $debug_mode_ct
-
     @training_abilities = settings.training_abilities({})
     echo("  @training_abilities: #{@training_abilities}") if $debug_mode_ct
 
@@ -900,8 +936,10 @@ class TrainerProcess
                    'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal',
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
-                   'Stealth' => 'Stealth', 'Ambush Stun' => 'Debilitation', 'Favor Orb' => 'Anything',
+                   'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
                    'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy' }
+
+    @skill_map['Hunt'] = %w(Perception Scouting) if DRStats.ranger?
     @favor_god = settings.favor_god
     if settings.favor_goal && @favor_god && /delicate/ =~ bput("tap #{@favor_god} orb", 'The orb is delicate', 'I could not find')
       @training_abilities['Favor Orb'] = 300
@@ -910,13 +948,20 @@ class TrainerProcess
     @no_app = []
 
     @dont_stalk = settings.dont_stalk
-
+    echo("  @dont_stalk: #{@dont_stalk}") if $debug_mode_ct
+    @stun_weapon = settings.stun_weapon
+    echo("  @stun_weapon: #{@stun_weapon}") if $debug_mode_ct
+    @stun_weapon_skill = settings.stun_weapon_skill
+    echo("  @stun_weapon_skill: #{@stun_weapon_skill}") if $debug_mode_ct
     @water_holder = settings.water_holder
+    echo("  @water_holder: #{@water_holder}") if $debug_mode_ct
     @flint_lighter = settings.flint_lighter
+    echo("  @flint_lighter: #{@flint_lighter}") if $debug_mode_ct
   end
 
   def execute(game_state)
     return if game_state.danger
+
     case select_ability(game_state)
     when 'PercMana'
       moon_mage_perc(game_state)
@@ -939,7 +984,7 @@ class TrainerProcess
     when 'Pray'
       bput('pray meraud', 'You glance')
     when 'Scream'
-      bput('Scream conc', 'Inhaling deeply', 'There is nothing') unless game_state.npcs.empty?
+      bput('Scream conc', 'Inhaling deeply', 'There is nothing', 'You open your mouth, then close it suddenly, looking somewhat like a fish') unless game_state.npcs.empty?
     when 'Khri Prowess'
       bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing') unless game_state.npcs.empty?
     when 'Stealth'
@@ -1001,7 +1046,7 @@ class TrainerProcess
     dead_count = DRRoom.dead_npcs.size
 
     EquipmentManager.instance.stow_weapon(game_state.weapon_name)
-    EquipmentManager.instance.wield_weapon(game_state.ambush_stun_weapon, 'Small Blunt')
+    EquipmentManager.instance.wield_weapon(@stun_weapon, @stun_weapon_skill)
 
     if hide?
       bput('ambush stun', 'You must be hidden or invisible to ambush', 'You aren\'t close enough to attack', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'Roundtime')
@@ -1009,7 +1054,7 @@ class TrainerProcess
       waitrt?
     end
 
-    EquipmentManager.instance.stow_weapon(game_state.ambush_stun_weapon)
+    EquipmentManager.instance.stow_weapon(@stun_weapon)
     EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     DRRoom.dead_npcs.size > dead_count
   end
@@ -1057,8 +1102,9 @@ class TrainerProcess
       return false if ['PercMana', 'App Careful'].include?(name)
     end
     check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
+    check = [check].flatten
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
-    expcheck = check.nil? || DRSkill.getxp(check) < 32
+    expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < 32 }
     return expcheck unless game_state.cooldown_timers[name]
     Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false
   end
@@ -1200,7 +1246,7 @@ class AttackProcess
 
   def attack_aimed(charged_maneuver, game_state)
     game_state.selected_maneuver = charged_maneuver unless game_state.loaded
-    game_state.loaded = false if game_state.mob_died
+    game_state.loaded = false if game_state.mob_died && !(game_state.casting_consume || game_state.prepare_consume)
     game_state.clear_aim_queue if Flags['ct-ranged-ready']
 
     if game_state.loaded && game_state.done_aiming?
@@ -1230,14 +1276,24 @@ class AttackProcess
       if game_state.dual_load? && DRSpells.active_spells['See the Wind']
         pause 0.5 until bput('load arrows', 'You reach into', 'already loaded', 'Such a feat would be impossible without the winds to guide')
       else
-        pause 0.5 until bput('load', 'You reach into', 'already loaded')
+        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded')
       end
 
       waitrt?
       game_state.loaded = true
       if game_state.selected_maneuver.empty?
         game_state.set_aim_queue
-        case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target')
+        case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow')
+        when 'Your repeating crossbow'
+          case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow')
+          when 'A rapid series of clicks'
+            case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target')
+            when 'Face what?'
+              game_state.clear_aim_queue
+            when 'You attempt to ready your repeating crossbow'
+              game_state.loaded = false
+            end
+          end
         when 'Face what?'
           game_state.clear_aim_queue
         end
@@ -1336,11 +1392,11 @@ class CombatTrainer
   end
 
   def setup(settings)
-    Flags.add('ct-spellcast', '^Your formation of a targeting pattern around .+ has completed\.', '^You feel fully prepared to cast your spell\.')
+    Flags.add('ct-spellcast', '^Your formation of a targeting pattern around .+ has completed\.', 'Your target pattern has finished forming around the area', '^You feel fully prepared to cast your spell\.')
 
     Flags.add('last-stance', 'Setting your Evasion stance to \d+%, your Parry stance to \d+%, and your Shield stance to \d+%.  You have \d+ stance points left')
 
-    fput 'stance set 100 40 40'
+    bput('stance set 100 40 40', 'Setting your')
     pause 0.25 until Flags['last-stance']
 
     @stop = false
@@ -1392,7 +1448,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1411,6 +1467,9 @@ class GameState
     @casting_moonblade = false
     @casting_ignite = false
     @use_charged_maneuvers = false
+    @casting_consume = false
+    @prepare_consume = false
+    @wounds = {}
 
     # private
     @clean_up_step = nil
@@ -1506,20 +1565,11 @@ class GameState
     @cambrinth = settings.cambrinth
     echo("  @cambrinth: #{@cambrinth}") if $debug_mode_ct
 
-    @held_cambrinth = settings.held_cambrinth
-    echo("  @held_cambrinth: #{@held_cambrinth}") if $debug_mode_ct
-
     @stored_cambrinth = settings.stored_cambrinth
     echo("  @stored_cambrinth: #{@stored_cambrinth}") if $debug_mode_ct
 
     @cambrinth_cap = settings.cambrinth_cap
     echo("  @cambrinth_cap: #{@cambrinth_cap}") if $debug_mode_ct
-
-    @charge_messages = settings.charge_messages([])
-    echo("  @charge_messages: #{@charge_messages}") if $debug_mode_ct
-
-    @invoke_messages = settings.invoke_messages([])
-    echo("  @invoke_messages: #{@invoke_messages}") if $debug_mode_ct
 
     @use_weak_attacks = settings.use_weak_attacks
     echo("  @use_weak_attacks: #{@use_weak_attacks}") if $debug_mode_ct
@@ -1560,10 +1610,6 @@ class GameState
 
   def done_cleaning_up?
     @clean_up_step == 'done'
-  end
-
-  def ambush_stun_weapon
-    weapon_training['Small Blunt']
   end
 
   def update_weapon_info(weapon_skill)
@@ -1742,36 +1788,28 @@ class GameState
     @dance_queue.shift
   end
 
-  def charge_cambrinth?
-    !@charges.nil?
-  end
-
-  def done_charging?
-    @charges.empty?
-  end
-
   def cambrinth_charges(cambrinth)
     @charges = cambrinth.nil? ? nil : cambrinth.dup
   end
 
-  def next_charge
-    @charges.pop
-  end
+  def check_charging?
+    return false if @charges.nil?
 
-  def find_cambrinth
-    find_cambrinth4(@held_cambrinth, @cambrinth, @stored_cambrinth, @cambrinth_cap)
-  end
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+    if @charges.empty?
+      echo('check_charging?: done') if $debug_mode_ct
 
-  def charge_cambrinth(next_charge)
-    charge(@cambrinth, next_charge, @charge_messages)
-  end
+      cambrinth_charges(nil)
+      invoke(@cambrinth)
+    else
+      next_charge = @charges.pop
+      echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
-  def invoke_cambrinth
-    invoke(@cambrinth, @invoke_messages)
-  end
+      charge(@cambrinth, next_charge)
+    end
+    stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 
-  def stow_cambrinth
-    stow_cambrinth5(@cambrinth, @held_cambrinth, @stored_cambrinth, @cambrinth_cap)
+    true
   end
 
   def npcs
@@ -1793,7 +1831,7 @@ class GameState
   end
 
   def can_ambush_stun?
-    weapon_training['Small Blunt'] && !npcs.empty? && !aimed_skill?
+    !npcs.empty? && !aimed_skill?
   end
 
   def use_weak_attacks?
@@ -1827,7 +1865,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :held_cambrinth, :cambrinth, :stored_cambrinth, :cambrinth_cap, :charge_messages, :invoke_messages, :use_weak_attacks
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

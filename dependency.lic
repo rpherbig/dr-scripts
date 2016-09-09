@@ -1,6 +1,6 @@
 # quiet
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#dependency
+  Documentation: https://elanthipedia.play.net/Lich_script_development#dependency
 =end
 
 require 'json'
@@ -18,6 +18,17 @@ unless found_gspec
   echo('Installing rest-firebase gem, this may take a few minutes.')
   Gem.install gem_name, gdep.requirement
   echo('Finished Installing rest-firebase gem.')
+end
+
+gem_name, *gem_ver_reqs = 'hitimes', '~> 1.2.4'
+gdep = Gem::Dependency.new(gem_name, *gem_ver_reqs)
+
+found_gspec = gdep.matching_specs.max_by(&:version)
+
+unless found_gspec
+  echo('Installing hitimes gem due to a failed install, this may take a few minutes.')
+  Gem.install gem_name, gdep.requirement
+  echo('Finished Installing hitimes gem.')
 end
 
 require 'rest-firebase'
@@ -161,6 +172,8 @@ class OpenStruct
 end
 
 class ScriptManager
+  attr_reader :autostarts
+
   def initialize(debug)
     @debug = debug
     @git_token = '4491b4c6' + '20864db1575' + '3542a5d8729cf362acd1c'
@@ -169,6 +182,7 @@ class ScriptManager
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
     @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
     @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
+    @lich_url = 'https://api.github.com/repos/rcuhljr/dr-lich/git/trees/master'
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
     Settings['autostart'] ||= []
@@ -196,8 +210,6 @@ class ScriptManager
   def toggle_developer
     @developer = !@developer
   end
-
-  attr_reader :autostarts
 
   def add_global_auto(script)
     @add_autos << script
@@ -294,6 +306,19 @@ class ScriptManager
   def start_scripts(force = false)
     repo_scripts.each { |name, _| get_script(name, force) }
     autostarts.each { |name| run_script(name) }
+  end
+
+  def download_lich
+    lich_data = make_request(@lich_url)['tree'].find { |data| data['path'] == 'lich.rbw' }
+    return if Settings['lich_fork_sha'] == lich_data['sha']
+
+    blob = make_request(lich_data['url'])
+    File.open('lich.rbw', 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    Settings['lich_fork_sha'] = lich_data['sha']
+  end
+
+  def stop_download_lich
+    Settings['lich_fork_sha'] = nil
   end
 
   def download_script(filename, force = false)
@@ -534,12 +559,23 @@ class SetupFiles
     @latest = false
     @settings = {}
     @extras = []
+    @base_file_stamps = {}
+    @base_files = {}
+    load_base_settings
   end
 
-  def request_settings(options, single_file = false)
+  def request_settings(options)
+    request(options, false)
+  end
+
+  def request_data(file)
+    request(file, true)
+  end
+
+  def request(options, data_load = false)
+    @data_load = data_load
     @load = true
     @extras = options
-    @single_file = single_file
     @settings = {}
   end
 
@@ -548,7 +584,9 @@ class SetupFiles
   end
 
   def run_queue
-    load_settings if @load
+    load_base_settings if @load
+    load_settings if @load && !@data_load
+    load_data if @load && @data_load
     save_settings if @save
   end
 
@@ -573,25 +611,50 @@ class SetupFiles
     return {}
   end
 
+  def load_base_settings
+    Dir['./scripts/profiles/base*.yaml'].map { |item| File.basename(item) }.each do |filename|
+      file_path = "./scripts/profiles/#{filename}"
+      mtime = File.exist?(file_path) ? File.stat(file_path).mtime : Time.new(0)
+      if @base_file_stamps[filename] != mtime
+        @base_files[filename] = safe_load_yaml(file_path)
+      end
+      @base_file_stamps[filename] = mtime
+    end
+  end
+
+  def load_data
+    if @extras.is_a? Array
+      @settings = {}
+      @extras.each do |_extra|
+        filename = "base-#{@extra}.yaml"
+        @settings.merge!(@base_files[filename].dup) if @base_files[filename]
+      end
+      @settings = OpenStruct.new(@settings)
+    else
+      filename = "base-#{@extras}.yaml"
+      @settings = OpenStruct.new(@base_files[filename].dup) if @base_files[filename]
+    end
+    @load = false
+  end
+
   def load_settings
     profile = "./scripts/profiles/#{checkname}-setup.yaml"
     if File.exist?(profile)
-      settings = @single_file ? {} : safe_load_yaml('./scripts/profiles/base.yaml')
+      settings = @base_files['base.yaml'].dup
       settings.merge!(safe_load_yaml(profile) || {})
       @extras.each do |subfile|
         filepath = "./scripts/profiles/#{checkname}-#{subfile}.yaml"
-        basepath = "./scripts/profiles/base-#{subfile}.yaml"
         if File.exist?(filepath)
           settings.merge!(safe_load_yaml(filepath))
-        elsif File.exist?(basepath)
-          settings.merge!(safe_load_yaml(basepath))
         else
           echo("Tried to request setting file that doesn't exist '#{subfile}'")
         end
       end
     end
     @settings = OpenStruct.new(settings)
-    @settings.lootables = (@settings.lootables + @settings.loot_additions - @settings.loot_subtractions).uniq
+    base_lootables = @base_files['base-items.yaml'][:lootables]
+    gems = @base_files['base-items.yaml'][:gem_nouns]
+    @settings.lootables = (base_lootables + gems + @settings.loot_additions([]) - @settings.loot_subtractions([])).uniq
     @load = false
   end
 end
@@ -660,8 +723,6 @@ class MoonWatch
     echo("updating #{moon} with #{data}") if @debug
     @moon_data[moon] = data
     @f.put("moon_data/#{moon}", data)
-    data['time_2'] = Time.now.utc
-    @f.post("moon_event_log/#{moon}", data)
   end
 
   def update_moon_state(raw_data)
@@ -678,7 +739,10 @@ end
 
 $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
-$moon_watch = MoonWatch.new(debug) unless UserVars.dont_watch_moons
+
+def enable_moon_connection
+  $turn_on_moon_watch = true
+end
 
 def get_settings(options = [])
   $setupfiles.request_settings(options)
@@ -686,8 +750,8 @@ def get_settings(options = [])
   $setupfiles.settings
 end
 
-def get_character_setting
-  $setupfiles.request_settings([], true)
+def get_data(file)
+  $setupfiles.request_data(file)
   pause 0.1 until $setupfiles.loaded?
   $setupfiles.settings
 end
@@ -810,6 +874,26 @@ def toggle_developer_mode
   echo "Developer mode now set to: #{$manager.toggle_developer}"
 end
 
+def toggle_lich_fork
+  Settings['lich_fork'] = !Settings['lich_fork']
+  echo "Now switching #{Settings['lich_fork'] ? 'onto' : 'off'} the DR lich fork..."
+
+  if Settings['lich_fork']
+    start_script('repository', ['unset-lich-updatable'])
+    $manager.download_lich
+  else
+    start_script('repository', ['set-lich-updatable'])
+    pause
+    start_script('repository', ['download-lich'])
+    pause
+    pause 1 while Script.running?('repository')
+    Settings['lich_fork_sha'] = nil
+    $manager.stop_download_lich
+  end
+  Settings.save
+  echo('New version of lich installed, please restart Lich.')
+end
+
 def setup_profiles
   $manager.setup_profiles
 end
@@ -860,7 +944,7 @@ def submit_shop_data(shop_data)
 end
 
 def get_all_moon_data
-  $moon_watch.moon_data
+  $moon_watch ? $moon_watch.moon_data : nil
 end
 
 def update_moon_data(moon, data)
@@ -869,6 +953,9 @@ end
 
 full_install if install
 
+force_start_script('bootstrap', ['wipe_constants'])
+
+$manager.download_lich if Settings['lich_fork']
 $manager.check_base_files
 $manager.start_scripts
 
@@ -878,12 +965,17 @@ if $manager.updated_dependency?
 end
 
 before_dying do
-  $moon_watch.close
+  $moon_watch.close if $moon_watch
 end
 
 loop do
+  if $turn_on_moon_watch && $moon_watch.nil?
+    $moon_watch = MoonWatch.new(debug)
+    $turn_on_moon_watch = nil
+  end
+
   $manager.run_queue
   $setupfiles.run_queue
-  $moon_watch.run_queue unless UserVars.dont_watch_moons
+  $moon_watch.run_queue if $moon_watch
   pause 0.1
 end

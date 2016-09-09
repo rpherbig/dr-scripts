@@ -1,15 +1,19 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#hunting-buddy
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#hunting-buddy
 =end
 
-custom_require.call(%w(common common-travel drinfomon events spellmonitor equipmanager))
+custom_require.call(%w(common common-arcana common-travel drinfomon events spellmonitor equipmanager))
 
 class HuntingBuddy
   include DRC
+  include DRCA
   include DRCT
 
   def initialize
     @settings = get_settings
+    data = get_data('hunting')
+    @escort_zones = data.escort_zones
+    @hunting_zones = data.hunting_zones
 
     @settings.hunting_info([]).each do |info|
       if @stopped_for_bleeding
@@ -36,33 +40,40 @@ class HuntingBuddy
         args.each_with_index { |arg, index| hunt(arg, duration[index], stop_on_skills[index]) }
       end
       wait_for_script_to_complete('bescort', @exit) if @exit
-      fput('release hyh') if DRSpells.active_spells['Hydra Hex']
-      fput('release ee') if DRSpells.active_spells['Electrostatic Eddy']
+      release_cyclics
     end
     walk_to(@settings.safe_room)
     EquipmentManager.instance.wear_equipment_set?('standard')
   end
 
   def find_hunting_room?(zone_name)
-    UserVars.friends = @settings.hunting_buddies
-    if rooms = @settings.hunting_zones[zone_name]
+    UserVars.friends = @settings.hunting_buddies || []
+    if rooms = @hunting_zones[zone_name]
       @exit = nil
       find_empty_room(rooms, @settings.safe_room,
                       lambda do
-                        return true if DRRoom.npcs.empty? && (DRRoom.pcs - UserVars.friends).empty?
-                        return false unless (DRRoom.pcs - UserVars.friends).empty?
-                        return true unless (DRRoom.pcs & UserVars.friends).empty?
+                        return true if (DRRoom.pcs & UserVars.friends).any?
+                        return false if DRRoom.pcs.any?
+                        # No visible friends in the room and no visible people
+                        return true if DRRoom.npcs.empty?
+                        # Enemies present, no people visible
+                        UserVars.friends.each { |friend| Flags.add("room-check-#{friend}", friend) }
                         Flags.add('room-check', 'says, ', 'say, ', 'You hear')
                         fput('say Anyone here?')
-                        return false unless 'You don\'t find anything of interest here' == bput('search', 'You don\'t find anything of interest here', 'vague silhouette', 'attempting to remain hidden', 'see signs that')
+                        unless 'You don\'t find anything of interest here' == bput('search', 'You don\'t find anything of interest here', 'vague silhouette', 'attempting to remain hidden', 'see signs that')
+                          pause
+                          waitrt?
+                          return UserVars.friends.find { |friend| Flags["room-check-#{friend}"] }
+                        end
                         20.times do |_|
                           pause 0.5
+                          return true if UserVars.friends.find { |friend| Flags["room-check-#{friend}"] }
                           return false if Flags['room-check'] || !(DRRoom.pcs - UserVars.friends).empty?
                         end
                         true
                       end)
     else
-      escort_info = @settings.escort_zones[zone_name]
+      escort_info = @escort_zones[zone_name]
       unless escort_info
         echo "FAILED TO FIND HUNTING ZONE #{zone_name} IN BASE.YAML"
         return false

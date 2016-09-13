@@ -177,8 +177,11 @@ class LootProcess
     echo("  @lootables: #{@lootables}") if $debug_mode_ct
 
     thanatology = settings.thanatology({})
-    @ritual_type = thanatology['ritual_type'] || {}
+    @ritual_type = thanatology['ritual_type'].downcase
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
+
+    @rituals = get_data('spells').rituals
+    echo("  @rituals: #{@rituals}") if $debug_mode_ct
 
     @last_ritual = nil
     echo("  @last_ritual: #{@last_ritual}") if $debug_mode_ct
@@ -295,6 +298,47 @@ class LootProcess
     end
   end
 
+  def check_rituals(game_state)
+    return true unless DRStats.necromancer?
+
+    if @last_ritual.nil?
+      if @heal
+        game_state.wounds = check_health
+        echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
+        do_ritual(DRRoom.dead_npcs.first, 'consume', game_state) unless game_state.wounds.empty?
+      end
+
+      do_ritual(DRRoom.dead_npcs.first, @ritual_type, game_state) unless game_state.prepare_consume
+    end
+    return false if %w(consume harvest dissect).include?(@last_ritual)
+    true
+  end
+
+  def do_ritual(mob_noun, ritual, game_state)
+    return unless DRStats.necromancer?
+    return if game_state.construct?(mob_noun)
+
+    do_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
+    perform_message = "perform #{ritual} on #{mob_noun}"
+    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime')
+    when @rituals['preserve'], @rituals['dissect']
+      @last_ritual = ritual
+      return
+    when @rituals['consume']
+      @last_ritual = ritual
+      game_state.prepare_consume = true if @heal
+      return
+    when @rituals['harvest']
+      @last_ritual = ritual
+      waitrt?
+      fput 'drop material'
+      return
+    when 'Rituals do not work upon constructs'
+      game_state.construct(mob_noun)
+      return
+    end
+  end
+
   def dispose_body(game_state)
     return unless @loot_bodies
     if DRRoom.dead_npcs.empty?
@@ -304,28 +348,12 @@ class LootProcess
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
-    healing = game_state.casting_consume || game_state.prepare_consume
-    if @necro && @last_ritual.nil?
-      if @heal
-        game_state.wounds = check_health
-        echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
-        unless game_state.wounds.empty?
-          game_state.prepare_consume = healing = check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state) && check_thanatology(DRRoom.dead_npcs.first, 'consume', game_state)
-        end
-      end
-      if @ritual_type == 'harvest'
-        check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
-      end
-      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state) unless healing
-      if ['preserve'].include?(@ritual_type) && !healing
-        arrange_mob(DRRoom.dead_npcs.first, game_state)
-        check_skinning(DRRoom.dead_npcs.first, game_state)
-      end
-    elsif @skin && !%w(consume harvest dissect).include?(@last_ritual)
+    can_skin = check_rituals(game_state)
+    if @skin && can_skin
       arrange_mob(DRRoom.dead_npcs.first, game_state)
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    unless healing
+    unless (game_state.casting_consume || game_state.prepare_consume)
       while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
         pause
         waitrt?
@@ -333,35 +361,6 @@ class LootProcess
       @last_ritual = nil
     end
     @loot_timer = Time.now
-  end
-
-  def check_thanatology(mob_noun, ritual, game_state)
-    return false if game_state.construct?(mob_noun)
-
-    perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
-    when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'Your cuts follow the vital lines of the corpse'
-      @last_ritual = ritual
-      return true
-    when 'precise motions with your ritual knife'
-      @last_ritual = ritual
-      waitrt?
-      fput 'drop material'
-      return true
-    when 'Rituals do not work upon constructs'
-      game_state.construct(mob_noun)
-      return false
-    when 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse'
-      return false
-    end
-    @last_ritual = ritual
-    waitrt?
-    pause 0.25
-    waitrt?
-    snap = [checkleft, checkright]
-    dispose_trash(checkleft) if snap.first != checkleft
-    dispose_trash(checkright) if snap.last != checkright
-    true
   end
 
   def arrange_mob(mob_noun, game_state)

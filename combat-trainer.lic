@@ -177,8 +177,11 @@ class LootProcess
     echo("  @lootables: #{@lootables}") if $debug_mode_ct
 
     thanatology = settings.thanatology({})
-    @ritual_type = thanatology['ritual_type'] || {}
+    @ritual_type = thanatology['ritual_type'].downcase
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
+
+    @rituals = get_data('spells').rituals
+    echo("  @rituals: #{@rituals}") if $debug_mode_ct
 
     @last_ritual = nil
     echo("  @last_ritual: #{@last_ritual}") if $debug_mode_ct
@@ -295,6 +298,47 @@ class LootProcess
     end
   end
 
+  def check_rituals(game_state)
+    return true unless DRStats.necromancer?
+
+    if @last_ritual.nil?
+      if @heal
+        game_state.wounds = check_health
+        echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
+        do_ritual(DRRoom.dead_npcs.first, 'consume', game_state) unless game_state.wounds.empty?
+      end
+
+      do_ritual(DRRoom.dead_npcs.first, @ritual_type, game_state) unless game_state.prepare_consume
+    end
+    return false if %w(consume harvest dissect).include?(@last_ritual)
+    true
+  end
+
+  def do_ritual(mob_noun, ritual, game_state)
+    return unless DRStats.necromancer?
+    return if game_state.construct?(mob_noun)
+
+    do_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
+    perform_message = "perform #{ritual} on #{mob_noun}"
+    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime')
+    when @rituals['preserve'], @rituals['dissect']
+      @last_ritual = ritual
+      return
+    when @rituals['consume']
+      @last_ritual = ritual
+      game_state.prepare_consume = true if @heal
+      return
+    when @rituals['harvest']
+      @last_ritual = ritual
+      waitrt?
+      fput 'drop material'
+      return
+    when 'Rituals do not work upon constructs'
+      game_state.construct(mob_noun)
+      return
+    end
+  end
+
   def dispose_body(game_state)
     return unless @loot_bodies
     if DRRoom.dead_npcs.empty?
@@ -304,28 +348,12 @@ class LootProcess
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
-    healing = game_state.casting_consume || game_state.prepare_consume
-    if @necro && @last_ritual.nil?
-      if @heal
-        game_state.wounds = check_health
-        echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
-        unless game_state.wounds.empty?
-          game_state.prepare_consume = healing = check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state) && check_thanatology(DRRoom.dead_npcs.first, 'consume', game_state)
-        end
-      end
-      if @ritual_type == 'harvest'
-        check_thanatology(DRRoom.dead_npcs.first, 'preserve', game_state)
-      end
-      check_thanatology(DRRoom.dead_npcs.first, @ritual_type, game_state) unless healing
-      if ['preserve'].include?(@ritual_type) && !healing
-        arrange_mob(DRRoom.dead_npcs.first, game_state)
-        check_skinning(DRRoom.dead_npcs.first, game_state)
-      end
-    elsif @skin && !%w(consume harvest dissect).include?(@last_ritual)
+    can_skin = check_rituals(game_state)
+    if @skin && can_skin
       arrange_mob(DRRoom.dead_npcs.first, game_state)
       check_skinning(DRRoom.dead_npcs.first, game_state)
     end
-    unless healing
+    unless game_state.casting_consume || game_state.prepare_consume
       while 'and get ready to search it' == bput('loot', 'You search', 'I could not find what you were referring to', 'and get ready to search it')
         pause
         waitrt?
@@ -333,35 +361,6 @@ class LootProcess
       @last_ritual = nil
     end
     @loot_timer = Time.now
-  end
-
-  def check_thanatology(mob_noun, ritual, game_state)
-    return false if game_state.construct?(mob_noun)
-
-    perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', 'precise motions with your ritual knife', 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'roundtime')
-    when 'corpse to make one long', 'carefully position the corpse', 'corpse and make a few quick precise cuts', 'Your cuts follow the vital lines of the corpse'
-      @last_ritual = ritual
-      return true
-    when 'precise motions with your ritual knife'
-      @last_ritual = ritual
-      waitrt?
-      fput 'drop material'
-      return true
-    when 'Rituals do not work upon constructs'
-      game_state.construct(mob_noun)
-      return false
-    when 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse'
-      return false
-    end
-    @last_ritual = ritual
-    waitrt?
-    pause 0.25
-    waitrt?
-    snap = [checkleft, checkright]
-    dispose_trash(checkleft) if snap.first != checkleft
-    dispose_trash(checkright) if snap.last != checkright
-    true
   end
 
   def arrange_mob(mob_noun, game_state)
@@ -978,7 +977,7 @@ class TrainerProcess
     when 'App Careful'
       appraise(game_state, 'careful')
     when 'Tactics'
-      bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'You must be closer', 'You must be standing') unless game_state.npcs.empty?
+      bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now') unless game_state.npcs.empty?
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
     when 'Pray'
@@ -989,6 +988,7 @@ class TrainerProcess
       bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing') unless game_state.npcs.empty?
     when 'Stealth'
       fput('stalk') if hide? && !@dont_stalk && !game_state.npcs.empty?
+      bput('unhide', 'You come out of hiding', 'But you are not') if game_state.npcs.empty?
     when 'Ambush Stun'
       return ambush_stun(game_state)
     when 'Favor Orb'
@@ -1244,6 +1244,19 @@ class AttackProcess
     game_state.action_taken
   end
 
+  def shoot_aimed(command, game_state)
+    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', 'you fire', 'you poach', 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you poach if you are not hidden', 'your moving to fire went unobserved', 'notices your attempt to remain hidden', 'you don\'t feel like fighting right now')
+    when 'How can you poach if you are not hidden', 'notices your attempt to remain hidden'
+      fput('shoot')
+      game_state.action_taken
+    when 'you fire', 'you poach', 'your moving to fire went unobserved'
+      game_state.action_taken
+    when 'you don\'t feel like fighting right now'
+      pause 1
+      shoot_aimed(command, game_state)
+    end
+  end
+
   def attack_aimed(charged_maneuver, game_state)
     game_state.selected_maneuver = charged_maneuver unless game_state.loaded
     game_state.loaded = false if game_state.mob_died && !(game_state.casting_consume || game_state.prepare_consume)
@@ -1251,18 +1264,12 @@ class AttackProcess
 
     if game_state.loaded && game_state.done_aiming?
       if game_state.selected_maneuver.empty?
-        command = 'shoot'
-        if game_state.use_stealth_attack? && hide?
-          command = @stealth_attack_aimed_action
-        end
-
-        case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', 'you fire', 'you poach', 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you poach if you are not hidden', 'your moving to fire went unobserved', 'notices your attempt to remain hidden')
-        when 'How can you poach if you are not hidden', 'notices your attempt to remain hidden'
-          fput('shoot')
-          game_state.action_taken
-        when 'you fire', 'you poach', 'your moving to fire went unobserved'
-          game_state.action_taken
-        end
+        command = if game_state.use_stealth_attack? && hide?
+                    @stealth_attack_aimed_action
+                  else
+                    'shoot'
+                  end
+        shoot_aimed(command, game_state)
       else
         use_charged_maneuver(game_state.selected_maneuver, game_state)
         game_state.action_taken
@@ -1283,22 +1290,26 @@ class AttackProcess
       game_state.loaded = true
       if game_state.selected_maneuver.empty?
         game_state.set_aim_queue
-        case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow')
-        when 'Your repeating crossbow'
-          case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow')
-          when 'A rapid series of clicks'
-            case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target')
-            when 'Face what?'
-              game_state.clear_aim_queue
-            when 'You attempt to ready your repeating crossbow'
-              game_state.loaded = false
-            end
-          end
-        when 'Face what?'
-          game_state.clear_aim_queue
-        end
+        aim(game_state)
         Flags.reset('ct-ranged-ready')
       end
+    end
+  end
+
+  def aim(game_state)
+    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Strangely, you don\'t feel like fighting right now')
+    when 'Your repeating crossbow'
+      case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow')
+      when 'A rapid series of clicks'
+        aim(game_state)
+      when 'You attempt to ready your repeating crossbow'
+        game_state.loaded = false
+      end
+    when 'Face what?'
+      game_state.clear_aim_queue
+    when 'Strangely, you don\'t feel like fighting right now'
+      pause 1
+      aim(game_state)
     end
   end
 
@@ -1844,7 +1855,7 @@ class GameState
 
   def melee_attack_verb
     if use_weak_attacks?
-      brawling? ? 'claw' : 'jab'
+      brawling? ? 'punch' : 'jab'
     else
       'attack'
     end

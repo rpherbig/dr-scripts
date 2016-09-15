@@ -64,7 +64,7 @@ class CrossingTraining
 
   def main
     walk_to(@settings.safe_room)
-    if (@settings.waggle_sets || {})['town-training']
+    if @settings.waggle_sets['town-training']
       pause 10
       wait_for_script_to_complete('buff', ['town-training'])
     end
@@ -215,10 +215,15 @@ class CrossingTraining
       focus_runestone
     else
       return if @researching
-      walk_to @settings.crossing_training_sorcery_room(1137)
-      spell = @settings.crossing_training_sorcery(nil)
-      return if spell.nil? || spell.empty?
 
+      spell = @settings.crossing_training_sorcery(nil)
+      if spell.nil? || spell.empty?
+        echo '***UNABLE TO TRAIN SORCERY, REMOVING IT FROM THE TRAINING LIST***'
+        @settings.crossing_training([]).delete('Sorcery')
+        return
+      end
+
+      walk_to @settings.crossing_training_sorcery_room(1137)
       3.times do
         break if DRSkill.getxp('Sorcery') >= 30
         fput "prep #{spell}"
@@ -383,7 +388,6 @@ class CrossingTraining
   def check_discern(data)
     UserVars.discerns = {} unless UserVars.discerns
     discern_data = UserVars.discerns[data['abbrev']] || {}
-    discern_data['time_stamp'] ||= 0 unless discern_data.empty?
     if data['symbiosis']
       if discern_data.empty? || discern_data['min'].nil?
         /requires at minimum (\d+) mana streams/ =~ bput("discern #{data['abbrev']}", 'requires at minimum \d+ mana streams')
@@ -393,7 +397,7 @@ class CrossingTraining
         discern_data['more'] = 0
       end
       calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
-    elsif discern_data.empty? || discern_data['time_stamp'] && Time.now - discern_data['time_stamp'] > 24 * 60 * 60
+    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > 24 * 60 * 60 || !discern_data['more'].nil?
       discern_data['time_stamp'] = Time.now
       case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
       when /you don't think you are able/i, 'You have no idea how to cast that spell'
@@ -598,7 +602,7 @@ class CrossingTraining
 
   def train_first_aid
     play_song?
-    fput 'get my compendium'
+    bput('get my compendium', 'You get')
     start_text = bput('look my compendium', '^The compendium lies open to the section on .* physiology')
     start_text =~ /^The compendium lies open to the section on (.*) physiology/i
     start = Regexp.last_match(1)
@@ -747,14 +751,22 @@ class CrossingTraining
       do_research('Attunement')
       return
     end
+
     if DRStats.moon_mage?
       fput('perc mana')
       pause 15
       waitrt?
       return
     end
+
+    room_list = if @settings.crossing_training_stationary_skills_only
+                  [Room.current.id.to_i]
+                else
+                  %w(815 814 802 800 799 801 817 818 816 761 757 756 748 747 746 729)
+                end
+
     start_timer = Time.now
-    %w(815 814 802 800 799 801 817 818 816 761 757 756 748 747 746 729).each do |roomid|
+    room_list.each do |roomid|
       walk_to roomid
       bput('perc', 'You reach out')
       waitrt?
@@ -831,6 +843,16 @@ class CrossingTraining
 
   def train_trading
     disciplines = @settings.work_order_disciplines
+
+    if @settings.sell_pouches_for_trading && DRSkill.getxp('Trading') < 5 && 'You get a' == bput("get pouch from my #{@settings.sale_pouches_container}", 'You get a', 'What were you')
+      gemshop = get_data('towns')[@settings.hometown]['gemshop']['id']
+      walk_to gemshop
+      fput('spec finesse')
+      fput('sell pouch')
+      fput('put pouch in bucket')
+      wait_for_script_to_complete('sell-loot')
+      return
+    end
 
     unless disciplines
       beep
@@ -952,9 +974,11 @@ class CrossingTraining
   end
 
   def play_song?(blocking = false)
-    return if @researching
+    return true if @researching
+    return false if @no_instrument
+    return true if DRSkill.getxp('Performance') >= 28
+
     UserVars.song = @song_list.first.first unless UserVars.song
-    return if @no_instrument
     @did_play = true
     case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
     when 'Play on what instrument'

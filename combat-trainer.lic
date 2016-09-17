@@ -510,6 +510,7 @@ class SpellProcess
   include DRCA
   include DRCS
   include DRCH
+  include DRCT
 
   def initialize(settings)
     echo('New SpellProcess') if $debug_mode_ct
@@ -742,7 +743,11 @@ class SpellProcess
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
     game_state.casting_ignite = true if name == 'Ignite'
-    prepare_spell(data, game_state)
+    if data['ritual']
+      cast_ritual(data, game_state)
+    else
+      prepare_spell(data, game_state)
+    end
   end
 
   def check_health(game_state)
@@ -808,6 +813,30 @@ class SpellProcess
     return if DRSkill.getxp(data['skill']) >= 34 && mana < 70 # make this a spell option
     prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
+  end
+
+  def cast_ritual(data, game_state)
+    retreat
+    if summoned = game_state.summoned_info(game_state.weapon_skill)
+      break_summoned_weapon(game_state.weapon_name)
+    else
+      EquipmentManager.instance.stow_weapon(game_state.weapon_name)
+    end
+    fput('STANCE SET 100 80 0')
+    fput("pre #{data['abbrev']} #{data['mana']}")
+    fput("get my #{data['focus']}")
+    fput("invoke my #{data['focus']}")
+    pause 5
+    waitrt?
+    fput("stow my #{data['focus']}")
+    unless summoned
+      EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    end
+    waitfor('feel fully prepared')
+    fput('cast')
+    if summoned
+      game_state.prepare_summoned_weapon(false)
+    end
   end
 
   def prepare_spell(data, game_state)
@@ -1155,6 +1184,9 @@ class AttackProcess
     @is_empath = DRStats.empath? && !settings.construct(false)
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
+    @undead = DRStats.empath? && settings.undead
+    echo("  @undead: #{@undead}") if $debug_mode_ct
+
     @stealth_attack_aimed_action = settings.stealth_attack_aimed_action
     echo("  @stealth_attack_aimed_action: #{@stealth_attack_aimed_action}") if $debug_mode_ct
 
@@ -1169,7 +1201,8 @@ class AttackProcess
     elsif game_state.mob_died && game_state.no_stab_current_mob
       game_state.no_stab_current_mob = false
     end
-    if game_state.dancing? || @is_empath
+
+    if game_state.dancing? || (@is_empath && !@undead && !DRSpells.active_spells['Absolution'])
       if game_state.finish_killing?
         echo('AttackProcess::clean_up') if $debug_mode_ct
         game_state.next_clean_up_step
@@ -1396,6 +1429,7 @@ class CombatTrainer
       [
         { name: 'debug', regex: /debug/i, optional: true },
         { name: 'construct', regex: /construct/i, optional: true, description: 'Construct setting to override empath no attack settings.' },
+        { name: 'undead', regex: /undead/i, optional: true, description: 'Allows hunting of undead by empaths when absolution is up.' },
         { name: 'dance', display: 'd#', regex: /d\d+/i, optional: true, description: 'Dance threshold, d2 would keep two enemies alive.' },
         { name: 'retreat', display: 'r#', regex: /r\d+/i, optional: true, description: 'Retreat threshold, r3 would stay at range with three or more enemies' }
       ]
@@ -1406,6 +1440,7 @@ class CombatTrainer
     settings = get_settings(args.flex)
 
     settings.construct = args.construct
+    settings.undead = args.undead
 
     settings.debug_mode = args.debug
     set_dance(args.dance, settings)

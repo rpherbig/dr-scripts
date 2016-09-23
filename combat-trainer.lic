@@ -283,12 +283,12 @@ class LootProcess
       end
     return unless tried_loot
     pause 1
-    if left_hand != pair.first
+    if left_hand != pair.first && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
       echo("out of room, failed to store #{left_hand}")
       game_state.unlootable(GameObj.left_hand.noun.downcase)
       dispose_trash(left_hand)
     end
-    if right_hand != pair.last
+    if right_hand != pair.last && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
       echo("out of room, failed to store #{right_hand}")
       game_state.unlootable(GameObj.right_hand.noun.downcase)
       dispose_trash(right_hand)
@@ -437,8 +437,8 @@ class LootProcess
           bput('adjust bundle', 'You adjust')
         end
       else
-        dispose_trash(left_hand) if snap.first != left_hand
-        dispose_trash(right_hand) if snap.last != right_hand
+        dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
+        dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
       end
       game_state.need_bundle = false
       unless stored_moon && 'you grab' == bput('get moon', 'you grab', 'What were')
@@ -449,8 +449,8 @@ class LootProcess
         end
       end
     end
-    dispose_trash(left_hand) if snap.first != left_hand
-    dispose_trash(right_hand) if snap.last != right_hand
+    dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
+    dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
   end
 end
 
@@ -542,6 +542,9 @@ class SpellProcess
     echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
 
     @cast_only_to_train = settings.cast_only_to_train
+    echo("  @cast_only_to_train: #{settings.cast_only_to_train}") if $debug_mode_ct
+
+    @perc_health_timer = Time.now
 
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
@@ -561,8 +564,6 @@ class SpellProcess
     return unless @tk_ammo
     fput("get #{@tk_ammo}")
     fput("drop #{@tk_ammo}")
-
-    @perc_health_timer = Time.now
   end
 
   def add_spell_flag(name, expire)
@@ -1237,6 +1238,7 @@ class AttackProcess
       end
 
       verb = game_state.melee_attack_verb
+
       command = game_state.offhand? ? "#{verb} left" : verb
 
       if (game_state.backstab? || game_state.ambush?) && hiding?
@@ -1500,10 +1502,10 @@ class CombatTrainer
         stop_script('tendme') if Script.running?('tendme')
         break
       end
-      if @stop && !@game_state.cleaning_up?
-        @game_state.next_clean_up_step
-        @game_state.stop_weak_attacks
-      end
+      next unless @stop && !@game_state.cleaning_up?
+      @game_state.next_clean_up_step
+      @game_state.stop_weak_attacks
+      @game_state.stop_analyze_combo
     end
   end
 end
@@ -1511,6 +1513,7 @@ end
 class GameState
   include DRCA
   include DRCS
+  include DRC
 
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $aim_skills = %w(Bow Slings Crossbow)
@@ -1552,6 +1555,7 @@ class GameState
     @charges = nil
     @aim_queue = []
     @dance_queue = []
+    @analyze_combo_array = []
 
     @dance_skill = settings.dance_skill
     echo("  @dance_skill: #{@dance_skill}") if $debug_mode_ct
@@ -1641,6 +1645,9 @@ class GameState
 
     @use_weak_attacks = settings.use_weak_attacks
     echo("  @use_weak_attacks: #{@use_weak_attacks}") if $debug_mode_ct
+
+    @analyze_combo_type = settings.analyze_combo_type
+    echo("  @analyze_combo_type: #{@analyze_combo_type}") if $debug_mode_ct
   end
 
   def next_clean_up_step
@@ -1910,15 +1917,36 @@ class GameState
     @use_weak_attacks = false
   end
 
+  def stop_analyze_combo
+    @analyze_combo_type = nil
+  end
+
   def melee_attack_verb
     if use_weak_attacks?
       brawling? ? 'punch' : 'jab'
+    elsif !@analyze_combo_type.nil? && !offhand? && !brawling?
+      update_analyze_array if @analyze_combo_array.empty?
+      @analyze_combo_array.shift
     else
       'attack'
     end
   end
 
   private
+
+  def update_analyze_array
+    result = bput("analyze #{@analyze_combo_type}", 'Analyze what\?', 'by landing a .*')
+    waitrt?
+
+    case result
+    when 'Analyze what?'
+      fput('face next')
+      return []
+    end
+
+    text = result.match(/by landing a (.*)\.$/).to_a[1]
+    @analyze_combo_array = list_to_nouns(text)
+  end
 
   def dance_stealth?
     @dance_actions_stealth && !@dance_actions_stealth.empty? && use_stealth?
@@ -1932,8 +1960,8 @@ class GameState
     DRSkill.getxp('Stealth') < 32
   end
 
-  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks
+  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :analyze_combo_type
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

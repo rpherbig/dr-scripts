@@ -7,7 +7,7 @@ custom_require.call(%w(common common-arcana drinfomon events))
 
 no_pause_all
 
-class LichbotWrapper
+class CharacterValidator
   def initialize(announce, sleep, greet)
     waitrt?
     fput('sleep') if sleep
@@ -18,57 +18,27 @@ class LichbotWrapper
     @greet = greet
 
     @lnet.unique_buffer.push("chat Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.") if announce
-    @lichbot = Lichbot.new
   end
 
-  def accept(character)
-    return unless validated?(character)
-    @lichbot.accept(character)
-  end
-
-  def list_buffs(character)
-    return unless validated?(character)
-    @lichbot.list_buffs(character)
-  end
-
-  def cast_buff(character, abbrev)
-    return unless validated?(character)
-    @lichbot.cast_buff(character, abbrev)
-  end
-
-  def give(character, item)
-    return unless validated?(character)
-    @lichbot.give(character, item)
-  end
-
-  def inventory(character)
-    return unless validated?(character)
-    @lichbot.inventory(character)
-  end
-
-  def help(character)
-    return unless validated?(character)
-    @lichbot.help(character)
-  end
-
-  def who(character)
-    return if validated?(character)
+  def validate(character)
+    return if valid?(character)
 
     echo "Attempting to validate: #{character}"
     @lnet.unique_buffer.push("who #{character}")
   end
 
-  def validate(character)
+  def confirm(character)
+    return if valid?(character)
+
     echo "Successfully validated: #{character}"
     @validated_characters << character
 
     return unless @greet
+
     put "whisper #{character} Hi! I'm your friendly neighborhood lichbot. Whisper me 'help' for more details. Don't worry, I've memorized your name so you won't see this message again."
   end
 
-  private
-
-  def validated?(character)
+  def valid?(character)
     @validated_characters.include?(character)
   end
 end
@@ -87,7 +57,7 @@ class Lichbot
     refresh_inventory
   end
 
-  def accept(character)
+  def accept(_character)
     waitrt?
     bput('accept', 'You accept')
     bput('stow right', 'You put')
@@ -195,7 +165,8 @@ arg_definitions = [
 
 args = parse_args(arg_definitions)
 
-lichbot = LichbotWrapper.new(args.announce, args.sleep, args.greet)
+lichbot = Lichbot.new
+validator = CharacterValidator.new(args.announce, args.sleep, args.greet)
 
 @last_room_list = []
 loop do
@@ -205,32 +176,32 @@ loop do
   if line =~ /^(.*) offers you (.*).  Enter ACCEPT to accept the offer or DECLINE to decline it.  The offer will expire in 30 seconds.$/
     character = Regexp.last_match(1)
 
-    lichbot.accept(character)
+    lichbot.accept(character) if validator.valid?(character)
   elsif line =~ /^(.*) whispers, "(inv|inventory)"$/i
     character = Regexp.last_match(1)
 
-    lichbot.inventory(character)
+    lichbot.inventory(character) if validator.valid?(character)
   elsif line =~ /^(.*) whispers, "(help)"$/i
     character = Regexp.last_match(1)
 
-    lichbot.help(character)
+    lichbot.help(character) if validator.valid?(character)
   elsif line =~ /^(.*) whispers, "(buffs|spells)"$/i
     character = Regexp.last_match(1)
 
-    lichbot.list_buffs(character)
+    lichbot.list_buffs(character) if validator.valid?(character)
   elsif line =~ /^(.*) whispers, "(give|giveme) (.*)"$/i
     character = Regexp.last_match(1)
     item = Regexp.last_match(3)
 
     Script.running.find_all { |s| !s.paused? && !s.no_pause_all }.each(&:pause)
-    lichbot.give(character, item)
+    lichbot.give(character, item) if validator.valid?(character)
     Script.running.find_all { |s| s.paused? && !s.no_pause_all }.each(&:unpause)
   elsif line =~ /^(.*) whispers, "(buff|cast) (.*)"$/i
     character = Regexp.last_match(1)
     abbrev = Regexp.last_match(3)
 
     Script.running.find_all { |s| !s.paused? && !s.no_pause_all }.each(&:pause)
-    lichbot.cast_buff(character, abbrev)
+    lichbot.cast_buff(character, abbrev) if validator.valid?(character)
     Script.running.find_all { |s| s.paused? && !s.no_pause_all }.each(&:unpause)
   elsif line =~ /^(.*) whispers, ".*"$/i
     character = Regexp.last_match(1)
@@ -240,14 +211,15 @@ loop do
   elsif DRRoom.pcs != @last_room_list
     new_characters = DRRoom.pcs - @last_room_list
 
-    new_characters.each { |name| lichbot.who(name) }
+    new_characters.each { |name| validator.validate(name) }
     @last_room_list = DRRoom.pcs
-  elsif line =~ /^\[server\]: "(.*)"$/
-    result = Regexp.last_match(1)
+  elsif line =~ /^\[server\]: "DR:(.*) is tuned to the following channels.*"$/
+    character = Regexp.last_match(1)
 
-    next unless result =~ /DR:(.*) is tuned to the following channels|DR:(.*) is connected but not tuned to any channels/
+    validator.confirm(character)
+  elsif line =~ /^\[server\]: "DR:(.*) is connected but not tuned to any channels.*"$/
+    character = Regexp.last_match(1)
 
-    character = Regexp.last_match(1) || Regexp.last_match(2)
-    lichbot.validate(character)
+    validator.confirm(character)
   end
 end

@@ -3,37 +3,163 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#lichbot
 =end
 
-custom_require.call(%w(common drinfomon events))
+custom_require.call(%w(common common-arcana drinfomon events))
 
-no_pause_all
-
-class Lichbot
-  include DRC
-
+class CharacterValidator
   def initialize(announce, sleep, greet)
-    bput('sleep', 'You relax', 'You are already') if sleep
-    stop_script('smartlisten') if Script.running?('smartlisten') && sleep
-
-    Flags.add('give-accepted', '.* has accepted your offer and is now holding .*')
-    Flags.add('give-declined', '.* has declined the offer')
-    Flags.add('give-expired', 'Your offer to .* has expired')
+    waitrt?
+    fput('sleep') if sleep
 
     @lnet = (Script.running + Script.hidden).find { |val| val.name == 'lnet' }
     @validated_characters = []
     @greet = greet
-    @inventory = []
-    refresh_inventory
 
-    chat("Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.") if announce
+    @lnet.unique_buffer.push("chat Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.") if announce
   end
 
-  def accept(character)
-    return unless validated?(character)
+  def validate(character)
+    return if valid?(character)
 
+    echo "Attempting to validate: #{character}"
+    @lnet.unique_buffer.push("who #{character}")
+  end
+
+  def confirm(character)
+    return if valid?(character)
+
+    echo "Successfully validated: #{character}"
+    @validated_characters << character
+
+    return unless @greet
+
+    put "whisper #{character} Hi! I'm your friendly neighborhood lichbot. Whisper me 'help' for more details. Don't worry, I've memorized your name so you won't see this message again."
+  end
+
+  def valid?(character)
+    @validated_characters.include?(character)
+  end
+end
+
+class Lichbot
+  include DRC
+  include DRCA
+
+  def initialize
+    Flags.add('give-accepted', '.* has accepted your offer and is now holding .*')
+    Flags.add('give-declined', '.* has declined the offer')
+    Flags.add('give-expired', 'Your offer to .* has expired')
+
+    Flags.add('stopped-listening', 'Your teacher is not here, so you are no longer learning anything', '.* stops teaching')
+
+    @settings = get_settings
+    @last_action = Time.now
+    @last_teacher = nil
+    @inventory = []
+    refresh_inventory
+  end
+
+  def accept
+    @last_action = Time.now
     waitrt?
     bput('accept', 'You accept')
     bput('stow right', 'You put')
     refresh_inventory
+  end
+
+  def list_buffs(character)
+    @last_action = Time.now
+    fput "whisper #{character} My buffs are:"
+    @settings.lichbot_buffs.each { |buff| fput "whisper #{character}   #{buff['name']} [#{buff['abbrev']}] - #{buff['description']}" }
+    fput "whisper #{character} END"
+  end
+
+  def cast_buff(character, abbrev)
+    @last_action = Time.now
+    buff_data = @settings.lichbot_buffs.find { |buff| buff['abbrev'] == abbrev }
+    unless buff_data
+      fput "whisper #{character} I'm sorry, I do not know spell [#{abbrev}]"
+      return
+    end
+
+    fput "whisper #{character} Preparing [#{buff_data['name']}] now"
+    buff_data['cast'] = "cast #{character}"
+    buff(buff_data, @settings)
+    fput "whisper #{character} Buffing complete"
+  end
+
+  def give(character, item)
+    @last_action = Time.now
+    unless get_item?(item)
+      fput "whisper #{character} Sorry, I failed to find [#{item}] in my inventory"
+      return
+    end
+
+    Flags.reset('give-accepted')
+    Flags.reset('give-expired')
+    Flags.reset('give-declined')
+    case bput("give #{item} to #{character}", 'You offer', 'What is it')
+    when 'What is it'
+      fput "whisper #{character} Sorry, I failed to give you [#{item}]"
+      stow_hands
+      return
+    end
+
+    pause 0.5 until Flags['give-accepted'] || Flags['give-expired'] || Flags['give-declined']
+
+    bput("stow #{item}", 'You put') if Flags['give-expired'] || Flags['give-declined']
+    refresh_inventory if Flags['give-accepted']
+  end
+
+  def inventory(character)
+    @last_action = Time.now
+    fput "whisper #{character} My inventory is:"
+    @inventory.each { |item| fput "whisper #{character}   #{item}" }
+    fput "whisper #{character} END"
+  end
+
+  def help(character)
+    @last_action = Time.now
+    fput "whisper #{character} Supported commands are:"
+    fput "whisper #{character}   (help) - this list"
+    fput "whisper #{character}   (inv|inventory) - view the items I have available"
+    fput "whisper #{character}   (give|giveme) [item] - take an item from me"
+    fput "whisper #{character}   (buffs|spells) - view the buffs I can cast"
+    fput "whisper #{character}   (buff|cast) [abbreviation] - receive [abbreviation] buff from me"
+    fput "whisper #{character} I will also accept and stow any item you trade me"
+  end
+
+  def ping
+    return if @last_action + 60 * 3 > Time.now
+    @last_action = Time.now
+
+    if Flags['stopped-listening'] || @last_teacher.nil? || !listen?(@last_teacher)
+      classes = assess_teach
+      @last_teacher = classes
+                      .reject { |t, s| t.nil? || s.nil? }
+                      .sort_by { |_t, s| [DRSkill.getxp(s), DRSkill.getrank(s)] }
+                      .find { |t, _s| listen?(t) }
+                      .first
+      Flags.reset('stopped-listening')
+    end
+
+    if should_train?('Attunement')
+      bput('perc', 'You reach out')
+      waitrt?
+    end
+
+    if should_train?('Augmentation') || should_train?('Arcana')
+      buff_data = @settings
+                  .lichbot_buffs
+                  .sort_by { |spell| DRSpells.active_spells[spell['name']] || 0 }
+                  .first
+      buff(buff_data, @settings) if buff_data
+    end
+  end
+
+  private
+
+  def should_train?(skill)
+    DRSkill.getxp(skill) < 28
   end
 
   def get_item?(item)
@@ -52,65 +178,6 @@ class Lichbot
     true
   end
 
-  def give(character, item)
-    return unless validated?(character)
-
-    unless get_item?(item)
-      fput "whisper #{character} Sorry, I failed to find #{item} in my inventory"
-      return
-    end
-
-    Flags.reset('give-accepted')
-    Flags.reset('give-expired')
-    case bput("give #{item} to #{character}", 'You offer', 'What is it')
-    when 'What is it'
-      fput "whisper #{character} Sorry, I failed to give you #{item}"
-      stow_hands
-      return
-    end
-
-    pause 0.5 until Flags['give-accepted'] || Flags['give-expired'] || Flags['give-declined']
-
-    bput("stow #{item}", 'You put') if Flags['give-expired'] || Flags['give-declined']
-    refresh_inventory if Flags['give-accepted']
-  end
-
-  def inventory(character)
-    return unless validated?(character)
-
-    fput "whisper #{character} My inventory is:"
-    @inventory.each { |item| fput "whisper #{character}   #{item}" }
-    fput "whisper #{character} END"
-  end
-
-  def who(character)
-    return if validated?(character)
-
-    echo "Attempting to validate: #{character}"
-    @lnet.unique_buffer.push("who #{character}")
-  end
-
-  def help(character)
-    return unless validated?(character)
-
-    fput "whisper #{character} Supported commands are:"
-    fput "whisper #{character}   help - this list"
-    fput "whisper #{character}   (inv|inventory) - view the items I have available"
-    fput "whisper #{character}   (give me|giveme) [item] - take an item from me"
-    fput "whisper #{character} I will also accept and stow any item you trade me"
-  end
-
-  def validate(character)
-    echo "Successfully validated: #{character}"
-    @validated_characters << character
-
-    return unless @greet
-
-    fput "whisper #{character} Hi! I'm your friendly neighborhood lichbot. Whisper me 'help' for more details. Don't worry, I've memorized your name so you won't see this message again."
-  end
-
-  private
-
   def refresh_inventory
     waitrt?
     fput('inv list')
@@ -125,14 +192,6 @@ class Lichbot
       .select { |item| item.lstrip.start_with?('-') }
       .map { |item| item.strip[1..-1] }
   end
-
-  def validated?(character)
-    @validated_characters.include?(character)
-  end
-
-  def chat(text)
-    @lnet.unique_buffer.push("chat #{text}")
-  end
 end
 
 arg_definitions = [
@@ -146,46 +205,60 @@ arg_definitions = [
 
 args = parse_args(arg_definitions)
 
-lichbot = Lichbot.new(args.announce, args.sleep, args.greet)
+lichbot = Lichbot.new
+validator = CharacterValidator.new(args.announce, args.sleep, args.greet)
 
 @last_room_list = []
 loop do
   line = script.gets?
   pause 0.05 unless line
 
-  if line =~ /^(.*) offers you (.*).  Enter ACCEPT to accept the offer or DECLINE to decline it.  The offer will expire in 30 seconds.$/
+  if DRRoom.pcs != @last_room_list
+    (DRRoom.pcs - @last_room_list).each { |name| validator.validate(name) }
+    @last_room_list = DRRoom.pcs
+  end
+
+  case line
+  when /^(.*) offers you (.*).  Enter ACCEPT to accept the offer or DECLINE to decline it.  The offer will expire in 30 seconds.$/
     character = Regexp.last_match(1)
 
-    lichbot.accept(character)
-  elsif line =~ /^(.*) whispers, "(inv|inventory|helpme|help me|help)"$/i
+    lichbot.accept if validator.valid?(character)
+  when /^(.*) whispers, "(inv|inventory)"$/i
     character = Regexp.last_match(1)
-    command = Regexp.last_match(2)
 
-    case command.downcase
-    when 'inventory', 'inv'
-      lichbot.inventory(character)
-    when 'help', 'helpme', 'help me'
-      lichbot.help(character)
-    end
-  elsif line =~ /^(.*) whispers, "(giveme|give me|give) (.*)"$/i
+    lichbot.inventory(character) if validator.valid?(character)
+  when /^(.*) whispers, "(help)"$/i
     character = Regexp.last_match(1)
-    _command = Regexp.last_match(2)
+
+    lichbot.help(character) if validator.valid?(character)
+  when /^(.*) whispers, "(buffs|spells)"$/i
+    character = Regexp.last_match(1)
+
+    lichbot.list_buffs(character) if validator.valid?(character)
+  when /^(.*) whispers, "(give|giveme) (.*)"$/i
+    character = Regexp.last_match(1)
     item = Regexp.last_match(3)
 
-    Script.running.find_all { |s| !s.paused? && !s.no_pause_all }.each(&:pause)
-    lichbot.give(character, item)
-    Script.running.find_all { |s| s.paused? && !s.no_pause_all }.each(&:unpause)
-  elsif DRRoom.pcs != @last_room_list
-    new_characters = DRRoom.pcs - @last_room_list
+    lichbot.give(character, item) if validator.valid?(character)
+  when /^(.*) whispers, "(buff|cast) (.*)"$/i
+    character = Regexp.last_match(1)
+    abbrev = Regexp.last_match(3)
 
-    new_characters.each { |name| lichbot.who(name) }
-    @last_room_list = DRRoom.pcs
-  elsif line =~ /^\[server\]: "(.*)"$/
-    result = Regexp.last_match(1)
+    lichbot.cast_buff(character, abbrev) if validator.valid?(character)
+  when /^(.*) whispers, ".*"$/i
+    character = Regexp.last_match(1)
 
-    next unless result =~ /DR:(.*) is tuned to the following channels|DR:(.*) is connected but not tuned to any channels/
+    fput "whisper #{character} I'm sorry, I did not understand that command"
+    lichbot.help(character)
+  when /^\[server\]: "DR:(.*) is tuned to the following channels.*"$/
+    character = Regexp.last_match(1)
 
-    character = Regexp.last_match(1) || Regexp.last_match(2)
-    lichbot.validate(character)
+    validator.confirm(character)
+  when /^\[server\]: "DR:(.*) is connected but not tuned to any channels.*"$/
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+  else
+    lichbot.ping
   end
 end

@@ -2,12 +2,13 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#new-character
 =end
 
-custom_require.call(%w(common common-crafting common-items common-travel equipmanager))
+custom_require.call(%w(common common-crafting common-items common-money common-travel equipmanager))
 
 class NewCharacter
   include DRC
   include DRCC
   include DRCI
+  include DRCM
   include DRCT
 
   def initialize
@@ -21,6 +22,10 @@ class NewCharacter
     @store = args.store
 
     @settings = get_settings
+    EquipmentManager.instance.refresh(@settings)
+    EquipmentManager.instance.wear_equipment_set?('standard')
+
+    ensure_copper_on_hand(20_000, @settings.hometown)
 
     check_default_store
     check_skinning
@@ -41,24 +46,27 @@ class NewCharacter
   end
 
   def check_manual_changes
-    echo 'Here are some common settings you might want to consider:'
+    echo 'Here are some common settings you might want to consider changing:'
     echo '  toggle expbrief'
+    echo '  toggle bundle'
+    echo '  toggle shield arm'
     echo '  spell stance 115 115 70'
     echo '  spell recognition on'
-    echo '  adjust shield'
-    echo 'Don\'t forget to join a guild!'
-    echo 'Don\'t forget to select a spell or ability from your guild leader!'
-    echo 'Don\'t forget to spend your initial 600 TDPs!'
+    echo 'Here are some common manual steps that you should consider:'
+    echo '  Join a guild' if DRStats.commoner?
+    echo '  Align to a different immortal' if DRStats.cleric?
+    echo '  Align to an elemental plane' if DRStats.warrior_mage?
+    echo '  Select a spell or ability from your guild leader'
+    echo '  Spend your initial 600 TDPs'
   end
 
   def check_sorcery
     echo '***CHECKING SORCERY***'
     return unless @settings.crossing_training.include?('Sorcery')
     return unless DRSkill.getrank('Sorcery') < 50 && @settings.crossing_training_sorcery.nil?
+    return if exists?('runestone')
 
-    unless exists?('runestone')
-      echo 'You need to find a runestone to train Sorcery'
-    end
+    echo 'You need to find a runestone to train Sorcery'
   end
 
   def check_zills
@@ -66,7 +74,10 @@ class NewCharacter
 
     if exists?('zills')
       description = 'chamois cloth'
-      buy_item(19_078, description) unless exists?(description)
+      unless exists?(description)
+        buy_item(19_078, 'cloth')
+        bput("stow my #{description}", 'You put')
+      end
     else
       echo 'You need to buy some zills (or ask in LNet)'
     end
@@ -85,53 +96,27 @@ class NewCharacter
     return unless DRStats.cleric?
 
     description = @settings.water_holder
-    unless exists?(description)
+    if exists?(description)
+      bput("get my #{description} from my #{@settings.theurgy_supply_container}", 'You get')
+    else
       buy_item(19_073, description)
+    end
 
-      if exists?(description)
-        walk_to(1164)
-        move('go shack')
-        move('go hole')
-        move('west')
-        move('up')
-        waitrt?
-        fix_standing
-        move('go path')
+    if exists?(description)
+      shrine = get_data('shrines')['shrines'][@settings.hometown].find { |s| s['location'] == 'Damaris\' altar near Kaerna' }
+      if shrine
+        walk_to(shrine['start_room'])
+        shrine['path_in'].each { |dir| move(dir) }
         bput("fill my #{description} with water from bowl", 'You fill')
-        move('go path')
-        move('go stump')
-        waitrt?
-        fix_standing
-        move('east')
-        move('go hole')
-        move('out')
-
-        if @settings.theurgy_supply_container
-          bput("put my #{description} in my #{@settings.theurgy_supply_container}", 'You put')
-        else
-          bput("stow my #{description}", 'You put')
-        end
-      else
-        echo "Failed to buy: #{description}"
+        shrine['path_out'].each { |dir| move(dir) }
       end
+
+      bput("put my #{description} in my #{@settings.theurgy_supply_container}", 'You put')
+    else
+      echo "Failed to buy: #{description}"
     end
 
-    description = 'pilgrim\'s badge'
-    unless exists?(description)
-      walk_to(19_073)
-      move('go storeroom')
-      bput("buy #{description}", 'You decide')
-      move('out')
-
-      if exists?(description)
-        bput("kiss my #{description}", 'making it your own')
-        walk_to(5989)
-        bput("push altar with my #{description}", 'You press')
-        bput('wear my badge', 'You put')
-      else
-        echo "Failed to buy: #{description}"
-      end
-    end
+    wait_for_script_to_complete('pilgrimage')
   end
 
   def check_armor_and_weapons
@@ -217,8 +202,11 @@ class NewCharacter
 
     description = 'bundling rope'
     unless exists?(description)
-      walk_to(8266)
-      bput("ask falken for #{description}", 'hands you')
+      room = get_data('town')[@settings.hometown]['tannery']['id']
+      name = get_data('town')[@settings.hometown]['tannery']['name']
+
+      walk_to(room)
+      bput("ask #{name} for #{description}", 'hands you')
       bput("stow my #{description}", 'You put')
     end
   end
@@ -226,10 +214,13 @@ class NewCharacter
   def check_gem_pouches
     echo '***CHECKING GEM POUCHES***'
 
+    room = get_data('town')[@settings.hometown]['gemshop']['id']
+    name = get_data('town')[@settings.hometown]['gemshop']['name']
+
     description = "#{@settings.gem_pouch_adjective} pouch"
     unless wearing?(description)
-      walk_to(4652)
-      bput("ask appraiser for #{description}", 'hands you')
+      walk_to(room)
+      bput("ask #{name} for #{description}", 'hands you')
       bput("wear my #{description}", 'You attach')
 
       bput("store gems in my #{description}", 'You will now') if @store
@@ -239,8 +230,8 @@ class NewCharacter
     return if container.nil?
 
     unless inside?(description, container)
-      walk_to(4652)
-      bput("ask appraiser for #{description}", 'hands you')
+      walk_to(room)
+      bput("ask #{name} for #{description}", 'hands you')
       bput("put my #{description} in my #{container}", 'You put')
     end
   end
@@ -251,17 +242,18 @@ class NewCharacter
 
     fput("store boxes in my #{@settings.picking_box_source}") if @settings.picking_box_source && @store
 
+    locksmithing_room = get_data('town')[@settings.hometown]['locksmithing']['id']
     description = 'lockpick ring'
     if @settings.use_lockpick_ring && !exists?(description)
-      buy_item(19_125, description)
+      buy_item(locksmithing_room, description)
       bput("wear my #{description}", 'You attach')
     end
 
     description = 'lockpick'
     if @settings.use_lockpick_ring
-      refill_lockpick_ring(@settings.lockpick_type)
+      refill_lockpick_ring(@settings.lockpick_type, @settings.hometown)
     elsif !exists?(description)
-      buy_item(19_125, "#{@settings.lockpick_type} #{description}")
+      buy_item(locksmithing_room, "#{@settings.lockpick_type} #{description}")
       bput("stow my #{description}", 'You put')
     end
   end

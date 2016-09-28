@@ -1,4 +1,3 @@
-# quiet
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_development#dependency
 =end
@@ -185,8 +184,10 @@ class ScriptManager
     @lich_url = 'https://api.github.com/repos/rcuhljr/dr-lich/git/trees/master'
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
+    UserVars.autostart_scripts = UserVars.autostart_scripts - ['dependency']
     Settings['autostart'] ||= []
     Settings['autostart'].uniq!
+    Settings['autostart'] = Settings['autostart'] - ['dependency']
 
     Settings['base_versions'] ||= {}
 
@@ -197,6 +198,8 @@ class ScriptManager
     @self_updated = false
     @thievery_queue = []
     @shop_update_queue = []
+
+    @enable_fork = Settings['lich_fork_sha']
   end
 
   def updated_dependency?
@@ -265,6 +268,14 @@ class ScriptManager
       @remove_autos.each { |script| Settings['autostart'].delete(script) }
       @remove_autos = []
     end
+    if @disable_fork
+      stop_download_lich
+      @disable_fork = nil
+    elsif @enable_fork
+      download_lich
+      @enable_fork = nil
+    end
+
     submit_thieving_update(*@thievery_queue.pop) unless @thievery_queue.empty?
     submit_shop_update(@shop_update_queue.pop) unless @shop_update_queue.empty?
     update_autostarts if update
@@ -280,11 +291,16 @@ class ScriptManager
     http.use_ssl = true
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-    request = partial ? Net::HTTP::Patch.new(uri.request_uri) : Net::HTTP::Put.new(uri.request_uri)
-    request['Content-Type'] = 'application/json'
-    request.body = shop_data.to_json
-    response = http.request(request)
-    response.body.chomp
+    begin
+      request = partial ? Net::HTTP::Patch.new(uri.request_uri) : Net::HTTP::Put.new(uri.request_uri)
+      request['Content-Type'] = 'application/json'
+      request.body = shop_data.to_json
+      response = http.request(request)
+      response.body.chomp
+    rescue => e
+      echo(e)
+      echo('Error in submitting shop data')
+    end
   end
 
   def load_script(filename, force = false)
@@ -306,6 +322,14 @@ class ScriptManager
   def start_scripts(force = false)
     repo_scripts.each { |name, _| get_script(name, force) }
     autostarts.each { |name| run_script(name) }
+  end
+
+  def queue_lich
+    @enable_fork = true
+  end
+
+  def unqueue_lich
+    @disable_fork = true
   end
 
   def download_lich
@@ -511,7 +535,7 @@ class ScriptManager
     request['Content-Type'] = 'application/json'
     response = http.request(request)
     return nil if response.body.nil?
-    JSON.load(response.body.chomp)
+    JSON.parse(response.body.chomp)
   end
 
   def submit_pastebin(message_body)
@@ -625,8 +649,8 @@ class SetupFiles
   def load_data
     if @extras.is_a? Array
       @settings = {}
-      @extras.each do |_extra|
-        filename = "base-#{@extra}.yaml"
+      @extras.each do |extra|
+        filename = "base-#{extra}.yaml"
         @settings.merge!(@base_files[filename].dup) if @base_files[filename]
       end
       @settings = OpenStruct.new(@settings)
@@ -639,8 +663,8 @@ class SetupFiles
 
   def load_settings
     profile = "./scripts/profiles/#{checkname}-setup.yaml"
+    settings = @base_files['base.yaml'].dup
     if File.exist?(profile)
-      settings = @base_files['base.yaml'].dup
       settings.merge!(safe_load_yaml(profile) || {})
       @extras.each do |subfile|
         filepath = "./scripts/profiles/#{checkname}-#{subfile}.yaml"
@@ -651,11 +675,22 @@ class SetupFiles
         end
       end
     end
-    @settings = OpenStruct.new(settings)
-    base_lootables = @base_files['base-items.yaml'][:lootables]
-    gems = @base_files['base-items.yaml'][:gem_nouns]
-    @settings.lootables = (base_lootables + gems + @settings.loot_additions([]) - @settings.loot_subtractions([])).uniq
+    @settings = transform_settings(settings)
     @load = false
+  end
+
+  def transform_settings(settings)
+    s = OpenStruct.new(settings)
+
+    @base_files['base-empty.yaml'][:empty_values].each { |name, value| s[name] ||= value }
+
+    base_lootables = @base_files['base-items.yaml'][:lootables]
+    boxes = @base_files['base-items.yaml'][:box_nouns]
+    gems = @base_files['base-items.yaml'][:gem_nouns]
+    scrolls = @base_files['base-items.yaml'][:scroll_nouns]
+    s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
+
+    s
   end
 end
 
@@ -711,6 +746,7 @@ class MoonWatch
       echo('Restarting moonwatch connection')
       close
       start
+      pause 3
     end
     return if @queue.empty?
     item = @queue.shift
@@ -880,15 +916,14 @@ def toggle_lich_fork
 
   if Settings['lich_fork']
     start_script('repository', ['unset-lich-updatable'])
-    $manager.download_lich
+    $manager.queue_lich
   else
     start_script('repository', ['set-lich-updatable'])
     pause
     start_script('repository', ['download-lich'])
     pause
     pause 1 while Script.running?('repository')
-    Settings['lich_fork_sha'] = nil
-    $manager.stop_download_lich
+    $manager.unqueue_lich
   end
   Settings.save
   echo('New version of lich installed, please restart Lich.')
@@ -955,7 +990,6 @@ full_install if install
 
 force_start_script('bootstrap', ['wipe_constants'])
 
-$manager.download_lich if Settings['lich_fork']
 $manager.check_base_files
 $manager.start_scripts
 

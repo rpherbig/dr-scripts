@@ -320,7 +320,7 @@ class LootProcess
 
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime')
+    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', 'A failed or completed ritual has rendered this corpse unusable for your purposes')
     when @rituals['preserve'], @rituals['dissect']
       @last_ritual = ritual
       return
@@ -648,7 +648,7 @@ class SpellProcess
     return unless Flags['ct-need-bless']
     Flags.reset('ct-need-bless')
 
-    prepare('Bless', 1)
+    prepare?('Bless', 1)
     cast("cast #{right_hand || left_hand}")
   end
 
@@ -764,7 +764,7 @@ class SpellProcess
       end
       @wounds = {}
       prepare_spell(data, game_state) if data
-    else
+    elsif @empath_spells['VH']
       data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
       prepare_spell(data, game_state)
     end
@@ -817,10 +817,10 @@ class SpellProcess
     else
       EquipmentManager.instance.stow_weapon(game_state.weapon_name)
     end
-    fput('STANCE SET 100 80 0')
-    prepare(data['abbrev'], data['mana'])
+    bput('stance set 100 80 0', 'Setting your')
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'])
     fput("get my #{data['focus']}")
-    invoke(data['focus'])
+    invoke(data['focus'], nil)
     pause 5
     waitrt?
     fput("stow my #{data['focus']}")
@@ -884,7 +884,7 @@ class SpellProcess
         data['cast'] = "cast #{moon}"
       end
     end
-    prepare(data['abbrev'], data['mana'], command)
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     @custom_cast = data['cast']
@@ -1098,8 +1098,8 @@ class TrainerProcess
 
   def ambush_stun(game_state)
     return false unless game_state.can_ambush_stun?
-    dead_count = DRRoom.dead_npcs.size
 
+    dead_count = DRRoom.dead_npcs.size
     EquipmentManager.instance.stow_weapon(game_state.weapon_name)
     EquipmentManager.instance.wield_weapon(@stun_weapon, @stun_weapon_skill)
 
@@ -1119,9 +1119,9 @@ class TrainerProcess
     return if game_state.npcs.empty?
     target = (game_state.npcs - @no_app).first
     return unless target
-    if 'Perhaps that' == bput("app #{target} #{modifier}", 'Taking stock of', 'It\'s dead', 'You can\'t determine anything about this creature.', 'I could not find', 'You cannot appraise that', 'roundtime', '^Perhaps that')
-      @no_app << target
-    end
+    return if 'Perhaps that' != bput("app #{target} #{modifier}", 'Taking stock of', 'It\'s dead', 'You can\'t determine anything about this creature.', 'I could not find', 'You cannot appraise that', 'roundtime', '^Perhaps that')
+
+    @no_app << target
   end
 
   def moon_mage_perc(game_state)
@@ -1133,6 +1133,7 @@ class TrainerProcess
 
   def astrology(game_state)
     return if game_state.retreating?
+
     retreat
     bput('predict weather', 'You predict that', 'You are far too', 'you lack the skill to grasp them fully')
     waitrt?
@@ -1153,14 +1154,14 @@ class TrainerProcess
   end
 
   def check_ability(name, ability_info, game_state)
-    if game_state.casting
-      return false if ['PercMana', 'App Careful'].include?(name)
-    end
+    return false if ['PercMana', 'App Careful'].include?(name) && game_state.casting
+
     check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
     check = [check].flatten
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
     expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < 32 }
     return expcheck unless game_state.cooldown_timers[name]
+
     Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false
   end
 end
@@ -1227,10 +1228,10 @@ class AttackProcess
   private
 
   def check_face(game_state)
-    if Flags['ct-face-what']
-      fput("eng #{game_state.npcs.first}")
-      Flags.reset('ct-face-what')
-    end
+    return unless Flags['ct-face-what']
+
+    fput("eng #{game_state.npcs.first}")
+    Flags.reset('ct-face-what')
   end
 
   def attack_melee(charged_maneuver, game_state)
@@ -1274,11 +1275,10 @@ class AttackProcess
     else
       game_state.action_taken
     end
+    return unless reget(5, 'You need two hands')
 
-    if reget(5, 'You need two hands')
-      fput('stow left') if left_hand && left_hand !~ /\b#{game_state.weapon_name}/i
-      fput('stow right') if right_hand && right_hand !~ /\b#{game_state.weapon_name}/i
-    end
+    fput('stow left') if left_hand && left_hand !~ /\b#{game_state.weapon_name}/i
+    fput('stow right') if right_hand && right_hand !~ /\b#{game_state.weapon_name}/i
   end
 
   def attack_thrown(game_state)
@@ -1380,9 +1380,8 @@ class AttackProcess
       pause 1
     else
       game_state.set_dance_queue
-      if /Face what/ =~ fput(game_state.next_dance_action)
-        fput("eng #{game_state.npcs.first}")
-      end
+      fput(game_state.next_dance_action)
+      pause 0.5
       waitrt?
     end
   end
@@ -1472,7 +1471,6 @@ class CombatTrainer
     Flags.add('last-stance', 'Setting your Evasion stance to \d+%, your Parry stance to \d+%, and your Shield stance to \d+%.  You have \d+ stance points left')
 
     bput('stance set 100 40 40', 'Setting your')
-    pause 0.25 until Flags['last-stance']
 
     @stop = false
     @running = true
@@ -1654,6 +1652,9 @@ class GameState
 
     @analyze_combo_type = settings.analyze_combo_type
     echo("  @analyze_combo_type: #{@analyze_combo_type}") if $debug_mode_ct
+
+    @dedicated_camb_use = settings.dedicated_camb_use
+    echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
   end
 
   def next_clean_up_step
@@ -1806,7 +1807,7 @@ class GameState
   end
 
   def ambush?
-    @ambush && DRSkill.getxp('Backstab') < 34
+    @ambush && DRSkill.getxp('Backstab') < 34 && !brawling?
   end
 
   def backstab?
@@ -1881,7 +1882,7 @@ class GameState
       echo('check_charging?: done') if $debug_mode_ct
 
       cambrinth_charges(nil)
-      invoke(@cambrinth)
+      invoke(@cambrinth, @dedicated_camb_use)
     else
       next_charge = @charges.pop
       echo("check_charging?: #{next_charge}") if $debug_mode_ct
@@ -1969,7 +1970,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :analyze_combo_type
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :analyze_combo_type, :dedicated_camb_use
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

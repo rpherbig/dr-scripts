@@ -12,6 +12,6 @@ stealing_data[:stealing_options].compact.each do |data|
   stealing.delete(update)
 end
 
-stealing.each { |x| stealing_data[:stealing_options] << x }
+stealing.compact.each { |x| stealing_data[:stealing_options] << x }
 
 File.open('./profiles/base-stealing.yaml', 'w') { |file| file.print(stealing_data.to_yaml) }

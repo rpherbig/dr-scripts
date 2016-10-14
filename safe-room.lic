@@ -1,31 +1,48 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#safe-room
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#safe-room
 =end
 
-custom_require.call(%w(common common-money common-travel drinfomon events))
+custom_require.call(%w(common common-healing common-money common-travel drinfomon events))
 
 class SafeRoom
   include DRC
+  include DRCH
   include DRCM
   include DRCT
 
   def initialize
+    arg_definitions = [
+      [
+        { name: 'force', regex: /force/i, optional: true, description: 'Run healing logic even if there are no visible wounds' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    unless args.force || check_health.any?
+      echo '***STATUS*** No wounds, skipping healing'
+      return
+    end
+
     settings = get_settings
 
     copper = settings.safe_room_tip_threshold || 4_000
 
     if use_pc_empath?(settings.safe_room_id, settings.safe_room_empath)
-      ensure_copper_on_hand(copper)
+      ensure_copper_on_hand(copper, settings.hometown)
       tip(settings.safe_room_tip_threshold, settings.safe_room_tip_amount, settings.safe_room_empath)
     elsif DRStats.empath?
       walk_to(settings.safe_room)
       wait_for_script_to_complete('healme')
     elsif !DRStats.necromancer?
-      ensure_copper_on_hand(copper)
-      Flags.add('healthy', 'Dokt waves a large hand at you', 'Dokt gives you a quick glance')
+      ensure_copper_on_hand(copper, settings.hometown)
+      Flags.add('healthy', 'Dokt waves a large hand at you', 'Dokt gives you a quick glance', 'go have yourself a birthday party')
       Flags.add('moved', 'grabs you and drags you')
       Flags.add('idle', 'you have been idle too long')
-      wait_at_empath
+
+      town_data = get_data('town')
+      hometown = town_data[settings.hometown]
+      wait_at_empath(hometown['npc_empath']['id'])
       fix_standing
     end
 
@@ -51,9 +68,9 @@ class SafeRoom
     wait_for_healing if Flags['moved']
   end
 
-  def wait_at_empath
-    walk_to 6218
-    unless Room.current.id == 6218
+  def wait_at_empath(room_id)
+    walk_to room_id
+    unless Room.current.id == room_id
       beep
       beep
       echo 'ERROR Navigating to safe room'
@@ -94,12 +111,16 @@ class SafeRoom
   end
 
   def use_pc_empath?(room_id, empath)
-    return unless room_id
-    return unless empath
+    return false unless room_id
+    return false unless empath
 
     walk_to room_id
+    return false unless DRRoom.pcs.include?(empath)
+
     fput("listen to #{empath}")
     pause 45
+
+    true
   end
 
   def give_and_take(room_id, give_items, take_items)
@@ -145,7 +166,7 @@ class SafeRoom
     DRRoom.room_objs.grep(/#{item}/).each do |_|
       fput "stow #{item}"
       pause 1
-      next unless [checkright, checkleft].include? item
+      next unless [right_hand, left_hand].grep(/#{item}/i)
       fput "drop #{item}"
       pause 1
       return false

@@ -1,5 +1,5 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#forge
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#forge
 =end
 
 custom_require.call(%w(common common-crafting common-travel events))
@@ -29,15 +29,21 @@ class Forge
       [
         { name: 'hone', regex: /hone/i },
         { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item to hone.' }
+      ],
+      [
+        { name: 'resume', regex: /resume/i },
+        { name: 'book_type', display: 'book type', options: %w(black armor weapon), description: 'What smithing type is this item.' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item to hone.' }
       ]
     ]
 
     args = parse_args(arg_definitions)
 
     settings = get_settings
-    @stamp = settings.mark_crafted_goods(false)
-    @bag = settings.crafting_container('backpack')
-    @belt = settings.forging_belt(nil)
+    @hometown = settings.hometown
+    @stamp = settings.mark_crafted_goods
+    @bag = settings.crafting_container
+    @belt = settings.forging_belt
     @hammer = settings.forging_tools.find { |item| /hammer/ =~ item }
 
     @item = args.noun
@@ -48,6 +54,9 @@ class Forge
       hone
     elsif args.balance
       balance
+    elsif args.resume
+      @book_type = args.book_type
+      analyze_item
     else
       @book_type = args.book_type
       @chapter = args.chapter
@@ -70,7 +79,7 @@ class Forge
   end
 
   def temper
-    unless checkleft =~ /#{@item}/i || checkright =~ /#{@item}/i
+    unless left_hand =~ /#{@item}/i || right_hand =~ /#{@item}/i
       echo('***Please hold the item to temper.***')
       exit
     end
@@ -83,7 +92,7 @@ class Forge
     turn_to("page #{find_recipe(10, 'metal weapon honing')}")
     bput('study my book', 'Roundtime')
     stow_item('book')
-    find_grindstone
+    find_grindstone(@hometown)
     Flags.add('hone-done', 'the metal now needs protection by pouring oil on it')
     do_hone
   end
@@ -93,7 +102,7 @@ class Forge
     turn_to("page #{find_recipe(10, 'metal weapon balancing')}")
     bput('study my book', 'Roundtime')
     stow_item('book')
-    find_grindstone
+    find_grindstone(@hometown)
     Flags.add('hone-done', 'the metal now needs protection by pouring oil on it')
     do_hone
   end
@@ -145,7 +154,7 @@ class Forge
       temper_finish
       return
     end
-    get_item('tongs') unless checkright
+    get_item('tongs') unless right_hand
     temper_turn
   end
 
@@ -176,9 +185,11 @@ class Forge
               'Roundtime',
               'ready for cooling in the slack tub', 'ready for a quench hardening in the slack tub',
               'straightening along the horn of the anvil', 'would benefit from some soft reworking.',
-              'set using tongs',
+              'sets using tongs', 'into wire using a mandrel or mold set', 'set using tongs',
               'That tool does not seem',
-              'You need a larger volume of metal')
+              'push them deep into the fire to set',
+              'You need a larger volume of metal',
+              'I could not find what you were referring to')
     when 'You must be holding'
       get_item(@hammer)
       pound(item)
@@ -188,12 +199,16 @@ class Forge
       bellows
     when 'ready for cooling in the slack tub', 'ready for a quench hardening in the slack tub'
       slack_tub
-    when 'straightening along the horn of the anvil', 'would benefit from some soft reworking.', 'set using tongs'
+    when 'straightening along the horn of the anvil', 'would benefit from some soft reworking.', 'sets using tongs', 'set using tongs', 'into wire using a mandrel or mold set'
       turn_item
     when 'That tool does not seem'
       analyze_item
     when 'You need a larger volume of metal'
       echo '***You need a larger ingot to forge this item.***'
+      exit
+    when 'I could not find what you were referring to'
+      echo '*** ERROR TRYING TO CRAFT, EXITING ***'
+      stow_item(right_hand)
       exit
     else
       pound
@@ -258,8 +273,12 @@ class Forge
       until 'need of some oil' == bput("pull my #{@item} with my pliers", 'roundtime', 'need of some oil')
         pause
         waitrt?
+        stow_item('pliers')
+        assemble_part
+        get_item('pliers')
       end
       stow_item('pliers')
+
     elsif 'weaponsmithing'.include? @book_type
       grind_item
     end
@@ -272,7 +291,7 @@ class Forge
       part = nil
       part = case Flags['forge-assembly']
              when 'ready to be woven into and around the material'
-               padding
+               'padding'
              else
                Flags['forge-assembly'][1..-1].join('.')
              end
@@ -284,7 +303,7 @@ class Forge
   end
 
   def grind_item
-    find_grindstone
+    find_grindstone(@hometown)
     spin_grindstone
     bput("push grind with my #{@item}", 'Roundtime', 'needs protection')
     waitrt?
@@ -303,23 +322,23 @@ class Forge
 
   def add_oil
     pour_oil
-    if @stamp
-      get_item('stamp')
-      fput("mark my #{@item} with my stamp")
-      pause
-      waitrt?
-      stow_item('stamp')
-    end
+
+    return unless @stamp
+    get_item('stamp')
+    fput("mark my #{@item} with my stamp")
+    pause
+    waitrt?
+    stow_item('stamp')
   end
 
   def analyze_item
     waitrt?
-    stow_item(checkleft) # store contents of both hands, reacquire hammer and tongs
-    stow_item(checkright)
+    stow_item(left_hand) # store contents of both hands, reacquire hammer and tongs
+    stow_item(right_hand)
     get_item(@hammer)
     get_item('tongs')
 
-    case bput("analyze #{@item}", 'The metal is ready to be cooled', 'Almost all of the coal has been consumed', 'ready for more pounding', 'metal will quickly rust', 'The forge fire has died down', 'metal is in need of some gentle bending')
+    case bput("analyze #{@item}", 'The metal is ready to be cooled', 'Almost all of the coal has been consumed', 'ready for more pounding', 'metal will quickly rust', 'The forge fire has died down', 'metal is in need of some gentle bending', 'to be pulled')
     when 'The metal is ready to be cooled'
       slack_tub
     when 'Almost all of the coal has been consumed'
@@ -330,7 +349,7 @@ class Forge
       add_oil
     when 'The forge fire has died down'
       bellows
-    when 'metal is in need of some gentle bending', 'to be pulled'
+    when 'metal is in need of some gentle bending', 'to be pulled', 'a mandrel or mold set'
       turn_item
     end
   end

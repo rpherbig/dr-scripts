@@ -1,9 +1,9 @@
 # quiet
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#common-arcana
+  Documentation: https://elanthipedia.play.net/Lich_script_development#common-arcana
 =end
 
-custom_require.call(%w(common common-travel))
+custom_require.call(%w(common common-travel spellmonitor))
 
 module DRCA
   module_function
@@ -15,85 +15,118 @@ module DRCA
     failure = ['as if it hungers for more', 'Your infusion fails completely', 'You don\'t have enough harnessed mana to infuse that much', 'You have no harnessed']
 
     loop do
-      pause 5 while checkmana <= amount
-      DRC.bput("harness #{amount}", 'You tap into', 'Strain though you may') if harness
-      pause 0.5
-      waitrt?
+      pause 5 while mana <= amount
+      harness_mana(amount) if harness
       break if success.include?(DRC.bput("infuse om #{amount}", success + failure))
       pause 0.5
       waitrt?
     end
   end
 
-  def activate_khri?(kneel, preps, ability)
+  def harness_mana(amount)
+    DRC.bput("harness #{amount}", 'You tap into', 'Strain though you may')
+    pause 0.5
+    waitrt?
+  end
+
+  def activate_khri?(kneel, ability)
     return false if DRSpells.active_spells[ability]
     DRCT.retreat if kneel
     DRC.bput('kneel', 'You kneel', 'You are already', 'You rise') if kneel && !kneeling?
-    result = DRC.bput(ability, preps)
+    result = DRC.bput(ability, get_data('spells').khri_preps)
     waitrt?
     DRC.fix_standing
 
     ['Your body is willing', 'You have not recovered'].include?(result)
   end
 
+  def prepare?(abbrev, mana, symbiosis = false, command = 'prepare')
+    DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
+
+    case DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    when 'Your desire to prepare this offensive spell suddenly slips away'
+      pause 1
+      return prepare?(abbrev, mana, symbiosis, command)
+    when 'Something in the area interferes with your spell preparations'
+      DRC.bput('rel symb', 'You release the', 'But you haven\'t') if symbiosis
+      return false
+    end
+
+    true
+  end
+
   def buff(spell, settings)
-    DRC.bput("pre #{spell['abbrev']} #{spell['mana']}", settings.prep_messages)
-    if spell['cambrinth']
-      find_cambrinth(settings)
-
-      charge_and_invoke(settings, spell['cambrinth'])
-
-      stow_cambrinth(settings)
-    end
+    prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
+    find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, spell['cambrinth'])
     waitcastrt?
-    DRC.bput('cast', settings.cast_messages)
+    cast(spell['cast'])
   end
 
-  def find_cambrinth(settings)
-    find_cambrinth4(settings.held_cambrinth, settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap)
+  def cast(cast_command = 'cast')
+    case DRC.bput(cast_command || 'cast', get_data('spells').cast_messages)
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
+      fput('release spell')
+    end
+    waitrt?
   end
 
-  def find_cambrinth4(held_cambrinth, cambrinth, stored_cambrinth, cambrinth_cap)
-    if held_cambrinth && DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      fput("remove my #{cambrinth}")
-    elsif stored_cambrinth
-      fput("get my #{cambrinth}")
+  def find_charge_invoke_stow(cambrinth, stored_cambrinth, cambrinth_cap, dedicated_camb_use, charges)
+    return unless charges
+
+    find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+    charge_and_invoke(cambrinth, dedicated_camb_use, charges)
+    stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+  end
+
+  def find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+    if stored_cambrinth
+      DRC.bput("get my #{cambrinth}", 'You get')
+    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
+      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide')
     end
   end
 
-  def stow_cambrinth(settings)
-    stow_cambrinth5(settings.cambrinth, settings.held_cambrinth, settings.stored_cambrinth, settings.cambrinth_cap)
-  end
-
-  def stow_cambrinth5(cambrinth, held_cambrinth, stored_cambrinth, cambrinth_cap)
-    if held_cambrinth && DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      fput("wear my #{cambrinth}")
-    elsif stored_cambrinth
-      fput("stow my #{cambrinth}")
+  def stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+    if stored_cambrinth
+      DRC.bput("stow my #{cambrinth}", 'You put')
+    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
+      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang')
     end
   end
 
-  def charge_and_invoke(settings, charges)
-    charge_and_invoke2(charges, settings.cambrinth, settings.charge_messages, settings.invoke_messages)
-  end
-
-  def charge_and_invoke2(charges, cambrinth, charge_messages, invoke_messages)
+  def charge_and_invoke(cambrinth, dedicated_camb_use, charges)
     charges.each do |mana|
-      charge(cambrinth, mana, charge_messages)
+      break unless charge?(cambrinth, mana)
     end
 
-    invoke(cambrinth, invoke_messages)
+    invoke(cambrinth, dedicated_camb_use)
   end
 
-  def invoke(cambrinth, invoke_messages)
-    DRC.bput("invoke my #{cambrinth}", invoke_messages)
+  def invoke(cambrinth, dedicated_camb_use)
+    DRC.bput("invoke my #{cambrinth} #{dedicated_camb_use}", get_data('spells').invoke_messages)
     pause
     waitrt?
   end
 
-  def charge(cambrinth, mana, charge_messages)
-    DRC.bput("charge my #{cambrinth} #{mana}", charge_messages)
+  def charge(cambrinth, mana)
+    DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages)
     pause
     waitrt?
+  end
+
+  def charge?(cambrinth, mana)
+    result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages)
+    pause
+    waitrt?
+    result == 'absorbs all of the energy'
+  end
+
+  def release_cyclics
+    get_data('spells')
+      .spell_data
+      .select { |_name, properties| properties['cyclic'] }
+      .select { |name, _properties| DRSpells.active_spells.keys.include?(name) }
+      .map { |_name, properties| properties['abbrev'] }
+      .each { |abbrev| fput("release #{abbrev}") }
   end
 end

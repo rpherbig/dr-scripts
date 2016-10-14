@@ -1,5 +1,5 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#pick
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#pick
 =end
 
 custom_require.call(%w(common common-arcana common-items common-money common-travel drinfomon equipmanager events spellmonitor))
@@ -14,8 +14,8 @@ class LockPicker
   def initialize
     setup
 
-    boxes = get_boxes(@settings.picking_box_source)
-    if boxes.empty?
+    boxes = get_boxes(@settings.picking_box_source) if @settings.picking_box_source
+    if boxes.nil? || boxes.empty?
       check_pet_boxes(@settings.picking_pet_box_source)
       return
     end
@@ -26,7 +26,7 @@ class LockPicker
 
     removed_items = EquipmentManager.instance.remove_gear_by(&:hinders_lockpicking)
 
-    if checkleft || checkright
+    if left_hand || right_hand
       echo '***ITEMS ARE STILL IN HANDS, EXITING***'
       EquipmentManager.instance.wear_items(removed_items)
       return
@@ -70,23 +70,23 @@ class LockPicker
 
       bput("get my #{box} from my #{source}", 'You get a .* from inside your ')
       unless disarm?(box)
-        bput("put my #{box} in my #{source}", 'You put your .* in your ') if checkright
+        bput("put my #{box} in my #{source}", 'You put your .* in your ') if right_hand
         next
       end
 
       until 'not even locked' == bput("pick my #{box} blind", 'not even locked', 'roundtime')
         waitrt?
         next unless DRSkill.getxp('Locksmithing') >= 30
-        bput("put my #{box} in my #{source}", 'You put your .* in your ') if checkright
+        bput("put my #{box} in my #{source}", 'You put your .* in your ') if right_hand
         fput('stow left') unless @settings.use_lockpick_ring
-        refill_ring
-        return
+        break
       end
 
       fput('stow left') unless @settings.use_lockpick_ring
       loot(box)
       dismantle(box)
     end
+
     refill_ring
   end
 
@@ -107,10 +107,12 @@ class LockPicker
       'slim' => 500
     }
     @loot_nouns = @settings.lootables
-
     echo "Loot nouns: #{@loot_nouns}" if UserVars.lockpick_debug
 
-    Flags.add('disarm-more', 'not yet fully disarmed', 'still has more to torment you with')
+    @trash_nouns = get_data('items').trash_nouns
+    echo "Trash nouns: #{@trash_nouns}" if UserVars.lockpick_debug
+
+    Flags.add('disarm-more', 'not fully disarmed', 'not yet fully disarmed', 'still has more to torment you with')
     fput("open my #{@settings.picking_box_source}")
     fput("open my #{@settings.picking_box_storage}")
   end
@@ -123,7 +125,10 @@ class LockPicker
 
     buffs['khri']
       .map { |name| "Khri #{name}" }
-      .each { |name| activate_khri?(@settings.kneel_khri, @settings.khri_preps, name) }
+      .each { |name| activate_khri?(@settings.kneel_khri, name) }
+
+    return unless DRRoom.pcs.include?(@settings.lockpick_buff_bot)
+    fput("whisper #{@settings.lockpick_buff_bot} buff hol")
   end
 
   def refill_ring
@@ -136,8 +141,8 @@ class LockPicker
       return
     end
 
-    ensure_copper_on_hand(cost * 5)
-    refill_lockpick_ring(type)
+    ensure_copper_on_hand(cost * 5, @settings.hometown)
+    refill_lockpick_ring(type, @settings.hometown)
   end
 
   def attempt_open(box)
@@ -146,7 +151,7 @@ class LockPicker
     bput("get my #{box} from my #{@settings.picking_box_source}", 'You get a .* from inside your ')
 
     unless disarm?(box)
-      bput("put my #{box} in my #{@settings.picking_box_storage}", 'You put your .* in your ') if checkright
+      bput("put my #{box} in my #{@settings.picking_box_storage}", 'You put your .* in your ') if right_hand
       return
     end
 
@@ -163,7 +168,7 @@ class LockPicker
   end
 
   def dismantle(box)
-    command = "dismantle my #{box} #{@settings.lockpick_dismantle('')}"
+    command = "dismantle my #{box} #{@settings.lockpick_dismantle}"
     case bput(command, 'repeat this request in the next 15 seconds', 'Roundtime')
     when 'repeat this request in the next 15 seconds'
       bput(command, 'repeat this request in the next 15 seconds', 'Roundtime')
@@ -192,7 +197,7 @@ class LockPicker
       return
     end
 
-    if @settings.trash_nouns([]).find { |thing| item =~ /\b#{thing}\b/i }
+    if @trash_nouns.find { |thing| item =~ /\b#{thing}\b/i }
       dispose_trash(item)
     elsif @loot_nouns.find { |thing| item.include?(thing) }
       message = bput("stow my #{item}", 'You put', 'You open', 'You think the .* pouch is too full to fit', 'You\'d better tie it up before putting')
@@ -260,12 +265,12 @@ class LockPicker
   end
 
   def get_lockpick
-    return if checkleft
+    return if left_hand
     waitrt?
 
     case bput('get my lockpick', 'referring to\?', '^You get ')
     when 'referring to?'
-      echo 'OUT OF LOCKPICKS'
+      echo '***OUT OF LOCKPICKS***'
       beep
       exit
     end
@@ -274,12 +279,16 @@ class LockPicker
   def disarm?(box)
     waitrt?
     check_danger
-    echo "disarm(#{box})" if UserVars.lockpick_debug
+    echo "disarm?(#{box})" if UserVars.lockpick_debug
     case bput("disarm my #{box} identify", *disarm_ident_responses)
     when *failed_ident
       disarm?(box)
     when *too_hard
-      false
+      if @settings.lockpick_ignore_difficulty
+        disarm_speed?(box, 'careful')
+      else
+        false
+      end
     when *(careful + roundtime)
       disarm_speed?(box, 'careful')
     when *quick
@@ -291,16 +300,16 @@ class LockPicker
 
   def check_danger
     pause 0.5 while stunned?
-    if bleeding?
-      snapshot = Room.current.id
-      wait_for_script_to_complete('safe-room')
-      walk_to(snapshot)
-    end
+    return unless bleeding?
+
+    snapshot = Room.current.id
+    wait_for_script_to_complete('safe-room')
+    walk_to(snapshot)
   end
 
   def disarm_speed?(box, speed)
     waitrt?
-    echo "disarm(#{box}, #{speed})" if UserVars.lockpick_debug
+    echo "disarm_speed?(#{box}, #{speed})" if UserVars.lockpick_debug
     Flags.reset('disarm-more')
 
     case bput("disarm my #{box} #{speed}", *(failed_disarm + repeat_disarm + roundtime))
@@ -321,7 +330,7 @@ class LockPicker
 
     result = true
 
-    analyze(box) if @settings.harvest_traps(false)
+    analyze(box) if @settings.harvest_traps
 
     result = disarm?(box) if Flags['disarm-more']
 
@@ -349,8 +358,8 @@ class LockPicker
       harvest(box)
     when *roundtime
       waitrt?
-      dispose_trash(checkleft) # only dispose https://elanthipedia.play.net/mediawiki/index.php/Locksmithing_skill#Box_Traps items.
-      while checkleft
+      dispose_trash(left_hand) # only dispose https://elanthipedia.play.net/Locksmithing_skill#Box_Traps items.
+      while left_hand
       end
     end
   end

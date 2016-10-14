@@ -1,26 +1,22 @@
 =begin
-  Documentation: https://elanthipedia.play.net/mediawiki/index.php/Lich_script_development#new-character
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#new-character
 =end
 
-custom_require.call(%w(common common-crafting common-items common-travel equipmanager))
+custom_require.call(%w(common common-crafting common-items common-money common-travel equipmanager))
 
 class NewCharacter
   include DRC
   include DRCC
   include DRCI
+  include DRCM
   include DRCT
 
   def initialize
-    arg_definitions = [
-      [
-        { name: 'store', regex: /store/i, optional: true, description: 'Set up reasonable \'store\' values' }
-      ]
-    ]
-
-    args = parse_args(arg_definitions)
-    @store = args.store
-
     @settings = get_settings
+    EquipmentManager.instance.refresh(@settings)
+    EquipmentManager.instance.wear_equipment_set?('standard')
+
+    ensure_copper_on_hand(20_000, @settings.hometown)
 
     check_default_store
     check_skinning
@@ -31,71 +27,90 @@ class NewCharacter
     check_engineering
     check_outfitting
     check_forging
+    check_alchemy
     check_armor_and_weapons
     check_ammunition
     check_theurgy
+    check_zills
+    check_sorcery
+    check_manual_changes
+  end
+
+  def check_manual_changes
+    echo 'Here are some common settings you might want to consider changing:'
+    echo '  toggle expbrief'
+    echo '  toggle bundle'
+    echo '  toggle shield arm'
+    echo '  spell stance 115 115 70'
+    echo '  spell recognition on'
+    echo 'Here are some common manual steps that you should consider:'
+    echo '  Join a guild' if DRStats.commoner?
+    echo '  Align to a different immortal' if DRStats.cleric?
+    echo '  Align to an elemental plane' if DRStats.warrior_mage?
+    echo '  Select an initial spell or ability from your guild leader'
+    echo '  Spend your initial 600 TDPs'
+  end
+
+  def check_sorcery
+    echo '***CHECKING SORCERY***'
+    return unless @settings.crossing_training.include?('Sorcery')
+    return unless DRSkill.getrank('Sorcery') < 50 && @settings.crossing_training_sorcery.nil?
+    return if exists?('runestone')
+
+    echo 'You need to find a runestone to train Sorcery'
+  end
+
+  def check_zills
+    echo '***CHECKING ZILLS***'
+
+    if exists?('zills')
+      description = 'chamois cloth'
+      unless exists?(description)
+        buy_item(19_078, 'cloth')
+        bput("stow my #{description}", 'You put')
+      end
+    else
+      echo 'You need to buy some zills (or ask in LNet)'
+    end
+  end
+
+  def store_in(type, container)
+    bput("store #{type} in my #{container}", 'You will now', 'To use the STORE verb', 'I could not find')
   end
 
   def check_default_store
-    return unless @store
-
-    fput('store default in my pack')
-    fput('store default in my back')
+    store_in('default', 'pack')
+    store_in('default', 'back')
   end
 
   def check_theurgy
-    echo '***THEURGY***'
+    echo '***CHECKING THEURGY***'
     return unless @settings.crossing_training.include?('Theurgy')
     return unless DRStats.cleric?
 
     description = @settings.water_holder
-    unless exists?(description)
-      buy_item(19_073, description)
+    if exists?(description)
+      bput("get my #{description} from my #{@settings.theurgy_supply_container}", 'You get')
+    else
+      room = get_data('town')[@settings.hometown]['theurgy_supplies']['id']
+      buy_item(room, description)
+    end
 
-      if exists?(description)
-        walk_to(1164)
-        move('go shack')
-        move('go hole')
-        move('west')
-        move('up')
-        waitrt?
-        fix_standing
-        move('go path')
+    if exists?(description)
+      shrine = get_data('shrines')['shrines'][@settings.hometown].find { |s| s['location'] == 'Damaris\' altar near Kaerna' }
+      if shrine
+        walk_to(shrine['start_room'])
+        shrine['path_in'].each { |dir| move(dir) }
         bput("fill my #{description} with water from bowl", 'You fill')
-        move('go path')
-        move('go stump')
-        waitrt?
-        fix_standing
-        move('east')
-        move('go hole')
-        move('out')
-
-        if @settings.theurgy_supply_container
-          bput("put my #{description} in my #{@settings.theurgy_supply_container}", 'You put')
-        else
-          bput("stow my #{description}", 'You put')
-        end
-      else
-        echo "Failed to buy: #{description}"
+        shrine['path_out'].each { |dir| move(dir) }
       end
+
+      bput("put my #{description} in my #{@settings.theurgy_supply_container}", 'You put')
+    else
+      echo "Failed to buy: #{description}"
     end
 
-    description = 'pilgrim\'s badge'
-    unless exists?(description)
-      walk_to(19_073)
-      move('go storeroom')
-      bput("buy #{description}", 'You decide')
-      move('out')
-
-      if exists?(description)
-        bput("kiss my #{description}", 'making it your own')
-        walk_to(5989)
-        bput("push altar with my #{description}", 'You press')
-        bput('wear my badge', 'You put')
-      else
-        echo "Failed to buy: #{description}"
-      end
-    end
+    wait_for_script_to_complete('pilgrimage')
   end
 
   def check_armor_and_weapons
@@ -103,11 +118,11 @@ class NewCharacter
     EquipmentManager.instance.empty_hands
     missing = EquipmentManager.instance.items
 
-    echo '***ARMOR***'
+    echo '***CHECKING ARMOR***'
     missing.reject! { |item| exists?(item.short_name) }
     missing.each { |item| buy_armor(item) }
 
-    echo '***WEAPONS***'
+    echo '***CHECKING WEAPONS***'
     missing.reject! { |item| exists?(item.short_name) }
     missing.each { |item| buy_weapon(item) }
 
@@ -117,7 +132,7 @@ class NewCharacter
   end
 
   def check_ammunition
-    echo '***AMMUNITION***'
+    echo '***CHECKING AMMUNITION***'
 
     trains_bow = @settings.weapon_training.keys.include?('Bow')
     trains_crossbow = @settings.weapon_training.keys.include?('Crossbow')
@@ -129,7 +144,7 @@ class NewCharacter
       buy_item(1543, description)
       bput("wear my #{description}", 'You attach')
       bput("open my #{description}", 'You open')
-      bput("store ammunition in my #{description}", 'You will now') if @store
+      store_in('ammunition', description)
     end
 
     buy_ammunition(trains_bow, 'arrow')
@@ -165,11 +180,11 @@ class NewCharacter
   end
 
   def wear_item?(item)
-    "You can't" != bput("wear my #{item.short_name}", "You can't", 'You sling')
+    "You can't" != bput("wear my #{item.short_name}", "You can't", 'You sling', 'You slide', 'You place', 'You strap')
   end
 
   def check_skinning
-    echo '***SKINNING***'
+    echo '***CHECKING SKINNING***'
     return unless @settings.skinning
     return unless @settings.skinning['skin']
 
@@ -180,82 +195,86 @@ class NewCharacter
     end
 
     description = 'bundling rope'
-    unless exists?(description)
-      walk_to(8266)
-      bput("ask falken for #{description}", 'hands you')
-      bput("stow my #{description}", 'You put')
-    end
+    return if exists?(description)
+
+    room = get_data('town')[@settings.hometown]['tannery']['id']
+    name = get_data('town')[@settings.hometown]['tannery']['name']
+    walk_to(room)
+    bput("ask #{name} for #{description}", 'hands you')
+    bput("stow my #{description}", 'You put')
   end
 
   def check_gem_pouches
-    echo '***GEM POUCHES***'
+    echo '***CHECKING GEM POUCHES***'
+
+    room = get_data('town')[@settings.hometown]['gemshop']['id']
+    name = get_data('town')[@settings.hometown]['gemshop']['name']
 
     description = "#{@settings.gem_pouch_adjective} pouch"
     unless wearing?(description)
-      walk_to(4652)
-      bput("ask appraiser for #{description}", 'hands you')
+      walk_to(room)
+      bput("ask #{name} for #{description}", 'hands you')
       bput("wear my #{description}", 'You attach')
 
-      bput("store gems in my #{description}", 'You will now') if @store
+      store_in('gems', description)
     end
 
     container = @settings.spare_gem_pouch_container
     return if container.nil?
+    return if inside?(description, container)
 
-    unless inside?(description, container)
-      walk_to(4652)
-      bput("ask appraiser for #{description}", 'hands you')
-      bput("put my #{description} in my #{container}", 'You put')
-    end
+    walk_to(room)
+    bput("ask #{name} for #{description}", 'hands you')
+    bput("put my #{description} in my #{container}", 'You put')
   end
 
   def check_locksmithing
-    echo '***LOCKSMITHING***'
+    echo '***CHECKING LOCKSMITHING***'
     return unless @settings.crossing_training.include?('Locksmithing')
 
-    fput("store boxes in my #{@settings.picking_box_source}") if @settings.picking_box_source && @store
+    store_in('boxes', @settings.picking_box_source) if @settings.picking_box_source
 
+    locksmithing_room = get_data('town')[@settings.hometown]['locksmithing']['id']
     description = 'lockpick ring'
     if @settings.use_lockpick_ring && !exists?(description)
-      buy_item(19_125, description)
+      buy_item(locksmithing_room, description)
       bput("wear my #{description}", 'You attach')
     end
 
     description = 'lockpick'
     if @settings.use_lockpick_ring
-      refill_lockpick_ring(@settings.lockpick_type)
-    elsif !exists(description)
-      buy_item(19_125, "#{@settings.lockpick_type} #{description}")
+      refill_lockpick_ring(@settings.lockpick_type, @settings.hometown)
+    elsif !exists?(description)
+      buy_item(locksmithing_room, "#{@settings.lockpick_type} #{description}")
       bput("stow my #{description}", 'You put')
     end
   end
 
   def check_scholarship
-    echo '***SCHOLARSHIP***'
+    echo '***CHECKING SCHOLARSHIP***'
     return unless @settings.crossing_training.include?('Scholarship')
 
     description = 'black book'
-    unless exists?(description)
-      order_item(8771, 1)
-      bput("stow my #{description}", 'You put')
-    end
+    return if exists?(description)
+
+    order_item(8771, 1)
+    bput("stow my #{description}", 'You put')
   end
 
   def check_cambrinth
-    echo '***CAMBRINTH***'
+    echo '***CHECKING CAMBRINTH***'
     return if DRStats.barbarian? || DRStats.thief? || DRStats.commoner? || DRStats.trader?
 
     description = @settings.cambrinth
     return if description.nil?
+    return if exists?(description)
 
-    unless exists?(description)
-      buy_item(19_152, description)
+    buy_item(19_152, description)
 
-      if @settings.stored_cambrinth
-        bput("stow my #{description}", 'You put')
-      else
-        bput("wear my #{description}", 'You ')
-      end
+    if @settings.stored_cambrinth
+      bput("stow my #{description}", 'You put')
+    else
+      bput("wear my #{description}", 'You ')
     end
   end
 
@@ -272,7 +291,7 @@ class NewCharacter
   end
 
   def check_engineering
-    echo '***ENGINEERING***'
+    echo '***CHECKING ENGINEERING***'
     return unless @settings.crossing_training.include?('Engineering')
 
     # Uses Shaping
@@ -280,22 +299,23 @@ class NewCharacter
     order_crafting?('carving knife', 8865, 8)
     order_crafting?('wood shaper', 8865, 9)
     order_crafting?('drawknife', 8865, 10)
-    order_crafting?('shaping book', 19_209, 4)
 
-    order_logbook('engineering logbook', 19_209, 10)
+    book_room = get_data('crafting')['shaping'][@settings.hometown]['repair-room']
+    order_crafting?('shaping book', book_room, 4)
+    order_logbook('engineering logbook', book_room, 10)
   end
 
   def check_outfitting
-    echo '***OUTFITTING***'
+    echo '***CHECKING OUTFITTING***'
     return unless @settings.crossing_training.include?('Outfitting')
-    
-    # Uses Tailoring
-    order_crafting?('knitting needle', 16668, 7)
-    order_crafting?('tailoring book', 16665, 1)
 
-    if @settings.train_workorders.include?('Tailoring')
-      order_logbook('outfitting logbook', 16665, 4)
-    end
+    # Uses Tailoring
+    order_crafting?('knitting needle', 16_668, 7)
+    order_crafting?('tailoring book', 16_665, 1)
+
+    return unless @settings.train_workorders.include?('Tailoring')
+
+    order_logbook('outfitting logbook', 16_665, 4)
   end
 
   def order_logbook(description, room, order_number)
@@ -307,19 +327,38 @@ class NewCharacter
   end
 
   def check_forging
-    echo '***FORGING***'
+    echo '***CHECKING FORGING***'
     return unless @settings.crossing_training.include?('Forging')
-    
+
+    tool_room = get_data('crafting')['blacksmithing'][@settings.hometown]['repair-room']
     # Uses Blacksmithing
-    order_crafting?('diagonal-peen hammer', 8776, 1)
-    order_crafting?('tongs', 8776, 2)
-    order_crafting?('shovel', 8776, 3)
-    order_crafting?('bellows', 8776, 5)
+    order_crafting?('diagonal-peen hammer', tool_room, 1)
+    order_crafting?('tongs', tool_room, 2)
+    order_crafting?('shovel', tool_room, 3)
+    order_crafting?('bellows', tool_room, 5)
     order_crafting?('blacksmithing book', 8771, 1)
 
-    if @settings.train_workorders.include?('Blacksmithing')
-      order_logbook('forging logbook', 8771, 10)
-    end
+    return unless @settings.train_workorders.include?('Blacksmithing')
+
+    order_logbook('forging logbook', 8771, 10)
+  end
+
+  def check_alchemy
+    echo '***CHECKING ALCHEMY***'
+    return unless @settings.crossing_training.include?('Alchemy')
+
+    tool_room = get_data('crafting')['alchemy'][@settings.hometown]['repair-room']
+    # Uses Remedies
+    order_crafting?('iron mortar', tool_room, 1)
+    order_crafting?('iron pestle', tool_room, 3)
+    order_crafting?('large bowl', tool_room, 4)
+    order_crafting?('mixing stick', tool_room, 5)
+    order_crafting?('metal sieve', tool_room, 6)
+    order_crafting?('remedies book', 8861, 1)
+
+    return unless @settings.train_workorders.include?('Remedies')
+
+    order_logbook('alchemy logbook', 8861, 4)
   end
 end
 

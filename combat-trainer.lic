@@ -521,6 +521,9 @@ class SpellProcess
     @offensive_spells = settings.offensive_spells
     echo("  @offensive_spells: #{@offensive_spells}") if $debug_mode_ct
 
+    @training_spells = settings.combat_spell_training
+    echo("  @training_spells: #{@training_spells}") if $debug_mode_ct
+
     @offensive_spell_cycle = settings.offensive_spell_cycle
     echo("  @offensive_spell_cycle: #{@offensive_spell_cycle}") if $debug_mode_ct
 
@@ -536,16 +539,25 @@ class SpellProcess
     echo("  @empath_spells: #{@empath_spells}") if $debug_mode_ct
 
     @osrel_timer = Time.now - 1000
-    echo("  @osrel_timer: #{settings.osrel_timer}") if $debug_mode_ct
+    echo("  @osrel_timer: #{@osrel_timer}") if $debug_mode_ct
 
     @osrel_amount = settings.osrel_amount
-    echo("  @osrel_amount: #{settings.osrel_amount}") if $debug_mode_ct
+    echo("  @osrel_amount: #{@osrel_amount}") if $debug_mode_ct
 
     @osrel_no_harness = settings.osrel_no_harness
-    echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
+    echo("  @osrel_no_harness: #{@osrel_no_harness}") if $debug_mode_ct
 
     @cast_only_to_train = settings.cast_only_to_train
-    echo("  @cast_only_to_train: #{settings.cast_only_to_train}") if $debug_mode_ct
+    echo("  @cast_only_to_train: #{@cast_only_to_train}") if $debug_mode_ct
+
+    @offensive_spell_mana_threshold = settings.offensive_spell_mana_threshold
+    echo("  @offensive_spell_mana_threshold: #{@offensive_spell_mana_threshold}") if $debug_mode_ct
+
+    @training_spell_mana_threshold = settings.training_spell_mana_threshold
+    echo("  @training_spell_mana_threshold: #{@training_spell_mana_threshold}") if $debug_mode_ct
+
+    @buff_spell_mana_threshold = settings.buff_spell_mana_threshold
+    echo("  @buff_spell_mana_threshold: #{@buff_spell_mana_threshold}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
 
@@ -559,6 +571,9 @@ class SpellProcess
       .values
       .select { |data| data['expire'] }
       .each { |data| add_spell_flag(data['abbrev'], data['expire']) }
+
+    @training_cast_timer = Time.now + 45
+    @training_cyclic_timer = Time.now + 45
 
     @spell_timers = {}
 
@@ -593,8 +608,10 @@ class SpellProcess
     check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
+    check_rue(game_state)
     check_health(game_state)
     check_buffs(game_state)
+    check_training(game_state)
     check_offensive(game_state)
     check_current(game_state)
     if game_state.finish_spell_casting? && !game_state.casting
@@ -648,7 +665,7 @@ class SpellProcess
     return unless Flags['ct-need-bless']
     Flags.reset('ct-need-bless')
 
-    prepare('Bless', 1)
+    prepare?('Bless', 1)
     cast("cast #{right_hand || left_hand}")
   end
 
@@ -659,6 +676,17 @@ class SpellProcess
 
     # Release the spell on the character
     bput('release ignite', 'The warm feeling in your hand goes away', 'Release what')
+    # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
+    pause 1
+  end
+
+  def check_rue(game_state)
+    return if @last_seen_weapon_name_rue == game_state.weapon_name
+    @last_seen_weapon_name_rue = game_state.weapon_name
+    return unless DRSpells.active_spells['Rutilor\'s Edge']
+
+    # Release the spell on the character
+    bput('release rue', 'You sense the Rutilor\'s Edge spell fade away', 'Release what')
     # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
     pause 1
   end
@@ -678,6 +706,7 @@ class SpellProcess
     @before.each { |action| bput(action['message'], action['matches']) } if @before
 
     @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
+    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_rue
     @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}" if game_state.casting_consume
     cast(@custom_cast)
     @custom_cast = nil
@@ -686,6 +715,7 @@ class SpellProcess
     game_state.cast_timer = nil
 
     game_state.casting_ignite = false
+    game_state.casting_rue = false
     game_state.casting_consume = false if game_state.casting_consume
 
     if game_state.casting_moonblade
@@ -714,13 +744,36 @@ class SpellProcess
 
   def check_buff_conditions?(name, _data, game_state)
     return false if name == 'Ignite' && game_state.aimed_skill?
+    return false if name == 'Rutilor\'s Edge' && game_state.aimed_skill?
 
     true
   end
 
+  def check_training(game_state)
+    return if game_state.casting
+    return unless @training_spells
+    return if mana < @training_spell_mana_threshold
+
+    needs_training = %w(Warding Utility Augmentation)
+                     .select { |skill| @training_spells[skill] }
+                     .select { |skill| DRSkill.getxp(skill) < 31 }
+                     .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
+                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    return unless needs_training
+
+    data = @training_spells[needs_training]
+    @training_cast_timer = Time.now + 45
+    if data['cyclic']
+      @training_cyclic_timer = Time.now + 325
+    elsif @training_cyclic_timer < @training_cast_timer
+      @training_cyclic_timer = @training_cast_timer
+    end
+    prepare_spell(data, game_state)
+  end
+
   def check_buffs(game_state)
     return if game_state.casting
-    return if mana < 40
+    return if mana < @buff_spell_mana_threshold
 
     recastable_buffs = @buff_spells
                        .select { |_, data| data['recast'] || data['recast_every'] || data['expire'] }
@@ -738,6 +791,7 @@ class SpellProcess
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
     game_state.casting_ignite = true if name == 'Ignite'
+    game_state.casting_rue = true if name == 'Rutilor\'s Edge'
     if data['ritual']
       cast_ritual(data, game_state)
     else
@@ -764,7 +818,7 @@ class SpellProcess
       end
       @wounds = {}
       prepare_spell(data, game_state) if data
-    else
+    elsif @empath_spells['VH']
       data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
       prepare_spell(data, game_state)
     end
@@ -784,7 +838,7 @@ class SpellProcess
   def check_offensive(game_state)
     return if game_state.casting
     return if game_state.npcs.empty?
-    return if mana < 40
+    return if mana < @offensive_spell_mana_threshold
     ready_spells = @offensive_spells
                    .select { |spell| spell['target_enemy'] ? game_state.npcs.include?(spell['target_enemy']) : true }
                    .select { |spell| spell['min_threshold'] ? game_state.npcs.length >= spell['min_threshold'] : true }
@@ -805,7 +859,6 @@ class SpellProcess
              @offensive_spell_cycle.rotate!
              ready_spells.find { |spell| spell['name'] == name }
            end
-    return if DRSkill.getxp(data['skill']) >= 34 && mana < 70 # make this a spell option
     prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
   end
@@ -817,8 +870,8 @@ class SpellProcess
     else
       EquipmentManager.instance.stow_weapon(game_state.weapon_name)
     end
-    fput('STANCE SET 100 80 0')
-    prepare(data['abbrev'], data['mana'])
+    bput('stance set 100 80 0', 'Setting your')
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'])
     fput("get my #{data['focus']}")
     invoke(data['focus'], nil)
     pause 5
@@ -884,7 +937,7 @@ class SpellProcess
         data['cast'] = "cast #{moon}"
       end
     end
-    prepare(data['abbrev'], data['mana'], command)
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     @custom_cast = data['cast']
@@ -1380,9 +1433,8 @@ class AttackProcess
       pause 1
     else
       game_state.set_dance_queue
-      if /Face what/ =~ fput(game_state.next_dance_action)
-        fput("eng #{game_state.npcs.first}")
-      end
+      fput(game_state.next_dance_action)
+      pause 0.5
       waitrt?
     end
   end
@@ -1472,7 +1524,6 @@ class CombatTrainer
     Flags.add('last-stance', 'Setting your Evasion stance to \d+%, your Parry stance to \d+%, and your Shield stance to \d+%.  You have \d+ stance points left')
 
     bput('stance set 100 40 40', 'Setting your')
-    pause 0.25 until Flags['last-stance']
 
     @stop = false
     @running = true
@@ -1525,7 +1576,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :casting_rue
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1543,6 +1594,7 @@ class GameState
     @cast_timer = nil
     @casting_moonblade = false
     @casting_ignite = false
+    @casting_rue = false
     @use_charged_maneuvers = false
     @casting_consume = false
     @prepare_consume = false
@@ -1809,7 +1861,7 @@ class GameState
   end
 
   def ambush?
-    @ambush && DRSkill.getxp('Backstab') < 34
+    @ambush && DRSkill.getxp('Backstab') < 34 && !brawling?
   end
 
   def backstab?
@@ -1889,7 +1941,7 @@ class GameState
       next_charge = @charges.pop
       echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
-      charge(@cambrinth, next_charge)
+      @charges = [] unless charge?(@cambrinth, next_charge)
     end
     stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 

@@ -30,8 +30,13 @@ class WorkOrders
     @bag = settings.crafting_container
     @hometown = settings.hometown
     @use_bone_for_carving = settings.use_bone_for_carving
+    @use_own_ingot_type = settings.use_own_ingot_type
+    @deed_own_ingot = settings.deed_own_ingot
     info = crafting_data[discipline][@hometown]
-
+    if discipline == 'weaponsmithing'
+      info = crafting_data['blacksmithing'][@hometown]
+    end
+    echo("@use_own_ingot_type is set to #{@use_own_ingot_type}")
     @recipes = crafting_data.crafting_recipes.select { |recipe| recipe['work_order'] && recipe['type'] =~ /#{discipline}/i }
     
     unless info
@@ -60,8 +65,10 @@ class WorkOrders
       @belt = settings.forging_belt
       if repair
         repair_items(info, tools)
+      elsif @use_own_ingot_type
+        forge_items_with_own_ingot(info, item, quantity, discipline)
       else
-        forge_items(info, item, quantity)
+        forge_items(info, item, quantity, discipline)
       end
     when 'tailoring'
       tools = settings.knitting_tools
@@ -69,7 +76,7 @@ class WorkOrders
       if repair
         repair_items(info, tools)
       else
-        sew_items(info, item, quantity)
+        sew_items(info, item, quantity, discipline)
       end
     when 'shaping'
       @engineering_room = settings.engineering_room
@@ -78,7 +85,7 @@ class WorkOrders
       if repair
         repair_items(info, tools)
       else
-        shape_items(info, item, quantity)
+        shape_items(info, item, quantity, discipline)
       end
     when 'carving'
       @engineering_room = settings.engineering_room
@@ -87,7 +94,7 @@ class WorkOrders
       if repair
         repair_items(info, tools)
       else
-        carve_items(info, item, quantity)
+        carve_items(info, item, quantity, discipline)
       end
     when 'remedies'
       @alchemy_room = settings.alchemy_room
@@ -96,7 +103,7 @@ class WorkOrders
       if repair
         repair_items(info, tools)
       else
-        remedy_items(info, item, quantity)
+        remedy_items(info, item, quantity, discipline)
       end
     else
       echo 'No discipline found?'
@@ -161,16 +168,21 @@ class WorkOrders
     end
   end
 
-  def find_recipe(info, item, quantity)
-    if !@use_bone_for_carving
-      recipe = @recipes.find { |r| r['name'] == item }
-      items_per_stock = info['stock-volume'] / recipe['volume']
-      spare_stock = (info['stock-volume'] % recipe['volume']).nonzero?
-      scrap = spare_stock || (quantity % items_per_stock).nonzero?
-    else
+  def find_recipe(info, item, quantity, discipline)
+    echo("Use bone is #{@use_bone_for_carving}")
+    echo("Discipline is #{discipline}")
+    if @use_bone_for_carving and discipline == 'carving'
       recipe = @recipes.find { |r| r['name'] == item }
       items_per_stock = info['stock-bone-volume'] / recipe['volume']
       spare_stock = (info['stock-bone-volume'] % recipe['volume']).nonzero?
+      scrap = spare_stock || (quantity % items_per_stock).nonzero?
+    else
+      recipe = @recipes.find { |r| r['name'] == item }
+      items_per_stock = info['stock-volume'] / recipe['volume']
+      spare_stock = (info['stock-volume'] % recipe['volume']).nonzero?
+      echo("quantity is #{quantity}")
+      echo("items per stock is #{items_per_stock}")
+      pause 2
       scrap = spare_stock || (quantity % items_per_stock).nonzero?
     end
 
@@ -248,9 +260,9 @@ class WorkOrders
       stow_hands
   end
 
-  def carve_items(info, item, quantity)
+  def carve_items(info, item, quantity, discipline)
     ensure_copper_on_hand(5000, @hometown)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity, discipline)
     echo("Recipe found and money available") if @debug_mode
      
     quantity.times do |count|
@@ -338,9 +350,9 @@ class WorkOrders
     end
   end
 
-  def shape_items(info, item, quantity)
+  def shape_items(info, item, quantity, discipline)
     ensure_copper_on_hand(5000, @hometown)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity, discipline)
 
     quantity.times do |count|
       if (count % items_per_stock).zero?
@@ -382,7 +394,7 @@ class WorkOrders
     stow_tool('yarn')
   end
 
-  def sew_items(info, item, quantity)
+  def sew_items(info, item, quantity, discipline)
     ensure_copper_on_hand(5000, @hometown)
     recipe = @recipes.find { |r| r['name'] == item }
 
@@ -474,7 +486,7 @@ class WorkOrders
     end
   end
 
-  def remedy_items(info, item, quantity)
+  def remedy_items(info, item, quantity, discipline)
     ensure_copper_on_hand(5000, @hometown)
     herb2_1 = ''
     liquid_used = ''
@@ -593,9 +605,8 @@ class WorkOrders
     end
   end
 
-  def forge_items(info, item, quantity)
-    recipe, = find_recipe(info, item, quantity)
-
+  def forge_items(info, item, quantity, discipline)
+    recipe, = find_recipe(info, item, quantity, discipline)
     remaining_volume = 0
 
     ensure_copper_on_hand(5000, @hometown)
@@ -604,7 +615,9 @@ class WorkOrders
       if remaining_volume < recipe['volume']
         dispose(info['stock-name'], info['trash-room']) if remaining_volume > 0
         order_item(info['stock-room'], info['stock-number'])
-        stow_hands
+#        stow_hands
+        stow_tool(left_hand)
+        stow_tool(right_hand)
         remaining_volume = info['stock-volume']
       end
 
@@ -616,19 +629,95 @@ class WorkOrders
     dispose(info['stock-name'], info['trash-room']) if remaining_volume > 0
   end
 
+  def ingot_volume
+    res = bput('anal my ingot', 'About \d+ volume')
+    res.scan(/\d+/).first.to_i
+  end
+
+  def forge_items_with_own_ingot(info, item, quantity, discipline)
+    recipe, = find_recipe(info, item, quantity, discipline)
+
+    if 'What where' == bput("get my #{@use_own_ingot_type} ingot", 'You get', 'What where')
+      if 'What where' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What where')
+        echo('out of material/deeds')
+        exit
+      else
+        fput('tap deed')
+        pause
+        fput("get #{@use_own_ingot_type} ingot") unless checkleft || checkright
+      end
+    end
+
+    volume = ingot_volume
+    stow_hands
+    smelt = false
+
+    if volume < quantity * recipe['volume']
+      smelt = true
+      if 'What where' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What where')
+        echo('out of material/deeds')
+        stow_hands
+        exit
+      else
+        fput('tap deed')
+        pause
+        fput("get #{@use_own_ingot_type} ingot") unless checkleft || checkright
+      end
+      volume = ingot_volume
+    end
+
+    stow_hands
+
+    if volume < quantity * recipe['volume']
+      echo('out of material/deeds')
+      exit
+    end
+
+    quantity.times do
+      wait_for_script_to_complete('smith', [@use_own_ingot_type, item])
+      bundle_item(recipe['noun'], info['logbook'])
+    end
+
+    if smelt
+      find_empty_crucible(@hometown)
+      2.times do
+        fput("get my #{@use_own_ingot_type} ingot")
+        fput('put my ingot in cruc')
+      end
+      wait_for_script_to_complete('smelt')
+      stow_hands
+    end
+
+    return unless @deed_own_ingot
+    unless exists?('packet')
+      ensure_copper_on_hand(10_000, @hometown)
+      order_item(8775, 14)
+      fput('stow my packet')
+    end
+    fput("get my #{@use_own_ingot_type} ingot")
+    fput('get packet')
+    fput('push my ingot with packet')
+    fput('stow packet')
+    fput('stow deed')
+  end
+
   def bundle_item(noun, logbook)
     bput("get my #{logbook} logbook", 'You get')
     if /requires items of/ =~ bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That\'s not going to work')
       dispose(noun)
     end
-    stow_hands
+#    stow_hands
+    stow_tool(left_hand)
+    stow_tool(right_hand)
   end
 
   def request_work_order(npc_rooms, npc, npc_last_name, discipline, logbook, diff)
     echo("In request work order function") if @debug_mode
     match_names = @recipes.map { |x| x['name'] }
     echo("#{match_names}") if @debug_mode
-    stow_hands
+#    stow_hands
+    stow_tool(left_hand)
+    stow_tool(right_hand)
     loop do
       find_npc(npc_rooms, npc_last_name)
       bput("get my #{logbook} logbook", 'You get') unless left_hand || right_hand

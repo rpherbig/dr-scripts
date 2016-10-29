@@ -286,12 +286,12 @@ class LootProcess
       end
     return unless tried_loot
     pause 1
-    if left_hand != pair.first && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
+    if left_hand != pair.first && !EquipmentManager.instance.is_listed_item?(left_hand)
       echo("out of room, failed to store #{left_hand}")
       game_state.unlootable(GameObj.left_hand.noun.downcase)
       dispose_trash(left_hand)
     end
-    if right_hand != pair.last && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
+    if right_hand != pair.last && !EquipmentManager.instance.is_listed_item?(right_hand)
       echo("out of room, failed to store #{right_hand}")
       game_state.unlootable(GameObj.right_hand.noun.downcase)
       dispose_trash(right_hand)
@@ -320,7 +320,7 @@ class LootProcess
 
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', 'A failed or completed ritual has rendered this corpse unusable for your purposes')
+    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', "This ritual may only be performed on a creature's corpse.", 'This corpse has already been preserved', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', 'A failed or completed ritual has rendered this corpse unusable for your purposes')
     when @rituals['preserve'], @rituals['dissect']
       @last_ritual = ritual
       return
@@ -440,8 +440,8 @@ class LootProcess
           bput('adjust bundle', 'You adjust')
         end
       else
-        dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
-        dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
+        dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(left_hand)
+        dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(right_hand)
       end
       game_state.need_bundle = false
       unless stored_moon && 'you grab' == bput('get moon', 'you grab', 'What were')
@@ -452,8 +452,8 @@ class LootProcess
         end
       end
     end
-    dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(DRC.left_hand)
-    dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(DRC.right_hand)
+    dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(left_hand)
+    dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(right_hand)
   end
 end
 
@@ -521,13 +521,13 @@ class SpellProcess
     @offensive_spells = settings.offensive_spells
     echo("  @offensive_spells: #{@offensive_spells}") if $debug_mode_ct
 
+    @training_spells = settings.combat_spell_training
+    echo("  @training_spells: #{@training_spells}") if $debug_mode_ct
+
     @offensive_spell_cycle = settings.offensive_spell_cycle
     echo("  @offensive_spell_cycle: #{@offensive_spell_cycle}") if $debug_mode_ct
 
     @spell_data = get_data('spells').spell_data
-
-    @is_necro = settings.thanatology['necro'] || false
-    echo("  @is_necro: #{@is_necro}") if $debug_mode_ct
 
     @necromancer_healing = settings.necromancer_healing
     echo("  @necromancer_healing: #{@necromancer_healing}") if $debug_mode_ct
@@ -536,16 +536,25 @@ class SpellProcess
     echo("  @empath_spells: #{@empath_spells}") if $debug_mode_ct
 
     @osrel_timer = Time.now - 1000
-    echo("  @osrel_timer: #{settings.osrel_timer}") if $debug_mode_ct
+    echo("  @osrel_timer: #{@osrel_timer}") if $debug_mode_ct
 
     @osrel_amount = settings.osrel_amount
-    echo("  @osrel_amount: #{settings.osrel_amount}") if $debug_mode_ct
+    echo("  @osrel_amount: #{@osrel_amount}") if $debug_mode_ct
 
     @osrel_no_harness = settings.osrel_no_harness
-    echo("  @osrel_no_harness: #{settings.osrel_no_harness}") if $debug_mode_ct
+    echo("  @osrel_no_harness: #{@osrel_no_harness}") if $debug_mode_ct
 
     @cast_only_to_train = settings.cast_only_to_train
-    echo("  @cast_only_to_train: #{settings.cast_only_to_train}") if $debug_mode_ct
+    echo("  @cast_only_to_train: #{@cast_only_to_train}") if $debug_mode_ct
+
+    @offensive_spell_mana_threshold = settings.offensive_spell_mana_threshold
+    echo("  @offensive_spell_mana_threshold: #{@offensive_spell_mana_threshold}") if $debug_mode_ct
+
+    @training_spell_mana_threshold = settings.training_spell_mana_threshold
+    echo("  @training_spell_mana_threshold: #{@training_spell_mana_threshold}") if $debug_mode_ct
+
+    @buff_spell_mana_threshold = settings.buff_spell_mana_threshold
+    echo("  @buff_spell_mana_threshold: #{@buff_spell_mana_threshold}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
 
@@ -560,7 +569,11 @@ class SpellProcess
       .select { |data| data['expire'] }
       .each { |data| add_spell_flag(data['abbrev'], data['expire']) }
 
+    @training_cast_timer = Time.now + 45
+    @training_cyclic_timer = Time.now + 45
+
     @spell_timers = {}
+    @wounds = {}
 
     @tk_ammo = settings.tk_ammo
     @tk_spell = @offensive_spells.find { |spell| spell['abbrev'] =~ /tkt|tks/i }
@@ -593,8 +606,10 @@ class SpellProcess
     check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
+    check_rue(game_state)
     check_health(game_state)
     check_buffs(game_state)
+    check_training(game_state)
     check_offensive(game_state)
     check_current(game_state)
     if game_state.finish_spell_casting? && !game_state.casting
@@ -663,6 +678,17 @@ class SpellProcess
     pause 1
   end
 
+  def check_rue(game_state)
+    return if @last_seen_weapon_name_rue == game_state.weapon_name
+    @last_seen_weapon_name_rue = game_state.weapon_name
+    return unless DRSpells.active_spells['Rutilor\'s Edge']
+
+    # Release the spell on the character
+    bput('release rue', 'You sense the Rutilor\'s Edge spell fade away', 'Release what')
+    # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
+    pause 1
+  end
+
   def ready_to_cast?(game_state)
     Flags['ct-spellcast'] || (@prep_time && Time.now - game_state.cast_timer >= @prep_time)
   end
@@ -675,17 +701,21 @@ class SpellProcess
   end
 
   def cast_spell(game_state)
-    @before.each { |action| bput(action['message'], action['matches']) } if @before
-
     @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
-    @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}" if game_state.casting_consume
-    cast(@custom_cast)
+    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_rue
+    if game_state.casting_consume
+      if @necromancer_healing.key?('Consume Flesh') && !@necromancer_healing.key?('Devour')
+        @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}"
+      end
+    end
+    cast(@custom_cast, @before, @after)
     @custom_cast = nil
 
     game_state.casting = false
     game_state.cast_timer = nil
 
     game_state.casting_ignite = false
+    game_state.casting_rue = false
     game_state.casting_consume = false if game_state.casting_consume
 
     if game_state.casting_moonblade
@@ -697,15 +727,10 @@ class SpellProcess
       game_state.casting_moonblade = false
     end
 
-    if @command
-      pause 0.5 until DRRoom.npcs.include?('warrior')
-      fput("command #{@command}")
-      @command = nil
-    end
-
-    return unless @after
-    @after.each { |action| bput(action['message'], action['matches']) }
-    @after = nil
+    return unless @command
+    pause 0.5 until DRRoom.npcs.include?('warrior')
+    fput("command #{@command}")
+    @command = nil
   end
 
   def check_spell_timer(data)
@@ -714,13 +739,36 @@ class SpellProcess
 
   def check_buff_conditions?(name, _data, game_state)
     return false if name == 'Ignite' && game_state.aimed_skill?
+    return false if name == 'Rutilor\'s Edge' && game_state.aimed_skill?
 
     true
   end
 
+  def check_training(game_state)
+    return if game_state.casting
+    return unless @training_spells
+    return if mana < @training_spell_mana_threshold
+
+    needs_training = %w(Warding Utility Augmentation)
+                     .select { |skill| @training_spells[skill] }
+                     .select { |skill| DRSkill.getxp(skill) < 31 }
+                     .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
+                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    return unless needs_training
+
+    data = @training_spells[needs_training]
+    @training_cast_timer = Time.now + 45
+    if data['cyclic']
+      @training_cyclic_timer = Time.now + 325
+    elsif @training_cyclic_timer < @training_cast_timer
+      @training_cyclic_timer = @training_cast_timer
+    end
+    prepare_spell(data, game_state)
+  end
+
   def check_buffs(game_state)
     return if game_state.casting
-    return if mana < 40
+    return if mana < @buff_spell_mana_threshold
 
     recastable_buffs = @buff_spells
                        .select { |_, data| data['recast'] || data['recast_every'] || data['expire'] }
@@ -738,6 +786,7 @@ class SpellProcess
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
     game_state.casting_ignite = true if name == 'Ignite'
+    game_state.casting_rue = true if name == 'Rutilor\'s Edge'
     if data['ritual']
       cast_ritual(data, game_state)
     else
@@ -748,9 +797,9 @@ class SpellProcess
   def check_health(game_state)
     return if game_state.casting
     return unless DRStats.empath?
-    return if health > 95
+    return if health > 95 && @wounds.empty?
 
-    if Time.now - @perc_health_timer > 30
+    if Time.now - @perc_health_timer > 30 && @empath_spells['FOC'] || @empath_spells['HEAL']
       @perc_health_timer = Time.now
       @wounds = check_perc_health
     end
@@ -771,11 +820,14 @@ class SpellProcess
   end
 
   def check_consume(game_state)
-    return unless @is_necro
+    return unless DRStats.necromancer?
+    return unless @necromancer_healing
     return if game_state.casting
     return unless game_state.prepare_consume
 
-    data = @necromancer_healing['Consume Flesh']
+    echo "@necromancer_healing.key?('Consume Flesh'): #{@necromancer_healing.key?('Consume Flesh')}" if $debug_mode_ct
+    echo "@necromancer_healing.key?('Devour'): #{@necromancer_healing.key?('Devour')}" if $debug_mode_ct
+    data = @necromancer_healing['Devour'] || @necromancer_healing['Consume Flesh']
     game_state.casting_consume = true
     game_state.prepare_consume = false
     prepare_spell(data, game_state)
@@ -784,7 +836,7 @@ class SpellProcess
   def check_offensive(game_state)
     return if game_state.casting
     return if game_state.npcs.empty?
-    return if mana < 40
+    return if mana < @offensive_spell_mana_threshold
     ready_spells = @offensive_spells
                    .select { |spell| spell['target_enemy'] ? game_state.npcs.include?(spell['target_enemy']) : true }
                    .select { |spell| spell['min_threshold'] ? game_state.npcs.length >= spell['min_threshold'] : true }
@@ -805,31 +857,24 @@ class SpellProcess
              @offensive_spell_cycle.rotate!
              ready_spells.find { |spell| spell['name'] == name }
            end
-    return if DRSkill.getxp(data['skill']) >= 34 && mana < 70 # make this a spell option
     prepare_spell(data, game_state)
     Flags.reset('ct-spelllost')
   end
 
   def cast_ritual(data, game_state)
-    retreat
     if summoned = game_state.summoned_info(game_state.weapon_skill)
       break_summoned_weapon(game_state.weapon_name)
     else
       EquipmentManager.instance.stow_weapon(game_state.weapon_name)
     end
-    bput('stance set 100 80 0', 'Setting your')
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'])
-    fput("get my #{data['focus']}")
-    invoke(data['focus'], nil)
-    pause 5
-    waitrt?
-    fput("stow my #{data['focus']}")
-    unless summoned
+
+    ritual(data)
+
+    if summoned
+      game_state.prepare_summoned_weapon(false)
+    else
       EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
-    waitcastrt?
-    cast
-    game_state.prepare_summoned_weapon(false) if summoned
   end
 
   def prepare_spell(data, game_state)
@@ -1184,6 +1229,9 @@ class AttackProcess
     @stealth_attack_aimed_action = settings.stealth_attack_aimed_action
     echo("  @stealth_attack_aimed_action: #{@stealth_attack_aimed_action}") if $debug_mode_ct
 
+    @offhand_thrown = settings.offhand_thrown
+    echo("  @offhand_thrown: #{@offhand_thrown}") if $debug_mode_ct
+
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
     Flags.add('ct-face-what', 'Face what')
   end
@@ -1196,7 +1244,7 @@ class AttackProcess
       game_state.no_stab_current_mob = false
     end
 
-    if game_state.dancing? || (@is_empath && !@undead && !DRSpells.active_spells['Absolution'])
+    if game_state.dancing? || (@is_empath && !(@undead && DRSpells.active_spells['Absolution']))
       if game_state.finish_killing?
         echo('AttackProcess::clean_up') if $debug_mode_ct
         game_state.next_clean_up_step
@@ -1285,6 +1333,8 @@ class AttackProcess
     hurl = game_state.bound_weapon? && !game_state.use_weak_attacks?
     attack_action = hurl ? 'hurl' : 'lob'
     retrieve_action = hurl ? 'invoke' : "get my #{game_state.weapon_name}"
+
+    attack_action += ' left' if game_state.weapon_skill == 'Offhand Weapon'
 
     bput(attack_action, 'roundtime', 'What are you trying to')
     waitrt?
@@ -1523,7 +1573,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :casting_rue
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1541,6 +1591,7 @@ class GameState
     @cast_timer = nil
     @casting_moonblade = false
     @casting_ignite = false
+    @casting_rue = false
     @use_charged_maneuvers = false
     @casting_consume = false
     @prepare_consume = false
@@ -1655,6 +1706,8 @@ class GameState
 
     @dedicated_camb_use = settings.dedicated_camb_use
     echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
+
+    $thrown_skills << 'Offhand Weapon' if settings.offhand_thrown
   end
 
   def next_clean_up_step
@@ -1887,7 +1940,7 @@ class GameState
       next_charge = @charges.pop
       echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
-      charge(@cambrinth, next_charge)
+      @charges = [] unless charge?(@cambrinth, next_charge)
     end
     stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 
@@ -1900,7 +1953,7 @@ class GameState
 
   def dual_load?
     @dual_load && weapon_skill == 'Bow' &&
-      DRSkill.getrank('Bow') > 200 && DRStats.agility > 30 && DRStats.reflex > 30 &&
+      DRSkill.getrank('Bow') >= 200 && DRStats.agility > 30 && DRStats.reflex > 30 &&
       (DRSpells.active_spells['See the Wind'] || DRStats.barbarian?)
   end
 

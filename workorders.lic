@@ -31,12 +31,25 @@ class WorkOrders
     @hometown = settings.hometown
     @use_own_ingot_type = settings.use_own_ingot_type
     @deed_own_ingot = settings.deed_own_ingot
+    @carving_type = settings.carving_workorder_material_type
+    @min_items = settings.workorder_min_items
+    @max_items = settings.workorder_max_items
+    @recipe_overrides = settings.workorder_recipes || {}
+
     info = crafting_data[discipline][@hometown]
     if discipline == 'weaponsmithing'
       info = crafting_data['blacksmithing'][@hometown]
     end
 
-    @recipes = crafting_data.crafting_recipes.select { |recipe| recipe['work_order'] && recipe['type'] =~ /#{discipline}/i }
+    @recipes = if @recipe_overrides[discipline]
+                 get_data('recipes').crafting_recipes.select { |recipe| recipe['type'] =~ /#{discipline}/i && @recipe_overrides[discipline].find { |name| recipe['name'] =~ /#{name}/i } }
+               else
+                 get_data('recipes').crafting_recipes.select { |recipe| recipe['work_order'] && recipe['type'] =~ /#{discipline}/i }
+               end
+
+    if discipline == 'carving'
+      @recipes = @recipes.select { |x| x['material'] == @carving_type }
+    end
 
     unless info
       echo("No crafting settings found for discipline: #{discipline}")
@@ -159,8 +172,11 @@ class WorkOrders
 
   def find_recipe(info, item, quantity)
     recipe = @recipes.find { |r| r['name'] == item }
-    items_per_stock = info['stock-volume'] / recipe['volume']
-    spare_stock = (info['stock-volume'] % recipe['volume']).nonzero?
+
+    volume_label = recipe['material'] == 'bone' ? 'stock-bone-volume' : 'stock-volume'
+    items_per_stock = info[volume_label] / recipe['volume']
+    spare_stock = (info[volume_label] % recipe['volume']).nonzero?
+
     scrap = spare_stock || (quantity % items_per_stock).nonzero?
 
     [recipe, items_per_stock, spare_stock, scrap]
@@ -176,41 +192,64 @@ class WorkOrders
     ensure_copper_on_hand(5000, @hometown)
     recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
 
+    bone_carving = recipe['material'] == 'bone'
+
+    if bone_carving
+      stock_name = 'stock-bone-name'
+      stock_number = 'stock-bone-number'
+    else
+      stock_name = 'stock-name'
+      stock_number = 'stock-number'
+    end
+
+    if search?(info['polish-full'])
+      fput('get my surface polish')
+      /(\d+)/ =~ bput('count my polish', 'The surface polish has \d+ uses remaining')
+      if Regexp.last_match(1).to_i <= 3
+        stow_hands
+        dispose('polish')
+        order_item(info['polish-room'], info['polish-number'])
+      end
+    else
+      order_item(info['polish-room'], info['polish-number'])
+    end
+    stow_hands
+
     quantity.times do |count|
-      if (count % items_per_stock).zero?
-        dispose("#{info['stock-name']} stone") if count > 0 && spare_stock
+      if items_per_stock.zero? || (count % items_per_stock).zero?
         if count > 0
           go_door
           pause 0.5 until Room.current.id
         end
-
-        order_item(info['stock-room'], info['stock-number'])
-        fput('tap my deed')
-        stow_hands
-
-        fput("get #{info['stock-name']} rock")
-        if search?(info['polish-full'])
-          fput('get my surface polish')
-          /(\d+)/ =~ bput('count my polish', 'The surface polish has \d+ uses remaining')
-          if Regexp.last_match(1).to_i < 3
-            dispose('polish')
-            order_item(info['polish-room'], info['polish-number'])
-            stow_hands
+        if bone_carving
+          fput("get my #{info[stock_name]} stack")
+          while bput('count my stack', 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
+            order_item(info['stock-room'], info[stock_number])
+            bput('combine', 'combine')
           end
         else
-          order_item(info['polish-room'], info['polish-number'])
-          stow_hands
+          dispose("#{info['stock-name']} stone") if count > 0 && spare_stock
+          order_item(info['stock-room'], info[stock_number])
+          fput('tap my deed')
         end
         stow_hands
-        find_shaping_room(@hometown, @engineering_room)
       end
 
-      wait_for_script_to_complete('carve', [recipe['chapter'], item, info['stock-name'], recipe['noun']])
+      find_shaping_room(@hometown, @engineering_room)
+
+      wait_for_script_to_complete('carve', [recipe['chapter'], item, info[stock_name], bone_carving ? 'stack' : 'rock', recipe['noun']])
 
       bundle_item(recipe['noun'], info['logbook'])
     end
-
-    dispose("#{info['stock-name']} stone") if scrap
+    if bone_carving
+      fput("get my #{info[stock_name]} stack")
+      if checkleft || checkright
+        stow_hands
+        dispose("#{info[stock_name]} stack")
+      end
+    elsif scrap
+      dispose("#{info['stock-name']} stone")
+    end
     go_door if XMLData.room_title.include?('Workshop')
   end
 
@@ -472,8 +511,8 @@ class WorkOrders
   def forge_items_with_own_ingot(info, item, quantity)
     recipe, = find_recipe(info, item, quantity)
 
-    if 'What where' == bput("get my #{@use_own_ingot_type} ingot", 'You get', 'What where')
-      if 'What where' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What where')
+    if 'What were' == bput("get my #{@use_own_ingot_type} ingot", 'You get', 'What were')
+      if 'What were' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What were')
         echo('out of material/deeds')
         exit
       else
@@ -489,7 +528,7 @@ class WorkOrders
 
     if volume < quantity * recipe['volume']
       smelt = true
-      if 'What where' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What where')
+      if 'What were' == bput("get my #{@use_own_ingot_type} deed", 'You get', 'What were')
         echo('out of material/deeds')
         stow_hands
         exit
@@ -557,14 +596,14 @@ class WorkOrders
       when /order for (.*)\. I need (\d+) of .* quality/
         item = Regexp.last_match(1)
         quantity = Regexp.last_match(2).to_i
-        if quantity <= 3 && match_names.include?(item)
+        if @min_items <= quantity && quantity <= @max_items && match_names.include?(item)
           stow_tool('logbook')
           return [item, quantity]
         end
       when /order for (.*)\. I need (\d+) stacks \(5 uses each\) of .* quality/
         item = Regexp.last_match(1)
         quantity = Regexp.last_match(2).to_i
-        if quantity <= 3 && match_names.include?(item)
+        if @min_items <= quantity && quantity <= @max_items && match_names.include?(item)
           stow_tool('logbook')
           return [item, quantity]
         end

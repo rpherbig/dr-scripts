@@ -1,0 +1,232 @@
+# want_script_output
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#bankbot
+=end
+
+custom_require.call(%w(common common-money common-validation))
+
+class Bankbot
+  include DRC
+  include DRCM
+
+  def initialize
+    # TODO: Write transactions to a file
+
+    @settings = get_settings
+    @last_action = Time.now
+    @denominations = ["Kronar", "Lirum", "Dokora"]
+
+    @banker_file_name = "bot_banker_#{checkname}.dat"
+    UserVars.bot_bank = UserVars.bot_bank || Hash.new{|hash, key| hash[key] = Hash.new}
+  end
+
+  def help(character)
+    @last_action = Time.now
+    fput "whisper #{character} Supported commands are:"
+    fput "whisper #{character}   (help) - this list"
+    fput "whisper #{character}   (bal|balance) - view your current bot balance"
+    fput "whisper #{character}   (with|withdraw) [amount] [denomination] - withdraw [amount] [denomination] from your bot balance."
+    fput "whisper #{character} I accept coins via TIPs to hold for you."
+  end
+
+  def balance(character)
+    @last_action = Time.now
+    unless has_bot_account(character)
+      fput "whisper #{character} Apologies, but my record shows that you do not have a Bot Bank account."
+      pause 0.5
+      fput "whisper #{character} You can tip me to start one."
+      return
+    end
+
+    show_balance_sheet(character)
+  end
+
+  def deposit(character, amount, denomination)
+    # TODO: Handle when multiple withdraw/deposit requests are being made (queue?)
+    # TODO: Handle case when player tries to give coins directly to bot (without using TIP). OR, if they
+    #       do not use the TIP command, check against current copper in-hand to ensure you actually received the
+    #       amount given, to avoid spoofing a 'give'
+    @last_action = Time.now
+
+    currency_type = get_currency_type(denomination)
+    echo "Currency type is: #{currency_type}." if UserVars.bankbot_debug
+
+    has_account = has_bot_account(character)
+
+    case bput("accept tip", "You accept #{character}'s tip and slip it away", "#{character}'s tip offer has expired.")
+    when /.*\'s tip offer has expired./i
+      fput "whisper #{character} Sorry! I was busy and could not accept your deposit in time. Try again."
+    when /You accept .*'s tip and slip it away/i
+      msg = has_account ? "Thank you for your business! Your new balance is: " : "You've officially started a new Bot Account. Your balance is: "
+
+      UserVars.bot_bank[character][currency_type] = has_account ? (get_balance(character, currency_type) + amount.to_i) : amount.to_i
+      
+      fput "whisper #{character} #{msg} #{UserVars.bot_bank[character]} #{currency_type}!" if UserVars.bankbot_debug
+
+      show_balance_sheet(character)
+    end
+  end
+
+  def withdraw(character, amount, denomination)
+    # TODO: Handle when multiple withdraw/deposit requests are being made (queue?)
+    @last_action = Time.now
+    unless has_bot_account(character)
+      fput "whisper #{character} Apologies, but my record shows that you do not have a Bot Bank account."
+      pause 0.5
+      fput "whisper #{character} You can tip me to start one."
+      return
+    end
+
+    currency_type = get_currency_type(denomination)
+
+    balance = get_balance(character, currency_type)
+    if balance < amount.to_i
+      fput "whisper #{character} The max you can withdraw is: #{balance} #{currency_type}."
+      return
+    end
+
+    case bput("tip #{character} #{amount} #{currency_type}", '\w+ declines your tip offer.', 'Your tip offer to \w+ has expired.', '\w+ accepts your tip and slips it away with a smile')
+    when /\w+ declines your tip offer.|Your tip offer to \w+ has expired./i
+      fput "whisper #{character} Alright then, I will continue to hold on to it."
+    when /\w+ accepts your tip and slips it away with a smile/i
+      balance = balance - amount.to_i
+      if balance <= 0
+        fput "whisper #{character} Your #{currency_type} account has now been closed!"
+        UserVars.bot_bank[character][currency_type] = 0
+      else
+        fput "whisper #{character} You now have a remaining balance of: #{balance} #{currency_type}."
+        UserVars.bot_bank[character][currency_type] = balance
+
+        show_balance_sheet(character)
+      end
+    else
+      fput "whisper #{character} I was unable to process your withdrawal. Please try again later."
+      fput "cancel tip"
+    end
+  end
+
+  private
+
+  def get_balance(character, denomination)
+    unless has_bot_account(character)
+      return 0
+    else
+      echo ("Trying to return: #{UserVars.bot_bank[character][denomination]}") if UserVars.bankbot_debug
+      return UserVars.bot_bank[character][denomination].to_i
+    end
+  end
+
+  def has_bot_account(character)
+    unless UserVars.bot_bank.has_key?(character)
+      opened_account = (UserVars.bot_bank[character].has_key?("Kronar") || UserVars.bot_bank[character].has_key?("Lirum") || UserVars.bot_bank[character].has_key?("Dokora"))
+      
+      unless opened_account
+        return false
+      else
+        return true
+      end
+    else
+      return true
+    end
+  end
+
+  def get_currency_type(denomination)
+    case denomination
+    when /Dok|Dokora.*/i
+      currency_type = "Dokora"
+    when /Lir|Lirum.*/i
+      currency_type = "Lirum"
+    when /Kro|Kronar.*/i
+      currency_type = "Kronar"
+    end
+
+    return currency_type
+  end
+
+  def show_balance_sheet(character)
+    closed_accounts = 0;
+
+    @denominations.each do |type|
+      account_balance = UserVars.bot_bank[character][type]
+
+      if account_balance <= 0 || account_balance.nil?
+        closed_accounts = closed_accounts + 1
+        next
+      end
+
+      money_readable = minimize_coins(account_balance)
+
+      denomination_msg = ""
+      money_readable.each do |amount|
+        denomination_msg = denomination_msg + "#{amount} " 
+      end
+
+      fput "whisper #{character} It looks like your current balance is #{denomination_msg} (#{account_balance}) #{type}."
+    end
+
+    if closed_accounts >= 3
+      fput "whisper #{character} You do not have an account with us."
+    end
+  end
+
+end
+
+arg_definitions = [
+  [
+    { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up bankbot' },
+    { name: 'announce', regex: /announce/i, optional: true, description: 'If arg is present, bankbot will announce its presence in LNet' },
+    { name: 'greet', regex: /greet/i, optional: true, description: 'If arg is present, bankbot will greet characters after validating (but only once)' }
+  ]
+]
+
+args = parse_args(arg_definitions)
+
+bankbot = Bankbot.new
+validator = CharacterValidator.new(args.announce, false, args.greet)
+
+@last_room_list = []
+loop do
+  line = script.gets?
+  pause 0.05 unless line
+
+  if DRRoom.pcs != @last_room_list
+    (DRRoom.pcs - @last_room_list).each { |name| validator.validate(name) }
+    @last_room_list = DRRoom.pcs
+  end
+
+  case line
+  when /^(.*) whispers, "(help)"$/i
+    character = Regexp.last_match(1)
+
+    bankbot.help(character) if validator.valid?(character)
+  when /^(.*) offers you a tip of (\d+) (\w+).  Type ACCEPT TIP, to accept it or DECLINE TIP to refuse it.$/
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(2)
+    denomination = Regexp.last_match(3)
+
+    bankbot.deposit(character, amount, denomination) if validator.valid?(character)
+  when /^(.*) whispers, "(with|withdraw) (\d+)\s*(Kro.*|Lir.*|Dok.*)"$/i
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(3)
+    denomination = Regexp.last_match(4)
+
+    bankbot.withdraw(character, amount, denomination) if validator.valid?(character)
+  when /^(.*) whispers, "(bal|balance)"$/i
+    character = Regexp.last_match(1)
+
+    bankbot.balance(character) if validator.valid?(character)
+  when /^(.*) whispers, ".*"$/i
+    character = Regexp.last_match(1)
+
+    fput "whisper #{character} I'm sorry, I did not understand that command"
+    bankbot.help(character)
+  when /^\[server\]: "DR:(.*) is tuned to the following channels.*"$/
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+  when /^\[server\]: "DR:(.*) is connected but not tuned to any channels.*"$/
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+  end
+end

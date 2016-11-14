@@ -384,6 +384,16 @@ class ScriptManager
     end
   end
 
+  def setup_data
+    verify_or_make_dir './scripts/data'
+    data_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
+    make_request(data_tree_url)['tree'].each do |setup_file|
+      echo("downloading #{setup_file}") if @debug
+      blob = make_request(setup_file['url'])
+      File.open("./scripts/data/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    end
+  end
+
   def update_local_stealing_yaml(id, update, new_entry = false)
     stealing_path = './scripts/profiles/base-stealing.yaml'
     stealing_data = $setupfiles.safe_load_yaml(stealing_path)
@@ -417,16 +427,19 @@ class ScriptManager
       end
   end
 
-  def get_yaml(filename)
-    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
-    setup_file = make_request(profile_tree_url)['tree'].find { |info| info['path'] =~ /#{filename}/i }
-    unless setup_file
-      echo("failed to find any files matching #{filename}")
-      return
-    end
-    echo("downloading #{setup_file['path']}")
-    blob = make_request(setup_file['url'])
-    File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+  def check_data_files
+    return if @developer
+    verify_or_make_dir './scripts/data'
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
+    make_request(profile_tree_url)['tree']
+      .select { |data| /^base.+yaml/ =~ data['path'] }
+      .reject { |setup_file| setup_file['sha'] == Settings['base_versions'][setup_file['path']] }
+      .each do |setup_file|
+        echo("downloading #{setup_file}") if @debug
+        blob = make_request(setup_file['url'])
+        File.open("./scripts/data/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+        Settings['base_versions'][setup_file['path']] = setup_file['sha']
+      end
   end
 
   def run_script(filename)
@@ -561,6 +574,8 @@ class ScriptManager
     message_body += "\n"
     message_body += Dir['./scripts/profiles/*.*'].join(',')
     message_body += "\n"
+    message_body += Dir['./scripts/data/*.*'].join(',')
+    message_body += "\n"
     message_body += "Lich Version: #{LICH_VERSION}"
     message_body += "\n"
     message_body += "Ruby Version: #{RUBY_VERSION}"
@@ -588,6 +603,7 @@ class SetupFiles
     @base_file_stamps = {}
     @base_files = {}
     load_base_settings
+    load_data_settings
   end
 
   def request_settings(options)
@@ -611,6 +627,7 @@ class SetupFiles
 
   def run_queue
     load_base_settings if @load
+    load_data_settings if @load
     load_settings if @load && !@data_load
     load_data if @load && @data_load
     save_settings if @save
@@ -640,6 +657,17 @@ class SetupFiles
   def load_base_settings
     Dir['./scripts/profiles/base*.yaml'].map { |item| File.basename(item) }.each do |filename|
       file_path = "./scripts/profiles/#{filename}"
+      mtime = File.exist?(file_path) ? File.stat(file_path).mtime : Time.new(0)
+      if @base_file_stamps[filename] != mtime
+        @base_files[filename] = safe_load_yaml(file_path)
+      end
+      @base_file_stamps[filename] = mtime
+    end
+  end
+
+  def load_data_settings
+    Dir['./scripts/data/base*.yaml'].map { |item| File.basename(item) }.each do |filename|
+      file_path = "./scripts/data/#{filename}"
       mtime = File.exist?(file_path) ? File.stat(file_path).mtime : Time.new(0)
       if @base_file_stamps[filename] != mtime
         @base_files[filename] = safe_load_yaml(file_path)
@@ -856,6 +884,8 @@ def full_install
   add_self_to_autostart
   respond 'Creating a /profiles directory and downloading default profiles'
   setup_profiles
+  respond 'Creating a /data directory and downloading data files'
+  setup_data
   respond 'Backing up existing scripts and replacing with latest versions'
   replace_all
   respond 'Finished install!'
@@ -935,8 +965,8 @@ def setup_profiles
   $manager.setup_profiles
 end
 
-def get_yaml(filename)
-  $manager.get_yaml(format_yaml_name(filename))
+def setup_data
+  $manager.setup_data
 end
 
 def remove_from_autostart(scripts)
@@ -993,6 +1023,7 @@ full_install if install
 force_start_script('bootstrap', ['wipe_constants'])
 
 $manager.check_base_files
+$manager.check_data_files
 $manager.start_scripts
 
 if $manager.updated_dependency?

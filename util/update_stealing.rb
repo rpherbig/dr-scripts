@@ -5,7 +5,7 @@ firebase = Firebase::Client.new('https://dr-scripts.firebaseio.com/')
 
 stealing = firebase.get('stealing-options').body
 
-stealing_data = YAML.load_file('./profiles/base-stealing.yaml')
+stealing_data = YAML.load_file('./data/base-stealing.yaml')
 stealing_data[:stealing_options].compact.each do |data|
   update = stealing.compact.find { |x| x['id'] == data['id'] }
   data.merge!(update)
@@ -14,4 +14,4 @@ end
 
 stealing.compact.each { |x| stealing_data[:stealing_options] << x }
 
-File.open('./profiles/base-stealing.yaml', 'w') { |file| file.print(stealing_data.to_yaml) }
+File.open('./data/base-stealing.yaml', 'w') { |file| file.print(stealing_data.to_yaml) }

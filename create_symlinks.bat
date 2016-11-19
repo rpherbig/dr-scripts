@@ -9,6 +9,8 @@ FOR /f %%a IN (
 
 rmdir %_Destination%\profiles
 mklink /h /j %_Destination%\profiles .\profiles
+rmdir %_Destination%\data
+mklink /h /j %_Destination%\data .\data
 
 goto:eof
 

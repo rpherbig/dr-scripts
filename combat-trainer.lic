@@ -307,8 +307,7 @@ class LootProcess
         echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
         do_necro_ritual(DRRoom.dead_npcs.first, 'consume', game_state) unless game_state.wounds.empty?
       end
-
-      do_necro_ritual(DRRoom.dead_npcs.first, @ritual_type, game_state) unless game_state.prepare_consume
+      do_necro_ritual(DRRoom.dead_npcs.first, @ritual_type, game_state) unless game_state.prepare_consume || (DRSkill.getxp('Thanatology') > 30 && @skin)
     end
     return false if %w(consume harvest dissect).include?(@last_ritual)
     true
@@ -320,22 +319,18 @@ class LootProcess
 
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, 'Rituals do not work upon constructs', 'Rituals do not work upon the undead', 'This ritual may only be performed on a corpse', "This ritual may only be performed on a creature's corpse.", 'This corpse has already been preserved', @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', 'A failed or completed ritual has rendered this corpse unusable for your purposes')
+    case bput(perform_message, @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', @rituals['construct'], @rituals['failures'])
     when @rituals['preserve'], @rituals['dissect']
       @last_ritual = ritual
-      return
     when @rituals['consume']
       @last_ritual = ritual
       game_state.prepare_consume = true if @necro_heal
-      return
     when @rituals['harvest']
       @last_ritual = ritual
       waitrt?
       fput 'drop material'
-      return
-    when 'Rituals do not work upon constructs'
+    when @rituals['construct']
       game_state.construct(mob_noun)
-      return
     end
   end
 
@@ -348,11 +343,9 @@ class LootProcess
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
-    can_skin = check_rituals(game_state)
-    if @skin && can_skin
-      arrange_mob(DRRoom.dead_npcs.first, game_state)
-      check_skinning(DRRoom.dead_npcs.first, game_state)
-    end
+    arrange_mob(DRRoom.dead_npcs.first, game_state)
+    check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals(game_state)
+
     unless game_state.casting_consume || game_state.prepare_consume
       while 'and get ready to search it' == bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it')
         pause
@@ -364,6 +357,7 @@ class LootProcess
   end
 
   def arrange_mob(mob_noun, game_state)
+    return unless @skin
     return unless @arrange_count > 0
     return unless game_state.skinnable?(mob_noun)
 
@@ -387,6 +381,7 @@ class LootProcess
   end
 
   def check_skinning(mob_noun, game_state)
+    return unless @skin
     return unless game_state.skinnable?(mob_noun)
 
     pause 0.25
@@ -727,6 +722,8 @@ class SpellProcess
       game_state.casting_moonblade = false
     end
 
+    Flags.reset("ct-#{@reset_expire}") if @reset_expire
+
     return unless @command
     pause 0.5 until DRRoom.npcs.include?('warrior')
     fput("command #{@command}")
@@ -895,14 +892,16 @@ class SpellProcess
     @spell_timers[data['abbrev']] = Time.now if data['recast_every']
 
     if data['moon']
+      unless Script.running? 'moonwatch'
+        echo 'moonwatch is not running. Starting it now'
+        UserVars.moons = {}
+        custom_require.call('moonwatch')
+        echo "Run `;e autostart('moonwatch')` to avoid this in the future"
+        pause 0.5 while UserVars.moons.empty?
+      end
       moon = UserVars.moons['visible'].first
       unless moon
         echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
-        unless Script.running? 'moonwatch'
-          echo 'moonwatch is not running. Starting it now'
-          custom_require.call('moonwatch')
-          echo "Run `;e autostart('moonwatch')` to avoid this in the future"
-        end
 
         @weather = bput('weather', 'inside', 'You glance up at the sky.') unless @weather
         if @weather =~ /inside/
@@ -935,7 +934,7 @@ class SpellProcess
     @custom_cast = data['cast']
     @after = data['after']
     @command = data['command']
-    Flags.reset("ct-#{data['abbrev']}") if data['expire']
+    @reset_expire = data['expire'] ? data['abbrev'] : nil
     Flags.reset('ct-spellcast')
     @before = data['before']
   end
@@ -1029,7 +1028,7 @@ class TrainerProcess
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
-                   'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy' }
+                   'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship' }
 
     @skill_map['Hunt'] = %w(Perception Scouting) if DRStats.ranger?
     @favor_god = settings.favor_god
@@ -1088,7 +1087,7 @@ class TrainerProcess
       bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing') unless game_state.npcs.empty?
     when 'Stealth'
       fput('stalk') if hide? && !@dont_stalk && !game_state.npcs.empty?
-      bput('unhide', 'You come out of hiding', 'But you are not') if game_state.npcs.empty?
+      bput('unhide', 'You come out of hiding', 'You slip out of hiding', 'But you are not') if game_state.npcs.empty?
     when 'Ambush Stun'
       return ambush_stun(game_state)
     when 'Favor Orb'
@@ -1097,6 +1096,8 @@ class TrainerProcess
       game_state.use_charged_maneuvers = true
     when 'Meraud'
       meraud_commune(game_state)
+    when 'Recall'
+      bput("recall #{game_state.npcs.first}", 'Roundtime', 'You are far too occupied') unless game_state.npcs.empty?
     end
     waitrt?
     false
@@ -1330,12 +1331,8 @@ class AttackProcess
   end
 
   def attack_thrown(game_state)
-    hurl = game_state.bound_weapon? && !game_state.use_weak_attacks?
-    attack_action = hurl ? 'hurl' : 'lob'
-    retrieve_action = hurl ? 'invoke' : "get my #{game_state.weapon_name}"
-
-    attack_action += ' left' if game_state.weapon_skill == 'Offhand Weapon'
-
+    attack_action = game_state.thrown_attack_verb
+    attack_action += ' left' if game_state.offhand?
     bput(attack_action, 'roundtime', 'What are you trying to')
     waitrt?
 
@@ -1344,6 +1341,7 @@ class AttackProcess
       end
     end
 
+    retrieve_action = game_state.thrown_retrieve_verb
     case bput(retrieve_action, 'You are already holding', 'You pick up', 'You get', 'You catch', 'What were you')
     when 'What were you'
       # Workaround for a game bug when you lob an unblessed weapon at a noncorporeal mob
@@ -1701,8 +1699,21 @@ class GameState
     @use_weak_attacks = settings.use_weak_attacks
     echo("  @use_weak_attacks: #{@use_weak_attacks}") if $debug_mode_ct
 
-    @analyze_combo_type = settings.analyze_combo_type
-    echo("  @analyze_combo_type: #{@analyze_combo_type}") if $debug_mode_ct
+    @use_barb_combos = settings.use_barb_combos
+    echo("  @use_barb_combos: #{@use_barb_combos}") if $debug_mode_ct
+
+    # For deprecation support
+    if settings.analyze_combo_type
+      echo('***The analyze_combo_type setting is deprecated and can be removed from your YAML. The use_barb_combos setting should be used instead.***')
+      @use_barb_combos = true
+    end
+
+    if @use_barb_combos
+      Flags.add('ct-accuracy-ready', 'You sense your combat accuracy decrease')
+      Flags['ct-accuracy-ready'] = true
+      Flags.add('ct-damage-ready', 'You sense your ability to land deadly blows decrease')
+      Flags['ct-damage-ready'] = true
+    end
 
     @dedicated_camb_use = settings.dedicated_camb_use
     echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
@@ -1842,11 +1853,6 @@ class GameState
     $aim_skills.include?(weapon_skill)
   end
 
-  def bound_weapon?
-    item = EquipmentManager.instance.item_by_desc(weapon_name)
-    item && item.bound
-  end
-
   def offhand?
     weapon_skill == 'Offhand Weapon'
   end
@@ -1953,7 +1959,7 @@ class GameState
 
   def dual_load?
     @dual_load && weapon_skill == 'Bow' &&
-      DRSkill.getrank('Bow') >= 200 && DRStats.agility > 30 && DRStats.reflex > 30 &&
+      DRSkill.getrank('Bow') > 200 && DRStats.agility > 30 && DRStats.reflex > 30 &&
       (DRSpells.active_spells['See the Wind'] || DRStats.barbarian?)
   end
 
@@ -1971,22 +1977,26 @@ class GameState
     !npcs.empty? && !aimed_skill?
   end
 
-  def use_weak_attacks?
-    @use_weak_attacks
-  end
-
   def stop_weak_attacks
     @use_weak_attacks = false
   end
 
   def stop_analyze_combo
-    @analyze_combo_type = nil
+    @use_barb_combos = false
+  end
+
+  def set_barb_accuracy_flag
+    Flags.reset('ct-accuracy-ready')
+  end
+
+  def set_barb_damage_flag
+    Flags.reset('ct-damage-ready')
   end
 
   def melee_attack_verb
-    if use_weak_attacks?
+    if @use_weak_attacks
       brawling? ? 'punch' : 'jab'
-    elsif !@analyze_combo_type.nil? && !offhand? && !brawling?
+    elsif @use_barb_combos && !offhand? && !brawling?
       update_analyze_array if @analyze_combo_array.empty?
       @analyze_combo_array.shift
     else
@@ -1994,20 +2004,62 @@ class GameState
     end
   end
 
+  def thrown_attack_verb
+    if @use_weak_attacks || lodging_weapon?
+      'lob'
+    elsif bound_weapon?
+      'hurl'
+    else
+      'throw'
+    end
+  end
+
+  def thrown_retrieve_verb
+    if bound_weapon?
+      'invoke'
+    else
+      "get my #{weapon_name}"
+    end
+  end
+
   private
 
-  def update_analyze_array
-    result = bput("analyze #{@analyze_combo_type}", 'Analyze what\?', 'by landing a .*')
+  def lodging_weapon?
+    item = EquipmentManager.instance.item_by_desc(weapon_name)
+    item.nil? || item.lodges
+  end
+
+  def bound_weapon?
+    item = EquipmentManager.instance.item_by_desc(weapon_name)
+    item && item.bound
+  end
+
+  def perform_analyze?(combo_type, expertise_requirement)
+    return false if combo_type != 'flame' && !Flags["ct-#{combo_type}-ready"]
+    return false if DRSkill.getrank('Expertise') < expertise_requirement
+
+    result = bput("analyze #{combo_type}", 'cannot repeat', 'Analyze what\?', 'by landing a .*')
     waitrt?
 
     case result
+    when 'cannot repeat'
+      Flags.reset("ct-#{combo_type}-ready")
+      return false
     when 'Analyze what?'
       fput('face next')
-      return []
+      return true
     end
 
     text = result.match(/by landing a (.*)\.$/).to_a[1]
     @analyze_combo_array = list_to_nouns(text)
+
+    true
+  end
+
+  def update_analyze_array
+    { 'accuracy' => 50, 'damage' => 125, 'flame' => 0 }.each do |type, expertise|
+      break if perform_analyze?(type, expertise)
+    end
   end
 
   def dance_stealth?
@@ -2023,7 +2075,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :analyze_combo_type, :dedicated_camb_use
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

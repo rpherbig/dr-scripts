@@ -111,6 +111,7 @@ class CrossingTraining
       walk_to(@training_room)
 
       check_listening
+      check_teaching
     end
 
     check_research
@@ -241,11 +242,26 @@ class CrossingTraining
     wait_for_script_to_complete('sorcery')
   end
 
+  def check_teaching
+    return if @settings.classes_to_teach.empty?
+    return if @last_teacher
+
+    if @class_timer.nil? || Time.now - @class_timer > 10 * 60
+      @settings.classes_to_teach.rotate!
+      bput('stop teach', 'You stop', 'you aren\'t teaching')
+      @class_timer = Time.now
+    end
+
+    to_teach = @settings.classes_to_teach.first
+    DRRoom.pcs.each { |character| bput("teach #{to_teach} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching') }
+  end
+
   def check_listening
     return unless @settings.listen
     return if listen?(@last_teacher, @bad_classes)
     return if DRRoom.pcs.empty?
-    return unless @listen_timer.nil? || Time.now - @listen_timer > 300
+    return unless @listen_timer.nil? || Time.now - @listen_timer > 5 * 60
+    return unless @class_timer.nil?
 
     classes = assess_teach
     @last_teacher = classes
@@ -476,13 +492,15 @@ class CrossingTraining
 
     if data['moon']
       # Look for a moon that will be up for the next few minutes
+      unless Script.running? 'moonwatch'
+        echo 'moonwatch is not running. Starting it now'
+        UserVars.moons = {}
+        custom_require.call('moonwatch')
+        echo "Run `;e autostart('moonwatch')` to avoid this in the future"
+        pause 0.5 while UserVars.moons.empty?
+      end
       unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
         echo "No moon available to cast #{data['abbrev']}"
-        unless Script.running? 'moonwatch'
-          echo 'moonwatch is not running. Starting it now'
-          custom_require.call('moonwatch')
-          echo "Run `;e autostart('moonwatch')` to avoid this in the future"
-        end
 
         weather = bput('weather', 'inside', 'You glance up at the sky.')
         walk_to @settings.outdoor_room if weather =~ /inside/
@@ -567,11 +585,7 @@ class CrossingTraining
       forage?('rock')
       dispose_trash 'rock'
     else
-      item = if @settings.forage_item
-               @settings.forage_item
-             else
-               'rock'
-             end
+      item = @settings.forage_item || 'rock'
       bput("collect #{item}", 'You manage to collect', 'The room is too cluttered to find anything here')
       waitrt?
       kick_pile? unless kick_pile?("#{item}s")
@@ -580,7 +594,13 @@ class CrossingTraining
 
   def train_first_aid
     play_song?
+
+    start_time = Time.now
     wait_for_script_to_complete('first-aid')
+
+    return if Time.now - start_time > 15
+    echo '***UNABLE TO TRAIN FIRST AID, REMOVING IT FROM THE TRAINING LIST***'
+    @settings.crossing_training.delete('First Aid')
   end
 
   def train_scholarship
@@ -636,10 +656,12 @@ class CrossingTraining
       climb_branch
     else
       play_song?
-      @athletics_options.each do |data|
-        check_research
-        break unless climb?(data['room'], data['targets'])
-      end
+      @athletics_options
+        .reject { |data| DRStats.necromancer? && data['justice'] }
+        .each do |data|
+          check_research
+          break unless climb?(data['room'], data['targets'])
+        end
     end
   end
 
@@ -672,6 +694,7 @@ class CrossingTraining
       if UserVars.athletics < 540
         practice_branch
       else
+        play_song?
         walk_to(19_464)
         while DRSkill.getxp('Athletics') < 29
           walk_to(2245)
@@ -700,7 +723,8 @@ class CrossingTraining
 
     [8266, 850, 7902, 19_077, 815, 793, 8265, 4652, 19_093, 19_078].each do |room_id|
       walk_to(room_id)
-      until 'You sense:' == bput('perceive health', 'You fail to sense', 'You sense:', 'You\'re not ready to do that again, yet')
+      5.times do
+        break if 'You sense:' == bput('perceive health', 'You fail to sense', 'You sense:', 'You\'re not ready to do that again, yet')
         pause 1
         rt = waitrt?
         pause 5 if rt.nil? || rt.zero?
@@ -900,6 +924,7 @@ class CrossingTraining
 
     walk_to(@training_room)
     check_listening
+    check_teaching
 
     wait_for_script_to_complete('sew', ['trash', 'knitting', chapter, unique_name, item])
 

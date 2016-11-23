@@ -57,6 +57,8 @@ class LockPicker
   end
 
   def check_pet_boxes(source)
+    return unless source
+
     boxes = get_boxes(source)
     return if boxes.empty?
 
@@ -126,11 +128,22 @@ class LockPicker
     @disarm_normal = messages['disarm_normal']
 
     Flags.add('disarm-more', 'not fully disarmed', 'not yet fully disarmed', 'still has more to torment you with')
-    fput("open my #{@settings.picking_box_source}")
-    fput("open my #{@settings.picking_box_storage}")
+    open_container(@settings.picking_box_source)
+    open_container(@settings.picking_box_storage)
+    open_container(@settings.picking_pet_box_source)
+  end
+
+  def open_container(name)
+    return unless name
+
+    fput("open my #{name}")
   end
 
   def do_buffs(buffs)
+    if DRRoom.pcs.include?(@settings.lockpick_buff_bot)
+      fput("whisper #{@settings.lockpick_buff_bot} buff hol")
+    end
+
     buffs['spells'].each do |spell|
       echo "Buffing: #{spell}" if UserVars.lockpick_debug
       buff(spell, @settings)
@@ -139,23 +152,19 @@ class LockPicker
     buffs['khri']
       .map { |name| "Khri #{name}" }
       .each { |name| activate_khri?(@settings.kneel_khri, name) }
-
-    return unless DRRoom.pcs.include?(@settings.lockpick_buff_bot)
-    fput("whisper #{@settings.lockpick_buff_bot} buff hol")
   end
 
   def refill_ring
     return unless @settings.use_lockpick_ring
-    type = @settings.lockpick_type
 
-    cost = @lockpick_costs[type]
+    cost = @lockpick_costs[@settings.lockpick_type]
     if cost.nil?
-      echo "***UNKNOWN LOCKPICK TYPE: #{type}, UNABLE TO REFILL YOUR LOCKPICK RING***"
+      echo "***UNKNOWN LOCKPICK TYPE: #{@settings.lockpick_type}, UNABLE TO REFILL YOUR LOCKPICK RING***"
       return
     end
 
     ensure_copper_on_hand(cost * 5, @settings.hometown)
-    refill_lockpick_ring(type, @settings.hometown)
+    refill_lockpick_container(@settings.lockpick_type, @settings.hometown, @settings.lockpick_container)
   end
 
   def attempt_open(box)
@@ -175,14 +184,14 @@ class LockPicker
 
     waitrt?
     loot(box)
-
     dismantle(box)
     waitrt?
   end
 
   def dismantle(box)
+    release_invisibility
     command = "dismantle my #{box} #{@settings.lockpick_dismantle}"
-    case bput(command, 'repeat this request in the next 15 seconds', 'Roundtime')
+    case bput(command, 'repeat this request in the next 15 seconds', 'Roundtime', 'You must be holding the object you wish to dismantle')
     when 'repeat this request in the next 15 seconds'
       dismantle(box)
     end
@@ -190,11 +199,12 @@ class LockPicker
 
   def loot(box)
     waitrt?
-    raw_contents = bput("open my #{box}", /^In the .* you see .*\./, /That is already open/)
-    if raw_contents =~ /That is already open/
-      raw_contents = bput("look in my #{box}", /^In the .* you see .*\./, 'There is nothing in there')
-      return if raw_contents == 'There is nothing in there'
+    if 'It is locked' == bput("open my #{box}", /^In the .* you see .*\./, 'That is already open', 'It is locked')
+      return
     end
+    raw_contents = bput("look in my #{box}", /^In the .* you see .*\./, 'There is nothing in there')
+    return if raw_contents == 'There is nothing in there'
+
     echo "raw: #{raw_contents}" if UserVars.lockpick_debug
     loot = list_to_nouns(raw_contents.match(/^In the .* you see (.*)\./).to_a[1])
     echo "loot: #{loot}" if UserVars.lockpick_debug
@@ -313,7 +323,7 @@ class LockPicker
 
   def check_danger
     pause 0.5 while stunned?
-    return unless bleeding?
+    return unless bleeding? || checkpoison
 
     snapshot = Room.current.id
     wait_for_script_to_complete('safe-room')

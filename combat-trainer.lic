@@ -508,6 +508,8 @@ class SpellProcess
   include DRCH
   include DRCT
 
+  $weapon_buffs = ['Ignite', 'Rutilor\'s Edge', 'Resonance']
+
   def initialize(settings)
     echo('New SpellProcess') if $debug_mode_ct
 
@@ -602,8 +604,7 @@ class SpellProcess
     check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
-    check_rue(game_state)
-    check_resonance(game_state)
+    check_rutilors_edge(game_state)
     check_health(game_state)
     check_buffs(game_state)
     check_training(game_state)
@@ -665,8 +666,9 @@ class SpellProcess
   end
 
   def check_ignite(game_state)
-    return if @last_seen_weapon_name_ignite == game_state.weapon_name
-    @last_seen_weapon_name_ignite = game_state.weapon_name
+    # Ignite must be released before it can be recast
+    # Rutilor's Edge and Resonance do not have this problem
+    return if @last_seen_weapon_buff_name == game_state.weapon_name
     return unless DRSpells.active_spells['Ignite']
 
     # Release the spell on the character
@@ -675,24 +677,14 @@ class SpellProcess
     pause 1
   end
 
-  def check_rue(game_state)
-    return if @last_seen_weapon_name_rue == game_state.weapon_name
-    @last_seen_weapon_name_rue = game_state.weapon_name
+  def check_rutilors_edge(game_state)
+    # Rutilor's Edge does not need to be released before it can be recast
+    # But releasing allows the buff logic to detect it should be recast
+    return if @last_seen_weapon_buff_name == game_state.weapon_name
     return unless DRSpells.active_spells['Rutilor\'s Edge']
 
     # Release the spell on the character
     bput('release rue', 'You sense the Rutilor\'s Edge spell fade away', 'Release what')
-    # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
-    pause 1
-  end
-
-  def check_resonance(game_state)
-    return if @last_seen_weapon_name_resonance == game_state.weapon_name
-    @last_seen_weapon_name_resonance = game_state.weapon_name
-    return unless DRSpells.active_spells['Resonance']
-
-    # Release the spell on the character
-    bput('release resonance', 'You sense the Resonance spell fade away', 'Release what')
     # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
     pause 1
   end
@@ -709,23 +701,24 @@ class SpellProcess
   end
 
   def cast_spell(game_state)
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_rue
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_resonance
+    if game_state.casting_weapon_buff
+      @custom_cast = "cast my #{game_state.weapon_name}"
+      @last_seen_weapon_buff_name = game_state.weapon_name
+    end
+
     if game_state.casting_consume
       if @necromancer_healing.key?('Consume Flesh') && !@necromancer_healing.key?('Devour')
         @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}"
       end
     end
+
     cast(@custom_cast, @before, @after)
     @custom_cast = nil
 
     game_state.casting = false
     game_state.cast_timer = nil
 
-    game_state.casting_ignite = false
-    game_state.casting_rue = false
-    game_state.casting_resonance = false
+    game_state.casting_weapon_buff = false
     game_state.casting_consume = false if game_state.casting_consume
 
     if game_state.casting_moonblade
@@ -750,9 +743,10 @@ class SpellProcess
   end
 
   def check_buff_conditions?(name, game_state)
-    return false if name == 'Ignite' && (game_state.aimed_skill? || game_state.brawling?)
-    return false if name == 'Rutilor\'s Edge' && (game_state.aimed_skill? || game_state.brawling?)
-    return false if name == 'Resonance' && (game_state.aimed_skill? || game_state.brawling?)
+    return false if $weapon_buffs.include?(name) && (game_state.aimed_skill? || game_state.brawling?)
+    # Resonance does not show up in Active Spells, so we need to track the last weapon on which it was cast to avoid recasting it continuously
+    # Ignite and Rutilor's Edge do not have this problem
+    return false if name == 'Resonance' && @last_seen_weapon_buff_name == game_state.weapon_name
 
     true
   end
@@ -798,9 +792,7 @@ class SpellProcess
       end
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
-    game_state.casting_ignite = true if name == 'Ignite'
-    game_state.casting_rue = true if name == 'Rutilor\'s Edge'
-    game_state.casting_resonance = true if name == 'Resonance'
+    game_state.casting_weapon_buff = $weapon_buffs.include?(name)
     if data['ritual']
       cast_ritual(data, game_state)
     else
@@ -1588,7 +1580,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :casting_rue, :casting_resonance
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
 
   def initialize(settings)
     echo('New GameState') if $debug_mode_ct
@@ -1605,8 +1597,7 @@ class GameState
     @selected_maneuver = ''
     @cast_timer = nil
     @casting_moonblade = false
-    @casting_ignite = false
-    @casting_rue = false
+    @casting_weapon_buff = false
     @use_charged_maneuvers = false
     @casting_consume = false
     @prepare_consume = false

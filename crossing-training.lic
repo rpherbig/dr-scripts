@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#crossing-training
 =end
 
-custom_require.call(%w(drinfomon equipmanager events spellmonitor common common-arcana common-crafting common-items common-money common-travel common-summoning))
+custom_require.call(%w(drinfomon equipmanager events spellmonitor common common-arcana common-crafting common-items common-money common-travel common-summoning performance))
 
 class CrossingTraining
   include DRC
@@ -31,9 +31,9 @@ class CrossingTraining
     @settings = get_settings(args.flex)
     @training_room = (@settings.training_rooms || [@settings.safe_room]).sample
     @athletics_options = get_data('athletics').athletics_options
-    @song_list = get_data('perform').perform_options
 
     @use_research = @settings.use_research
+    self.researching = nil
     @settings.storage_containers.each { |container| fput("open my #{container}") }
     @disciplines_to_skill = {
       'Blacksmithing' => 'Forging',
@@ -53,7 +53,6 @@ class CrossingTraining
     release_cyclics
 
     Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
-    Flags.add('ct-song', 'you finish playing')
     Flags.add('ct-spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires')
     Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were')
     Flags.add('research-complete', '^Breakthrough!')
@@ -73,7 +72,7 @@ class CrossingTraining
       end
       next unless @stop && !@researching
       @running = false
-      stop_play
+      Performance.stop_play
       break
     end
   end
@@ -123,7 +122,7 @@ class CrossingTraining
         echo '***Skills capped, sleeping***' if UserVars.crossing_trainer_debug
         fput 'exit' if @settings.exit_on_skills_capped
         walk_to(@training_room)
-        play_song?
+        Performance.play_song?
       end
 
       # Output a harmless command to prevent being logged out
@@ -131,7 +130,7 @@ class CrossingTraining
       return
     end
 
-    stop_play unless @researching
+    Performance.stop_play
     refresh_cyclic unless @researching
 
     echo "***Attempting to train #{skill}***" if UserVars.crossing_trainer_debug
@@ -297,7 +296,7 @@ class CrossingTraining
 
     Flags.reset('research-partial')
     Flags.reset('research-complete')
-    @researching = nil
+    self.researching = nil
   end
 
   def train_mining
@@ -423,6 +422,11 @@ class CrossingTraining
     infuse_om(!@settings.osrel_no_harness, @settings.osrel_amount)
   end
 
+  def researching=(status)
+    @researching = status
+    Performance.researching = status
+  end
+
   def research
     refresh_cyclic
     return if 'You cannot begin' != bput("research #{@researching} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin')
@@ -441,7 +445,7 @@ class CrossingTraining
       research
     elsif Flags['research-complete']
       Flags.reset('research-complete')
-      @researching = nil
+      self.researching = nil
     end
   end
 
@@ -460,7 +464,7 @@ class CrossingTraining
       cast_spell({ 'abbrev' => 'GAF' }, nil)
       pause 2
     end
-    @researching = case skill
+    self.researching = case skill
                    when 'Arcana', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic'
                      'FUNDAMENTAL'
                    when 'Attunement'
@@ -570,7 +574,7 @@ class CrossingTraining
   end
 
   def train_performance
-    return if play_song?(true)
+    return if Performance.play_song?(true)
 
     echo '***UNABLE TO TRAIN PERFORMANCE, REMOVING IT FROM THE TRAINING LIST***'
     @settings.crossing_training.delete('Performance')
@@ -589,7 +593,7 @@ class CrossingTraining
   end
 
   def train_first_aid
-    play_song?
+    Performance.play_song?
 
     start_time = Time.now
     wait_for_script_to_complete('first-aid')
@@ -600,7 +604,7 @@ class CrossingTraining
   end
 
   def train_scholarship
-    play_song?
+    Performance.play_song?
 
     case bput('get my black book', 'What were you', 'You get')
     when 'What were you'
@@ -651,7 +655,7 @@ class CrossingTraining
       return if @researching
       climb_branch
     else
-      play_song?
+      Performance.play_song?
       @athletics_options
         .reject { |data| @settings.avoid_athletics_in_justice && data['justice'] }
         .each do |data|
@@ -760,7 +764,7 @@ class CrossingTraining
   end
 
   def train_thievery
-    stop_play if @settings.hide_to_steal
+    Performance.stop_play if @settings.hide_to_steal
 
     wait_for_script_to_complete('steal')
   end
@@ -768,7 +772,7 @@ class CrossingTraining
   def train_appraisal
     return if @researching
 
-    play_song? if DRSkill.getrank('Appraisal') >= 250
+    Performance.play_song? if DRSkill.getrank('Appraisal') >= 250
     wait_for_script_to_complete('appraisal')
   end
 
@@ -940,86 +944,7 @@ class CrossingTraining
     fput('stow my yarn')
   end
 
-  def stop_play
-    return unless @did_play
-    return if @no_instrument
-    @did_play = false
-    bput('stop play', 'You stop playing your song', 'In the name of', "But you're not performing")
-    Flags['ct-song'] = true
-  end
 
-  def play_song?(blocking = false)
-    return true if @researching
-    return false if @no_instrument
-    return true if DRSkill.getxp('Performance') >= 28
-
-    UserVars.song = @song_list.first.first unless UserVars.song
-    @did_play = true
-    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
-    when 'Play on what instrument'
-      @no_instrument = true
-      return false
-    when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play'
-      return true
-    when 'You cannot play'
-      wait_for_script_to_complete('safe-room')
-    when 'dirtiness may affect your performance'
-      if DRSkill.getrank('Performance') < 20
-        echo "Skipping cleaning of zills due to low rank of Performance: #{DRSkill.getrank('Performance')}" if UserVars.crossing_trainer_debug
-        return true
-      end
-      stop_play
-      clean_zills
-      return play_song?
-    when 'You begin a', 'You effortlessly begin', 'You begin some'
-      stop_play
-      UserVars.song = @song_list[UserVars.song] || @song_list.first.first
-      return play_song?
-    when 'You struggle to begin'
-      if UserVars.song != @song_list.first.first
-        stop_play
-        UserVars.song = @song_list.first.first
-        return play_song?
-      end
-    end
-
-    return true unless blocking
-
-    Flags.reset('ct-song')
-    pause 1 until Flags['ct-song']
-    true
-  end
-
-  def clean_zills
-    cloth = @settings.cleaning_cloth
-    bput('remove my zills', 'You slide')
-    bput("get my #{cloth}", 'You get')
-
-    loop do
-      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
-      when 'not in need of drying'
-        break
-      when 'You should be sitting up'
-        fix_standing
-        next
-      end
-      pause 1
-      waitrt?
-
-      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
-        pause 1
-        waitrt?
-      end
-    end
-
-    until /not in need of cleaning/i =~ bput("clean my zills with my #{cloth}", 'Roundtime', 'not in need of cleaning')
-      pause 1
-      waitrt?
-    end
-
-    bput('wear my zills', 'You slide')
-    bput("stow my #{cloth}", 'You put')
-  end
 end
 
 # Call this last to avoid the need for forward declarations

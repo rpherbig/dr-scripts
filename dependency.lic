@@ -7,8 +7,9 @@ require 'net/http'
 require 'base64'
 require 'yaml'
 require 'ostruct'
+require 'digest/sha1'
 
-$DEPENDENCY_VERSION = '1.0'
+$DEPENDENCY_VERSION = '1.1'
 
 gem_name, *gem_ver_reqs = 'rest-firebase', '~> 1.1.0'
 gdep = Gem::Dependency.new(gem_name, *gem_ver_reqs)
@@ -202,6 +203,8 @@ class ScriptManager
     @shop_update_queue = []
 
     @enable_fork = LICH_VERSION =~ /f/
+
+    @versions = nil
   end
 
   def updated_dependency?
@@ -225,23 +228,20 @@ class ScriptManager
   end
 
   def get_versions
-    if File.exist?('script_versions.dat')
-      Marshal.load(File.open('script_versions.dat', 'rb'))
+    if @versions
+      @versions
     else
-      {}
+      @versions = build_version_hash
     end
   end
 
-  def set_version(filename, sha)
-    data = get_versions
-    data[filename] = sha
-    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
-  end
-
-  def remove_script(filename)
-    data = get_versions
-    data.delete(filename)
-    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
+  def build_version_hash
+    Dir['./scripts/*.lic'].each_with_object({}) do |path, versions|
+      file = File.basename(path)
+      body = File.open("./scripts/#{file}", 'r').readlines.join('')
+      sha = Digest::SHA1.hexdigest('blob' + " #{body.size}" + "\0" + body)
+      versions[file] = sha
+    end
   end
 
   def autos_proccessed?
@@ -305,12 +305,6 @@ class ScriptManager
     end
   end
 
-  def load_script(filename, force = false)
-    return if filename.nil? || filename.empty?
-    get_script(filename, force)
-    run_script(filename)
-  end
-
   def get_script(filename, force = false)
     filename = filename.dup
     echo("checking:#{filename} force:#{force}") if @debug
@@ -322,6 +316,7 @@ class ScriptManager
   end
 
   def start_scripts(force = false)
+    @versions = nil
     repo_scripts.each { |name, _| get_script(name, force) }
     custom_require.call(autostarts)
   end
@@ -355,22 +350,12 @@ class ScriptManager
     echo("downloading:#{filename}") if @debug
     info = get_file_status(filename)
     return unless info
-    if @developer
-      set_version(filename, info['sha'])
-      return
-    end
+    return if @developer
     return if get_versions[filename] == info['sha'] && !force
-
-    if File.exist?("./scripts/#{filename}") && !get_versions[filename]
-      new_name = "#{filename}#{Time.now.to_i}.bak"
-      echo "Renaming existing script #{filename} to #{new_name}"
-      File.rename("./scripts/#{filename}", "./scripts/#{new_name}")
-    end
 
     echo("info:#{info}") if @debug
     blob = make_request(info['url'])
     File.open("./scripts/#{filename}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
-    set_version(filename, blob['sha'])
 
     @self_updated = true if filename == 'dependency.lic'
   end
@@ -875,10 +860,6 @@ def force_refresh_scripts
   $manager.start_scripts
 end
 
-def stop_updating_script(filename)
-  $manager.remove_script(format_name(filename))
-end
-
 def list_tracked_scripts
   $manager.get_versions.sort
 end
@@ -897,15 +878,8 @@ def full_install
   respond 'Finished install!'
 end
 
-def migrate_scripts
-  remove_from_autostart(managed_scripts)
-  add_self_to_autostart
-  managed_scripts.each(&method(:get_script))
-end
-
 def replace_all
   managed_scripts
-    .select { |script| File.exist?("./scripts/#{script}") }
     .each do |script|
       new_name = "#{script}#{Time.now.to_i}.bak"
       respond "Renaming existing script #{script} to #{new_name}"

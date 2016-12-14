@@ -1,0 +1,161 @@
+# want_script_output
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#bankbot
+=end
+
+custom_require.call(%w(common common-validation drinfomon events))
+
+# TODO: Write to file
+
+class Bankbot
+  include DRC
+
+  def initialize
+    Flags.add('tip-accepted', '.* accepts your tip and slips it away with a smile')
+    Flags.add('tip-declined', '.* declines your tip offer')
+    Flags.add('tip-expired', 'Your tip offer to .* has expired')
+    @balance = Hash.new { |hash, key| hash[key] = Hash.new { |h, k| h[k] = 0 } }
+
+    fput('avoid !all')
+    fput('avoid whispering')
+  end
+
+  def help(character)
+    fput "whisper #{character} Supported commands are:"
+    fput "whisper #{character}   (help) - this list"
+    fput "whisper #{character}   (bal|balance) - view your current balance"
+    fput "whisper #{character}   (with|withdraw) [amount] [currency] - withdraw [amount] [currency] from your bot balance."
+    fput "whisper #{character} I accept coins via TIPs to hold for you."
+  end
+
+  def balance(character)
+    pretty_print = @balance[character].map { |currency, amount| "#{amount} #{currency}" }.join(', ')
+    fput "whisper #{character} Your balance is: #{pretty_print}."
+  end
+
+  def deposit(character, amount, currency)
+    amount = amount.to_i
+    currency = determine_currency(currency)
+
+    case bput('accept tip', 'But you have no tip offers outstanding', "You accept #{character}'s tip and slip it away", "But #{character} isn't here")
+    when 'But you have no tip offers outstanding', /But .* isn't here/i
+      echo("Unable to accept tip from #{character} for #{amount} #{currency}")
+      return
+    when /You accept .*'s tip and slip it away/i
+      # submit_bankbot_update("#{character}: deposit #{amount} #{currency}")
+      @balance[character][currency] += amount.to_i
+      balance(character)
+    end
+  end
+
+  def withdraw(character, amount, currency)
+    amount = amount.to_i
+    currency = determine_currency(currency)
+
+    echo("#{character}: withdraw #{amount} #{currency}")
+
+    if @balance[character][currency] < amount
+      fput "whisper #{character} You don't have that much money."
+      balance(character)
+      return
+    end
+
+    Flags.reset('tip-accepted')
+    Flags.reset('tip-expired')
+    Flags.reset('tip-declined')
+    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on')
+    when "I don't know who"
+      echo("Unable to find #{character} to give #{amount} #{currency}")
+      return
+    when 'you really should keep every bronze you can get your hands on'
+      echo '***ERROR*** UNABLE TO TIP, EXITING'
+      exit
+    end
+
+    pause 0.5 until Flags['tip-accepted'] || Flags['tip-expired'] || Flags['tip-declined']
+
+    return unless Flags['tip-accepted']
+
+    # submit_bankbot_update("#{character}: withdraw #{amount} #{currency}")
+    @balance[character][currency] -= amount
+    balance(character)
+  end
+
+  private
+
+  def determine_currency(input)
+    %w(Kronars Lirums Dokoras).find { |s| s.downcase.include?(input.downcase) }
+  end
+end
+
+arg_definitions = [
+  [
+    { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up bankbot' },
+    { name: 'announce', regex: /announce/i, optional: true, description: 'If arg is present, bankbot will announce its presence in LNet' },
+    { name: 'greet', regex: /greet/i, optional: true, description: 'If arg is present, bankbot will greet characters after validating (but only once)' }
+  ]
+]
+
+args = parse_args(arg_definitions)
+
+bankbot = Bankbot.new
+validator = CharacterValidator.new(args.announce, false, args.greet, 'Bankbot')
+
+@last_room_list = []
+loop do
+  line = script.gets?
+  pause 0.05 unless line
+
+  if DRRoom.pcs != @last_room_list
+    (DRRoom.pcs - @last_room_list).each { |name| validator.validate(name) }
+    @last_room_list = DRRoom.pcs
+  end
+
+  case line
+  when /^(.*) whispers, "(help)"$/i
+    character = Regexp.last_match(1)
+
+    next unless validator.valid?(character)
+    bankbot.help(character)
+  when /^(.*) offers you a tip of (\d+) (\w+)\.  Type ACCEPT TIP, to accept it or DECLINE TIP to refuse it\.$/
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(2)
+    currency = Regexp.last_match(3)
+
+    if validator.valid?(character)
+      bankbot.deposit(character, amount, currency)
+    else
+      fput('decline tip')
+    end
+  when /^(.*) whispers, "(with|withdraw) (\d+) (K.*|L.*|D.*)"$/i
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(3)
+    currency = Regexp.last_match(4)
+
+    next unless validator.valid?(character)
+    bankbot.withdraw(character, amount, currency)
+  when /^(.*) whispers, "(bal|balance)"$/i
+    character = Regexp.last_match(1)
+
+    next unless validator.valid?(character)
+    bankbot.balance(character)
+  when /^(.*) whispers, ".*"$/i
+    character = Regexp.last_match(1)
+
+    next unless validator.valid?(character)
+    fput "whisper #{character} I'm sorry, I did not understand that command"
+    bankbot.help(character)
+  when /^\[server\]: "DR:(.*) is tuned to the following channels.*"$/
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+  when /^\[server\]: "DR:(.*) is connected but not tuned to any channels.*"$/
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+  when /^\[Private\]-.*:(.*): "RequestSlackToken"/
+    character = Regexp.last_match(1)
+    validator.confirm(character)
+    validator.send_slack_token(character)
+  end
+end

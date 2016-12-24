@@ -11,21 +11,31 @@ class SellLoot
   include DRCT
 
   def initialize
-    EquipmentManager.instance.empty_hands
+    EquipmentManager.new.empty_hands
+
+    Flags.add('tip-accepted', '.* accepts your tip and slips it away with a smile')
+    Flags.add('tip-declined', '.* declines your tip offer')
+    Flags.add('tip-expired', 'Your tip offer to .* has expired')
 
     settings = get_settings
     town_data = get_data('town')
     @hometown = town_data[settings.hometown]
+    @bankbot_name = settings.bankbot_name
+    @bankbot_deposit_threshold = settings.bankbot_deposit_threshold
+    @bankbot_room_id = settings.bankbot_room_id
 
-    keep_amount, keep_type = parse(settings.sell_loot_money_on_hand.split(' '))
     sell_gems("#{settings.gem_pouch_adjective} pouch") if settings.sell_loot_pouch
 
     check_spare_pouch(settings.spare_gem_pouch_container, settings.gem_pouch_adjective) if settings.spare_gem_pouch_container
 
     sell_bundle if settings.sell_loot_bundle
 
-    withdrawals = convert_input(keep_amount, keep_type)
-    deposit_coins(withdrawals)
+    return if settings.sell_loot_skip_bank
+    exchange_coins
+
+    keep_copper = parse(settings.sell_loot_money_on_hand.split(' '))
+    deposit_coins(keep_copper)
+    check_bankbot(settings.hometown, keep_copper)
   end
 
   def parse(setting)
@@ -42,25 +52,55 @@ class SellLoot
     keep_amount = args.amount || setting[0] || 3
     keep_type = args.type || setting[1] || 'silver'
 
-    [keep_amount, keep_type]
+    convert_to_copper(keep_amount, keep_type)
   end
 
-  def convert_input(keep_amount, keep_type)
-    copper = convert_to_copper(keep_amount, keep_type)
-    minimize_coins(copper)
-  end
-
-  def deposit_coins(withdrawals)
+  def exchange_coins
     walk_to @hometown['exchange']['id']
     exchange_to = @hometown['currency']
     %w(dokoras kronars lirums)
       .reject { |currency| currency == exchange_to }
       .each { |currency| fput "exchange all #{currency} for #{exchange_to}" }
+  end
 
+  def deposit_coins(keep_copper)
     walk_to @hometown['deposit']['id']
     fput 'deposit all'
-    withdrawals.each { |amount| fput "withdraw #{amount}" }
+    minimize_coins(keep_copper).each { |amount| fput "withdraw #{amount}" }
     fput 'check balance'
+  end
+
+  def check_bankbot(hometown, keep_copper)
+    return unless @bankbot_name
+    return unless @bankbot_room_id
+    return unless @bankbot_deposit_threshold
+
+    copper_on_hand = wealth(hometown)
+    deposit_amount = copper_on_hand - @bankbot_deposit_threshold - keep_copper
+    return if deposit_amount <= 0
+
+    walk_to @bankbot_room_id
+    return unless DRRoom.pcs.include?(@bankbot_name)
+
+    Flags.reset('tip-accepted')
+    Flags.reset('tip-expired')
+    Flags.reset('tip-declined')
+    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding', 'already has a tip offer pending')
+    when "I don't know who"
+      echo '***Bankbot not found, skipping deposit***'
+      return
+    when 'You already have a tip offer outstanding'
+      echo '***You already have a tip offer outstanding, skipping deposit***'
+      return
+    when 'you really should keep every bronze you can get your hands on'
+      echo '***ERROR*** UNABLE TO TIP DUE TO LOW CIRCLE, EXITING'
+      return
+    when 'already has a tip offer pending'
+      echo '***Bankbot is busy, skipping deposit***'
+      return
+    end
+
+    pause 0.5 until Flags['tip-accepted'] || Flags['tip-expired'] || Flags['tip-declined']
   end
 
   def sell_bundle
@@ -69,7 +109,7 @@ class SellLoot
     walk_to @hometown['tannery']['id']
 
     return if 'Remove what' == bput('remove my bundle', 'You remove', 'You sling', 'Remove what')
-    bput('sell my bundle', 'ponders over the bundle', 'sorts through it carefully')
+    bput('sell my bundle', 'ponders over the bundle', 'sorts through it')
     bput('stow rope', 'You put')
   end
 
@@ -87,7 +127,7 @@ class SellLoot
   end
 
   def sell_gems(container)
-    case bput("open my #{container}", 'You open your', 'has been tied off', 'What were you referring to', 'That is already open')
+    case bput("open my #{container}", 'You open your', 'You open a', 'has been tied off', 'What were you referring to', 'That is already open')
     when 'has been tied off', 'What were you referring to'
       return
     end

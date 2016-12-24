@@ -9,13 +9,17 @@ class SetupProcess
   include DRCS
   include DRCT
 
-  def initialize(settings)
+  def initialize(settings, equipment_manager)
+    @equipment_manager = equipment_manager
     echo('New SetupProcess') if $debug_mode_ct
 
     @stance_override = settings.stance_override
     echo("  @stance_override: #{@stance_override}") if $debug_mode_ct
     @priority_defense = settings.priority_defense
     echo("  @priority_defense: #{@priority_defense}") if $debug_mode_ct
+    @cycle_armors = settings.cycle_armors
+    echo("  @cycle_armors: #{@cycle_armors}") if $debug_mode_ct
+    @last_cycle_time = Time.now - 125
   end
 
   def execute(game_state)
@@ -30,7 +34,7 @@ class SetupProcess
           break_summoned_weapon(game_state.weapon_name)
         end
       else
-        EquipmentManager.instance.stow_weapon(game_state.weapon_name)
+        @equipment_manager.stow_weapon(game_state.weapon_name)
       end
       game_state.next_clean_up_step
       return true
@@ -53,10 +57,33 @@ class SetupProcess
       check_weapon(game_state)
       check_stance(game_state)
     end
+
+    check_armor_swap(game_state)
     false
   end
 
   private
+
+  def check_armor_swap(game_state)
+    return if Time.now - @last_cycle_time < 120
+    return if game_state.loaded
+    armor_types = @cycle_armors.map { |skill, _| skill }
+    next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    return if next_armor_type == @last_worn_type
+
+    @last_cycle_time = Time.now
+
+    if @last_worn_type
+      @equipment_manager.desc_to_items(@cycle_armors[@last_worn_type]).each { |item| @equipment_manager.remove_item(item) }
+    else
+      all_swap_pieces = @cycle_armors.map { |_, pieces| pieces }.flatten
+      @equipment_manager.worn_items(all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
+    end
+
+    @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[next_armor_type]))
+
+    @last_worn_type = next_armor_type
+  end
 
   def determine_next_to_train(game_state, weapon_training, ending_ranged)
     return unless game_state.skill_done? || !weapon_training[game_state.weapon_skill] || ending_ranged
@@ -130,7 +157,7 @@ class SetupProcess
 
     # Clean up the previous weapon
     if !last_summoned
-      EquipmentManager.instance.stow_weapon(game_state.last_weapon_name)
+      @equipment_manager.stow_weapon(game_state.last_weapon_name)
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
@@ -143,7 +170,7 @@ class SetupProcess
     if next_summoned
       game_state.prepare_summoned_weapon(last_summoned)
     else
-      EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
   end
 end
@@ -154,7 +181,8 @@ class LootProcess
   include DRCS
   include DRCH
 
-  def initialize(settings)
+  def initialize(settings, equipment_manager)
+    @equipment_manager = equipment_manager
     echo('New LootProcess') if $debug_mode_ct
     skinning = settings.skinning
 
@@ -286,12 +314,12 @@ class LootProcess
       end
     return unless tried_loot
     pause 1
-    if left_hand != pair.first && !EquipmentManager.instance.is_listed_item?(left_hand)
+    if left_hand != pair.first && !@equipment_manager.is_listed_item?(left_hand)
       echo("out of room, failed to store #{left_hand}")
       game_state.unlootable(GameObj.left_hand.noun.downcase)
       dispose_trash(left_hand)
     end
-    if right_hand != pair.last && !EquipmentManager.instance.is_listed_item?(right_hand)
+    if right_hand != pair.last && !@equipment_manager.is_listed_item?(right_hand)
       echo("out of room, failed to store #{right_hand}")
       game_state.unlootable(GameObj.right_hand.noun.downcase)
       dispose_trash(right_hand)
@@ -315,23 +343,34 @@ class LootProcess
 
   def do_necro_ritual(mob_noun, ritual, game_state)
     return unless DRStats.necromancer?
+    return unless ritual
     return if game_state.construct?(mob_noun)
 
+    echo "Attempting necromancer ritual #{ritual} on #{mob_noun}" if $debug_mode_ct
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
-    case bput(perform_message, @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], 'roundtime', @rituals['construct'], @rituals['failures'])
+    result = bput(perform_message, @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], @rituals['construct'], @rituals['failures'])
+    echo result if $debug_mode_ct
+    case result
     when @rituals['preserve'], @rituals['dissect']
+      echo 'Detected preserve or dissect messaging' if $debug_mode_ct
       @last_ritual = ritual
     when @rituals['consume']
+      echo 'Detected consume messaging' if $debug_mode_ct
       @last_ritual = ritual
       game_state.prepare_consume = true if @necro_heal
     when @rituals['harvest']
+      echo 'Detected harvest messaging' if $debug_mode_ct
       @last_ritual = ritual
       waitrt?
-      fput 'drop material'
+      bput('drop material', 'you discard it')
     when @rituals['construct']
+      echo 'Detected an attempt to do ritual on a construct' if $debug_mode_ct
       game_state.construct(mob_noun)
+    when *@rituals['failures']
+      echo 'Failure detected' if $debug_mode_ct
     end
+    echo "Last ritual performed: #{@last_ritual}" if $debug_mode_ct
   end
 
   def dispose_body(game_state)
@@ -424,7 +463,7 @@ class LootProcess
       elsif summoned = game_state.summoned_info(game_state.weapon_skill)
         break_summoned_weapon(game_state.weapon_name)
       else
-        EquipmentManager.instance.stow_weapon(game_state.weapon_name)
+        @equipment_manager.stow_weapon(game_state.weapon_name)
       end
       if 'You get' == bput('get bundling rope', 'You get', 'What were you referring to', 'You need a free hand')
         fput('bundle')
@@ -435,20 +474,20 @@ class LootProcess
           bput('adjust bundle', 'You adjust')
         end
       else
-        dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(left_hand)
-        dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(right_hand)
+        dispose_trash(left_hand) if snap.first != left_hand && !@equipment_manager.is_listed_item?(left_hand)
+        dispose_trash(right_hand) if snap.last != right_hand && !@equipment_manager.is_listed_item?(right_hand)
       end
       game_state.need_bundle = false
       unless stored_moon && 'you grab' == bput('get moon', 'you grab', 'What were')
         if summoned
           game_state.prepare_summoned_weapon(false)
         else
-          EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+          @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
         end
       end
     end
-    dispose_trash(left_hand) if snap.first != left_hand && !EquipmentManager.instance.is_listed_item?(left_hand)
-    dispose_trash(right_hand) if snap.last != right_hand && !EquipmentManager.instance.is_listed_item?(right_hand)
+    dispose_trash(left_hand) if snap.first != left_hand && !@equipment_manager.is_listed_item?(left_hand)
+    dispose_trash(right_hand) if snap.last != right_hand && !@equipment_manager.is_listed_item?(right_hand)
   end
 end
 
@@ -507,7 +546,10 @@ class SpellProcess
   include DRCH
   include DRCT
 
-  def initialize(settings)
+  $weapon_buffs = ['Ignite', 'Rutilor\'s Edge', 'Resonance']
+
+  def initialize(settings, equipment_manager)
+    @equipment_manager = equipment_manager
     echo('New SpellProcess') if $debug_mode_ct
 
     @buff_spells = settings.buff_spells
@@ -550,6 +592,18 @@ class SpellProcess
 
     @buff_spell_mana_threshold = settings.buff_spell_mana_threshold
     echo("  @buff_spell_mana_threshold: #{@buff_spell_mana_threshold}") if $debug_mode_ct
+
+    @cambrinth = settings.cambrinth
+    echo("  @cambrinth: #{@cambrinth}") if $debug_mode_ct
+
+    @cambrinth_cap = settings.cambrinth_cap
+    echo("  @cambrinth_cap: #{@cambrinth_cap}") if $debug_mode_ct
+
+    @dedicated_camb_use = settings.dedicated_camb_use
+    echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
+
+    @stored_cambrinth = settings.stored_cambrinth
+    echo(" @stored_cambrinth: #{@stored_cambrinth}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
 
@@ -601,8 +655,7 @@ class SpellProcess
     check_consume(game_state)
     check_bless(game_state)
     check_ignite(game_state)
-    check_rue(game_state)
-    check_resonance(game_state)
+    check_rutilors_edge(game_state)
     check_health(game_state)
     check_buffs(game_state)
     check_training(game_state)
@@ -660,12 +713,13 @@ class SpellProcess
     Flags.reset('ct-need-bless')
 
     prepare?('Bless', 1)
-    cast("cast #{right_hand || left_hand}")
+    cast?("cast #{right_hand || left_hand}")
   end
 
   def check_ignite(game_state)
-    return if @last_seen_weapon_name_ignite == game_state.weapon_name
-    @last_seen_weapon_name_ignite = game_state.weapon_name
+    # Ignite must be released before it can be recast
+    # Rutilor's Edge and Resonance do not have this problem
+    return if @last_seen_weapon_buff_name == game_state.weapon_name
     return unless DRSpells.active_spells['Ignite']
 
     # Release the spell on the character
@@ -674,24 +728,14 @@ class SpellProcess
     pause 1
   end
 
-  def check_rue(game_state)
-    return if @last_seen_weapon_name_rue == game_state.weapon_name
-    @last_seen_weapon_name_rue = game_state.weapon_name
+  def check_rutilors_edge(game_state)
+    # Rutilor's Edge does not need to be released before it can be recast
+    # But releasing allows the buff logic to detect it should be recast
+    return if @last_seen_weapon_buff_name == game_state.weapon_name
     return unless DRSpells.active_spells['Rutilor\'s Edge']
 
     # Release the spell on the character
     bput('release rue', 'You sense the Rutilor\'s Edge spell fade away', 'Release what')
-    # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
-    pause 1
-  end
-
-  def check_resonance(game_state)
-    return if @last_seen_weapon_name_resonance == game_state.weapon_name
-    @last_seen_weapon_name_resonance = game_state.weapon_name
-    return unless DRSpells.active_spells['Resonance']
-
-    # Release the spell on the character
-    bput('release resonance', 'You sense the Resonance spell fade away', 'Release what')
     # Wait for the spell on the weapon to be released (it can take a second or two to pulse)
     pause 1
   end
@@ -707,24 +751,39 @@ class SpellProcess
     cast_spell(game_state) if ready_to_cast?(game_state)
   end
 
+  def check_invoke
+    return unless @should_invoke
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+    @should_invoke = nil
+    invoke(@cambrinth, @dedicated_camb_use)
+    stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+  end
+
   def cast_spell(game_state)
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_ignite
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_rue
-    @custom_cast = "cast my #{game_state.weapon_name}" if game_state.casting_resonance
+    check_invoke
+    if game_state.casting_weapon_buff
+      @custom_cast = "cast my #{game_state.weapon_name}"
+      @last_seen_weapon_buff_name = game_state.weapon_name
+    end
+
     if game_state.casting_consume
       if @necromancer_healing.key?('Consume Flesh') && !@necromancer_healing.key?('Devour')
         @custom_cast = "cast #{game_state.wounds[game_state.wounds.keys.max].first}"
       end
     end
-    cast(@custom_cast, @before, @after)
+
+    hide? if XMLData.prepared_spell == 'Vivisection' && game_state.use_stealth_attack?
+
+    cast?(@custom_cast, @symbiosis, @before, @after)
     @custom_cast = nil
+    @symbiosis = nil
+    @before = nil
+    @after = nil
 
     game_state.casting = false
     game_state.cast_timer = nil
 
-    game_state.casting_ignite = false
-    game_state.casting_rue = false
-    game_state.casting_resonance = false
+    game_state.casting_weapon_buff = false
     game_state.casting_consume = false if game_state.casting_consume
 
     if game_state.casting_moonblade
@@ -749,9 +808,10 @@ class SpellProcess
   end
 
   def check_buff_conditions?(name, game_state)
-    return false if name == 'Ignite' && game_state.aimed_skill?
-    return false if name == 'Rutilor\'s Edge' && game_state.aimed_skill?
-    return false if name == 'Resonance' && game_state.aimed_skill?
+    return false if $weapon_buffs.include?(name) && (game_state.aimed_skill? || game_state.brawling?)
+    # Resonance does not show up in Active Spells, so we need to track the last weapon on which it was cast to avoid recasting it continuously
+    # Ignite and Rutilor's Edge do not have this problem
+    return false if name == 'Resonance' && @last_seen_weapon_buff_name == game_state.weapon_name
 
     true
   end
@@ -797,9 +857,7 @@ class SpellProcess
       end
     end
     echo("found buff missing: #{name}") if $debug_mode_ct && name
-    game_state.casting_ignite = true if name == 'Ignite'
-    game_state.casting_rue = true if name == 'Rutilor\'s Edge'
-    game_state.casting_resonance = true if name == 'Resonance'
+    game_state.casting_weapon_buff = $weapon_buffs.include?(name)
     if data['ritual']
       cast_ritual(data, game_state)
     else
@@ -811,6 +869,14 @@ class SpellProcess
     return if game_state.casting
     return unless DRStats.empath?
     return if health > 95 && @wounds.empty?
+
+    if DRSpells.active_spells['Regeneration']
+      if @empath_spells['VH'] && health <= 95
+        data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
+        prepare_spell(data, game_state)
+      end
+      return
+    end
 
     if Time.now - @perc_health_timer > 30 && @empath_spells['FOC'] || @empath_spells['HEAL']
       @perc_health_timer = Time.now
@@ -878,15 +944,16 @@ class SpellProcess
     if summoned = game_state.summoned_info(game_state.weapon_skill)
       break_summoned_weapon(game_state.weapon_name)
     else
-      EquipmentManager.instance.stow_weapon(game_state.weapon_name)
+      @equipment_manager.stow_weapon(game_state.weapon_name)
     end
 
+    check_invoke
     ritual(data)
 
     if summoned
       game_state.prepare_summoned_weapon(false)
     else
-      EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
   end
 
@@ -947,7 +1014,9 @@ class SpellProcess
     prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
+    @should_invoke = data['cambrinth']
     @custom_cast = data['cast']
+    @symbiosis = data['symbiosis']
     @after = data['after']
     @command = data['command']
     @reset_expire = data['expire'] ? data['abbrev'] : nil
@@ -1034,7 +1103,8 @@ class TrainerProcess
   include DRC
   include DRCT
 
-  def initialize(settings)
+  def initialize(settings, equipment_manager)
+    @equipment_manager = equipment_manager
     echo('New TrainerProcess') if $debug_mode_ct
     @training_abilities = settings.training_abilities
     echo("  @training_abilities: #{@training_abilities}") if $debug_mode_ct
@@ -1044,7 +1114,9 @@ class TrainerProcess
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
-                   'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship' }
+                   'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
+                   'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
+                   'Barb Research Debilitation' => 'Debilitation' }
 
     @skill_map['Hunt'] = %w(Perception Scouting) if DRStats.ranger?
     @favor_god = settings.favor_god
@@ -1071,6 +1143,9 @@ class TrainerProcess
 
     @flint_lighter = settings.flint_lighter
     echo("  @flint_lighter: #{@flint_lighter}") if $debug_mode_ct
+
+    @kneel_khri = settings.kneel_khri
+    echo("  @kneel_khri: #{@kneel_khri}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1100,7 +1175,15 @@ class TrainerProcess
     when 'Scream'
       bput('Scream conc', 'Inhaling deeply', 'There is nothing', 'You open your mouth, then close it suddenly, looking somewhat like a fish') unless game_state.npcs.empty?
     when 'Khri Prowess'
+      if @kneel_khri
+        fput('retreat')
+        fput('kneel')
+      end
       bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing') unless game_state.npcs.empty?
+      if @kneel_khri
+        waitrt?
+        fput('stand')
+      end
     when 'Stealth'
       fput('stalk') if hide? && !@dont_stalk && !game_state.npcs.empty?
       bput('unhide', 'You come out of hiding', 'You slip out of hiding', 'But you are not') if game_state.npcs.empty?
@@ -1114,6 +1197,12 @@ class TrainerProcess
       meraud_commune(game_state)
     when 'Recall'
       bput("recall #{game_state.npcs.first}", 'Roundtime', 'You are far too occupied') unless game_state.npcs.empty?
+    when 'Barb Research Augmentation'
+      bput('meditate research monkey', 'You clear ')
+    when 'Barb Research Warding'
+      bput('meditate research turtle', 'You clear ')
+    when 'Barb Research Debilitation'
+      bput('meditate research earthquake', 'You clear ')
     end
     waitrt?
     false
@@ -1126,12 +1215,16 @@ class TrainerProcess
       reset_ability(game_state, 'Meraud')
       return
     end
+    if /meraud/i =~ bput('commune sense', 'roundtime', 'A spark of Meraud')
+      reset_ability(game_state, 'Meraud', 60)
+      return
+    end
     waitrt?
-    EquipmentManager.instance.stow_weapon(game_state.weapon_name)
+    @equipment_manager.stow_weapon(game_state.weapon_name)
     fput "get #{@water_holder}"
     if /that/i =~ bput("sprinkle #{@water_holder} on #{checkname}", 'You sprinkle', 'Sprinkle that')
       fput "stow #{@water_holder}"
-      EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
       @training_abilities.delete('Meraud')
       return
     end
@@ -1139,7 +1232,7 @@ class TrainerProcess
     fput "get #{@flint_lighter}", 'You get a', 'You are already'
     if 'referring to' == bput('get incense', 'You get', 'You are already', 'referring to')
       fput "stow #{@flint_lighter}", 'You put your', 'Stow what'
-      EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
       @training_abilities.delete('Meraud')
       return
     end
@@ -1151,7 +1244,7 @@ class TrainerProcess
     bput("put incense in my #{@theurgy_supply_container}", 'You put', 'What were you referring to')
     fput "stow #{@flint_lighter}", 'You put your', 'Stow what'
     pause 1
-    EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     bput('commune meraud', 'Nothing happens.', 'you have attempted a commune too recently', 'You close your eyes and concentrate, letting your mind still and feeling your breathing grow shallow', 'the ground is already consecrated')
     pause
     waitrt?
@@ -1162,17 +1255,21 @@ class TrainerProcess
     return false unless game_state.can_ambush_stun?
 
     dead_count = DRRoom.dead_npcs.size
-    EquipmentManager.instance.stow_weapon(game_state.weapon_name)
-    EquipmentManager.instance.wield_weapon(@stun_weapon, @stun_weapon_skill)
+    unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
+      @equipment_manager.stow_weapon(game_state.weapon_name)
+      @equipment_manager.wield_weapon(@stun_weapon, @stun_weapon_skill)
+    end
 
     if hide?
-      bput('ambush stun', 'You must be hidden or invisible to ambush', 'You aren\'t close enough to attack', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'Roundtime')
+      bput('ambush stun', 'Wouldn\'t it be better if you used a melee weapon?', 'You must be hidden or invisible to ambush', 'You aren\'t close enough to attack', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'Roundtime')
       pause
       waitrt?
     end
 
-    EquipmentManager.instance.stow_weapon(@stun_weapon)
-    EquipmentManager.instance.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
+      @equipment_manager.stow_weapon(@stun_weapon)
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    end
     DRRoom.dead_npcs.size > dead_count
   end
 
@@ -1202,10 +1299,10 @@ class TrainerProcess
     fput('eng')
   end
 
-  def reset_ability(game_state, ability_name)
+  def reset_ability(game_state, ability_name, offset = 0)
     ability_info = @training_abilities.find { |name, _| name == ability_name }.last
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
-    game_state.cooldown_timers[ability_name] = Time.now - cooldown
+    game_state.cooldown_timers[ability_name] = Time.now - [(cooldown - offset), 0].min
   end
 
   def select_ability(game_state)
@@ -1353,7 +1450,7 @@ class AttackProcess
     waitrt?
 
     if game_state.weapon_name == 'blades'
-      until /(Stow what|You put your)/ =~ bput('stow blade', 'Stow what', 'You pick up .*blade', 'You put your blades')
+      until /(Stow what|You put your)/ =~ bput('stow blade', 'Stow what', 'You pick up .*blade', 'You put your')
       end
     end
 
@@ -1369,8 +1466,8 @@ class AttackProcess
   end
 
   def shoot_aimed(command, game_state)
-    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', 'you fire', 'you poach', 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you poach if you are not hidden', 'your moving to fire went unobserved', 'notices your attempt to remain hidden', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
-    when 'How can you poach if you are not hidden', 'notices your attempt to remain hidden'
+    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', 'you fire', 'you poach', 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you poach', 'your moving to fire went unobserved', 'notices your attempt to remain hidden', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
+    when 'How can you poach', 'notices your attempt to remain hidden'
       shoot_aimed('shoot', game_state)
     when 'you fire', 'you poach', 'your moving to fire went unobserved'
       game_state.action_taken
@@ -1510,11 +1607,10 @@ class CombatTrainer
 
   def initialize
     settings = set_args
-
+    @equipment_manager = EquipmentManager.new(settings)
     setup(settings)
     settings.storage_containers.each { |container| fput("open my #{container}") }
-    EquipmentManager.instance.refresh(settings)
-    EquipmentManager.instance.wear_equipment_set?('standard')
+    @equipment_manager.wear_equipment_set?('standard')
   end
 
   def set_dance(message, settings)
@@ -1539,25 +1635,25 @@ class CombatTrainer
     @stop = false
     @running = true
     $debug_mode_ct = UserVars.combat_trainer_debug || settings.debug_mode
-    @game_state = GameState.new(settings)
+    @game_state = GameState.new(settings, @equipment_manager)
     @safety_process = SafetyProcess.new
     @combat_processes = make_processes(settings)
   end
 
   def make_processes(settings)
     [
-      SetupProcess.new(settings),
-      SpellProcess.new(settings),
+      SetupProcess.new(settings, @equipment_manager),
+      SpellProcess.new(settings, @equipment_manager),
       AbilityProcess.new(settings),
-      LootProcess.new(settings),
+      LootProcess.new(settings, @equipment_manager),
       ManipulateProcess.new(settings),
-      TrainerProcess.new(settings),
+      TrainerProcess.new(settings, @equipment_manager),
       AttackProcess.new(settings)
     ]
   end
 
   def start_combat
-    EquipmentManager.instance.empty_hands
+    @equipment_manager.empty_hands
     loop do
       @combat_processes.each do |process|
         @safety_process.execute(@game_state)
@@ -1587,9 +1683,10 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_ignite, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :casting_rue, :casting_resonance
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
 
-  def initialize(settings)
+  def initialize(settings, equipment_manager)
+    @equipment_manager = equipment_manager
     echo('New GameState') if $debug_mode_ct
     # public
     @mob_died = false
@@ -1604,11 +1701,10 @@ class GameState
     @selected_maneuver = ''
     @cast_timer = nil
     @casting_moonblade = false
-    @casting_ignite = false
-    @casting_rue = false
-    @use_charged_maneuvers = false
+    @casting_weapon_buff = false
     @casting_consume = false
     @prepare_consume = false
+    @use_charged_maneuvers = false
     @wounds = {}
 
     # private
@@ -1952,18 +2048,19 @@ class GameState
   def check_charging?
     return false if @charges.nil?
 
-    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
     if @charges.empty?
       echo('check_charging?: done') if $debug_mode_ct
-
       cambrinth_charges(nil)
-      invoke(@cambrinth, @dedicated_camb_use)
-    else
-      next_charge = @charges.pop
-      echo("check_charging?: #{next_charge}") if $debug_mode_ct
-
-      @charges = [] unless charge?(@cambrinth, next_charge)
+      return false
     end
+
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+
+    next_charge = @charges.pop
+    echo("check_charging?: #{next_charge}") if $debug_mode_ct
+
+    @charges = [] unless charge?(@cambrinth, next_charge)
+
     stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 
     true
@@ -2011,7 +2108,7 @@ class GameState
 
   def melee_attack_verb
     if @use_weak_attacks
-      brawling? ? 'punch' : 'jab'
+      brawling? ? 'gouge' : 'jab'
     elsif @use_barb_combos && !offhand? && !brawling?
       update_analyze_array if @analyze_combo_array.empty?
       @analyze_combo_array.shift
@@ -2021,10 +2118,10 @@ class GameState
   end
 
   def thrown_attack_verb
-    if @use_weak_attacks || lodging_weapon?
-      'lob'
-    elsif bound_weapon?
+    if bound_weapon? && !@use_weak_attacks
       'hurl'
+    elsif @use_weak_attacks || lodging_weapon?
+      'lob'
     else
       'throw'
     end
@@ -2041,12 +2138,12 @@ class GameState
   private
 
   def lodging_weapon?
-    item = EquipmentManager.instance.item_by_desc(weapon_name)
+    item = @equipment_manager.item_by_desc(weapon_name)
     item.nil? || item.lodges
   end
 
   def bound_weapon?
-    item = EquipmentManager.instance.item_by_desc(weapon_name)
+    item = @equipment_manager.item_by_desc(weapon_name)
     item && item.bound
   end
 

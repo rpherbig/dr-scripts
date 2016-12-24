@@ -3,48 +3,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#lichbot
 =end
 
-custom_require.call(%w(common common-arcana common-items drinfomon events))
-
-class CharacterValidator
-  def initialize(announce, sleep, greet)
-    waitrt?
-    fput('sleep') if sleep
-
-    @lnet = (Script.running + Script.hidden).find { |val| val.name == 'lnet' }
-    @validated_characters = []
-    @greet = greet
-
-    @lnet.unique_buffer.push("chat Lichbot is up and running in room #{Room.current.id}! Whisper me 'help' for more details.") if announce
-  end
-
-  def send_slack_token(character)
-    message = "slack_token: #{UserVars.slack_token || 'Not Found'}"
-    echo "Attempting to DM #{character} with message: #{message}"
-    @lnet.unique_buffer.push("chat to #{character} #{message}")
-  end
-
-  def validate(character)
-    return if valid?(character)
-
-    echo "Attempting to validate: #{character}"
-    @lnet.unique_buffer.push("who #{character}")
-  end
-
-  def confirm(character)
-    return if valid?(character)
-
-    echo "Successfully validated: #{character}"
-    @validated_characters << character
-
-    return unless @greet
-
-    put "whisper #{character} Hi! I'm your friendly neighborhood lichbot. Whisper me 'help' for more details. Don't worry, I've memorized your name so you won't see this message again."
-  end
-
-  def valid?(character)
-    @validated_characters.include?(character)
-  end
-end
+custom_require.call(%w(common common-arcana common-items common-validation drinfomon events))
 
 class Lichbot
   include DRC
@@ -69,7 +28,13 @@ class Lichbot
   def accept(character)
     @last_action = Time.now
     waitrt?
-    bput('accept', 'You accept')
+    case bput('accept', 'You accept', 'would push you over your item limit')
+    when 'would push you over your item limit'
+      fput "whisper #{character} ***ERROR*** I am at my inventory limit and cannot accept that."
+      fput 'decline'
+      return
+    end
+
     stow_hands
     if right_hand || left_hand
       fput("drop my #{right_hand}") if right_hand
@@ -112,17 +77,31 @@ class Lichbot
     Flags.reset('give-accepted')
     Flags.reset('give-expired')
     Flags.reset('give-declined')
-    case bput("give #{item} to #{character}", 'You offer', 'What is it')
-    when 'What is it'
-      fput "whisper #{character} Sorry, I failed to give you [#{item}]"
-      stow_hands
-      return
-    end
-
+    return unless give_item?(character, item, false)
     pause 0.5 until Flags['give-accepted'] || Flags['give-expired'] || Flags['give-declined']
 
     stow_hands
     refresh_inventory if Flags['give-accepted']
+  end
+
+  def give_item?(character, item, repeat = false)
+    if repeat
+      fput('swap') unless right_hand
+      command = "give #{character}"
+    else
+      command = "give my #{item} to #{character}"
+    end
+
+    case bput(command, 'You offer', 'What is it', "You don't need to specify the object")
+    when 'What is it'
+      fput "whisper #{character} Sorry, I failed to give you [#{item}]"
+      stow_hands
+      return false
+    when "You don't need to specify the object"
+      return give_item?(character, item, true)
+    end
+
+    true
   end
 
   def inventory(character)
@@ -142,7 +121,7 @@ class Lichbot
       fput "whisper #{character}   (buffs|spells) - view the buffs I can cast"
       fput "whisper #{character}   (buff|cast) [abbreviation] - receive [abbreviation] buff from me"
     end
-    fput "whisper #{character} I will also accept and stow any item you trade me"
+    fput "whisper #{character} I will also accept and stow any item you trade me."
   end
 
   def ping
@@ -166,13 +145,13 @@ class Lichbot
       waitrt?
     end
 
-    if should_train?('Augmentation') || should_train?('Arcana')
-      buff_data = @settings
-                  .lichbot_buffs
-                  .sort_by { |spell| DRSpells.active_spells[spell['name']] || 0 }
-                  .first
-      buff(buff_data, @settings) if buff_data
-    end
+    return unless should_train?('Augmentation') || should_train?('Arcana')
+
+    buff_data = @settings
+                .lichbot_buffs
+                .sort_by { |spell| DRSpells.active_spells[spell['name']] || 0 }
+                .first
+    buff(buff_data, @settings) if buff_data
   end
 
   private
@@ -185,11 +164,10 @@ class Lichbot
     if @settings.lichbot_compost
       prepare?('compost', 1)
       pause 1
-      cast
+      cast?
     end
 
     return if DRRoom.room_objs.count.zero?
-    fput('say I\'ve asked the janitor to drop by, please check your valuables')
     fix_standing
     fput('dump junk')
   end
@@ -216,12 +194,13 @@ class Lichbot
 
   def refresh_inventory
     waitrt?
-    fput('inv list')
-    pause
+    bput('inv list', 'Roundtime')
 
-    log = reget(200)
+    log = reget(400)
     start_index = log.rindex { |x| x =~ /You have/i } + 1
     end_index = log.rindex { |x| x =~ /Roundtime/i } - 1
+
+    return unless start_index && end_index
 
     @inventory =
       log[start_index..end_index]
@@ -242,7 +221,7 @@ arg_definitions = [
 args = parse_args(arg_definitions)
 
 lichbot = Lichbot.new
-validator = CharacterValidator.new(args.announce, args.sleep, args.greet)
+validator = CharacterValidator.new(args.announce, args.sleep, args.greet, 'Lichbot')
 
 @last_room_list = []
 loop do
@@ -258,8 +237,11 @@ loop do
   when /^(.*) offers you (.*).  Enter ACCEPT to accept the offer or DECLINE to decline it.  The offer will expire in 30 seconds.$/
     character = Regexp.last_match(1)
 
-    next unless validator.valid?(character)
-    lichbot.accept(character)
+    if validator.valid?(character)
+      lichbot.accept(character)
+    else
+      fput('decline')
+    end
   when /^(.*) whispers, "(inv|inventory)"$/i
     character = Regexp.last_match(1)
 

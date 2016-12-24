@@ -20,15 +20,15 @@ class LockPicker
       return
     end
 
-    EquipmentManager.instance.refresh
+    @equipment_manager = EquipmentManager.new
 
-    EquipmentManager.instance.empty_hands
+    @equipment_manager.empty_hands
 
-    removed_items = EquipmentManager.instance.remove_gear_by(&:hinders_lockpicking)
+    removed_items = @equipment_manager.remove_gear_by(&:hinders_lockpicking)
 
     if left_hand || right_hand
       echo '***ITEMS ARE STILL IN HANDS, EXITING***'
-      EquipmentManager.instance.wear_items(removed_items)
+      @equipment_manager.wear_items(removed_items)
       return
     end
 
@@ -44,10 +44,11 @@ class LockPicker
         break
       end
       attempt_open(box)
+      break if @make_pets && @pet_count >= @pet_goal
     end
 
     fix_standing
-    EquipmentManager.instance.wear_items(removed_items)
+    @equipment_manager.wear_items(removed_items)
 
     if lockpick_buffs['khri']
       lockpick_buffs['khri'].each { |name| fput("khri stop #{name}") }
@@ -62,7 +63,7 @@ class LockPicker
     boxes = get_boxes(source)
     return if boxes.empty?
 
-    @settings.harvest_traps = false
+    @harvest_traps = false
 
     boxes.each do |box|
       if DRSkill.getxp('Locksmithing') >= 30
@@ -93,21 +94,33 @@ class LockPicker
   end
 
   def stop_picking?
-    @settings.stop_pick_on_mindlock && DRSkill.getxp('Locksmithing') >= 30
+    @stop_pick_on_mindlock && DRSkill.getxp('Locksmithing') >= 30
   end
 
   def setup
-    arg_definitions = [[]]
+    arg_definitions = [
+      [
+        { name: 'pets', regex: /pets/, description: 'Disarm boxes and place them in the pet box container' },
+        { name: 'count', regex: /\d+/, description: 'How many pet boxes to make' }
+      ],
+      []
+    ]
 
-    args = parse_args(arg_definitions, true)
-
-    @settings = get_settings(args.flex)
+    args = parse_args(arg_definitions)
 
     @lockpick_costs = {
       'ordinary' => 125,
       'stout' => 250,
       'slim' => 500
     }
+
+    @make_pets = args.pets
+    @pet_goal = args.count.to_i
+    @pet_count = 0
+
+    @settings = get_settings(args.flex)
+    @harvest_traps = !@make_pets && @settings.harvest_traps
+    @stop_pick_on_mindlock = !@make_pets && @settings.stop_pick_on_mindlock
     @loot_nouns = @settings.lootables
     echo "Loot nouns: #{@loot_nouns}" if UserVars.lockpick_debug
 
@@ -156,15 +169,15 @@ class LockPicker
 
   def refill_ring
     return unless @settings.use_lockpick_ring
-
+    lockpick_count = count_lockpick_container(@settings.lockpick_container)
+    return unless lockpick_count
     cost = @lockpick_costs[@settings.lockpick_type]
     if cost.nil?
       echo "***UNKNOWN LOCKPICK TYPE: #{@settings.lockpick_type}, UNABLE TO REFILL YOUR LOCKPICK RING***"
       return
     end
-
-    ensure_copper_on_hand(cost * 5, @settings.hometown)
-    refill_lockpick_container(@settings.lockpick_type, @settings.hometown, @settings.lockpick_container)
+    ensure_copper_on_hand(cost * lockpick_count, @settings.hometown)
+    refill_lockpick_container(@settings.lockpick_type, @settings.hometown, @settings.lockpick_container, lockpick_count)
   end
 
   def attempt_open(box)
@@ -174,6 +187,12 @@ class LockPicker
 
     unless disarm?(box)
       bput("put my #{box} in my #{@settings.picking_box_storage}", 'You put your .* in your ') if right_hand
+      return
+    end
+
+    if @make_pets
+      bput("put my #{box} in my #{@settings.picking_pet_box_source}", 'You put your .* in your ')
+      @pet_count += 1
       return
     end
 
@@ -245,7 +264,7 @@ class LockPicker
   end
 
   def attempt_pick(box)
-    get_lockpick unless @settings.use_lockpick_ring
+    find_lockpick unless @settings.use_lockpick_ring
     pause 0.5 while pick(box)
   end
 
@@ -254,7 +273,7 @@ class LockPicker
     check_danger
     case bput("pick my #{box} ident", @pick_careful, @pick_quick, @pick_blind, @pick_retry, /Find a more appropriate tool and try again/, /It's not even locked, why bother/)
     when /Find a more appropriate tool and try again/
-      get_lockpick
+      find_lockpick
       pick(box)
     when /It's not even locked, why bother/
       return false
@@ -279,7 +298,7 @@ class LockPicker
       waitrt?
       return true
     when /Find a more appropriate tool and try again/
-      get_lockpick
+      find_lockpick
       return pick_speed(box, speed)
     else
       pause
@@ -287,7 +306,7 @@ class LockPicker
     end
   end
 
-  def get_lockpick
+  def find_lockpick
     return if left_hand
     waitrt?
 
@@ -322,7 +341,10 @@ class LockPicker
   end
 
   def check_danger
+    waitrt?
     pause 0.5 while stunned?
+    echo " bleeding?: #{bleeding?}" if UserVars.lockpick_debug
+    echo " checkpoison: #{checkpoison}" if UserVars.lockpick_debug
     return unless bleeding? || checkpoison
 
     snapshot = Room.current.id
@@ -353,7 +375,7 @@ class LockPicker
 
     result = true
 
-    analyze(box) if @settings.harvest_traps
+    analyze(box) if @harvest_traps
 
     result = disarm?(box) if Flags['disarm-more']
 

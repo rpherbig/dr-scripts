@@ -22,6 +22,7 @@ class SellLoot
     @hometown = town_data[settings.hometown]
     @bankbot_name = settings.bankbot_name
     @bankbot_deposit_threshold = settings.bankbot_deposit_threshold
+    @bankbot_room_id = settings.bankbot_room_id
 
     sell_gems("#{settings.gem_pouch_adjective} pouch") if settings.sell_loot_pouch
 
@@ -30,11 +31,11 @@ class SellLoot
     sell_bundle if settings.sell_loot_bundle
 
     return if settings.sell_loot_skip_bank
-    keep_amount, keep_type = parse(settings.sell_loot_money_on_hand.split(' '))
-    withdrawals = convert_input(keep_amount, keep_type)
-    deposit_coins
-    check_bankbot(settings.hometown)
-    withdraw(withdrawals)
+    exchange_coins
+
+    keep_copper = parse(settings.sell_loot_money_on_hand.split(' '))
+    deposit_coins(keep_copper)
+    check_bankbot(settings.hometown, keep_copper)
   end
 
   def parse(setting)
@@ -51,43 +52,53 @@ class SellLoot
     keep_amount = args.amount || setting[0] || 3
     keep_type = args.type || setting[1] || 'silver'
 
-    [keep_amount, keep_type]
+    convert_to_copper(keep_amount, keep_type)
   end
 
-  def convert_input(keep_amount, keep_type)
-    copper = convert_to_copper(keep_amount, keep_type)
-    minimize_coins(copper)
-  end
-
-  def deposit_coins
+  def exchange_coins
     walk_to @hometown['exchange']['id']
     exchange_to = @hometown['currency']
     %w(dokoras kronars lirums)
       .reject { |currency| currency == exchange_to }
       .each { |currency| fput "exchange all #{currency} for #{exchange_to}" }
-
-    walk_to @hometown['deposit']['id']
-    fput 'deposit all'
   end
 
-  def withdraw(withdrawals)
-    withdrawals.each { |amount| fput "withdraw #{amount}" }
+  def deposit_coins(keep_copper)
+    walk_to @hometown['deposit']['id']
+    fput 'deposit all'
+    minimize_coins(keep_copper).each { |amount| fput "withdraw #{amount}" }
     fput 'check balance'
   end
 
-  def check_bankbot(hometown)
+  def check_bankbot(hometown, keep_copper)
     return unless @bankbot_name
+    return unless @bankbot_room_id
     return unless @bankbot_deposit_threshold
-    return unless DRRoom.pcs.include?(@bankbot_name)
+
     copper_on_hand = wealth(hometown)
-    return if copper_on_hand <= @bankbot_deposit_threshold
+    deposit_amount = copper_on_hand - @bankbot_deposit_threshold - keep_copper
+    return if deposit_amount <= 0
+
+    walk_to @bankbot_room_id
+    return unless DRRoom.pcs.include?(@bankbot_name)
 
     Flags.reset('tip-accepted')
     Flags.reset('tip-expired')
     Flags.reset('tip-declined')
-
-    deposit_amount = copper_on_hand - @bankbot_deposit_threshold
-    bput("tip #{@bankbot_name} #{deposit_amount} #{@hometown['currency']}", 'You offer')
+    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding', 'already has a tip offer pending')
+    when "I don't know who"
+      echo '***Bankbot not found, skipping deposit***'
+      return
+    when 'You already have a tip offer outstanding'
+      echo '***You already have a tip offer outstanding, skipping deposit***'
+      return
+    when 'you really should keep every bronze you can get your hands on'
+      echo '***ERROR*** UNABLE TO TIP DUE TO LOW CIRCLE, EXITING'
+      return
+    when 'already has a tip offer pending'
+      echo '***Bankbot is busy, skipping deposit***'
+      return
+    end
 
     pause 0.5 until Flags['tip-accepted'] || Flags['tip-expired'] || Flags['tip-declined']
   end

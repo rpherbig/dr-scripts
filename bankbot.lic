@@ -5,16 +5,20 @@
 
 custom_require.call(%w(common common-validation drinfomon events))
 
-# TODO: Write to file
-
 class Bankbot
   include DRC
+
+  $CURRENCIES = %w(Kronars Lirums Dokoras)
 
   def initialize
     Flags.add('tip-accepted', '.* accepts your tip and slips it away with a smile')
     Flags.add('tip-declined', '.* declines your tip offer')
     Flags.add('tip-expired', 'Your tip offer to .* has expired')
-    @balance = Hash.new { |hash, key| hash[key] = Hash.new { |h, k| h[k] = 0 } }
+    # This provides a default balance of 0 for all currencies
+    @ledger = Hash.new { |hash, key| hash[key] = Hash.new { |h, k| h[k] = 0 } }
+    # Convert symbols to strings
+    load_bankbot_ledger.each { |k, v| @ledger[k.to_s] = v }
+    echo("Initialized ledger: #{@ledger}")
 
     fput('avoid !all')
     fput('avoid whispering')
@@ -28,63 +32,89 @@ class Bankbot
     fput "whisper #{character} I accept coins via TIPs to hold for you."
   end
 
-  def balance(character)
-    pretty_print = @balance[character].map { |currency, amount| "#{amount} #{currency}" }.join(', ')
+  def report_balance(character)
+    pretty_print = $CURRENCIES.map { |currency| "#{@ledger[character][currency]} #{currency}" }.join(', ')
     fput "whisper #{character} Your balance is: #{pretty_print}."
   end
 
-  def deposit(character, amount, currency)
+  def deposit(character, amount, input_currency)
     amount = amount.to_i
-    currency = determine_currency(currency)
+    currency = determine_currency(input_currency)
+    unless currency
+      log(character, 'deposit', amount, input_currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{input_currency}'."
+      return
+    end
 
     case bput('accept tip', 'But you have no tip offers outstanding', "You accept #{character}'s tip and slip it away", "But #{character} isn't here")
     when 'But you have no tip offers outstanding', /But .* isn't here/i
-      echo("Unable to accept tip from #{character} for #{amount} #{currency}")
+      log(character, 'deposit', amount, currency, 'character not found')
       return
     when /You accept .*'s tip and slip it away/i
-      # submit_bankbot_update("#{character}: deposit #{amount} #{currency}")
-      @balance[character][currency] += amount.to_i
-      balance(character)
+      @ledger[character][currency] += amount.to_i
+      log(character, 'deposit', amount, currency, 'succeeded')
+      report_balance(character)
     end
   end
 
-  def withdraw(character, amount, currency)
+  def withdraw(character, amount, input_currency)
     amount = amount.to_i
-    currency = determine_currency(currency)
+    currency = determine_currency(input_currency)
+    unless currency
+      log(character, 'withdrawal', amount, input_currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{input_currency}'."
+      return
+    end
 
-    echo("#{character}: withdraw #{amount} #{currency}")
-
-    if @balance[character][currency] < amount
+    if @ledger[character][currency] < amount
+      log(character, 'withdrawal', amount, currency, 'insufficient funds')
       fput "whisper #{character} You don't have that much money."
-      balance(character)
+      report_balance(character)
       return
     end
 
     Flags.reset('tip-accepted')
     Flags.reset('tip-expired')
     Flags.reset('tip-declined')
-    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on')
+    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding')
     when "I don't know who"
-      echo("Unable to find #{character} to give #{amount} #{currency}")
+      log(character, 'withdrawal', amount, currency, 'character not found')
+      return
+    when 'You already have a tip offer outstanding'
+      fput "whisper #{character} Sorry, someone else is in the middle of a withdrawal. Please try again in a moment."
+      log(character, 'withdrawal', amount, currency, 'withdrawal already pending')
       return
     when 'you really should keep every bronze you can get your hands on'
-      echo '***ERROR*** UNABLE TO TIP, EXITING'
+      echo '***ERROR*** UNABLE TO TIP DUE TO LOW CIRCLE, EXITING'
       exit
     end
 
     pause 0.5 until Flags['tip-accepted'] || Flags['tip-expired'] || Flags['tip-declined']
 
-    return unless Flags['tip-accepted']
+    if Flags['tip-expired']
+      log(character, 'withdrawal', amount, currency, 'expired')
+    end
 
-    # submit_bankbot_update("#{character}: withdraw #{amount} #{currency}")
-    @balance[character][currency] -= amount
-    balance(character)
+    if Flags['tip-declined']
+      log(character, 'withdrawal', amount, currency, 'declined')
+    end
+
+    return unless Flags['tip-accepted']
+    @ledger[character][currency] -= amount
+    log(character, 'withdrawal', amount, currency, 'succeeded')
+    report_balance(character)
   end
 
   private
 
+  def log(character, action, amount, currency, message)
+    save_bankbot_transaction("#{character}, #{action}, #{amount}, #{currency}, #{message}", @ledger)
+    echo("Logging: #{character}, #{action}, #{amount}, #{currency}, #{message}")
+    echo("Ledger: #{@ledger}")
+  end
+
   def determine_currency(input)
-    %w(Kronars Lirums Dokoras).find { |s| s.downcase.include?(input.downcase) }
+    $CURRENCIES.find { |s| s.downcase.include?(input.downcase) }
   end
 end
 
@@ -138,7 +168,7 @@ loop do
     character = Regexp.last_match(1)
 
     next unless validator.valid?(character)
-    bankbot.balance(character)
+    bankbot.report_balance(character)
   when /^(.*) whispers, ".*"$/i
     character = Regexp.last_match(1)
 

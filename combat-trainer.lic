@@ -593,6 +593,18 @@ class SpellProcess
     @buff_spell_mana_threshold = settings.buff_spell_mana_threshold
     echo("  @buff_spell_mana_threshold: #{@buff_spell_mana_threshold}") if $debug_mode_ct
 
+    @cambrinth = settings.cambrinth
+    echo("  @cambrinth: #{@cambrinth}") if $debug_mode_ct
+
+    @cambrinth_cap = settings.cambrinth_cap
+    echo("  @cambrinth_cap: #{@cambrinth_cap}") if $debug_mode_ct
+
+    @dedicated_camb_use = settings.dedicated_camb_use
+    echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
+
+    @stored_cambrinth = settings.stored_cambrinth
+    echo(" @stored_cambrinth: #{@stored_cambrinth}") if $debug_mode_ct
+
     @perc_health_timer = Time.now
 
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
@@ -739,7 +751,16 @@ class SpellProcess
     cast_spell(game_state) if ready_to_cast?(game_state)
   end
 
+  def check_invoke
+    return unless @should_invoke
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+    @should_invoke = nil
+    invoke(@cambrinth, @dedicated_camb_use)
+    stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+  end
+
   def cast_spell(game_state)
+    check_invoke
     if game_state.casting_weapon_buff
       @custom_cast = "cast my #{game_state.weapon_name}"
       @last_seen_weapon_buff_name = game_state.weapon_name
@@ -849,6 +870,14 @@ class SpellProcess
     return unless DRStats.empath?
     return if health > 95 && @wounds.empty?
 
+    if DRSpells.active_spells['Regeneration']
+      if @empath_spells['VH'] && health <= 95
+        data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
+        prepare_spell(data, game_state)
+      end
+      return
+    end
+
     if Time.now - @perc_health_timer > 30 && @empath_spells['FOC'] || @empath_spells['HEAL']
       @perc_health_timer = Time.now
       @wounds = check_perc_health
@@ -918,6 +947,7 @@ class SpellProcess
       @equipment_manager.stow_weapon(game_state.weapon_name)
     end
 
+    check_invoke
     ritual(data)
 
     if summoned
@@ -984,6 +1014,7 @@ class SpellProcess
     prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
+    @should_invoke = data['cambrinth']
     @custom_cast = data['cast']
     @symbiosis = data['symbiosis']
     @after = data['after']
@@ -1184,6 +1215,10 @@ class TrainerProcess
       reset_ability(game_state, 'Meraud')
       return
     end
+    if /meraud/i =~ bput('commune sense', 'roundtime', 'A spark of Meraud')
+      reset_ability(game_state, 'Meraud', 60)
+      return
+    end
     waitrt?
     @equipment_manager.stow_weapon(game_state.weapon_name)
     fput "get #{@water_holder}"
@@ -1220,7 +1255,7 @@ class TrainerProcess
     return false unless game_state.can_ambush_stun?
 
     dead_count = DRRoom.dead_npcs.size
-    unless game_state.weapon_name == @stun_weapon
+    unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
       @equipment_manager.stow_weapon(game_state.weapon_name)
       @equipment_manager.wield_weapon(@stun_weapon, @stun_weapon_skill)
     end
@@ -1231,7 +1266,7 @@ class TrainerProcess
       waitrt?
     end
 
-    unless game_state.weapon_name == @stun_weapon
+    unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
       @equipment_manager.stow_weapon(@stun_weapon)
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
@@ -1264,10 +1299,10 @@ class TrainerProcess
     fput('eng')
   end
 
-  def reset_ability(game_state, ability_name)
+  def reset_ability(game_state, ability_name, offset = 0)
     ability_info = @training_abilities.find { |name, _| name == ability_name }.last
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
-    game_state.cooldown_timers[ability_name] = Time.now - cooldown
+    game_state.cooldown_timers[ability_name] = Time.now - [(cooldown - offset), 0].min
   end
 
   def select_ability(game_state)
@@ -2013,18 +2048,19 @@ class GameState
   def check_charging?
     return false if @charges.nil?
 
-    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
     if @charges.empty?
       echo('check_charging?: done') if $debug_mode_ct
-
       cambrinth_charges(nil)
-      invoke(@cambrinth, @dedicated_camb_use)
-    else
-      next_charge = @charges.pop
-      echo("check_charging?: #{next_charge}") if $debug_mode_ct
-
-      @charges = [] unless charge?(@cambrinth, next_charge)
+      return false
     end
+
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
+
+    next_charge = @charges.pop
+    echo("check_charging?: #{next_charge}") if $debug_mode_ct
+
+    @charges = [] unless charge?(@cambrinth, next_charge)
+
     stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 
     true

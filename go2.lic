@@ -1,0 +1,945 @@
+=begin
+
+	attempts to find the shortest route between any two rooms in the game
+	requires a map database (;repository download-mapdb)
+
+	;go2 help
+
+	         author: Tillmen (tillmen@lichproject.org)
+	original author: Shaelun
+	           game: any
+	           tags: core, movement
+	        version: 1.7
+
+	changelog:
+		1.7 (2014-12-11):
+			added stop-for-dead to the help message
+		1.6 (2014-12-10):
+			added stop-for-dead option
+			add settings to list command
+		1.5 (2014-12-04):
+			remove a debug message
+		1.4 (2014-12-04):
+			added delay setting
+			fixed bug with finding silver cost of a path
+		1.3 (2014-11-09):
+			changed typeahead setting to be different for each character
+		1.2 (2014-10-16):
+			don't use typeaheads for first move: makes it easier to find problems
+		1.1 (2014-10-07):
+			only automatically reduce typeahead setting if there's a typeahead message in the buffer
+
+=end
+
+# fixme: don't do puzzles
+
+setting_value = { 'on' => true, 'true' => true, 'yes' => true, 'off' => false, 'false' => false, 'no' => false }
+previous = shortest_distances = nil
+
+CharSettings['typeahead']        =     0 if CharSettings['typeahead'].nil?
+CharSettings['use portals']      = false if CharSettings['use portals'].nil?
+CharSettings['have portal pass'] = false if CharSettings['have portal pass'].nil?
+CharSettings['vaalor shortcut']  = false if CharSettings['vaalor shortcut'].nil?
+CharSettings['ice mode']         = :auto if CharSettings['ice mode'].nil?
+CharSettings['get silvers']      = false if CharSettings['get silvers'].nil?
+CharSettings['delay']            =     0 if CharSettings['delay'].nil?
+CharSettings['stop for dead']    = false if CharSettings['stop for dead'].nil?
+
+show_help = proc {
+	output = "\n"
+	output.concat "   #{$lich_char}#{script.name} <target>                Takes you where you want to go using your saved options.\n"
+	output.concat "   #{$lich_char}#{script.name} <options> <target>      Takes you where you want to go, using the given options instead of\n"
+	output.concat "   #{''.rjust($lich_char.length + script.name.length)}                          your saved options.\n"
+	output.concat "   #{$lich_char}#{script.name} <options>               Saves the given options.\n"
+	output.concat "\n"
+	output.concat "   target:\n"
+	output.concat "\n"
+	output.concat "      <target> may be a room number, a custom target, a built-in target,\n"
+	output.concat "       or part of a room title or room description.\n"
+	output.concat "\n"
+	output.concat "   options:\n"
+	output.concat "\n"
+	output.concat "     --typeahead=<#>                         Sets the number of typeahead lines to use.\n"
+	output.concat "     --delay=<#>                             Sets the delay in seconds between movements\n"
+	output.concat "                                              (disables typeahead).\n"
+	if XMLData.game =~ /^GS/
+		output.concat "     --get-silvers=<on|off>                  Sets if #{script.name} has permission to access your bank\n"
+		output.concat "                                              account.\n"
+		output.concat "     --ice-mode=<auto|wait|run>              Sets how #{script.name} should deal with room the make you\n"
+		output.concat "                                              slip and fall.\n"
+		output.concat "     --stop-for-dead=<on|off>                Pauses the script if you pass a dead person.\n"
+		output.concat "     --shortcut=<on|off>                     Sets if the shortcut to Ta'Vaalor should be used.\n"
+		output.concat "                                              (climbing and/or simming needed)\n"
+		output.concat "     --get-return-trip-silvers=<on|off>      Sets if #{script.name} should withdraw enough silvers to\n"
+		output.concat "                                              return from your destination room to your starting room.\n"
+		output.concat "     --use-seeking=<on|off>                  Sets if #{script.name} should use Voln symbol of seeking\n"
+		output.concat "                                              when it will shorten your trip.\n"
+	end
+	if XMLData.game =~ /^GSPlat|^GSF/
+		output.concat "     --portals=<on|off>                      Sets if portals should be used.\n"
+	end
+	if XMLData.game =~ /^GSPlat/
+		output.concat "     --portal-pass=<on|off>                  Turn this on if you have a wearable portal pass and don't\n"
+		output.concat "                                              need a portal ticket.\n"
+	end
+	output.concat "\n"
+	output.concat "   other commands:\n"
+	output.concat "\n"
+	output.concat "      #{$lich_char}#{script.name} save <new name>=<target>      Saves a custom target.  <target> can be the same as before,\n"
+	output.concat "      #{''.rjust($lich_char.length + script.name.length)}                             	  or 'current' for your current room\n"
+	output.concat "      #{$lich_char}#{script.name} delete <custom target>        Deletes a saved custom target.\n"
+	output.concat "      #{$lich_char}#{script.name} list                          Shows your settings and custom targets.\n"
+	output.concat "      #{$lich_char}#{script.name} targets                       Shows the built-in targets.\n"
+	output.concat "\n"
+	respond output
+}
+
+change_map_platinum_portals = proc { |use_portals,have_pass|
+	unless Map.list.any? { |room| room.timeto.any? { |adj_id,time| time.class == Proc and time._dump =~ /$go2_use_portals/ } }
+		to_nexus = {
+			'7561' => "move 'go hole'; ",
+			'9318' => "move 'go portal'; move 'south'; ",
+			'3479' => "move 'go portal'; move 'southwest'; ",
+			'2696' => "move 'go portal'; move 'west'; ",
+			'17691' => "move 'go portal'; move 'northwest'; ",
+			'12584' => "move 'go portal'; move 'north'; ",
+			'9664' => "move 'go portal'; move 'northeast'; ",
+			'20453' => "move 'go portal'; move 'east'; ",
+			'16746' => "move 'go portal'; move 'southeast'; "
+	 	}
+		to_old_nexus = {
+			'7561' => "move 'go hole'; ",
+			'5052' => "move 'go portal'; move 'south'; ",
+			'9095' => "move 'go portal'; move 'southwest'; ",
+			'2696' => "move 'go portal'; move 'west'; ",
+			'11128' => "move 'go portal'; move 'northwest'; ",
+			'12387' => "move 'go portal'; move 'north'; ",
+			'648' => "move 'go portal'; move 'northeast'; ",
+			'5766' => "move 'go portal'; move 'east'; ",
+			'5940' => "move 'climb step'; move 'go portal'; move 'southeast'; "
+		}
+		from_nexus = {
+			'7561'  => "move 'out'; ",
+			'9318'  => "move 'north'; move 'go portal'; ",
+			'3479'  => "move 'northeast'; move 'go portal'; ",
+			'2696'  => "move 'east'; move 'go portal'; ",
+			'17691' => "move 'southeast'; move 'go portal'; ",
+			'12584' => "move 'south'; move 'go portal'; ",
+			'9664' => "move 'southwest'; move 'go portal'; ",
+			'20453' => "move 'west'; move 'go portal'; ",
+			'16746' => "move 'northwest'; move 'go portal'; "
+		}
+		from_old_nexus = {
+			'7561'  => "move 'out'; ",
+			'5052'  => "move 'north'; move 'go portal'; ",
+			'9095'  => "move 'northeast'; move 'go portal'; ",
+			'2696'  => "move 'east'; move 'go portal'; ",
+			'11128' => "move 'southeast'; move 'go portal'; ",
+			'12387' => "move 'south'; move 'go portal'; ",
+			'648'  => "move 'southwest'; move 'go portal'; ",
+			'5766' => "move 'west'; move 'go portal'; ",
+			'5940' => "move 'northwest'; move 'go portal'; "
+		}
+		hub_string="group_members = nil\nfor line in clear.reverse\nif line =~ /^Obvious (paths|exits)/\nbreak\nelsif line =~ /^([A-Za-z ,]+) followed\\.$/\ngroup_members = $1.split(/, | and /)\nbreak\nend\nend\nmove 'go portal'\nif group_members\necho \"Waiting for your group... To ditch them, ;send go \"\nbegin\nline = get\nif line =~ /^([A-z][a-z]+) suddenly appears\\.$/\ngroup_members.delete $1\nelsif line == 'go'\nbreak\nend\nend while group_members.length > 0; end;"
+		to_hub={
+			'19706' => hub_string,
+			'19709' => hub_string,
+			'19745' => hub_string,
+			'19752' => hub_string,
+			'19778' => hub_string,
+			'19723' => hub_string,
+			'19721' => hub_string,
+			'19719' => hub_string
+		}
+		transport_hub='19707'
+	
+		if use_portals
+			if have_pass
+				before_portal = ''
+				after_portal = ''
+			else
+				before_portal = "$go2_portal_need_fill_hand = false; unless (righthand? == 'ticket') or (lefthand? == 'ticket'); empty_hand; $go2_portal_need_fill_hand = true; dothistimeout 'get my portal ticket', 3, /^You remove|^You grab|^You reach into|^Get what\?/; end; unless (righthand? == 'ticket') or (lefthand? == 'ticket'); fill_hand if $go2_portal_need_fill_hand; echo 'a decent portal ticket would be helpful.'; exit; end; result = dothistimeout 'look my portal ticket', 20, /Realizing the ticket has expired|I could not find what you were referring to|days left on your ticket/; unless result =~ /days left on your ticket/; echo 'a decent portal ticket would be helpful.'; exit; end; "
+				after_portal = "dothistimeout 'stow my ticket', 3, /^You put|^You slip .*? into|^You tuck|^What were you trying to stow\?/; fill_hand if $go2_portal_need_fill_hand"
+			end
+			for start_room in to_nexus.keys
+				for end_room in from_nexus.keys
+					if start_room != end_room
+						Map[start_room.to_i].wayto[end_room] = StringProc.new(before_portal + to_nexus[start_room] + from_nexus[end_room] + after_portal)
+						Map[start_room.to_i].timeto[end_room] = 2
+					end
+				end
+			end
+			for start_room in to_hub.keys
+				Map[start_room.to_i].wayto[transport_hub] = StringProc.new(before_portal + to_hub[start_room] + after_portal)
+				Map[start_room.to_i].timeto[transport_hub] = 1
+			end
+			Room[19753].timeto['19745']=0.2
+		else
+			for start_room in to_nexus.keys
+				for end_room in from_nexus.keys
+					if start_room != end_room
+						Map[start_room.to_i].wayto.delete(end_room)
+						Map[start_room.to_i].timeto.delete(end_room)
+					end
+				end
+			end
+			for start_room in to_old_nexus.keys
+				for end_room in from_old_nexus.keys
+					if start_room != end_room
+						Map[start_room.to_i].wayto.delete(end_room)
+						Map[start_room.to_i].timeto.delete(end_room)
+					end
+				end
+			end
+			for start_room in to_hub.keys
+				Map[start_room.to_i].wayto.delete(transport_hub)
+				Map[start_room.to_i].timeto.delete(transport_hub)
+			end
+		end
+	end
+}
+
+change_map_vaalor_shortcut = proc { |use_shortcut|
+	unless Map.list.any? { |room| room.timeto.any? { |adj_id,time| time.class == Proc and time._dump =~ /$go2_use_vaalor_shortcut/ } }
+		if use_shortcut
+			Room[16745].timeto['16746'] = 15
+			Room[16746].timeto['16745'] = 15
+		else
+			Room[16745].timeto['16746'] = 15000
+			Room[16746].timeto['16745'] = 15000
+		end
+	end
+}
+
+check_silvers = proc {
+	hook_proc = proc { |server_string|
+		if server_string =~ /^\s*Name\:|^\s*Gender\:|^\s*Normal \(Bonus\)|^\s*Strength \(STR\)\:|^\s*Constitution \(CON\)\:|^\s*Dexterity \(DEX\)\:|^\s*Agility \(AGI\)\:|^\s*Discipline \(DIS\)\:|^\s*Aura \(AUR\)\:|^\s*Logic \(LOG\)\:|^\s*Intuition \(INT\)\:|^\s*Wisdom \(WIS\)\:|^\s*Influence \(INF\)\:/
+			nil
+		elsif server_string =~ /^\s*Mana\:\s+\-?[0-9]+\s+Silver\:\s+([0-9]+)/
+			DownstreamHook.remove('go2_check_silvers')
+			nil
+		else
+			server_string
+		end
+	}
+	clear
+	DownstreamHook.add('go2_check_silvers', hook_proc)
+	silence_me unless undo_silence = silence_me
+	put 'info'
+	silence_me if undo_silence
+	while (line = get)
+		if line =~ /^\s*Mana\:\s+\-?[0-9]+\s+Silver\:\s+([0-9]+)/
+			silvers = $1.to_i
+			break
+		end
+	end
+	silvers
+}
+
+get_silver_cost = proc { |path|
+	cost = 0
+	path.each_index { |index| 
+		Room[path[index]].tags.each { |tag|
+			if tag =~ /^silver-cost:#{path[index+1]}:(.*)$/
+				cost_string = $1
+				if cost_string =~ /^[0-9]+$/
+					cost += cost_string.to_i
+				else
+					cost += StringProc.new(cost_string).call.to_i
+				end
+			end
+		}
+	}
+	cost
+}
+
+#
+# check for general commands
+#
+if script.vars.empty? or script.vars[0].strip =~ /^help$/i
+	show_help.call
+	exit
+elsif script.vars[0] =~ /^targets$/i
+	echo 'generating list...'
+	interesting_tags = [ "alchemist", "consignment", "bank", "furrier", "gemshop", "herbalist", "locksmith", "pawnshop", "town", "advguard", "advguild", "advpickup", "armorshop", "bakery", "bardguild", "boutique", "chronomage", "clericguild", "empathguild", "forge", "general store", "npccleric", "npchealer", "movers", "smokeshop", "sorcererguild", "warriorguild", "weaponshop", "wizardguild", "advguard2", "clericshop", "fletcher", "rangerguild", "sunfist", "voln", "exchange", "inn", "exchange" ]
+	town_list = Map.list.find_all { |room| room.tags.include?('town') }
+	town_ids = town_list.collect { |room| room.id }
+	town_hash = Hash.new
+	town_ids.each { |id| town_hash[id] = Array.new }
+	for tag in interesting_tags
+		for room in Map.list.find_all { |room| room.tags.include?(tag) }
+			if nearest = Room[room.id].find_nearest(town_ids)
+				unless town_hash[nearest].any? { |line| line =~ /^ \- #{tag.ljust(17)} / }
+					town_hash[nearest].push " - #{tag.ljust(17)} #{room.title.first.sub(/^\[/, '').sub(/\]$/, '').ljust(34)} - #{room.id.to_s.rjust(5)}"
+				end
+			end
+		end
+	end
+	output = "\n"
+	town_list.each { |town_room|
+		output.concat "---------------------------------------------------------------\n"
+		output.concat " - town              #{town_room.title.first.sub(/^\[/, '').sub(/\]$/, '').ljust(34)} - #{town_room.id.to_s.rjust(5)}\n"
+		output.concat "---------------------------------------------------------------\n"
+		town_hash[town_room.id].sort.each { |thingie|
+			output.concat thingie
+			output.concat "\n"
+		}
+		output.concat "\n"
+	}
+	respond output
+	exit
+elsif script.vars[0] =~ /^list$/i
+	output = "\n"
+	output.concat "settings:\n"
+	output.concat "\n"
+	output.concat "            typeahead: #{CharSettings['typeahead']}"
+	if (CharSettings['typeahead'] > 0) and (CharSettings['delay'] > 0)
+		output.concat " (not used because delay > 0)"
+	end
+	output.concat "\n"
+	output.concat "                delay: #{CharSettings['delay']}\n"
+	output.concat "          get silvers: #{CharSettings['get silvers'] ? 'on' : 'off'}\n"
+	output.concat "   get return silvers: #{CharSettings['get return trip silvers'] ? 'on' : 'off'}\n"
+	output.concat "             ice mode: #{CharSettings['ice mode']}\n"
+	output.concat "          use seeking: #{CharSettings['use seeking'] ? 'on' : 'off'}\n"
+	if XMLData.game =~ /^GS/
+		output.concat "        stop for dead: #{CharSettings['stop for dead'] ? 'on' : 'off'}\n"
+		output.concat "      vaalor shortcut: #{CharSettings['vaalor shortcut'] ? 'on' : 'off'}\n"
+	end
+	if XMLData.game =~ /^GSPlat|^GSF/
+		output.concat "          use portals: #{CharSettings['use portals'] ? 'on' : 'off'}"
+		output.concat "     have portal pass: #{CharSettings['have portal pass'] ? 'yes' : 'no'}"
+	end
+	output.concat "\n"
+	output.concat "custom targets:\n"
+	output.concat "\n"
+	for target_name,target_num in GameSettings['custom targets'].sort
+		output.concat "   #{target_name.ljust(20)} = #{target_num.to_s.rjust(5)}   #{Map[target_num].title.first}\n"
+	end
+	output.concat "\n"
+	respond output
+	exit
+elsif script.vars[1] =~ /^save/i
+	new_target = script.vars[0].sub(/\s*save\s*/i, '').split(/\s*=\s*/)
+	if new_target[0] =~ /^[0-9]+$/
+		echo "Target name can't be just a number."
+		exit
+	end
+	if new_target[1].strip =~ /^current$/i
+		unless new_room = Map.current
+			echo 'error: your current room was not found in the map database.'
+			exit
+		end
+	else
+		unless new_target[1] =~ /^\d+$/ and new_room = Map[new_target[1].to_i]
+			unless new_room = Map[new_target[1]]
+				show_help.call
+				echo "error: could not identify the target room"
+				exit
+			end
+		end
+	end
+	custom_targets = (GameSettings['custom targets'] || Hash.new)
+	custom_targets[new_target[0]] = new_room.id
+	GameSettings['custom targets'] = custom_targets
+	echo "custom target saved (#{new_target[0]}->#{new_room.id})"
+	exit
+elsif script.vars[1] =~ /^delete$/i
+	delkey = script.vars[0].sub(/\s*delete\s*/i, '')
+	custom_targets = (GameSettings['custom targets'] || Hash.new)
+	if kilkey = custom_targets.keys.find { |key| key =~ /^#{delkey}$/i } or kilkey = custom_targets.keys.find { |key| key =~ /^#{delkey}/i }
+		custom_targets.delete(kilkey)
+		GameSettings['custom targets'] = custom_targets
+		echo "custom target deleted (#{kilkey})"
+		exit
+	else
+		echo "#{delkey} does not appear to be a custom target"
+		exit
+	end
+elsif script.vars[1] =~ /^reload$/i
+	Map.reload
+	echo  'map data has been reloaded'
+	exit
+end
+
+#
+# target and/or options
+#
+
+target_search_array             = Array.new
+setting_typeahead               = nil
+setting_delay                   = nil
+setting_disable_confirm         = false
+setting_use_vaalor_shortcut     = nil
+setting_ice_mode                = nil
+setting_get_silvers             = nil
+setting_use_seeking             = nil
+setting_stop_for_dead           = nil
+setting_get_return_trip_silvers = nil
+setting_have_portal_pass        = nil
+setting_use_portals             = nil
+
+for var in script.vars[1..-1]
+	if var =~ /^(?:\-\-)?typeahead=([0-9]+)$/i
+		setting_typeahead = $1.to_i
+	elsif var =~ /^(?:\-\-)?delay=([0-9\.]+)$/i
+		setting_delay = $1.to_f
+	elsif var =~ /^_disable_confirm_$|^--disable-confirm$/i
+		setting_disable_confirm = true
+	elsif var =~ /^--stop-for-dead$/i
+		setting_stop_for_dead = true
+	elsif var =~ /^--stop-for-dead=(on|true|yes|off|false|no)/i
+		setting_stop_for_dead = setting_value[$1]
+	elsif (XMLData.game =~ /^GS/) and var =~ /^(?:\-\-)?shortcut=(on|true|yes|off|false|no)$/i
+		setting_use_vaalor_shortcut = setting_value[$1]
+	elsif (XMLData.game =~ /^GS/) and (var =~ /^(?:\-\-)?ice\-?mode=(auto|wait|run)$/i)
+		if $1.downcase == 'auto'
+			setting_ice_mode = :auto
+		elsif $1.downcase == 'wait'
+			setting_ice_mode = :wait
+		elsif $1.downcase == 'run'
+			setting_ice_mode = :run
+		end
+	elsif (XMLData.game =~ /^GS/) and (var =~ /^(?:\-\-)?get[_\-]?(?:silver|coin)s?=(on|true|yes|off|false|no)$/i)
+		setting_get_silvers = setting_value[$1]
+	elsif (XMLData.game =~ /^GS/) and (var =~ /^(?:\-\-)?use[_\-]?seeking=(on|true|yes|off|false|no)$/i)
+		setting_use_seeking = setting_value[$1]
+	elsif (XMLData.game =~ /^GS/) and (var =~ /^(?:\-\-)?get\-return\-trip\-silvers=(on|true|yes|off|false|no)$/i)
+		setting_get_return_trip_silvers = setting_value[$1]
+	elsif (XMLData.game =~ /^GSF|^GSPlat/) and (var =~ /^(?:\-\-)?portals?=(on|true|yes|off|false|no)$/i)
+		setting_use_portals = setting_value[$1]
+	elsif (XMLData.game =~ /^GSPlat/) and (var =~ /^(?:\-\-)?portal\-pass=(on|true|yes|off|false|no)$/i)
+		setting_have_portal_pass = setting_value[$1]
+	else
+		target_search_array.push(var)
+	end
+end
+target_search_string = target_search_array.join(' ')
+
+#
+# if only settings were given, save the settings and exit
+#
+if target_search_string.empty?
+	unless setting_delay.nil?
+		CharSettings['delay'] = setting_delay
+		echo "delay setting changed to #{setting_delay} seconds"
+	end
+	unless setting_typeahead.nil?
+		CharSettings['typeahead'] = setting_typeahead
+		echo "typeahead setting changed to #{setting_typeahead}"
+		if CharSettings['delay'].to_f > 0
+			echo "typeahead setting will not be used, because the delay setting is greater than zero"
+		end
+	end
+	if XMLData.game =~ /^GSPlat/
+		unless setting_use_portals.nil?
+			CharSettings['use portals'] = setting_use_portals
+			$go2_use_portals = setting_use_portals
+			if setting_have_portal_pass.nil?
+				change_map_platinum_portals.call(setting_use_portals, CharSettings['have portal pass'])
+			else
+				change_map_platinum_portals.call(setting_use_portals, setting_have_portal_pass)
+			end
+			echo "portals will #{'not ' unless setting_use_portals}be used"
+		end
+		unless setting_have_portal_pass.nil?
+			CharSettings['have portal pass'] = setting_have_portal_pass
+			$go2_have_portal_pass = CharSettings['have portal pass']
+			if setting_use_portals.nil?
+				change_map_platinum_portals.call(CharSettings['use portals'], setting_have_portal_pass)
+			else
+				change_map_platinum_portals.call(setting_use_portals, setting_have_portal_pass)
+			end
+			echo "the script will #{'not ' if setting_have_portal_pass}try to pull out a portal ticket to use portals"
+		end
+	elsif XMLData.game =~ /^GSF/
+		unless setting_use_portals.nil?
+			CharSettings['use portals'] = setting_use_portals
+			$go2_use_portals = setting_use_portals
+			echo "portals will #{'not ' unless setting_use_portals}be used"
+		end
+	end
+	if XMLData.game =~ /^GS/
+		unless setting_use_vaalor_shortcut.nil?
+			CharSettings['vaalor shortcut'] = setting_use_vaalor_shortcut
+			$go2_use_vaalor_shortcut = setting_use_vaalor_shortcut
+			change_map_vaalor_shortcut.call(setting_use_vaalor_shortcut)
+			echo "shortcut between Ta'Vaalor and Ta'Illistim will #{'not ' unless setting_use_vaalor_shortcut}be used"
+		end
+		unless setting_get_silvers.nil?
+			CharSettings['get silvers'] = setting_get_silvers
+			echo "go2 #{ if setting_get_silvers then 'may' else 'will not' end } withdraw money from your bank account for travel expenses"
+		end
+		unless setting_use_seeking.nil?
+			CharSettings['use seeking'] = setting_use_seeking
+			$go2_use_seeking = setting_use_seeking
+			echo "go2 #{ if setting_use_seeking then 'may' else 'will not' end } use symbol of seeking for faster travel"
+		end
+		unless setting_stop_for_dead.nil?
+			CharSettings['stop for dead'] = setting_stop_for_dead
+			echo "go2 #{ if setting_stop_for_dead then 'will (probably)' else 'will not' end } stop when it sees dead people"
+		end
+		unless setting_ice_mode.nil?
+			CharSettings['ice mode'] = setting_ice_mode
+			# fixme: echo "something"
+		end
+		unless setting_get_return_trip_silvers.nil?
+			CharSettings['get return trip silvers'] = setting_get_return_trip_silvers
+			echo "silvers will #{'not ' unless setting_get_return_trip_silvers}be withdrawn in advance for return trips"
+		end
+	end
+	exit
+end
+
+unless start_room = Room.current
+	echo 'error: your current room was not found in the map database'
+	exit
+end
+
+#
+# target was given; use saved settings, override them with command line settings, but don't save them
+#
+if setting_typeahead.nil?
+	setting_typeahead = CharSettings['typeahead']
+end
+
+if setting_delay.nil?
+	setting_delay = CharSettings['delay']
+end
+
+if setting_get_silvers.nil?
+	$go2_get_silvers = CharSettings['get silvers']
+else
+	before_dying { $go2_get_silvers = CharSettings['get silvers'] }
+	$go2_get_silvers = setting_get_silvers
+end
+
+if setting_use_seeking.nil?
+	$go2_use_seeking = CharSettings['use seeking']
+else
+	before_dying { $go2_use_seeking = CharSettings['use seeking'] }
+	$go2_use_seeking = setting_use_seeking
+end
+
+if setting_stop_for_dead.nil?
+	setting_stop_for_dead = CharSettings['stop for dead']
+end
+
+if setting_ice_mode.nil?
+	$go2_ice_mode = CharSettings['ice mode']
+else
+	before_dying { $go2_ice_mode = CharSettings['ice mode'] }
+	$go2_ice_mode = setting_ice_mode
+end
+
+if setting_use_portals.nil?
+	$go2_use_portals = CharSettings['use portals']
+else
+	before_dying { $go2_use_portals = CharSettings['use portals'] }
+	$go2_use_portals = setting_use_portals
+end
+
+if setting_have_portal_pass.nil?
+	setting_have_portal_pass = CharSettings['have portal pass'] 
+else
+	before_dying { $go2_have_portal_pass = CharSettings['have portal pass'] }
+end
+$go2_have_portal_pass = setting_have_portal_pass
+
+if setting_use_vaalor_shortcut.nil?
+	setting_use_vaalor_shortcut = CharSettings['vaalor shortcut']
+else
+	before_dying { $go2_use_vaalor_shortcut = CharSettings['vaalor shortcut'] }
+end
+$go2_use_vaalor_shortcut = setting_use_vaalor_shortcut
+
+if setting_get_return_trip_silvers.nil?
+	setting_get_return_trip_silvers = CharSettings['get return trip silvers']
+end
+
+if XMLData.game =~ /^GSPlat/
+	change_map_platinum_portals.call(setting_use_portals, setting_have_portal_pass)
+end
+
+if XMLData.game =~ /^GS/
+	change_map_vaalor_shortcut.call(setting_use_vaalor_shortcut)
+end
+
+#
+# find target
+#
+if target_search_string =~ /^[0-9]+$/
+	unless destination = Map[target_search_string.to_i]
+		echo "error: room number (#{target_search_string}) was not found in the map database"
+		exit
+	end
+	confirm = false
+elsif (custom_targets = GameSettings['custom targets']) and (target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}$/i }) or (target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}/i })
+	destination_id = custom_targets[target]
+	unless destination = Map[destination_id]
+		echo "error: custom target (#{destination_id}) was not found in the map database"
+		exit
+	end
+	confirm = false
+elsif defined?(Map.tags) and Map.tags.include?(target_search_string)
+	target_list = Map.list.find_all { |room| room.tags.include?(target_search_string) }.collect { |room| room.id }
+	if target_list.empty?
+		echo 'fixme (1)'
+		exit
+	end
+	if target_list.include?(start_room.id)
+		echo "you're already here..."
+		exit
+	end
+	previous, shortest_distances = start_room.dijkstra(target_list)
+	target_list.delete_if { |room_id| shortest_distances[room_id].nil? }
+	if target_list.empty?
+		echo 'fixme (2)'
+		exit
+	end
+	target_id = target_list.sort { |a,b| shortest_distances[a] <=> shortest_distances[b] }.first
+	unless target_id and (destination = Map[target_id])
+		echo 'fixme (3)'
+		exit
+	end
+	if shortest_distances[destination.id] < 20
+		confirm = false
+	else
+		confirm = true
+	end
+else
+	chkre = /#{target_search_string.sub(/\.$/, '').gsub(/\.(?:\.\.)?/, '|')}/i
+	chk = /#{Regexp.escape(target_search_string.strip)}/i
+	room_list = Map.list.find_all { |room| room.title.find { |title| title =~ chk } or room.description.find { |desc| desc =~ chk } or room.description.find { |desc| desc =~ chkre } }
+	if room_list.nil? or room_list.empty?
+		echo 'no matching rooms found'
+		exit
+	end
+	if room_list.length == 1
+		destination = room_list.first
+		confirm = true
+	else
+		destination = nil
+		first = 1
+		show_size = 20
+		respond "#{room_list.length} matching rooms found:"
+		while first < room_list.length
+			respond
+			for which in (first)..([(first+show_size-1),room_list.length].min)
+				respond "#{(which).to_s.rjust(5)}: #{room_list[which-1].title.first.ljust(37)} (#{room_list[which-1].id})"
+			end
+			respond
+			respond "select a room (;send <#{first}-#{[first+show_size-1,room_list.length].min}>)#{ " or ';send next' for more" if (first+show_size-1) < room_list.length}"
+			respond
+			clear
+			line = nil
+			line = get until line.strip =~ /^[0-9]+$|^next$/i
+			if line =~ /^next$/
+				first += show_size
+			else
+				destination = room_list[line.to_i-1]
+				break
+			end
+		end
+		unless destination
+			echo 'no more rooms match'
+			exit
+		end
+		confirm = false
+	end
+end
+
+if setting_stop_for_dead and (setting_typeahead > 0) and (setting_delay <= 0)
+	$go2_see_dead_people = false
+	exec_string = "
+		hide_me
+		status_tags
+		parent_id = #{Script.self.object_id}
+		Thread.new { loop { sleep 3; Script.self.kill unless Script.running.any? { |s| s.object_id == parent_id } or Script.hidden.any? { |s| s.object_id == parent_id } } }
+		while (line = get)
+			if line =~ /<compDef id='room players'>Also here:.*? the body of </
+				$go2_see_dead_people = true
+			end
+		end
+	"
+	start_exec_script(exec_string, flags={ :quiet => true })
+end
+
+#
+# move
+#
+if start_room.id == destination.id
+	echo "you're already here..."
+	exit
+end
+
+start_time   = nil
+error_count  = 0
+$go2_restart = false
+first_move   = true
+
+loop {
+
+	moves_sent = $room_count
+
+	if $go2_restart
+		first_move = true
+		break if Room.current.id == destination.id
+		echo 'restarting script...'
+		if error_count > 1
+			# dothis 'help lag-check', /^No help files matching that entry were found\.|^MERCHANT HELP/
+			dothis 'combatant', /^That only works in the Gladiator Arenas\./
+		end
+		unless start_room = Map.current
+			echo 'error: your current room was not found in the map database'
+			exit
+		end
+		previous, shortest_distances = Map.dijkstra(start_room.id, destination.id)
+	end
+
+	unless previous and shortest_distances
+		previous, shortest_distances = Map.dijkstra(start_room.id, destination.id)
+	end
+	unless previous[destination.id]
+		echo "error: failed to find a path between your current room (#{start_room.id}) and destination room (#{destination.id})"
+		exit
+	end
+	path = [ destination.id ]
+	path.push(previous[path[-1]]) until previous[path[-1]].nil?
+	path.reverse!
+	est_time = shortest_distances[destination.id]
+	previous = shortest_distances = nil
+
+	if XMLData.game =~ /^GS/
+		needed_silvers = get_silver_cost.call(path)
+		if setting_get_return_trip_silvers
+			return_previous, return_shortest_distances = Map.dijkstra(destination.id, start_room.id)
+			return_path = [ start_room.id ]
+			return_path.push(return_previous[return_path[-1]]) until return_previous[return_path[-1]].nil?
+			return_path.reverse!
+			return_previous = return_shortest_distances = nil
+			needed_silvers += get_silver_cost.call(return_path)
+			return_path = nil
+		end
+		if needed_silvers > 0
+			current_silvers = check_silvers.call
+			if needed_silvers > current_silvers
+				if $go2_get_silvers
+					unless bank_id = Room.current.find_all_nearest_by_tag('bank').find { |room_id| current_silvers >= get_silver_cost.call(Room.current.path_to(room_id)) }
+						echo "error: You're too poor to go to the bank."
+						exit
+					end
+					pr, s = Map.dijkstra(Room.current.id, bank_id)
+					est_time = s[bank_id]
+					pr = s = nil
+					pr, s = Map.dijkstra(bank_id, destination.id)
+					est_time += s[destination.id]
+					pr = s = nil
+					unless setting_disable_confirm or not confirm
+						confirm = false
+						respond "ETA: #{(est_time/60.0).as_time}.  #{path.length-1} (wrong) rooms between this room (#{start_room.id}), the bank (#{bank_id}), and:"
+						respond destination.to_s + "\n\nTo go here, unpause the script.  To abort, kill the script."
+						pause_script
+					end
+					if $go2_started_go2_bank
+						echo "You're too poor to go to the bank."
+						exit
+					end
+					begin
+						$go2_started_go2_bank = true
+						go2_count = Script.running.find_all { |s| s.name == script.name }.length
+						force_start_script script.name, [ bank_id.to_s ]
+						wait_until { Script.running.find_all { |s| s.name == script.name }.length <= go2_count }
+					ensure
+						$go2_started_go2_bank = false
+					end
+					unless start_room = Room.current
+						echo 'error: your current room was not found in the map database'
+						exit
+					end
+					moves_sent = $room_count
+					previous, shortest_distances = Map.dijkstra(start_room.id, destination.id)
+					unless previous[destination.id]
+						echo "error: failed to find a path between your current room (#{start_room.id}) and destination room (#{destination.id})"
+						exit
+					end
+					path = [ destination.id ]
+					path.push(previous[path[-1]]) until previous[path[-1]].nil?
+					path.reverse!
+					est_time = shortest_distances[destination.id]
+					previous = shortest_distances = nil
+					needed_silvers = get_silver_cost.call(path)
+					if setting_get_return_trip_silvers
+						return_previous, return_shortest_distances = Map.dijkstra(destination.id, start_room.id)
+						return_path = [ start_room.id ]
+						return_path.push(return_previous[return_path[-1]]) until return_previous[return_path[-1]].nil?
+						return_path.reverse!
+						return_previous = return_shortest_distances = nil
+						needed_silvers += get_silver_cost.call(return_path)
+						return_path = nil
+					end
+					fput 'unhide' if hidden? or invisible?
+					if XMLData.room_title == '[Pinefar, Depository]'
+						fput "ask banker for #{[(needed_silvers - check_silvers.call), 20].max} silvers"
+					else
+						fput "withdraw #{needed_silvers - check_silvers.call} silvers"
+					end
+				else
+					echo 'You are too poor to make this trip.'
+					echo 'To give go2 permission to take your monies, type ;go2 getsilvers=on'
+					echo 'Continuing anyway in 10 seconds...'
+					sleep 10
+				end
+			end
+		end
+	end
+
+	if setting_disable_confirm or $go2_restart or not confirm
+		echo "ETA: #{(est_time/60.0).as_time} (#{path.length-1} rooms to move through)"
+	else 
+		respond "ETA: #{(est_time/60.0).as_time}.  #{path.length-1} rooms between this room (#{start_room.id}) and:"
+		respond destination.to_s + "\n\nTo go here, unpause the script.  To abort, kill the script."
+		pause_script
+	end
+
+	start_time = Time.now.to_f unless $go2_restart
+
+	$go2_restart = false
+
+	path.each_index { |idx|
+		room = Map[path[idx]]
+		next_id = (path[idx + 1] || break).to_s
+
+		exit if dead?
+		wait_while { muckled? }
+		fput 'stand' unless standing?
+		waitrt?
+
+		if room.wayto[next_id].class == Proc
+			# echo 'proc: ' + room.id.to_s + ' -> ' + next_id.to_s
+			if (setting_typeahead > 0) and (setting_delay <= 0)
+				50.times {
+					break if ($room_count >= moves_sent)
+					sleep 0.05
+				}
+				if setting_stop_for_dead and $go2_see_dead_people
+					$go2_restart = true
+					10.times {
+						break if GameObj.pcs.any? { |pc| pc.status =~ /dead/ }
+						idx -= 1
+						break unless (way = Room.current.wayto[path[idx].to_s])
+						if way.class == Proc
+							way.call
+						else
+							move way
+						end
+					}
+					pause_script
+					$go2_see_dead_people = false
+					break
+				end
+				unless ($room_count >= moves_sent)
+					if $_SERVERBUFFER_.any? { |line| line =~ /Sorry, you may only type ahead/ }
+						echo 'reducing typeahead setting...'
+						setting_typeahead -= 1
+					end
+					$go2_restart = true
+					break
+				end
+			end
+			begin
+				room_id_before_proc = Room.current.id
+				room.wayto[next_id].call
+				sleep setting_delay
+				pause_script if setting_stop_for_dead and GameObj.pcs.any? { |pc| pc.status =~ /dead/ }
+				# $go2_restart = true if Room.current.id == room_id_before_proc
+				break if $go2_restart
+			rescue
+				respond "--- error running mini-script: #{room.id} -> #{next_id}"
+				respond $!
+				exit
+			end
+			moves_sent = $room_count
+		else
+			if (setting_typeahead > 0) and (setting_delay <= 0) and not first_move
+				time = Time.now + 3
+				moves = moves_sent - setting_typeahead
+				loop {
+					break if ($room_count >= moves) or (Time.now > time)
+					sleep 0.02
+				}
+				if setting_stop_for_dead and $go2_see_dead_people
+					$go2_restart = true
+					50.times {
+						break if ($room_count >= moves_sent)
+						sleep 0.05
+					}
+					10.times {
+						break if GameObj.pcs.any? { |pc| pc.status =~ /dead/ }
+						idx -= 1
+						break unless (way = Room.current.wayto[path[idx].to_s])
+						if way.class == Proc
+							way.call
+						else
+							move way
+						end
+					}
+					pause_script
+					$go2_see_dead_people = false
+					break
+				end
+				unless ($room_count + setting_typeahead) >= moves_sent
+					if $_SERVERBUFFER_.any? { |line| line =~ /Sorry, you may only type ahead/ }
+						echo 'reducing typeahead setting...'
+						setting_typeahead -= 1
+					end
+					$go2_restart = true
+					break
+				end
+				put room.wayto[next_id]
+				moves_sent += 1
+			else
+				first_move = false
+				moves_sent += 1
+				result = move room.wayto[next_id]
+				sleep setting_delay
+				pause_script if setting_stop_for_dead and GameObj.pcs.any? { |pc| pc.status =~ /dead/ }
+				unless result
+					error_count += 1
+					if (idx == 0) and (error_count > 2) and (Room.current.id == room.id)
+						echo "changing Room[#{room.id}].timeto['#{next_id}'] to nil"
+						old_room = room
+						old_next_id = next_id
+						old_timeto = room.timeto[next_id]
+						before_dying {
+							echo "reverting Room[#{old_room.id}].timeto['#{old_next_id}'] back to #{old_timeto.inspect}"
+							old_room.timeto[old_next_id] = old_timeto
+						}
+						room.timeto[next_id] = nil
+					end
+					$go2_restart = true
+					break
+				end
+			end
+		end
+		waitrt?
+		if $go2_cast and Spell[515].active? and (checkprep == Spell[402].name) and Spell[402].affordable?
+			Spell[402].cast
+		end
+	}
+
+	if (setting_typeahead > 0) and (setting_delay <= 0)
+		50.times {
+			break if ($room_count >= moves_sent)
+			sleep 0.05
+		}
+		unless $room_count >= moves_sent
+			$go2_restart = true
+		end
+	end
+
+	break unless $go2_restart
+}
+
+sleep 0.1
+echo "travel time: #{((Time.now.to_f - start_time) / 60.00).as_time}"

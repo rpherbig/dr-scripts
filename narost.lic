@@ -1,0 +1,644 @@
+=begin
+
+	Tracks your current room on Tsoran (or other) maps
+
+	click on a room to go there
+	shift-click on a room to show its description
+	right-click for some options
+
+	author: Tillmen (tillmen@lichproject.org)
+	game: any
+	tags: core, movement
+
+=end
+
+# fixme: click arrow to next map to show map
+
+i_stand_alone
+clear
+
+unless HAVE_GTK
+	respond
+	respond 'error: ruby-gtk bindings are not installed or failed to load'
+	respond
+	exit
+end
+
+unless defined?(Gtk.queue)
+	respond
+	respond 'Your version of Lich is too old for this script.'
+	respond
+	exit
+end
+
+if $SAFE > 0
+	echo "This script needs to be trusted to work properly. (;trust #{script.name})"
+	exit
+end
+
+trouble = script.vars.any? { |var| var =~ /trouble/i }
+
+Settings.load
+setting_keep_above = Settings['keep_above']
+setting_keep_above = true if setting_keep_above.nil?
+setting_follow     = nil
+menu_follow        = nil
+window_width       = Settings['window_width'] || 400
+window_height      = Settings['window_height'] || 300
+window_position    = Settings['window_position'] || [ 0, 0 ]
+if trouble
+	echo "Settings['window_width']: #{Settings['window_width'].inspect}"
+	echo "Settings['window_height']: #{Settings['window_height'].inspect}"
+	echo "Settings['window_position']: #{Settings['window_position'].inspect}"
+	echo "window_width: #{window_width.inspect}"
+	echo "window_height: #{window_height.inspect}"
+	echo "window_position: #{window_position.inspect}"
+end
+global_scale       = Settings['global_scale']
+global_scale       = 1.0 if global_scale.nil?
+map_scale          = Settings['map_scale'] || Hash.new
+
+$narost_maps  ||= Hash.new
+scale           = nil
+map_offset_x    = nil
+map_offset_y    = nil
+narost_exit     = false
+dragging        = false
+map_dir         = "#{$lich_dir}maps#{File::Separator}"
+window_resized  = true
+fix_click       = nil
+current_room    = nil
+current_map     = nil
+start           = nil
+
+window          = nil
+scroller        = nil
+layout          = nil
+image           = nil
+circle_width    = nil
+circle_height   = nil
+circle_image    = nil
+tag_img_pixbuf  = nil
+tag_img_width   = nil
+tag_img_height  = nil
+tag_img_list    = Array.new
+menu            = nil
+menu_scale_list = nil
+menu_tags_list  = nil
+current_tag     = nil
+scale_list      = [ 10, 25, 33, 50, 66, 75, 90, 100, 110, 125, 133, 150, 166, 175, 190, 200 ]
+
+used_maps = Array.new
+Map.list.each { |room| used_maps.push(room.map_name) unless room.map_name.nil? or used_maps.include?(room.map_name) }
+used_maps.sort!
+
+missing_maps = Array.new
+used_maps.each { |map_name| missing_maps.push(map_name) unless File.exists?("#{map_dir}#{map_name}") }
+echo "These map images were not found: #{missing_maps.join(', ')}" unless missing_maps.empty?
+missing_maps = nil
+
+unless File.exists?("#{map_dir}circle.png")
+	File.open("#{map_dir}circle.png", 'wb') { |f| f.puts('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'.unpack('m').join('')) }
+end
+
+unless File.exists?("#{map_dir}tag_img.png")
+	File.open("#{map_dir}tag_img.png", 'wb') { |f| f.puts('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'.unpack('m').join('')) }
+end
+
+Gtk.queue {
+	format, width, height = Gdk::Pixbuf.get_file_info("#{map_dir}tag_img.png")
+	tag_img_width = width
+	tag_img_height = height
+	tag_img_pixbuf = Gdk::Pixbuf.new("#{$lich_dir}maps/tag_img.png")
+}
+
+show_tag = proc { |tag|
+	current_tag = tag
+	while img = tag_img_list.shift
+		img.hide
+		img.destroy
+	end
+	if tag
+		short_current_map = current_map.sub(/^.*\//, '')
+		Map.list.each { |room|
+			next if room.nil?
+			next unless room.image == short_current_map
+			next unless room.tags.include?(tag)
+			img = Gtk::Image.new
+			tag_img_list.push(img)
+			img.set_pixbuf(tag_img_pixbuf)
+			layout.put(img, (((room.image_coords[0].to_i + room.image_coords[2].to_i)/2)*scale) - (tag_img_width/2) + map_offset_x, (((room.image_coords[1].to_i + room.image_coords[3].to_i)/2)*scale) - (tag_img_height/2) + map_offset_y)
+			img.show
+		}
+	end
+}
+
+change_map = proc { |file_name|
+	current_map = file_name
+	if File.exists?(current_map)
+		if global_scale
+			scale = global_scale
+		else
+			scale = map_scale[current_map] || 1.0
+		end
+		menu_scale_list.children[scale_list.index((scale*100).to_i)+1].active = true
+		unless $narost_maps[current_map] and ($narost_maps[current_map]['scale'] == scale)
+			Gtk.queue {
+				$narost_maps[current_map] = Hash.new
+				format, width, height = Gdk::Pixbuf.get_file_info(current_map)
+				$narost_maps[current_map]['width'] = width
+				$narost_maps[current_map]['height'] = height
+				$narost_maps[current_map]['scale'] = scale
+				if scale == 1
+					$narost_maps[current_map]['pixbuf'] = Gdk::Pixbuf.new(current_map)
+				else
+					$narost_maps[current_map]['pixbuf'] = Gdk::Pixbuf.new(current_map).scale(width*scale, height*scale)
+				end
+			}
+		end
+		Gtk.queue {
+			image.set_pixbuf($narost_maps[current_map]['pixbuf'])
+			image.set_size_request($narost_maps[current_map]['width']*scale, $narost_maps[current_map]['height']*scale)
+			map_offset_x = scroller.allocation.width.to_i/2
+			map_offset_y = scroller.allocation.height.to_i/2
+			layout.set_size(($narost_maps[current_map]['width']*scale) + map_offset_x*2, ($narost_maps[current_map]['height']*scale) + map_offset_y*2)
+			layout.move(image, map_offset_x, map_offset_y)
+			tag_list = Array.new
+			short_current_map = current_map.sub(/^.*\//, '')
+			Map.list.each { |room|
+				next if room.nil?
+				next unless room.image == short_current_map
+				room.tags.each { |tag|
+					tag_list.push(tag) unless (tag =~ /^silver\-cost/) or tag_list.include?(tag)
+				}
+			}
+			menu_tags_list.children.each { |child| child.destroy }
+			group = Gtk::RadioMenuItem.new('(clear)')
+			menu_tags_list.append(group)
+			group.signal_connect('toggled') { |owner|
+				Gtk.queue {
+					show_tag.call(nil) if owner.active?
+				}
+			}
+			tag_list.sort { |a,b| dis = a.split(' ')[-1].to_s <=> b.split(' ')[-1].to_s; if (dis == 0); a.split(' ')[-2].to_s <=> b.split(' ')[-2].to_s; else; dis; end }.each { |tag|
+				menu_tag = Gtk::RadioMenuItem.new(group, tag)
+				menu_tags_list.append(menu_tag)
+				menu_tag.signal_connect('toggled') { |owner|
+					Gtk.queue {
+						if owner.active?
+							show_tag.call(tag)
+						end
+					}
+				}
+				if current_tag == tag
+					menu_tag.active = true
+					show_tag.call(tag)
+				end
+			}
+			menu_tags_list.show_all
+			unless tag_list.include?(current_tag)
+				group.active = true
+				show_tag.call(nil)
+			end
+		}
+	else
+		echo "file not found: #{current_map}"
+	end
+}
+
+change_room = proc {
+	if window_resized
+		window_resized = false
+		Gtk.queue {
+			map_offset_x = scroller.allocation.width.to_i/2
+			map_offset_y = scroller.allocation.height.to_i/2
+			layout.set_size(($narost_maps[current_map]['width']*scale) + (map_offset_x*2), ($narost_maps[current_map]['height']*scale) + (map_offset_y*2))
+			layout.move(image, map_offset_x, map_offset_y)
+			if current_tag
+				show_tag.call(current_tag)
+			end
+		}
+	end
+	Gtk.queue {
+		scroller.hadjustment.value = current_room.map_x.to_i*scale
+		scroller.vadjustment.value = current_room.map_y.to_i*scale
+		layout.move(circle_image, (current_room.map_x.to_i*scale) - (circle_width/2) + map_offset_x, (current_room.map_y.to_i*scale) - (circle_height/2) + map_offset_y)
+		window.title = "Narost: #{Char.name} (##{current_room.id})"
+	}
+}
+
+no_room = proc {
+	Gtk.queue { 
+		layout.move(circle_image, -circle_width, -circle_height)
+		window.title = "Narost: #{Char.name}"
+	}
+}
+
+find_clicked_link = proc { |click_x, click_y|
+	clicked_link = nil
+	map_name = current_map.slice(/([^\/\\]+)$/)
+	# fixme: use tags in map database for this
+	map_links = [
+		[ 'TI-teras.gif',                  1962, 2238,   68,  192, 'TI-wilds.gif',                   840, 1252 ],
+		[ 'TI-teras.gif',                   710,  972, 2130, 2260, 'WL-wehnimers.gif',              2338, 1070 ],
+		[ 'TI-wilds.gif',                  1124, 1412,  604,  682, 'TI-vtull.gif',                  2276, 1638 ],
+		[ 'TI-wilds.gif',                   678, 1006, 1218, 1296, 'TI-teras.gif',                  2100,  130 ],
+		[ 'TI-wilds.gif',                  1190, 1390, 2750, 2878, 'TI-nelemar.gif',                2794, 1670 ],
+		[ 'TI-vtull.gif',                  2100, 2452, 1598, 1672, 'TI-wilds.gif',                  1268,  643 ],
+		[ 'TI-nelemar.gif',                2704, 2882, 1598, 1724, 'TI-wilds.gif',                  1290, 2814 ],
+		[ 'WL-wehnimers.gif',              2188, 2494,  976, 1144, 'TI-teras.gif',                   834, 2204 ],
+		[ 'WL-gates.gif',                  1956, 2160, 1600, 1660, 'WL-danjirland.gif',              226, 2592 ],
+		[ 'WL-danjirland.gif',               96,  354, 2500, 2672, 'WL-gates.gif',                  2052, 1636 ],
+		[ 'EN-tavaalor.gif',               2380, 2618,  322,  446, 'EN-cemetery.gif',                350, 1906 ],
+		[ 'EN-tavaalor.gif',               2348, 2618, 1794, 1912, 'EN-cemetery.gif',                170, 2178 ],
+		[ 'EN-tavaalor.gif',               1058, 1362, 1802, 1920, 'EN-victory.gif',                2510,  560 ],
+		[ 'EN-tavaalor.gif',               1030, 1344,  242,  364, 'EN-fearling.gif',               2158, 1946 ],
+		[ 'EN-tavaalor.gif',                 48,  266, 1260, 1480, 'EN-fearling.gif',               2768, 1882 ],
+		[ 'EN-cemetery.gif',                230,  472, 1816, 1992, 'EN-tavaalor.gif',               2498,  374 ],
+		[ 'EN-cemetery.gif',                 56,  294, 2096, 2266, 'EN-tavaalor.gif',               2490, 1844 ],
+		[ 'EN-victory.gif',                2360, 2656,  492,  612, 'EN-tavaalor.gif',               1210, 1850 ],
+		[ 'EN-victory.gif',                1812, 2154,  688,  788, 'EN-fearling.gif',               1658, 2182 ],
+		[ 'EN-victory.gif',                1494, 1840,  614,  670, 'EN-fearling.gif',               1148, 2188 ],
+		[ 'EN-fearling.gif',               1986, 2324, 1876, 1998, 'EN-tavaalor.gif',               1184,  296 ],
+		[ 'EN-fearling.gif',               2644, 2892, 1858, 1932, 'EN-tavaalor.gif',                162, 1378 ],
+		[ 'EN-fearling.gif',               2698, 2892, 1810, 1858, 'EN-tavaalor.gif',                162, 1378 ],
+		[ 'EN-fearling.gif',                990, 1316, 2132, 2238, 'EN-victory.gif',                1660,  642 ],
+		[ 'EN-fearling.gif',               1570, 1742, 2120, 2242, 'EN-victory.gif',                1984,  744 ],
+		[ 'EN-fearling.gif',               1214, 1500,   84,  212, 'EN-sylvarraend.gif',            2492, 2223 ],
+		[ 'EN-sylvarraend.gif',            2396, 2588, 2162, 2278, 'EN-fearling.gif',               1350,  150 ],
+		[ 'EN-gyldemar.gif',               2118, 2330, 1364, 1486, 'EN-old-tafaendryl.gif',          482, 2192 ],
+		[ 'EN-gyldemar.gif',               2052, 2118, 1545, 1486, 'EN-old-tafaendryl.gif',          482, 2192 ],
+		[ 'EN-gyldemar.gif',                 84,  374, 2232, 2408, 'EN-sylvarraend.gif',            1436, 1148 ],
+		[ 'EN-old-tafaendryl.gif',          372,  592, 2156, 2230, 'EN-gyldemar.gif',               2186, 1434 ],
+		[ 'EN-sapphire.gif',               2636, 2944, 1870, 1992, 'EN-taillistim.gif',              246,  716 ],
+		[ 'EN-sapphire.gif',               2202, 2522,   30,  150, 'EN-taillistim.gif',             2726, 2222 ],
+		[ 'EN-sylvarraend.gif',            1330, 1548, 1106, 1184, 'EN-gyldemar.gif',                228, 2372 ],
+		[ 'EN-sylvarraend.gif',              74,  498,  978, 1096, 'EN-sapphire.gif',               2394,  440 ],
+		[ 'EN-sapphire.gif',               2270, 2524,  386,  500, 'EN-sylvarraend.gif',             282, 1046 ],
+		[ 'EN-sapphire.gif',               1210, 1464,  704,  828, 'EN-skull.gif',                  1332, 2808 ],
+		[ 'EN-skull.gif',                  1240, 1436, 2740, 2868, 'EN-sapphire.gif',               1386,  772 ],
+		[ 'EN-taillistim.gif',               78,  416,  614,  866, 'EN-sapphire.gif',               2788, 1940 ],
+		[ 'EN-taillistim.gif',             2552, 2900, 2154, 2270, 'EN-sapphire.gif',               2364,  100 ],
+		[ 'IMT-icemule.gif',                 76,  188, 1654, 1730, 'IMT-east-west-north-gates.gif',  632, 1266 ],
+		[ 'IMT-icemule.gif',               1132, 1272,  564,  640, 'IMT-east-west-north-gates.gif', 2156, 2076 ],
+		[ 'IMT-icemule.gif',               2214, 2320, 1482, 1560, 'IMT-east-west-north-gates.gif',  226, 2110 ],
+		[ 'IMT-icemule.gif',               1136, 1270, 2750, 2826, 'IMT-south-gate.gif',             856, 1084 ],
+		[ 'IMT-east-west-north-gates.gif',  580,  694, 1228, 1306, 'IMT-icemule.gif',                132, 1690 ],
+		[ 'IMT-east-west-north-gates.gif', 2088, 2226, 2043, 2114, 'IMT-icemule.gif',               1198,  602 ],
+		[ 'IMT-east-west-north-gates.gif',  178,  282, 2076, 2150, 'IMT-icemule.gif',               2260, 1520 ],
+		[ 'IMT-east-west-north-gates.gif',  230,  478, 2196, 2260, 'IMT-south-gate.gif',            1126,  814 ],
+		[ 'IMT-east-west-north-gates.gif',  390,  638, 1340, 1414, 'IMT-south-gate.gif',             694,  812 ],
+		[ 'RR-riversrest.gif',              300,  544,   84,  206, 'RR-maelstrom.gif',              1946, 2668 ],
+		[ 'RR-riversrest.gif',             1518, 1682,  298,  372, 'RR-citadel.gif',                1988, 1046 ],
+		[ 'RR-riversrest.gif',              430,  706, 1608, 1680, 'VO-caravansary.gif',            1688, 1782 ],
+		[ 'RR-maelstrom.gif',              1814, 2076, 2626, 2702, 'RR-riversrest.gif',              416,  148 ],
+		[ 'RR-citadel.gif',                1868, 2138, 1010, 1082, 'RR-riversrest.gif',             1598,  336 ],
+		[ 'VO-caravansary.gif',            1556, 1824, 1742, 1816, 'RR-riversrest.gif',              576, 1642 ],
+	]
+	for link in map_links
+		if (link[0] =~ /#{map_name}/i) and (click_x > link[1]) and (click_x < link[2]) and (click_y > link[3]) and (click_y < link[4])
+			clicked_link = [ "#{map_dir}#{link[5]}", link[6], link[7] ]
+			break
+		end
+	end
+	clicked_link
+}
+
+find_clicked_room = proc { |click_x, click_y|
+	Map.list.find { |room| 
+		not room.nil? and not room.map_name.nil? and not room.map_x.nil? and not room.map_y.nil? and not room.map_roomsize.nil? and (current_map =~ /#{room.map_name}$/) and (room.map_x > click_x - (room.map_roomsize/2)) and (room.map_x < click_x + (room.map_roomsize/2)) and (room.map_y > click_y - (room.map_roomsize/2)) and (room.map_y < click_y + (room.map_roomsize/2)) }
+}
+
+Gtk.queue {
+	window = Gtk::Window.new
+	window.title = "Narost: #{Char.name}"
+	window.signal_connect('delete_event') { narost_exit = true }
+	window.signal_connect('size_allocate') { window_resized = true }
+
+	scroller = Gtk::ScrolledWindow.new
+	scroller.border_width = 0
+	scroller.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_ALWAYS)
+	window.add(scroller)
+
+	layout = Gtk::Layout.new
+	scroller.add(layout)
+
+	image = Gtk::Image.new
+	layout.put(image, 0, 0)
+
+	format, width, height = Gdk::Pixbuf.get_file_info("#{map_dir}circle.png")
+	circle_width = width
+	circle_height = height
+	circle_pixbuf = Gdk::Pixbuf.new("#{$lich_dir}maps/circle.png")
+	circle_image = Gtk::Image.new
+	circle_image.set_pixbuf(circle_pixbuf)
+	layout.put(circle_image, -circle_width, -circle_height)
+
+	menu_follow = Gtk::CheckMenuItem.new('follow current room')
+	menu_follow.active = true
+	setting_follow = true
+	menu_follow.signal_connect('toggled') { |owner| setting_follow = owner.active? }
+
+	menu_keep_above = Gtk::CheckMenuItem.new('keep above')
+	menu_keep_above.active = setting_keep_above
+	menu_keep_above.signal_connect('toggled') { |owner| setting_keep_above = window.keep_above = owner.active? }
+
+	menu_find = Gtk::MenuItem.new('find room')
+	menu_find.signal_connect('activate') {
+		Gtk.queue {
+			find_window = Gtk::Window.new
+			find_window.title = 'find room'
+			find_entry = Gtk::Entry.new
+			find_button = Gtk::Button.new('find')
+			find_entry.signal_connect('activate') {
+				Gtk.queue { find_button.clicked }
+			}
+			find_button.signal_connect('clicked') {
+				Gtk.queue {
+					if room = Room[find_entry.text]
+						if room.map_name
+							file_name = "#{map_dir}#{room.map_name}"
+							change_map.call(file_name) unless current_map == file_name
+							if window_resized
+								window_resized = false
+								Gtk.queue {
+									map_offset_x = scroller.allocation.width.to_i/2
+									map_offset_y = scroller.allocation.height.to_i/2
+									layout.set_size(($narost_maps[current_map]['width']*scale) + (map_offset_x*2), ($narost_maps[current_map]['height']*scale) + (map_offset_y*2))
+									layout.move(image, map_offset_x, map_offset_y)
+								}
+							end
+							Gtk.queue {
+								scroller.hadjustment.value = room.map_x.to_i*scale
+								scroller.vadjustment.value = room.map_y.to_i*scale
+								layout.move(circle_image, (room.map_x.to_i*scale) - (circle_width/2) + map_offset_x, (room.map_y.to_i*scale) - (circle_height/2) + map_offset_y)
+								window.title = "Narost: #{Char.name} (##{room.id})"
+							}
+						else
+							respond '[narost: that room does not have an image associated with it]'
+						end
+					else
+						respond '[narost: no matching room]'
+					end
+					find_window.destroy
+				}
+			}
+			find_box = Gtk::HBox.new
+			find_box.pack_start(find_entry, false, false, 2)
+			find_box.pack_start(find_button, false, false, 2)
+			find_window.add(find_box)
+			find_window.show_all
+		}
+	}
+
+	menu_map_list = Gtk::Menu.new
+	used_maps.each { |map_name|
+		item = Gtk::MenuItem.new(map_name.sub(/(?:\-[0-9]+)?\.[A-z]{1,3}$/,''), false)
+		item.signal_connect('activate') { change_map.call("#{map_dir}#{map_name}"); no_room.call }
+		menu_map_list.append(item)
+	}
+
+	menu_view_map = Gtk::MenuItem.new('view map')
+	menu_view_map.submenu = menu_map_list
+
+	menu_scale_list = Gtk::Menu.new
+	menu_global_scale = Gtk::CheckMenuItem.new('global setting')
+	menu_global_scale.active = true if global_scale
+	menu_scale_list.append(menu_global_scale)
+	group = nil
+	scale_list.each { |num|
+		if group
+			item = Gtk::RadioMenuItem.new(group, "#{num} %")
+		else
+			group = item = Gtk::RadioMenuItem.new("#{num} %")
+		end
+		item.signal_connect('toggled') { |owner|
+			if owner.active?
+				new_scale = num/100.0
+				if new_scale != scale
+					if global_scale
+						global_scale = new_scale
+					else
+						map_scale[current_map] = new_scale
+					end
+					change_map.call(current_map)
+					change_room.call
+				end
+			end
+		}
+		menu_scale_list.append(item)
+	}
+	group = nil
+
+	menu_global_scale.signal_connect('toggled') {
+		if menu_global_scale.active?
+			scale_list.each_index { |index| global_scale = scale_list[index]/100.0 if menu_scale_list.children[index+1].active? }
+		else
+			global_scale = false
+		end
+	}
+
+	menu_scale_map = Gtk::MenuItem.new('scale')
+	menu_scale_map.submenu = menu_scale_list
+
+	menu_tags = Gtk::MenuItem.new('tags')
+
+	menu_tags_list = Gtk::Menu.new
+	menu_tags.submenu = menu_tags_list
+
+	menu = Gtk::Menu.new
+	menu.append(menu_follow)
+	menu.append(menu_keep_above)
+	menu.append(menu_find)
+	menu.append(menu_view_map)
+	menu.append(menu_scale_map)
+	menu.append(menu_tags)
+	menu.show_all
+
+=begin
+	layout.signal_connect('scroll_event') { |owner,ev|
+		Gtk.queue {
+			if ev.direction == Gdk::EventScroll::DOWN
+				new_scale = scale_list[scale_list.index((scale*100).to_i)-1]/100.0
+			elsif ev.direction == Gdk::EventScroll::UP
+				new_scale = scale_list[scale_list.index((scale*100).to_i)+1]/100.0
+			end
+			unless new_scale.nil?
+				if global_scale
+					global_scale = new_scale
+				else
+					map_scale[current_map] = new_scale
+				end
+				change_map.call(current_map)
+				change_room.call
+			end
+		}
+	}
+=end
+	layout.add_events(Gdk::Event::BUTTON_PRESS_MASK)
+	layout.signal_connect('button_press_event') { |owner, ev|
+		if ev.button == 3
+			menu.popup(nil, nil, ev.button, ev.time)
+		elsif ev.button == 4
+			respond 'button4'
+		elsif ev.button == 5
+			respond 'button4'
+		else
+			dragging = nil
+			pointer_x, pointer_y = layout.pointer
+			before_drag = {
+				'x'    => pointer_x,
+				'y'    => pointer_y,
+				'hadj' => scroller.hadjustment.value.to_i,
+				'vadj' => scroller.vadjustment.value.to_i
+			}
+			Thread.new {
+				while dragging != false
+					sleep 0.1
+					pointer_x = pointer_y = nil
+					Gtk.queue { pointer_x, pointer_y = layout.pointer }
+					sleep 0.01 while pointer_y.nil?
+					if dragging.nil?
+						if (pointer_x < before_drag['x'] - 10) or (pointer_x > before_drag['x'] + 10) or (pointer_y < before_drag['y'] - 10) or (pointer_y > before_drag['y'] + 10)
+							dragging = true
+						end
+					end
+					if dragging
+						diff_x = before_drag['x'] - pointer_x
+						diff_y = before_drag['y'] - pointer_y
+						Gtk.queue {
+							scroller.hadjustment.value = [ (before_drag['hadj'] + diff_x), ($narost_maps[current_map]['width']*scale) ].min
+							scroller.vadjustment.value = [ (before_drag['vadj'] + diff_y), ($narost_maps[current_map]['height']*scale) ].min
+						}
+					end
+				end
+			}
+		end
+	}
+	layout.add_events(Gdk::Event::BUTTON_RELEASE_MASK)
+	layout.signal_connect('button-release-event') { |owner, ev|
+		Gtk.queue {
+			if dragging
+				dragging = false
+			else
+				dragging = false
+				if (ev.event_type == Gdk::Event::Type::BUTTON_RELEASE) and (ev.button == 1)
+					pointer_x, pointer_y = layout.pointer
+					click_x = (scroller.hadjustment.value.to_i + pointer_x.to_i - map_offset_x.to_i)/scale.to_f
+					click_y = (scroller.vadjustment.value.to_i + pointer_y.to_i - map_offset_y.to_i)/scale.to_f
+					# fixme: check state correctly
+					if (ev.state.inspect =~/shift-mask.*control-mask|control-mask.*shift-mask/) and (script.vars[0] =~ /fix/)
+						map_name = current_map.slice(/([^\/\\]+)$/)
+						if fix_click.nil?
+							fix_click = [ click_x, click_y ]
+						else
+							x = ((click_x + fix_click[0])/2).round
+							y = ((click_y + fix_click[1])/2).round
+							size = ((([click_x, fix_click[0]].max - [click_x, fix_click[0]].min) + ([click_y, fix_click[1]].max - [click_y, fix_click[1]].min))/2).round
+							current_room = $narost_fake_room || Room.current
+							respond "#{current_room.id}; x: #{x}, y: #{y}, size: #{size}"
+							if defined?(current_room.image_coords)
+								current_room.image = map_name
+								current_room.image_coords = [ [fix_click[0].round, click_x.round].min, [fix_click[1].round, click_y.round].min, [fix_click[0].round, click_x.round].max, [fix_click[1].round, click_y.round].max ]
+							else
+								current_room.map_name = map_name
+								current_room.map_x = x
+								current_room.map_y = y
+								current_room.map_roomsize = size
+							end
+							fix_click = nil
+						end
+					elsif ev.state.inspect =~/control-mask/
+						respond "x: #{click_x}, y: #{click_y}"
+					elsif ev.state.inspect =~ /shift-mask/
+						if clicked_room = find_clicked_room.call(click_x, click_y)
+							respond
+							respond clicked_room
+							respond
+						else
+							respond '[narost: no matching room found]'
+						end
+					else
+						if clicked_link = find_clicked_link.call(click_x, click_y)
+							change_map.call(clicked_link[0])
+							scroller.hadjustment.value = clicked_link[1].to_i*scale
+							scroller.vadjustment.value = clicked_link[2].to_i*scale
+						elsif clicked_room = find_clicked_room.call(click_x, click_y)
+							start_script 'go2', [ clicked_room.id.to_s, '_disable_confirm_' ]
+						else
+							respond '[narost: no matching room found]'
+						end
+					end
+				end
+			end
+		}
+	}
+
+	window.show_all
+
+	window_width = [window_width,100].max
+	window_height = [window_height,100].max
+	window.resize(window_width, window_height)
+
+	window_position[0] = [[0, window_position[0].to_i].max, (Gdk.screen_width-window_width)].min
+	window_position[1] = [[0, window_position[1].to_i].max, (Gdk.screen_height-window_height)].min
+	window.move(window_position[0], window_position[1])
+
+	if trouble
+		respond
+		respond "[narost: window_width: #{window_width.inspect}]"
+		respond "[narost: window_height: #{window_height.inspect}]"
+		respond "[narost: window_position: #{window_position.inspect}]"
+		respond "[narost: window.allocation.width: #{window.allocation.width.inspect}]"
+		respond "[narost: window.allocation.height: #{window.allocation.height.inspect}]"
+		respond "[narost: window.position: #{window.position.inspect}]"
+	end
+
+	window.keep_above = true if setting_keep_above
+
+	start = true
+}
+
+before_dying {
+	window_position = window_width = window_height = nil
+	Gtk.queue {
+		window_position = window.position
+		window_width = window.allocation.width
+		window_height = window.allocation.height
+	}
+	sleep 0.01 while window_height.nil?
+	Gtk.queue { window.destroy }
+	Settings['window_position'] = window_position if (window_position.class == Array) and (window_position[0].to_i > 0) and (window_position[1].to_i > 0)
+	Settings['window_width'] = window_width if (window_width.class == Fixnum) and (window_width > 100)
+	Settings['window_height'] = window_height if (window_height.class == Fixnum) and (window_height > 100)
+	Settings['keep_above'] = setting_keep_above
+	Settings['global_scale'] = global_scale
+	Settings['map_scale'] = map_scale
+	Settings.save
+}
+
+wait_until { start }
+
+if script.vars[1] and (script.vars[1] !~ /^fix|trouble$/) and (current_room = Room[script.vars[1..-1].join(' ')]) and (map_name = current_room.map_name)
+	menu_follow.active = false
+	setting_follow = false
+	file_name = "#{map_dir}#{map_name}"
+	change_map.call(file_name) unless current_map == file_name
+	change_room.call
+	room_count = $room_count
+	sleep 0.2 while (room_count == $room_count) and not narost_exit
+	wait_until { setting_follow or narost_exit } unless setting_follow or narost_exit
+end
+
+until narost_exit
+	if (current_room = Room.current) and (map_name = current_room.map_name)
+		file_name = "#{map_dir}#{map_name}"
+		change_map.call(file_name) unless current_map == file_name
+		change_room.call
+	else
+		no_room.call
+	end
+	room_count = $room_count
+	sleep 0.2 while (room_count == $room_count) and not narost_exit
+	wait_until { setting_follow or narost_exit } unless setting_follow or narost_exit
+end

@@ -1,0 +1,2408 @@
+=begin
+
+	This script allows you to connect to the Lich server to upload and download scripts,
+	the map database, and Lich.
+
+	;repository help
+
+	      author: Tillmen (tillmen@lichproject.org)
+	contributors: SpiffyJr (theman@spiffyjr.me)
+	        game: any
+	        tags: core
+	     version: 2.31
+
+	changelog:
+		2.31 (2016-04-04):
+			give DragonRealms Fallen its own map database
+		2.30 (2015-07-27):
+			fix for losing previous map data when using checkout-mapdb under certain conditions
+		2.29 (2015-06-03):
+			don't ask for a password for author "nobody"
+
+=end
+=begin
+
+		2.28 (2015-05-21):
+			don't restart infomon and lnet: infomon failed to start on some machines
+		2.27 (2015-05-14):
+			give progress updates while uploading the map database if it's slow
+		2.26 (2015-04-21):
+			auto load/restart spell-list.xml, gameobj-data.xml, lnet, infomon after downloading
+			check for missing map images even if the map database was up-to-date
+			allow the server to display warning messages
+		2.25 (2015-02-21):
+			an update just for people who have managed to ignore hundreds of download errors a day for months
+		2.24 (2015-01-23):
+			added --version option to download command
+			give a warning if the system date is outside the range of the CA cert date
+			disable SSLv2 and SSLv3
+		2.23 (2015-01-16):
+			new host name
+		2.22 (2014-11-23):
+			set map database as updatable by default
+		2.21 (2014-11-23):
+			set default values for download-updates on first run
+		2.20 (2014-11-22):
+			show game in list when there's multiple files with the same name
+		2.19 (2014-11-11):
+			slow down download-updates
+		2.18 (2014-11-06):
+			workaround to deal with the plat_updater script disabling OpenSSL::SSL::VERIFY_PEER
+		2.17 (2014-10-12):
+			started on gui
+		2.16 (2014-10-12):
+			delete old map databases after downloading a new one
+		2.15 (2014-10-07):
+			don't look in data directory for xml files on Lich 4.4
+		2.14 (2014-10-07):
+			fix Invalid cross-device link error (when temp directory is on a different disk)
+		2.13 (2014-10-05):
+			automatically download-mapdb after checkout-mapdb
+		2.12 (2014-10-05):
+			alias --sort=date to --sort=age
+			improve error reporting for bad commands and options
+			add options to show/hide columns in list
+		2.11 (2014-10-02):
+			look in data directory when uploading xml files
+		2.10 (2014-10-01):
+			fix download-updates not checking update times correctly
+		2.9 (2014-10-01):
+			reduce width of list
+		2.8 (2014-10-01):
+			added download-updates command
+			changed download-lich to preserve file mode of lich.rb on non-Windows
+		2.7 (2014-09-29):
+			cache file list and reuse if nothing has changed
+			added download-lich command
+
+=end
+
+unless $SAFE == 0
+	echo "this script must be trusted to work (;trust #{script.name})"
+	exit
+end
+
+unless defined?(LICH_VERSION) # Lich < 4.5
+	LICH_VERSION = $version
+end
+
+if Settings['updatable'].nil?
+	Settings['first-gs-run'] = true
+	Settings['updatable'] = Hash.new
+	Settings['updatable'][:scripts] = Array.new
+	Settings['updatable'][:scripts].push(:filename => 'repository.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'lnet.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'alias.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'vars.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'go2.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'narost.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'autostart.lic', :game => 'any', :author => 'Tillmen')
+	Settings['updatable'][:mapdb] = Hash.new
+	Settings['updatable'][:mapdb][XMLData.game] = true
+	Settings['updatable'][:mapdb]['GSIV'] = true
+	Settings['updatable'][:mapdb]['GSF'] = true
+	Settings['updatable'][:mapdb]['GSPlat'] = true
+	Settings['updatable'][:lich] = true
+end
+
+if (XMLData.game =~ /^GS/) and Settings['first-gs-run']
+	Settings['first-gs-run'] = false
+	Settings['updatable'][:scripts].push(:filename => 'infomon.lic', :game => 'gs', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'spell-list.xml', :game => 'gs', :author => 'Tillmen')
+	Settings['updatable'][:scripts].push(:filename => 'gameobj-data.xml', :game => 'gs', :author => 'Tillmen')
+end
+
+require 'openssl'
+require 'digest/md5'
+
+hostname           = 'repo.lichproject.org'
+port               = 7157
+ca_cert            = OpenSSL::X509::Certificate.new("-----BEGIN CERTIFICATE-----\nMIIDlTCCAn2gAwIBAgIJAKuu65i5NsruMA0GCSqGSIb3DQEBCwUAMGExCzAJBgNV\nBAYTAlVTMREwDwYDVQQIDAhJbGxpbm9pczESMBAGA1UECgwJTWF0dCBMb3dlMQ8w\nDQYDVQQDDAZSb290Q0ExGjAYBgkqhkiG9w0BCQEWC21hdHRAaW80LnVzMB4XDTE0\nMDYwNzE3NDUwMFoXDTI0MDYwNDE3NDUwMFowYTELMAkGA1UEBhMCVVMxETAPBgNV\nBAgMCElsbGlub2lzMRIwEAYDVQQKDAlNYXR0IExvd2UxDzANBgNVBAMMBlJvb3RD\nQTEaMBgGCSqGSIb3DQEJARYLbWF0dEBpbzQudXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQCcIRn0IMCNYeL5agKmkdedgJXsIyTJS8qKrY6EvQsq4tt0\nmO3Or9K8IaDl7qFdQ9nfSJ5phNgoCy9wZ9rDWv5FhY5MnnVHGr3fCa7RkMxJFR/N\nwiD4ihQlixOUly76glceyc/6QQS9bNe96evZDstERGAFfzgHY4qAlyurR6mBu9Mb\nyyCRok6xMRnjrbTMNkvvOsuG0sY9ot+SLHGgU3qT7+wVh/CbWcjeF7/Qwa//fbFk\nmq5c1FuvhU3DanSSz+VuWudPFSyZ3r5pYrLMJWsyomDa4gkL2bJ5jya2BWDMXvSS\nCpdQgPDIlClMfAFLd/Ss8ZIGa6uNFcSK6Xca51ClAgMBAAGjUDBOMB0GA1UdDgQW\nBBScbglRiGzz9yzuhgBwFYjgimeByDAfBgNVHSMEGDAWgBScbglRiGzz9yzuhgBw\nFYjgimeByDAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA7MLZYfqam\n5aaSBqQpT6sOGDtVc9koIok59oTQmNXqe+awg2VUnAiesxtLd+FWGUMp8XzHdGWw\nH3O6kAUkPm/in001X7TRAhbgDujfTRbTzxND0XrjuEzDMALs3YpDM1pMXqC7RXWA\n7z+N0gRaUgmh1rMbk/qA3cAfC2dwf2j3NYy3bDw3lMpdyIwAfOQxiZVglYgX3dgT\nU9b//gsUyPCvlpL0mYcmhOOLt6oqQhMJaw1I6A9xMe2kO2L+8KPGK2u1B+P5/Sx0\nFE8LIp5KA3a7yRbOty19NsGR+yW7WwV7BL6c6GOKb/iKJBLYzTmNG6m16hRrxDGj\ntGu91I0ORptB\n-----END CERTIFICATE-----")
+client_version     = '2.31'
+mapdb_reloaded     = false
+cmd                = Array.new
+cmd_author         = nil
+cmd_password       = nil
+cmd_tags           = nil
+cmd_show_tags      = nil
+cmd_sort           = nil
+cmd_reverse        = nil
+cmd_limit          = nil
+cmd_force          = nil
+cmd_name           = nil
+cmd_game           = nil
+cmd_age            = nil
+cmd_size           = nil
+cmd_downloads      = nil
+cmd_rating         = nil
+cmd_version        = nil
+no_more_options    = nil
+cmd_show_tags      = nil
+cmd_hide_age       = nil
+cmd_hide_size      = nil
+cmd_hide_author    = nil
+cmd_hide_downloads = nil
+cmd_hide_rating    = nil
+
+get_comments_from_data = proc { |data|
+	begin
+		if data =~ /^=begin\r?\n?(.+?)^=end/m
+			$1.split("\n")
+		else
+			comments = Array.new
+			data.split("\n").each { |line| if line =~ /^[\t\s]*#/; comments.push(line); elsif line !~ /^[\t\s]*$/; break; end }
+			comments
+		end
+	rescue
+		Array.new
+	end
+}
+
+get_author_from_comments = proc { |comments|
+	author = nil
+	for line in comments
+		if line =~ /^[\s\t#]*author:[\s\t]*([\w,\s\.\d]+)/i
+			author = $1.sub(/\s\(.*?\)/, '').strip
+			break
+		end
+	end
+	author
+}
+
+get_game_from_comments = proc { |comments|
+	game = nil
+	for line in comments
+		if line =~ /^[\s\t#]*game:[\s\t]*([\w,\s\.\d]+)/i
+			game = $1.strip
+			break
+		end
+	end
+	if game =~ /^Gemstone$/i
+		'GS'
+	elsif game =~ /^Dragon\s*Realms$/i
+		'DR'
+	else
+		game
+	end
+}
+
+get_tags_from_comments = proc { |comments|
+	tags = nil
+	for line in comments
+		if line =~ /^[\s\t#]*tags:[\s\t]*([\w,\s\.\d]+)/i
+			tags = $1.strip
+			break
+		end
+	end
+	tags
+}
+
+unmet_lich_requirement = proc { |comments|
+	requirement = nil
+	current_version = LICH_VERSION.split('.').collect { |num| num.rjust(5, '0') }.join('.')
+	for line in comments
+		if line =~ /^[\s\t#]*required:[\s\t]*(.+)/i
+			$1.split(',').each { |req|
+				if req.strip =~ /^[\s\t]*Lich[\s\t]*(>|<|=|>=|<=)[\s\t]*([0-9\.]+)/i
+					op = $1
+					version = $2
+					needed_version = version.split('.').collect { |num| num.rjust(5, '0') }.join('.')
+					if op == '<'
+						if current_version >= needed_version
+							requirement = "< #{version}"
+							break
+						end
+					elsif op == '>'
+						if current_version <= needed_version
+							requirement = "> #{version}"
+							break
+						end
+					elsif op == '='
+						if current_version != needed_version
+							requirement = "= #{version}"
+							break
+						end
+					elsif op == '>='
+						if current_version < needed_version
+							requirement = ">= #{version}"
+							break
+						end
+					elsif op == '<='
+						if current_version > needed_version
+							requirement = "<= #{version}"
+							break
+						end
+					end
+				end
+			}
+		end
+		break if requirement
+	end
+	requirement
+}
+
+connect = proc {
+	begin
+		if ca_cert.not_before > Time.now
+			respond "\n---\n--- warning: The current date is set incorrectly on your computer. This will\n---          cause the SSL certificate verification to fail and prevent this\n---          script from connecting to the server.  Fix it.\n---\n\n"
+			sleep 3
+		end
+		if ca_cert.not_after < Time.now
+			respond "\n---\n--- warning: Your computer thinks the date is #{Time.now.strftime("%m-%d-%Y")}.  If this is the\n---          correct date, you need an updated version of this script.  If \n---          this is not the correct date, you need to change it.  In either\n---          case, this date makes the SSL certificate in this script invalid\n---          and will prevent the script from connecting to the server.\n---\n\n"
+			sleep 3
+		end
+		cert_store              = OpenSSL::X509::Store.new
+		cert_store.add_cert(ca_cert)
+		ssl_context             = OpenSSL::SSL::SSLContext.new
+		ssl_context.options     = (OpenSSL::SSL::OP_NO_SSLv2 + OpenSSL::SSL::OP_NO_SSLv3)
+		ssl_context.cert_store  = cert_store
+		if OpenSSL::SSL::VERIFY_PEER == OpenSSL::SSL::VERIFY_NONE
+			# the plat_updater script redefines OpenSSL::SSL::VERIFY_PEER, disabling it for everyone
+			ssl_context.verify_mode = 1 # probably right
+		else
+			ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+		end
+		socket                  = TCPSocket.new(hostname, port)
+		ssl_socket              = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+		ssl_socket.connect
+		if (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == 'CN' }[1] != 'lichproject.org') and (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == 'CN' }[1] != 'Lich Repository')
+			if cmd_force
+				echo "warning: server certificate hostname mismatch"
+			else
+				echo "error: server certificate hostname mismatch"
+				ssl_socket.close rescue nil
+				socket.close rescue nil
+				exit
+			end
+		end
+		def ssl_socket.geth
+			hash = Hash.new
+			gets.scan(/[^\t]+\t[^\t]+(?:\t|\n)/).each { |s| s = s.chomp.split("\t"); hash[s[0].downcase] = s[1] }
+			return hash
+		end
+		def ssl_socket.puth(h)
+			puts h.to_a.flatten.join("\t")
+		end
+	rescue
+		echo "error connecting to server: #{$!}"
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+		exit
+	end
+	[ ssl_socket, socket ]
+}
+
+get_list = proc {
+	request = { 'action' => 'list', 'supported compressions' => 'gzip', 'client' => client_version }
+	request['current-md5sum'] = Digest::MD5.new.update(Settings['cached-list']).to_s if Settings['cached-list']
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			if response['error'] == 'already up-to-date'
+				echo 'list up-to-date' if $repository_debug
+				nil
+			else
+				echo "error: server says: #{response['error']}"
+				exit
+			end
+		else
+			if response['size'].nil? or (response['size'] !~ /^[0-9]+$/) or not response['server time']
+				echo "error: unrecognized response from server: #{response.inspect}"
+				exit
+			elsif response['compression'] and response['compression'] != 'gzip'
+				echo "error: unsupported compression method: #{response['compression']}"
+				exit
+			end
+			data = ssl_socket.read(response['size'].to_i)
+			if response['compression'] == 'gzip'
+				data_gz = data
+				echo "list data_gz: #{data_gz.length}" if $repository_debug
+				StringIO.open(data_gz) { |data_gz_io|
+					begin
+						gz_reader = Zlib::GzipReader.new(data_gz_io)
+						data = gz_reader.read
+					ensure
+						gz_reader.close
+					end
+				}
+				data_gz = nil
+			end
+			Settings['cached-list'] = data
+			Settings['cached-list-offset'] = Time.now.to_i - response['server time'].to_i
+		end
+		echo "list data: #{Settings['cached-list'].length}" if $repository_debug
+		list = Array.new
+		Settings['cached-list'].split("\n").each { |d| list.push(d.split("\t", -1)) }
+		headers = list.shift
+		if lui = headers.index('last update')
+			list.each { |row| row[lui] = row[lui].to_i + Settings['cached-list-offset'] }
+		end
+		list.unshift(headers)
+		list
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+}
+
+add_comments_to_list = proc { |list|
+	request = { 'action' => 'list-comments', 'supported compressions' => 'gzip', 'client' => client_version }
+	request['current-md5sum'] = Digest::MD5.new.update(Settings['cached-list-comments']).to_s if Settings['cached-list-comments']
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			if response['error'] == 'already up-to-date'
+				echo 'comments up-to-date' if $repository_debug
+				nil
+			else
+				echo "error: server says: #{response['error']}"
+				exit
+			end
+		else
+			if response['size'].nil? or (response['size'] !~ /^[0-9]+$/) or not response['server time']
+				echo "error: unrecognized response from server: #{response.inspect}"
+				exit
+			elsif response['compression'] and response['compression'] != 'gzip'
+				echo "error: unsupported compression method: #{response['compression']}"
+				exit
+			end
+			data = ssl_socket.read(response['size'].to_i)
+			if response['compression'] == 'gzip'
+				data_gz = data
+				echo "comments data_gz: #{data_gz.length}" if $repository_debug
+				StringIO.open(data_gz) { |data_gz_io|
+					begin
+						gz_reader = Zlib::GzipReader.new(data_gz_io)
+						data = gz_reader.read
+					ensure
+						gz_reader.close
+					end
+				}
+				data_gz = nil
+			end
+			Settings['cached-list-comments'] = data
+		end
+		echo "comments data: #{Settings['cached-list-comments'].length}" if $repository_debug
+		headers = list.shift
+		fi = headers.index('file')
+		gi = headers.index('game')
+		ci = headers.length
+		headers[ci] = 'comments'
+		foist = true
+		headers2 = fi2 = gi2 = ci2 = nil
+		Settings['cached-list-comments'].split("\n").each { |d|
+			if foist
+				foist = false
+				headers2 = d.split("\t", -1)
+				fi2 = headers2.index('file')
+				gi2 = headers2.index('game')
+				ci2 = headers2.index('comments')
+			else
+				row2 = d.split("\t", -1)
+				if row = list.find { |r| (r[fi] == row2[fi2]) and (r[gi] == row2[gi2]) }
+					row[ci] = row2[ci2].gsub("\x14", "\t").gsub("\x12", "\n")
+				end
+			end
+		}
+		list.unshift(headers)
+		list
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+}
+
+filter_list = proc { |list|
+	headers = list.shift
+	if cmd_name and (fi = headers.index('file'))
+		for name in cmd_name
+			list.delete_if { |row| row[fi] !~ /#{name.split(',').collect { |n| Regexp.escape(n) }.join('|')}/i }
+		end
+	end
+	if gi = headers.index('game')
+		if cmd_game
+			games = cmd_game.split(',').collect { |g| g.downcase.strip }
+		elsif XMLData.game =~ /^GS/
+			games = ['gs','any']
+		elsif XMLData.game =~ /^DR/
+			games = ['dr','any']
+		else
+			games = ['other','any']
+		end
+		list.delete_if { |row| not games.include?(row[gi]) }
+	end
+	if cmd_size and (si = headers.index('size'))
+		for op,bytes in cmd_size
+			if op == '>'
+				list.delete_if { |row| row[si].to_i <= bytes }
+			elsif op == '<'
+				list.delete_if { |row| row[si].to_i >= bytes }
+			elsif op == '='
+				list.delete_if { |row| row[si].to_i != bytes }
+			end
+		end
+	end
+	if cmd_age and (lui = headers.index('last update'))
+		now = Time.now.to_i
+		for op,seconds in cmd_age
+			if op == '>'
+				list.delete_if { |row| (now - row[lui].to_i) <= seconds }
+			elsif op == '<'
+				list.delete_if { |row| (now - row[lui].to_i) >= seconds }
+			end
+		end
+	end
+	if cmd_author and (ai = headers.index('author'))
+		authors = cmd_author.split(',').collect { |a| a.downcase.gsub(/[^a-z]+/, '') }
+		list.delete_if { |row| not authors.include?(row[ai].downcase.gsub(/[^a-z]+/, '')) }
+	end
+	if cmd_downloads and (di = headers.index('downloads'))
+		for op,dc in cmd_downloads
+			if op == '>'
+				list.delete_if { |row| row[di].to_i <= dc }
+			elsif op == '<'
+				list.delete_if { |row| row[di].to_i >= dc }
+			elsif op == '='
+				list.delete_if { |row| row[di].to_i != dc }
+			end
+		end
+	end
+	if cmd_rating and (rti = headers.index('rating total')) and (rci = headers.index('rating count'))
+		list.delete_if { |row| row[rci].to_i.zero? }
+		for op,rate in cmd_rating
+			list.delete_if { |row| (row[rti] !~ /^[0-9]+$/) or (row[rci] !~ /^[0-9]+$/) or ( (op == '>') and ((row[rti].to_f / row[rci].to_f) <= rate) ) or ( (op == '<') and ((row[rti].to_f / row[rci].to_f) >= rate) ) or ( (op == '=') and ((row[rti].to_f / row[rci].to_f) != rate) ) }
+		end
+	end
+	if cmd_tags and (ti = headers.index('tags'))
+		for tags in cmd_tags
+			tags = tags.split(',').collect { |t| t.downcase.gsub(/[^a-z]+/, '') }
+			list.delete_if { |row| (tags & (row[ti].split(',').collect { |t| t.downcase.gsub(/[^a-z]+/, '') })).empty? }
+		end
+	end
+	list.unshift(headers)
+	list	
+}
+
+format_list = proc { |list|
+	headers = list.shift
+	if (rti = headers.index('rating total')) and (rci = headers.index('rating count'))
+		list.each_index { |ri|
+			if (list[ri][rti] =~ /^[0-9]+$/) and (list[ri][rci].to_i > 0)
+#				list[ri][rti] = "#{(list[ri][rti].to_f / list[ri][rci].to_f).to_s.slice(/^[0-9]+(?:\.[0-9])?/)} (#{list[ri][rti]}/#{list[ri][rci]})"
+				list[ri][rti] = "#{(list[ri][rti].to_f / list[ri][rci].to_f).to_s.slice(/^[0-9]+(?:\.[0-9])?/)} (#{list[ri][rci]})"
+			else
+				list[ri][rti] = String.new
+			end
+		}
+		headers[rti] = 'rating'
+		headers.delete_at(rci)
+		list.each { |row| row.delete_at(rci) }
+	end
+	if cmd_sort
+		if cmd_sort == 'name'
+			cmd_sort = 'file'
+		elsif cmd_sort =~ /^(?:last\-?)?updated?$|^age$|^date$/
+			cmd_sort = 'last update'
+		end
+		if i = headers.index(cmd_sort)
+			if cmd_sort =~ /^(?:size|updated|age|downloads)$/
+				list.sort! { |a,b| a[i].to_i <=> b[i].to_i }
+			elsif cmd_sort == 'rating'
+				list.sort! { |a,b| a[i].to_s.slice(/[0-9\.]+/).to_f <=> b[i].to_s.slice(/[0-9\.]+/).to_f }
+			else
+				list.sort! { |a,b| a[i] <=> b[i] }
+			end
+		else
+			echo "warning: couldn't find a header named #{cmd_sort} in the list"
+		end
+	end
+	if cmd_reverse
+		list.reverse!
+	end
+	if lui = headers.index('last update')
+		list.each_index { |ri|
+			list[ri][lui] = "#{Time.at(list[ri][lui].to_i).strftime("%Y-%m-%d %I:%M%p").downcase.gsub(/\s0/,'  ')}"
+		}
+	end
+	if si = headers.index('size')
+		list.each_index { |ri|
+			list[ri][si] = "#{(list[ri][si].to_f / 1024).to_s.slice(/^[0-9]+(?:\.[0-9])?/)}k"
+		}
+	end
+	if (c = headers.index('game')) and (f = headers.index('file'))
+		f_list = list.collect { |r| r[f] }.uniq
+		g_list = list.collect { |r| r[c] }.uniq
+		g_list.delete('any')
+		unless (f_list.length < list.length) or (g_list.length > 1)
+			headers.delete_at(c)
+			list.each { |r| r.delete_at(c) }
+		end
+	end
+	if (di = headers.index('downloads'))
+		headers[di] = 'DLs'
+	end
+	if cmd_tags.nil? and not cmd_show_tags and (ti = headers.index('tags'))
+		list.each_index { |ri| list[ri].delete_at(ti) }
+		headers.delete_at(ti)
+	else
+		if (ti = headers.index('tags'))
+			list.each_index { |ri|
+				if list[ri][ti].length > 20
+					list[ri][ti] = "#{list[ri][ti][0,19]}>"
+				end
+			}
+		end
+	end
+	if cmd_hide_rating and (i = headers.index('rating'))
+		list.each_index { |ri| list[ri].delete_at(i) }
+		headers.delete_at(i)
+	end
+	if cmd_hide_downloads and (di = headers.index('DLs'))
+		list.each_index { |ri| list[ri].delete_at(di) }
+		headers.delete_at(di)
+	end
+	if cmd_hide_author and (ai = headers.index('author'))
+		list.each_index { |ri| list[ri].delete_at(ai) }
+		headers.delete_at(ai)
+	end
+	if cmd_hide_size and (si = headers.index('size'))
+		list.each_index { |ri| list[ri].delete_at(si) }
+		headers.delete_at(si)
+	end
+	if cmd_hide_age and (lui = headers.index('last update'))
+		list.each_index { |ri| list[ri].delete_at(lui) }
+		headers.delete_at(lui)
+	end
+	list.unshift headers
+	column_width = Array.new
+	list[0].each_index { |i|
+		list.each { |r|
+			column_width[i] = [column_width[i].to_i,r[i].to_s.length].max
+		}
+	}
+	headers = list.shift
+	if cmd_limit
+		if cmd_limit =~ /^([0-9]+),([0-9]+)$/
+			list = list[($1.to_i),($2.to_i)]
+		elsif cmd_limit =~ /^[0-9]+$/
+			list = list[0,(cmd_limit.to_i)]
+		end
+	end
+	ti = headers.index('tags') || -1
+	list.unshift column_width.collect { |c| ''.rjust(c, '-') }
+	list.unshift headers
+	list.each { |row| row.each_index { |i|
+		if i == ti
+			row[i] = row[i].ljust(column_width[i])
+		else
+			row[i] = row[i].rjust(column_width[i])
+		end
+	} }
+	list.collect { |row| row.join('   ') }.join("\n")
+}
+
+download_lich = proc {
+	if RUBY_VERSION !~ /^2/
+		echo "error: This script can't update Lich for you because the new version of Lich requires Ruby 2.0, and you're using Ruby #{RUBY_VERSION}.  See https://lichproject.org/download.html for instructions on updating."
+	else
+		filename = "#{$lich_dir}#{File.basename($PROGRAM_NAME)}"
+		if not File.exists?(filename)
+			echo "error: file not found: #{filename}"
+		else
+			begin
+				ssl_socket, socket = connect.call
+				ssl_socket.puth('action' => 'download-lich', 'current-md5sum' => Digest::MD5.file(filename).to_s, 'supported compressions' => 'gzip', 'client' => client_version)
+				response = ssl_socket.geth
+				if response['warning']
+					echo "warning: server says: #{response['warning']}"
+				end
+				if response['error']
+					if response['error'] == 'already up-to-date'
+						echo 'Lich is up-to-date'
+					else
+						echo "error: server says: #{response['error']}"
+					end
+				elsif response['compression'] and response['compression'] != 'gzip'
+					echo "error: unsupported compression method: #{response['compression']}"
+				elsif not response['size'] or not response['version'] or not response['md5sum']
+					echo "error: unrecognized response from server: #{response.inspect}"
+				else
+					response['size'] = response['size'].to_i
+					backupfilename = "#{$temp_dir}lich-#{LICH_VERSION}.rb"
+					backupfilename.concat('w') if $PROGRAM_NAME =~ /w$/
+					tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+					echo "downloading Lich #{response['version']}..."
+					File.open(tempfilename, 'wb') { |f|
+						(response['size'] / 1_000_000).times { f.write(ssl_socket.read(1_000_000)) }
+						f.write(ssl_socket.read(response['size'] % 1_000_000)) unless (response['size'] % 1_000_000) == 0
+					}
+					if response['compression'] == 'gzip'
+						ungzipname = "#{$temp_dir}#{rand(100000000)}"
+						File.open(ungzipname, 'wb') { |f|
+							Zlib::GzipReader.open(tempfilename) { |f_gz|
+								while data = f_gz.read(1_000_000)
+									f.write(data)
+								end
+								data = nil
+							}
+						}
+						begin
+							File.rename(ungzipname, tempfilename)
+						rescue
+							if $!.to_s =~ /Invalid cross-device link/
+								File.open(ungzipname, 'rb') { |r| File.open(tempfilename, 'wb') { |w| w.write(r.read) } }
+								File.delete(ungzipname)
+							else
+								raise $!
+							end
+						end
+					end
+					md5sum_mismatch = (Digest::MD5.file(tempfilename).to_s != response['md5sum'])
+					if md5sum_mismatch and not cmd_force
+						echo "error: md5sum mismatch: file likely corrupted in transit"
+						File.delete(tempfilename)
+					else
+						if md5sum_mismatch
+							echo "warning: md5sum mismatch: file likely corrupted in transit"
+						end
+						if defined?(Win32)
+							begin
+								File.rename(filename, backupfilename)
+							rescue
+								if $!.to_s =~ /Invalid cross-device link/
+									File.open(filename, 'rb') { |r| File.open(backupfilename, 'wb') { |w| w.write(r.read) } }
+									File.delete(filename)
+								else
+									raise $!
+								end
+							end
+							begin
+								File.rename(tempfilename, filename)
+							rescue
+								if $!.to_s =~ /Invalid cross-device link/
+									File.open(tempfilename, 'rb') { |r| File.open(filename, 'wb') { |w| w.write(r.read) } }
+									File.delete(tempfilename)
+								else
+									raise $!
+								end
+							end
+						else
+							# perserves file mode, which might be suid and we can't set that here
+							File.open(filename, 'rb') { |r| File.open(backupfilename, 'wb') { |w| w.write(r.read) } }
+							File.open(tempfilename, 'rb') { |r| File.open(filename, 'wb') { |w| w.write(r.read) } }
+							File.delete(tempfilename)
+						end
+						echo "Lich has been updated to version #{response['version']}."
+						echo "Changes will take effect next time you start Lich."
+					end
+				end
+			ensure
+				ssl_socket.close rescue nil
+				socket.close rescue nil
+			end
+		end
+	end
+}
+
+download_mapdb = proc {
+	failed = true
+	downloaded = false
+	if XMLData.game =~ /^GS/i
+		if XMLData.game =~ /^GSF$|^GSPlat$/i
+			game = XMLData.game.downcase
+		else
+			game = 'gsiv'
+		end
+	elsif XMLData.game =~ /^DR/i
+		if XMLData.game =~ /^DRF$|^DRX$/i
+			game = XMLData.game.downcase
+		else
+			game = 'dr'
+		end
+	else
+		game = XMLData.game.downcase
+	end
+	request = { 'action' => 'download-mapdb', 'game' => game, 'supported compressions' => 'gzip', 'client' => client_version }
+	if (current_map = Dir.entries("#{$data_dir}#{XMLData.game}").find_all { |fn| fn =~ /^map\-[0-9]+\.(?:dat|xml)$/ }.sort[-1])
+		request['current-md5sum'] = Digest::MD5.file("#{$data_dir}#{XMLData.game}/#{current_map}").to_s
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			if response['error'] == 'already up-to-date'
+				echo 'map database is up-to-date'
+				failed = false
+			else
+				echo "error: server says: #{response['error']}"
+			end
+		elsif response['compression'] and response['compression'] != 'gzip'
+			echo "error: unsupported compression method: #{response['compression']}"
+		else
+			response['size'] = response['size'].to_i
+			newfilename = "#{$data_dir}#{XMLData.game}/map-#{response['timestamp']}.dat"
+			tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+			echo 'downloading map database...'
+			File.open(tempfilename, 'wb') { |f|
+				(response['size'] / 1_000_000).times { f.write(ssl_socket.read(1_000_000)) }
+				f.write(ssl_socket.read(response['size'] % 1_000_000)) unless (response['size'] % 1_000_000) == 0
+			}
+			if response['compression'] == 'gzip'
+				ungzipname = "#{$temp_dir}#{rand(100000000)}"
+				File.open(ungzipname, 'wb') { |f|
+					Zlib::GzipReader.open(tempfilename) { |f_gz|
+						while data = f_gz.read(1_000_000)
+							f.write(data)
+						end
+						data = nil
+					}
+				}
+				begin
+					File.rename(ungzipname, tempfilename)
+				rescue
+					if $!.to_s =~ /Invalid cross-device link/
+						File.open(ungzipname, 'rb') { |r| File.open(tempfilename, 'wb') { |w| w.write(r.read) } }
+						File.delete(ungzipname)
+					else
+						raise $!
+					end
+				end
+			end
+			md5sum_mismatch = (Digest::MD5.file(tempfilename).to_s != response['md5sum'])
+			if md5sum_mismatch and not cmd_force
+				echo "error: md5sum mismatch: file likely corrupted in transit"
+				File.delete(tempfilename)
+			else
+				if md5sum_mismatch
+					echo "warning: md5sum mismatch: file likely corrupted in transit"
+				end
+				begin
+					File.rename(tempfilename, newfilename)
+				rescue
+					if $!.to_s =~ /Invalid cross-device link/
+						File.open(tempfilename, 'rb') { |r| File.open(newfilename, 'wb') { |w| w.write(r.read) } }
+						File.delete(tempfilename)
+					else
+						raise $!
+					end
+				end
+				failed = false
+				downloaded = true
+			end
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+	unless failed
+		if downloaded
+			old_maps = Dir.entries("#{$data_dir}#{XMLData.game}").find_all { |fn| (fn =~ /^map\-([0-9]+)\.(?:dat|xml)$/) and ($1 != response['timestamp']) }[0...-3]
+			unless old_maps.empty?
+				echo "deleting old map databases..."
+				begin
+					old_maps.each { |fn| File.delete("#{$data_dir}#{XMLData.game}/#{fn}") }
+				rescue
+					echo "error: #{$!}"
+				end
+				old_maps = nil
+			end
+			# rename map files with a higher timestamp than the just downloaded map, because the user probably wants to use the map they just downloaded
+			Dir.entries("#{$data_dir}#{XMLData.game}").each { |fn|
+				if (fn =~ /^map\-([0-9]+)\.(?:dat|xml)$/) and ($1.to_i > response['timestamp'].to_i)
+					begin
+						File.rename("#{$data_dir}#{XMLData.game}/#{fn}", "#{$data_dir}#{XMLData.game}/#{fn}.bak")
+					rescue
+						if $!.to_s =~ /Invalid cross-device link/
+							File.open("#{$data_dir}#{XMLData.game}/#{fn}", 'rb') { |r| File.open("#{$data_dir}#{XMLData.game}/#{fn}.bak", 'wb') { |w| w.write(r.read) } }
+							File.delete("#{$data_dir}#{XMLData.game}/#{fn}")
+						else
+							raise $!
+						end
+					end
+				end
+			}
+			echo 'loading map database...'
+			Map.reload
+			mapdb_reloaded = true
+		end
+		image_filenames = Array.new
+		Map.list.each { |room| image_filenames.push(room.image) if room.image and not image_filenames.include?(room.image) }
+		Dir.mkdir("#{$lich_dir}maps") unless File.exists?("#{$lich_dir}maps")
+		image_filenames.delete_if { |fn| File.exists?("#{$lich_dir}maps/#{fn}") }
+		unless image_filenames.empty?
+			echo 'downloading missing map images...'
+			begin
+				ssl_socket, socket = connect.call
+				ssl_socket.puth('action' => 'download-mapdb-images', 'files' => image_filenames.join('/'), 'client' => client_version)
+				loop {
+					response = ssl_socket.geth
+					if response['warning']
+						echo "warning: server says: #{response['warning']}"
+					end
+					if response['error']
+						echo "error: server says: #{response['error']}"
+						break
+					elsif response['success']
+						break
+					elsif not response['file'] or not response['size'] or not response['md5sum']
+						echo "error: unrecognized response from server: #{response.inspect}"
+						break
+					end
+					response['size'] = response['size'].to_i
+					tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+					echo "downloading #{response['file']}..."
+					File.open(tempfilename, 'wb') { |f|
+						(response['size'] / 1_000_000).times { f.write(ssl_socket.read(1_000_000)) }
+						f.write(ssl_socket.read(response['size'] % 1_000_000)) unless (response['size'] % 1_000_000) == 0
+					}
+					md5sum_mismatch = (Digest::MD5.file(tempfilename).to_s != response['md5sum'])
+					if md5sum_mismatch and not cmd_force
+						echo "error: md5sum mismatch: file likely corrupted in transit"
+						File.delete(tempfilename)
+					else
+						if md5sum_mismatch
+							echo "warning: md5sum mismatch: file likely corrupted in transit"
+						end
+						begin
+							File.rename(tempfilename, "#{$lich_dir}maps/#{response['file']}")
+						rescue
+							if $!.to_s =~ /Invalid cross-device link/
+								File.open(tempfilename, 'rb') { |r| File.open("#{$lich_dir}maps/#{response['file']}", 'wb') { |w| w.write(r.read) } }
+								File.delete(tempfilename)
+							else
+								raise $!
+							end
+						end
+					end
+				}
+			ensure
+				ssl_socket.close rescue nil
+				socket.close rescue nil
+			end
+		end
+		echo 'done'
+	end
+}
+
+download_file = proc { |file,game,version|
+	begin
+		ssl_socket, socket = connect.call
+		request = { 'action' => 'download', 'file' => file, 'game' => game, 'supported compressions' => 'gzip', 'client' => client_version }
+		request['version'] = version unless version.nil?
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+			false
+		elsif (response['file'] != file) or (response['size'] !~ /^[0-9]+$/)
+			echo 'error: out of cheese 6'
+			false
+		elsif response['compression'] and response['compression'] != 'gzip'
+			echo "error: unsupported compression method: #{response['compression']}"
+			false
+		else
+			response['size'] = response['size'].to_i
+			if (file =~ /\.xml$/i) and (LICH_VERSION.split('.').collect { |num| num.rjust(5, '0') }.join('.') >= '00004.00006.00000')
+				newfilename = "#{$data_dir}#{file}"
+			else
+				newfilename = "#{$script_dir}#{file}"
+			end
+			tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+			File.open(tempfilename, 'wb') { |f|
+				(response['size'] / 1_000_000).times { f.write(ssl_socket.read(1_000_000)) }
+				f.write(ssl_socket.read(response['size'] % 1_000_000)) unless (response['size'] % 1_000_000) == 0
+			}
+			if response['compression'] == 'gzip'
+				ungzipname = "#{$temp_dir}#{rand(100000000)}"
+				File.open(ungzipname, 'wb') { |f|
+					Zlib::GzipReader.open(tempfilename) { |f_gz|
+						while data = f_gz.read(1_000_000)
+							f.write(data)
+						end
+						data = nil
+					}
+				}
+				begin
+					File.rename(ungzipname, tempfilename)
+				rescue
+					if $!.to_s =~ /Invalid cross-device link/
+						File.open(ungzipname, 'rb') { |r| File.open(tempfilename, 'wb') { |w| w.write(r.read) } }
+						File.delete(ungzipname)
+					else
+						raise $!
+					end
+				end
+			end
+			md5sum_mismatch = (Digest::MD5.file(tempfilename).to_s != response['md5sum'])
+			if md5sum_mismatch and not cmd_force
+				echo "error: md5sum mismatch: file likely corrupted in transit"
+				File.delete(tempfilename)
+				false
+			else
+				if md5sum_mismatch
+					echo "warning: md5sum mismatch: file likely corrupted in transit"
+				end
+				failed_requirement = unmet_lich_requirement.call(File.open(tempfilename, 'rb') { |f| get_comments_from_data.call(f.read(20_000)) })
+				if failed_requirement and not cmd_force
+					echo "error: #{file} requires Lich version #{failed_requirement}; your current Lich version is #{LICH_VERSION}"
+					File.delete(tempfilename)
+					false
+				else
+					if failed_requirement
+						echo "warning: #{file} requires Lich version #{failed_requirement}; your current Lich version is #{LICH_VERSION}"
+					end
+					begin
+						File.rename(tempfilename, newfilename)
+					rescue
+						if $!.to_s =~ /Invalid cross-device link/
+							File.open(tempfilename, 'rb') { |r| File.open(newfilename, 'wb') { |w| w.write(r.read) } }
+							File.delete(tempfilename)
+						else
+							raise $!
+						end
+					end
+					if XMLData.game =~ /^GS/
+						if file == 'spell-list.xml'
+							Spell.load
+						elsif file == 'gameobj-data.xml'
+							GameObj.load_data
+						end
+					end
+					true
+				end
+			end
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+}
+
+
+for var in script.vars[1..-1]
+	if no_more_options
+		cmd.push(var)
+	elsif var == '--'
+		no_more_options = true
+	elsif var =~ /^--/
+		if var =~ /^--author/i
+			if var =~ /^--author\s*=\s*(.+)/i
+				cmd_author = $1
+			else
+				echo 'error: --author option not complete; e.g. --author=Bob'
+				exit
+			end
+		elsif var =~ /^--password/i
+			if var =~ /^--password\s*=\s*(.+)/i
+				cmd_password = $1
+			else
+				echo 'error: --password option not complete; e.g. --password=12345'
+				exit
+			end
+		elsif var =~ /^--sort/i
+			if var =~ /^--sort\s*=\s*(.+)/i
+				cmd_sort = $1
+			else
+				echo 'error: --sort option not complete; e.g. --sort=age'
+				exit
+			end
+		elsif var =~ /^--reverse$/i
+			cmd_reverse = true
+		elsif var =~ /^--limit/i
+			if var =~ /^--limit\s*=\s*(.+)/i
+				cmd_limit = $1
+			else
+				echo 'error: --limit option not complete; e.g. --limit=10'
+				exit
+			end
+		elsif var =~ /^--force$/i
+			cmd_force = true
+		elsif var =~ /^--game/i
+			if var =~ /^--game\s*=\s*(.+)/i
+				cmd_game = $1
+			else
+				echo 'error: --game option not complete; e.g. --game=gs'
+				exit
+			end
+		elsif var =~ /^--name/i
+			if var =~ /^--name\s*=\s*(.+)/i
+				cmd_name ||= Array.new
+				cmd_name.push($1)
+			else
+				echo 'error: --name option not complete; e.g. --name=loot'
+				exit
+			end
+		elsif var =~ /^--show-?tags$/i
+			cmd_show_tags = true
+		elsif var =~ /^--hide-?(?:age|date|updated|last-update)$/i
+			cmd_hide_age = true
+		elsif var =~ /^--hide-?size$/i
+			cmd_hide_size = true
+		elsif var =~ /^--hide-?author$/i
+			cmd_hide_author = true
+		elsif var =~ /^--hide-?downloads?$/i
+			cmd_hide_downloads = true
+		elsif var =~ /^--hide-?rating$/i
+			cmd_hide_rating = true
+		elsif var =~ /^--tags/i
+			if var =~ /^--tags?\s*=\s*(.+)/i
+				cmd_tags ||= Array.new
+				cmd_tags.push($1)
+			else
+				echo 'error: --tags option not complete; e.g. --tags=core'
+				exit
+			end
+		elsif var =~ /^--size/i
+			if var =~ /^--size\s*(>|<|=)\s*([0-9\.]+)(k|m|g)?b?/i
+				cmd_size ||= Array.new
+				if $3 == 'g'
+					cmd_size.push [ $1, ($2.to_f*1073741824).to_i ]
+				elsif $3 == 'm'
+					cmd_size.push [ $1, ($2.to_f*1048576).to_i ]
+				elsif $3 == 'k'
+					cmd_size.push [ $1, ($2.to_f*1024).to_i ]
+				else
+					cmd_size.push [ $1, $2.to_i ]
+				end
+			else
+				echo 'error: --size option not complete; e.g. --size>15k'
+				exit
+			end
+		elsif var =~ /^--age/i
+			if var =~ /^--age\s*(>|<)\s*([0-9\.]+)(m|h|d|w|y)?$/i
+				cmd_age ||= Array.new
+				if $3 == 'y'
+					cmd_age.push [ $1, ($2.to_f*60*60*24*365).to_i ]
+				elsif $3 == 'w'
+					cmd_age.push [ $1, ($2.to_f*60*60*24*7).to_i ]
+				elsif $3 == 'd'
+					cmd_age.push [ $1, ($2.to_f*60*60*24).to_i ]
+				elsif $3 == 'h'
+					cmd_age.push [ $1, ($2.to_f*60*60).to_i ]
+				elsif $3 == 'm'
+					cmd_age.push [ $1, ($2.to_f*60).to_i ]
+				else
+					cmd_age.push [ $1, $2.to_i ]
+				end
+			else
+				echo 'error: --age option not complete; e.g. --age<24h'
+				exit
+			end
+		elsif var =~ /^--downloads/i
+			if var =~ /^--downloads?\s*(>|<|=)\s*([0-9]+)/i
+				cmd_downloads ||= Array.new
+				cmd_downloads.push [ $1, $2.to_i ]
+			else
+				echo 'error: --downloads option not complete; e.g. --downloads>50'
+				exit
+			end
+		elsif var =~ /^--rating/i
+			if var =~ /^--rating\s*(>|<|=)\s*([0-9\.]+)/i
+				cmd_rating ||= Array.new
+				cmd_rating.push [ $1, $2.to_f ]
+			else
+				echo 'error: --rating option not complete; e.g. --rating>8.5'
+				exit
+			end
+		elsif var =~ /^--version/i
+			if var =~ /^--version\s*=\s*([0-9\.]+)/i
+				cmd_version = $1
+			else
+				echo 'error: --version option not complete; e.g. --version=1.2'
+				exit
+			end
+		else
+			echo "error: unknown option: #{var}"
+			exit
+		end
+	else
+		cmd.push(var)
+	end
+end
+
+
+#
+# list
+#
+if cmd[0] =~ /^list$/i
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	respond "\n#{format_list.call(filter_list.call(get_list.call))}\n\n"
+
+#
+# list-updates
+#
+elsif cmd[0] =~ /^list-?update[sd]$/i
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (lui = headers.index('last update')) and (fi = headers.index('file'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	list.delete_if { |row| 
+		if (row[fi] =~ /\.xml$/i) and (LICH_VERSION.split('.').collect { |n| n.rjust(5,'0') }.join('.') >= '00004.00006.00000')
+			not File.exists?("#{$data_dir}#{row[fi]}") or ((File.mtime("#{$data_dir}#{row[fi]}").to_i + 15) > row[lui].to_i)
+		else
+			not File.exists?("#{$script_dir}#{row[fi]}") or ((File.mtime("#{$script_dir}#{row[fi]}").to_i + 15) > row[lui].to_i)
+		end
+	}
+	list.unshift(headers)
+	respond "\n#{format_list.call(list)}\n\n"
+
+
+#
+# list-new
+#
+elsif cmd[0] =~ /^list-?new$/i
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	list.delete_if { |row|
+		if (row[fi] =~ /\.xml$/i) and (LICH_VERSION.split('.').collect { |num| num.rjust(5, '0') }.join('.') >= '00004.00006.00000')
+			File.exists?("#{$data_dir}#{row[fi]}")
+		else
+			File.exists?("#{$script_dir}#{row[fi]}")
+		end
+	}
+	list.unshift(headers)
+	respond "\n#{format_list.call(list)}\n\n"
+
+
+#
+# list-tags
+#
+elsif cmd[0] =~ /^list-?tags?$/i
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless ti = headers.index('tags')
+		echo 'error: list is missing headers'
+		exit
+	end
+	tags = Hash.new
+	list.each { |row| row[ti].split(',').each { |t| tags[t.downcase.gsub(/[^a-z]+/, '')] = t } }
+	if tags.empty?
+		respond "\ntags: (none)\n\n"
+	else
+		respond "\ntags: #{tags.values.join(', ')}\n\n"
+	end
+
+
+#
+# info
+#
+elsif (cmd[0] =~ /^info$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file')) and (gi = headers.index('game'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	exact_name_list = list.find_all { |row| row[fi].downcase == cmd[1].downcase }
+	if exact_name_list.length > 0
+		list = exact_name_list
+	else
+		list.delete_if { |row| row[fi] !~ /^#{cmd[1]}/i }
+	end
+	if list.empty?
+		echo "error: file not found"
+	elsif list.length > 1
+		list.unshift(headers)
+		respond "\nMultiple files match: be more specific\n\n#{format_list.call(list)}\n\n"
+	else
+		file = list[0][fi]
+		game = list[0][gi]
+		list.unshift(headers)
+		begin
+			ssl_socket, socket = connect.call
+			ssl_socket.puth('action' => 'inspect', 'file' => file, 'game' => game, 'client' => client_version)
+			response = ssl_socket.geth
+			if response['warning']
+				echo "warning: server says: #{response['warning']}"
+			end
+			if response['error']
+				echo "error: server says: #{response['error']}"
+				exit
+			elsif (response['size'] !~ /^[0-9]+$/)
+				echo 'error: out of cheese 4'
+				exit
+			end
+			data = ssl_socket.read(response['size'].to_i)
+		ensure
+			ssl_socket.close rescue nil
+			socket.close rescue nil
+		end
+		output = "\n#{format_list.call(list)}\n\n"
+		if response['versions']
+			sorted_versions = response['versions'].split(';').collect { |v| v.split('.') }.sort { |a,b|
+				i = r = 0
+				loop {
+					if (r != 0) or not (a[i] or b[i])
+						break
+					elsif b[i] and not a[i]
+						r = -1
+					elsif a[i] and not b[i]
+						r = 1
+					else
+						r = (a[i].to_i <=> b[i].to_i)
+					end
+					i += 1
+				}
+				r
+			}.collect { |v| v.join('.') }.join(', ')
+			output.concat "available versions: #{sorted_versions}\n\n"
+		end
+		output.concat "#{data}\n\n"
+		respond output
+	end
+
+
+#
+# download
+#
+elsif (cmd[0] =~ /^download$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file')) and (gi = headers.index('game'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	exact_name_list = list.find_all { |row| row[fi].downcase == cmd[1].downcase }
+	if exact_name_list.length > 0
+		list = exact_name_list
+	else
+		list.delete_if { |row| row[fi] !~ /^#{cmd[1]}/i }
+	end
+	if list.empty?
+		echo "error: file not found"
+	elsif list.length > 1
+		list.unshift(headers)
+		respond "\nMultiple files match: be more specific\n\n#{format_list.call(list)}\n\n"
+	else
+		echo "downloading #{list[0][fi]} in 3 seconds... (;k #{script.name} to cancel)"
+		sleep 3
+		if download_file.call(list[0][fi], list[0][gi], cmd_version)
+			echo 'done'
+		end
+	end
+
+
+#
+# download-updates
+#
+elsif (cmd[0] =~ /^download-?update[ds]$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	if Settings['updatable'].nil?
+		echo "error: download-updates has not been set up; look for set-updatable and unset-updatable commands in ;#{script.name} help"
+		exit
+	end
+	Settings['updatable'][:scripts] ||= Array.new
+	Settings['updatable'][:mapdb] ||= Hash.new
+	if Settings['updatable'][:lich]
+		download_lich.call
+	end
+	if Settings['updatable'][:mapdb][XMLData.game]
+		download_mapdb.call
+	end
+	unless Settings['updatable']['scripts'].empty?
+		list = get_list.call
+		headers = list.shift
+		unless (fi = headers.index('file')) and (gi = headers.index('game')) and (lui = headers.index('last update')) and (ai = headers.index('author'))
+			echo 'error: list is missing headers'
+		else
+			no_updates = true
+			for local_info in (Settings['updatable'][:scripts])
+				next if (LICH_VERSION =~ /^4\.4/) and (local_info[:filename] =~ /^(alias|vars|autostart|infomon)\.lic$/i)
+				if remote_info = list.find { |rinfo| (rinfo[fi] == local_info[:filename]) and (rinfo[gi] == local_info[:game]) }
+					if (local_info[:filename] =~ /\.xml$/i) and (LICH_VERSION.split('.').collect { |n| n.rjust(5,'0') }.join('.') >= '00004.00006.00000')
+						updated = !File.exists?("#{$data_dir}#{local_info[:filename]}") || (File.mtime("#{$data_dir}#{local_info[:filename]}").to_i < remote_info[lui].to_i)
+					else
+						updated = !File.exists?("#{$script_dir}#{local_info[:filename]}") || (File.mtime("#{$script_dir}#{local_info[:filename]}").to_i < remote_info[lui].to_i)
+					end
+					if updated
+						if (remote_info[ai] != local_info[:author]) and not cmd_force
+							echo "warning: author of #{local_info[:filename]} changed from #{local_info[:author]} to #{remote_info[ai]}: skipping"
+						else
+							if remote_info[ai] != local_info[:author]
+								echo "warning: author of #{local_info[:filename]} changed from #{local_info[:author]} to #{remote_info[ai]}: downloading anyway"
+							end
+							echo "downloading #{local_info[:filename].sub(/\.lic$/,'')}..."
+							start = Time.now.to_f
+							download_file.call(local_info[:filename], local_info[:game], nil)
+							sleep [(1.5 - Time.now.to_f + start), 0].max
+							no_updates = false
+						end
+					end
+				else
+					# file is not in the repository
+				end
+			end
+			if no_updates
+				echo 'scripts are up-to-date'
+			else
+				echo 'done'
+			end
+		end
+	end
+
+
+#
+# settings for download-updates
+#
+elsif (cmd[0] =~ /^show-?updat(?:e|able)$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:scripts] ||= Array.new
+	Settings['updatable'][:mapdb] ||= Hash.new
+	output = "\n"
+	output.concat "      Lich: #{Settings['updatable'][:lich] ? 'on' : 'off'}\n"
+	output.concat "    map db: #{Settings['updatable'][:mapdb][XMLData.game] ? 'on' : 'off'}\n"
+	if Settings['updatable'][:scripts].empty?
+		output.concat "   scripts: (none)\n"
+	else
+		output.concat "   scripts: #{Settings['updatable'][:scripts].collect { |s| s[:filename].sub(/\.lic$/,'') }.join(', ')}\n"
+	end
+	output.concat "\n"
+	respond output
+elsif (cmd[0] =~ /^set-?updat(?:e|able)$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file')) and (gi = headers.index('game')) and (ai = headers.index('author'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	exact_name_list = list.find_all { |row| row[fi].downcase == cmd[1].downcase }
+	if exact_name_list.length > 0
+		list = exact_name_list
+	else
+		list.delete_if { |row| row[fi] !~ /^#{cmd[1]}/i }
+	end
+	if list.empty?
+		echo "error: file not found"
+	elsif list.length > 1
+		list.unshift(headers)
+		respond "\nMultiple files match: be more specific\n\n#{format_list.call(list)}\n\n"
+	else
+		info = { :filename => list[0][fi], :game => list[0][gi], :author => list[0][ai] }
+		Settings['updatable'] ||= Hash.new
+		Settings['updatable'][:scripts] ||= Array.new
+		if Settings['updatable'][:scripts].include?(info)
+			echo "#{info[:filename]} is already set as updatable"
+		else
+			Settings['updatable'][:scripts].push(info)
+			echo "the download-updates command will download #{info[:filename]} when there's an update"
+		end
+	end
+elsif (cmd[0] =~ /^unset-?updat(?:e|able)$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:scripts] ||= Array.new
+	if info = (Settings['updatable'][:scripts].find { |i| i[:filename] == cmd[1] } || Settings['updatable'][:scripts].find { |i| i[:filename] =~ /^#{cmd[1]}/i })
+		echo "the download-updates command will ignore updates for #{info[:filename]}"
+		Settings['updatable'][:scripts].delete(info)
+	else
+		echo "could not find #{cmd[1]} in the updatable list"
+	end
+elsif (cmd[0] =~ /^set-?lich-?updat(?:e|able)$|^set-?updat(?:e|able)-?lich$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:lich] = true
+	echo "the download-updates command will download Lich when there's an update"
+elsif (cmd[0] =~ /^unset-?lich-?updat(?:e|able)$|^unset-?updat(?:e|able)-?lich$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:lich] = false
+	echo 'the download-updates command will ignore updates for Lich'
+elsif (cmd[0] =~ /^set-?map(?:db)?-?updat(?:e|able)$|^set-?updat(?:e|able)-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:mapdb] ||= Hash.new
+	Settings['updatable'][:mapdb][XMLData.game] = true
+	echo "the download-updates command will download the #{XMLData.game} map database when there's an update"
+elsif (cmd[0] =~ /^unset-?map(?:db)?-?updat(?:e|able)$|^unset-?updat(?:e|able)-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	Settings['updatable'] ||= Hash.new
+	Settings['updatable'][:mapdb] ||= Hash.new
+	Settings['updatable'][:mapdb][XMLData.game] = false
+	echo "the download-updates command will ignore updates for the #{XMLData.game} map database"
+
+
+#
+# upload
+#
+elsif (cmd[0] =~ /^upload$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	if File.exists?("#{$script_dir}#{cmd[1]}")
+		file = cmd[1]
+		filename = "#{$script_dir}#{cmd[1]}"
+	elsif File.exists?("#{$script_dir}#{cmd[1]}.lic")
+		file = "#{cmd[1]}.lic"
+		filename = "#{$script_dir}#{cmd[1]}.lic"
+	elsif (cmd[1] =~ /\.xml$/i) and (LICH_VERSION.split('.').collect { |num| num.rjust(5, '0') }.join('.') >= '00004.00006.00000') and File.exists?("#{$data_dir}#{cmd[1]}")
+		file = "#{cmd[1]}"
+		filename = "#{$data_dir}#{cmd[1]}"
+	else
+		echo "error: could not find #{cmd[1]}"
+		exit
+	end
+	_filename = filename
+	md5sum    = Digest::MD5.file(filename).to_s
+	comments  = File.open(filename, 'rb') { |f| get_comments_from_data.call(f.read(20_000)) }
+	author    = (cmd_author || get_author_from_comments.call(comments) || Char.name)
+	game      = (cmd_game || get_game_from_comments.call(comments) || (if XMLData.game =~ /^GS/; 'GS'; elsif XMLData.game =~ /^DR/; 'DR'; else; 'other'; end))
+	password  = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	if password.nil?
+		if author == 'nobody'
+			password = 'nothing'
+		else
+			echo "error: no password is saved for author #{author}"
+			echo "If that's not the author name you want for this script, specify a different name by adding \"author: NAME\" to the comments at the top of your script, or add \"--author=NAME\" to the upload command."
+			echo "Otherwise, specify a password by adding \"--password=NEWPASSWORD\" to the upload command."
+			exit
+		end
+	end
+	tags     = (cmd_tags.join(',') || get_tags_from_comments.call(comments))
+	size     = File.stat(filename).size
+	request  = { 'action' => 'upload', 'file' => file, 'game' => game, 'size' => size, 'author' => author, 'password' => password, 'md5sum' => md5sum, 'tags' => tags, 'client' => client_version }
+	delete_filename = false
+	if size > 5000
+		tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+		File.open(filename, 'rb') { |f|
+			Zlib::GzipWriter.open(tempfilename) { |f_gz|
+				while data = f.read(1_000_000)
+					f_gz.write(data)
+				end
+				data = nil
+			}
+		}
+		filename = tempfilename
+		delete_filename = true
+		size = File.stat(filename).size
+		request['size'] = size
+		request['compression'] = 'gzip'
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+			exit
+		elsif not response['continue']
+			echo "error: unrecognized response from server: #{response.inspect}"
+			exit
+		end
+		if cmd_password
+			Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+			echo "password saved for author #{author}"
+		end
+		File.open(filename, 'rb') { |f|
+			(size / 1_000_000).times { ssl_socket.write(f.read(1_000_000)) }
+			ssl_socket.write(f.read(size % 1_000_000)) unless (size % 1_000_000) == 0
+		}
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			echo 'upload complete'
+		else
+			echo "error: unrecognized response from server: #{response.inspect}"
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+		File.delete(filename) if delete_filename
+	end
+
+
+#
+# delete
+#
+elsif (cmd[0] =~ /^delete$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file')) and (gi = headers.index('game')) and (ai = headers.index('author'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	exact_name_list = list.find_all { |row| row[fi].downcase == cmd[1].downcase }
+	if exact_name_list.length > 0
+		list = exact_name_list
+	else
+		list.delete_if { |row| row[fi] !~ /^#{cmd[1]}/i }
+	end
+	if list.empty?
+		echo "error: file not found"
+	elsif list.length > 1
+		list.unshift(headers)
+		respond "\nMultiple files match: be more specific\n\n#{format_list.call(list)}\n\n"
+	else
+		file = list[0][fi]
+		game = list[0][gi]
+		author = list[0][ai]
+		password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+		if password.nil?
+			if author == 'nobody'
+				password = 'nothing'
+			else
+				echo "error: no password is saved for author #{author}; specify a password by adding \"--password=PASSWORD\" to the delete command"
+				exit
+			end
+		end
+		echo "deleting #{file} in 5 seconds... (;k #{script.name} to cancel)"
+		sleep 5
+		begin
+			ssl_socket, socket = connect.call
+			ssl_socket.puth('action' => 'delete', 'file' => file, 'game' => game, 'author' => author, 'password' => password, 'client' => client_version)
+			response = ssl_socket.geth
+			if response['warning']
+				echo "warning: server says: #{response['warning']}"
+			end
+			if response['error']
+				echo "error: server says: #{response['error']}"
+			elsif response['success']
+				if cmd_password
+					Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+					echo "password saved for author #{author}"
+				end
+				echo 'done'
+			else
+				echo "error: unrecognized response from server: #{response.inspect}"
+			end
+		ensure
+			ssl_socket.close rescue nil
+			socket.close rescue nil
+		end
+	end
+
+
+#
+# rate
+#
+elsif (cmd[0] =~ /^rate$/i)
+	unless cmd[1]
+		echo 'error: missing script name on command line'
+		exit
+	end
+	unless cmd[2]
+		echo 'error: missing rating on command line'
+		exit
+	end
+	unless cmd[2] =~ /^(?:[1-9]|10)$/
+		echo 'error: rating needs to be 1-10'
+		exit
+	end
+	if cmd[3]
+		echo "error: extra words on command line: #{cmd[3..-1].join(' ')}"
+		exit
+	end
+	list = filter_list.call(get_list.call)
+	headers = list.shift
+	unless (fi = headers.index('file')) and (gi = headers.index('game'))
+		echo 'error: list is missing headers'
+		exit
+	end
+	exact_name_list = list.find_all { |row| row[fi].downcase == cmd[1].downcase }
+	if exact_name_list.length > 0
+		list = exact_name_list
+	else
+		list.delete_if { |row| row[fi] !~ /^#{cmd[1]}/i }
+	end
+	if list.empty?
+		echo "error: file not found"
+	elsif list.length > 1
+		list.unshift(headers)
+		respond "\nMultiple files match: be more specific\n\n#{format_list.call(list)}\n\n"
+	else
+		file = list[0][fi]
+		game = list[0][gi]
+		begin
+			ssl_socket, socket = connect.call
+			ssl_socket.puth('action' => 'rate', 'file' => file, 'game' => game, 'rating' => cmd[2], 'client' => client_version)
+			response = ssl_socket.geth
+			if response['warning']
+				echo "warning: server says: #{response['warning']}"
+			end
+			if response['error']
+				echo "error: server says: #{response['error']}"
+				exit
+			elsif response['success']
+				echo 'Thank you for rating this script.'
+				exit
+			end
+		ensure
+			ssl_socket.close rescue nil
+			socket.close rescue nil
+		end
+	end
+
+
+#
+# change password
+#
+elsif cmd[0] =~ /^(?:new|change)-?password$/i
+	unless cmd[1]
+		echo 'error: missing new password on command line'
+		exit
+	end
+	if cmd[2]
+		echo "error: extra words on command line: #{cmd[2..-1].join(' ')}"
+		exit
+	end
+	author = (cmd_author || Char.name)
+	password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	if password.nil?
+		echo "error: no password is saved for author #{author}; specify a password by adding \"--password=OLDPASSWORD\" to the change-password command (or if this author name has not been used before, the initial password must be set with an upload command)"
+		exit
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'change password', 'author' => author, 'password' => password, 'new password' => cmd[1], 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			echo 'your password has been changed on the server'
+			Settings["password:#{author.gsub(/[^a-z]/, '').downcase}"] = cmd[1]
+			echo "password saved for author #{author}"
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# checkout-mapdb
+#
+elsif (cmd[0] =~ /^checkout-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	if XMLData.game =~ /^GSF$|^GSPlat$|^GSIV$|^DR$|^DRF$|^DRX$/i
+		game = XMLData.game.downcase
+	else
+		echo 'error: unknown game'
+		exit
+	end
+	author = (cmd_author || Char.name)
+	password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	if password.nil?
+		echo "error: no password is saved for author #{author}"
+		echo "If that's not the author name you want to use, specify a different name by adding \"--author=NAME\" to the command."
+		echo "Otherwise, specify a password by adding \"--password=NEWPASSWORD\" to the command."
+		exit
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'checkout-mapdb', 'author' => author, 'password' => password, 'game' => game, 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			if cmd_password
+				Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+				echo "password saved for author #{author}"
+			end
+			echo 'success;  running download-mapdb now...'
+			download_mapdb.call
+			Map.reload unless mapdb_reloaded # mapdb on disk may have been updated by another character, leaving the in memory mapdb on this character out of date
+			echo "edit your map database and     ;#{script.name} upload-mapdb     within 24 hours."
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# relase-mapdb
+#
+elsif (cmd[0] =~ /^release-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	author = (cmd_author || Char.name)
+	password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	if password.nil?
+		echo "error: no password is saved for author #{author}"
+		echo "If that's not the author name you want to use, specify a different name by adding \"--author=NAME\" to the command."
+		echo "Otherwise, specify a password by adding \"--password=NEWPASSWORD\" to the command."
+		exit
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'release-mapdb', 'author' => author, 'password' => password, 'game' => XMLData.game.downcase, 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			if cmd_password
+				Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+				echo "password saved for author #{author}"
+			end
+			echo 'success: other people can work on the map database now'
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# approve-mapdb
+#
+elsif (cmd[0] =~ /^approve-?map(?:db)?$/i)
+	unless cmd[1] and cmd[2]
+		echo 'error: missing game and timestamp on command line'
+		exit
+	end
+	if cmd[3]
+		echo "error: extra words on command line: #{cmd[3..-1].join(' ')}"
+		exit
+	end
+	author = (cmd_author || Char.name)
+	password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	unless (game = cmd[1]) and (timestamp = cmd[2])
+		echo "You're doing it wrong."
+		exit
+	end
+	if password.nil?
+		echo "error: no password is saved for author #{author}"
+		echo "If that's not the author name you want to use, specify a different name by adding \"--author=NAME\" to the command."
+		echo "Otherwise, specify a password by adding \"--password=NEWPASSWORD\" to the command."
+		exit
+	end
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'approve-mapdb', 'author' => author, 'password' => password, 'game' => game, 'timestamp' => timestamp, 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			if cmd_password
+				Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+				echo "password saved for author #{author}"
+			end
+			echo 'success'
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# upload-mapdb
+#
+elsif (cmd[0] =~ /^upload-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	if XMLData.game =~ /^GSF$|^GSPlat$|^GSIV$|^DR$|^DRF$|^DRX$/i
+		game = XMLData.game.downcase
+	else
+		echo 'error: unknown game'
+		exit
+	end
+	echo 'saving map database...'
+	Map.save
+	filename = Dir.entries("#{$data_dir}#{XMLData.game}").find_all { |fn| fn =~ /^map\-[0-9]+\.(?:dat|xml)$/ }.collect { |fn| "#{$data_dir}#{XMLData.game}/#{fn}" }.sort[-1]
+	unless File.exists?(filename)
+		echo 'error'
+		exit
+	end
+	md5sum   = Digest::MD5.file(filename).to_s
+	author   = (cmd_author || Char.name)
+	password = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	if password.nil?
+		echo "error: no password is saved for author #{author}"
+		echo "If that's not the author name you want, specify a different name by adding \"--author=NAME\" to the command."
+		echo "Otherwise, specify a password by adding \"--password=NEWPASSWORD\" to the upload command."
+		exit
+	end
+	size     = File.stat(filename).size
+	request  = { 'action' => 'upload-mapdb', 'game' => game, 'author' => author, 'password' => password, 'md5sum' => md5sum, 'client' => client_version }
+
+	echo 'compressing map database...'
+	tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+	File.open(filename, 'rb') { |f|
+		Zlib::GzipWriter.open(tempfilename) { |f_gz|
+			while data = f.read(1_000_000)
+				f_gz.write(data)
+			end
+			data = nil
+		}
+	}
+	size = File.stat(tempfilename).size
+	request['size'] = size
+	request['compression'] = 'gzip'
+
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth(request)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+			exit
+		elsif not response['continue']
+			echo "error: unrecognized response from server: #{response.inspect}"
+			exit
+		end
+		if cmd_password
+			Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+			echo "password saved for author #{author}"
+		end
+		echo 'uploading map database...'
+		progress = 0
+		progress_time = Time.now.to_i
+		File.open(tempfilename, 'rb') { |f|
+			(size / 1_000_000).times {
+				ssl_socket.write(f.read(1_000_000))
+				progress += 1000000
+				if ((Time.now.to_i - progress_time) > 4)
+					progress_time = Time.now.to_i
+					echo "still uploading (#{((progress*100)/size).round}%)..."
+				end
+			}
+			ssl_socket.write(f.read(size % 1_000_000)) unless (size % 1_000_000) == 0
+		}
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			echo 'upload complete'
+		else
+			echo "error: unrecognized response from server: #{response.inspect}"
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+		File.delete(tempfilename)
+	end
+
+	image_filenames = Array.new
+	Map.list.each { |room| image_filenames.push(room.image) if room.image and not image_filenames.include?(room.image) }
+	image_filenames.each { |fn|
+		unless fn =~ /\.(?:png|jpg|gif)$/i
+			echo "warning: ignoring #{fn} (map images should have a .png or .jpg file extension)"
+		end
+		unless File.exists?("#{$lich_dir}maps/#{fn}")
+			echo "warning: ignoring #{fn} (file not found in #{$lich_dir}/maps)"
+		end
+	}
+	image_filenames.delete_if { |fn| (fn !~ /\.(?:png|jpg|gif)$/i) or not File.exists?("#{$lich_dir}maps/#{fn}") }
+	image_filenames = image_filenames.join('/')
+
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'upload-mapdb-images', 'files' => image_filenames, 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['need-images']
+			for filename in response['need-images'].split('/')
+				echo "uploading #{filename}..."
+				size = File.stat("#{$lich_dir}maps/#{filename}").size
+				ssl_socket.puth('file' => filename, 'size' => size, 'md5sum' => Digest::MD5.file("#{$lich_dir}maps/#{filename}").to_s, 'client' => client_version)
+				response = ssl_socket.geth
+				if response['warning']
+					echo "warning: server says: #{response['warning']}"
+				end
+				if response['error']
+					echo "error: server says: #{response['error']}"
+					break
+				elsif not response['continue']
+					echo "error: unrecognized response from server: #{response.inspect}"
+					break
+				end
+				File.open("#{$lich_dir}maps/#{filename}", 'rb') { |f|
+					(size / 1_000_000).times { ssl_socket.write(f.read(1_000_000)) }
+					ssl_socket.write(f.read(size % 1_000_000)) unless (size % 1_000_000) == 0
+				}
+				response = ssl_socket.geth
+				if response['warning']
+					echo "warning: server says: #{response['warning']}"
+				end
+				if response['error']
+					echo "error: server says: #{response['error']}"
+				elsif not response['success']
+					echo "error: unrecognized response from server: #{response.inspect}"
+				end
+			end
+			echo 'done'
+		elsif response['success']
+			nil
+		else
+			echo "error: unrecognized response from server: #{response.inspect}"
+		end
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# download-mapdb
+#
+elsif (cmd[0] =~ /^download-?map(?:db)?$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	download_mapdb.call
+	
+
+#
+# upload-lich
+#
+elsif (cmd[0] =~ /^upload-?lich$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	filename = "#{$lich_dir}#{File.basename($PROGRAM_NAME)}"
+	unless File.exists?(filename)
+		echo "error: file not found: #{filename}"
+		exit
+	end
+	tempfilename = "#{$temp_dir}#{rand(100000000)}.repo"
+	File.open(filename, 'rb') { |f|
+		Zlib::GzipWriter.open(tempfilename) { |f_gz|
+			while data = f.read(1_000_000)
+				f_gz.write(data)
+			end
+			data = nil
+		}
+	}
+	size = File.stat(tempfilename).size
+	author    = (cmd_author || Char.name)
+	password  = (cmd_password || Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"])
+	begin
+		ssl_socket, socket = connect.call
+		ssl_socket.puth('action' => 'upload-lich', 'author' => author, 'password' => password, 'version' => LICH_VERSION, 'size' => size.to_s, 'md5sum' => Digest::MD5.file(filename).to_s, 'compression' => 'gzip', 'client' => client_version)
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+			exit
+		elsif not response['continue']
+			echo "error: unrecognized response from server: #{response.inspect}"
+			exit
+		end
+		if cmd_password
+			Settings["password:#{author.downcase.gsub(/[^a-z]/, '')}"] = cmd_password
+			echo "password saved for author #{author}"
+		end
+		File.open(tempfilename, 'rb') { |f|
+			(size / 1_000_000).times { ssl_socket.write(f.read(1_000_000)) }
+			ssl_socket.write(f.read(size % 1_000_000)) unless (size % 1_000_000) == 0
+		}
+		response = ssl_socket.geth
+		if response['warning']
+			echo "warning: server says: #{response['warning']}"
+		end
+		if response['error']
+			echo "error: server says: #{response['error']}"
+		elsif response['success']
+			echo 'upload complete'
+		else
+			echo "error: unrecognized response from server: #{response.inspect}"
+		end
+		File.delete(tempfilename)
+	ensure
+		ssl_socket.close rescue nil
+		socket.close rescue nil
+	end
+
+
+#
+# download-lich
+#
+elsif (cmd[0] =~ /^download-?lich$/i)
+	if cmd[1]
+		echo "error: extra words on command line: #{cmd[1..-1].join(' ')}"
+		exit
+	end
+	download_lich.call
+
+
+#
+# gui
+#
+elsif cmd[0] =~ /^gui$/i
+	unless defined?(Gtk)
+		echo "error: no gtk"
+		exit
+	end
+	file_ls = nil
+	thread_group = Thread.current.group
+	populate_liststore = proc {
+		file_ls.clear
+		list = nil
+		get_list_thread = Thread.new {
+			report_errors {
+				thread_group.add(Thread.current)
+				list = add_comments_to_list.call(get_list.call)
+			}
+		}
+		get_list_thread.join
+		headers = list.shift
+		fi = headers.index('file')
+		ai = headers.index('author')
+		gi = headers.index('game')
+		si = headers.index('size')
+		ui = headers.index('last update')
+		di = headers.index('downloads')
+		ti = headers.index('tags')
+		rti = headers.index('rating total')
+		rci = headers.index('rating count')
+		ci = headers.index('comments')
+		for info in list
+			iter = file_ls.append
+			iter[0] = info[fi] if fi
+			iter[1] = info[ai] if ai
+			if gi
+				if info[gi] == 'gs'
+					iter[2] = 'GS'
+				elsif info[gi] == 'dr'
+					iter[2] = 'DR'
+				else
+					iter[2] = info[gi]
+				end
+			end
+			if si
+				iter[3] = "#{(info[si].to_f / 1024).to_s.slice(/^[0-9]+(?:\.[0-9])?/)}k"
+				iter[4] = info[si].to_i
+			end
+			if ui
+				iter[5] = "#{Time.at(info[ui].to_i).strftime("%Y-%m-%d %I:%M%p").downcase.gsub(/\s0/,'  ')}"
+				iter[6] = info[ui].to_i
+			end
+			iter[7] = info[di].to_i if di
+			if rti and rci
+				if (info[rti] =~ /^[0-9]+$/) and (info[rci].to_i > 0)
+					iter[8] = "#{(info[rti].to_f / info[rci].to_f).to_s.slice(/^[0-9]+(?:\.[0-9])?/)}"
+				else
+					iter[8] = ''
+				end
+				iter[9] = info[rci].to_i
+			end
+			# fixme: sort rating as Float
+			iter[10] = info[ti] if ti
+			iter[11] = info[ci] if ci
+		end
+	}
+	window = nil
+	window_done = false
+	load_window_position = Settings['window_position']
+	load_window_width    = Settings['window_width']
+	load_window_height   = Settings['window_height']
+	save_window_position = nil
+	save_window_width    = nil
+	save_window_height   = nil
+	sort_ascending = true
+	begin
+		Gtk.queue {
+			renderer = Gtk::CellRendererText.new
+			renderer.background = 'white'
+			tmp = Array.new
+			headers.each { |head|
+				if head =~ /file|game|author|tags/
+					tmp.push String
+				elsif head =~ /downloads/
+					tmp.push Fixnum
+				end
+			}
+			# Filename, Author, Game, Size, Last Update, Downloads, Rating, Votes, Tags, Comments
+			file_ls = Gtk::ListStore.new(String, String, String, String, Fixnum, String, Fixnum, Fixnum, String, Fixnum, String, String)
+			file_ls.set_sort_column_id(0, Gtk::SORT_ASCENDING)
+			file_tv = Gtk::TreeView.new(file_ls)
+			foo = Gtk::TreeViewColumn.new('Filename',    renderer, :text => 0, :background_set => 2)
+			foo.sort_column_id = 0
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Author',      renderer, :text => 1, :background_set => 2)
+			foo.sort_column_id = 1
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Game',        renderer, :text => 2, :background_set => 2)
+			foo.sort_column_id = 2
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Size',        renderer, :text => 3, :background_set => 2)
+			foo.sort_column_id = 4
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Last Update', renderer, :text => 5, :background_set => 2)
+			foo.sort_column_id = 6
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('DLs',         renderer, :text => 7, :background_set => 2)
+			foo.sort_column_id = 7
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Rating',      renderer, :text => 8, :background_set => 2)
+			foo.sort_column_id = 8
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Votes',       renderer, :text => 9, :background_set => 2)
+			foo.sort_column_id = 9
+			file_tv.append_column(foo)
+			foo = Gtk::TreeViewColumn.new('Tags',        renderer, :text => 10, :background_set => 2)
+			foo.sort_column_id = 10
+			file_tv.append_column(foo)
+			file_tv.headers_visible = true
+
+			file_sw = Gtk::ScrolledWindow.new
+			file_sw.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_ALWAYS)
+			file_sw.add(file_tv)
+
+			comments_tv = Gtk::TextView.new
+			comments_sw = Gtk::ScrolledWindow.new
+			comments_sw.add(comments_tv)
+
+			vbox = Gtk::VBox.new
+			vbox.pack_start(file_sw)
+			vbox.pack_start(comments_sw)
+
+			window              = Gtk::Window.new
+			window.title        = 'Repository'
+			window.border_width = 5
+			if load_window_height and load_window_width
+				window.resize(load_window_width, load_window_height)
+			else
+				window.resize(600, 800)
+			end
+			if load_window_position
+				window.move(load_window_position[0], load_window_position[1])
+			end
+			window.add(vbox)
+
+			# fixme: download script, refresh list, filter list, rate
+			# maybe fixme: upload, delete, updatable settings, download-lich, download-mapdb, checkout-mapdb
+
+			file_tv.signal_connect('cursor-changed') {
+				report_errors {
+					comments_tv.buffer.text = (file_tv.selection.selected[11] || String.new)
+				}
+			}
+			window.signal_connect('delete_event') {
+				save_window_position = window.position
+				save_window_width    = window.allocation.width
+				save_window_height   = window.allocation.height
+				window_done = true
+			}
+			window.show_all
+		}
+		sleep 0.1
+		Gtk.queue { populate_liststore.call }
+		wait_until { window_done }
+	ensure
+		Settings['window_position'] = save_window_position if (save_window_position.class == Array) and (save_window_position[0].to_i >= 0) and (save_window_position[1].to_i >= 0)
+		Settings['window_width']    = save_window_width    if (save_window_width.class == Fixnum) and (save_window_width > 100)
+		Settings['window_height']   = save_window_height   if (save_window_height.class == Fixnum) and (save_window_height > 100)
+		Gtk.queue { window.destroy }
+	end
+
+
+#
+# help
+#
+elsif cmd[0] =~ /^help$/i
+		output = "\n"
+		output.concat "usage:\n"
+		output.concat "\n"
+		output.concat "   #{$clean_lich_char}#{script.name} COMMAND OPTIONS\n"
+		output.concat "\n"
+		output.concat "commands:\n"
+		output.concat "\n"
+		output.concat "   list                      show files you can download\n"
+		output.concat "   list-updates              show files that you have and there's an update for\n"
+		output.concat "   list-new                  show files that you don't have\n"
+		output.concat "   list-tags                 show all the tags currently in use\n"
+		output.concat "   info FILENAME             show information about a file\n"
+		output.concat "   download FILENAME         download a file\n"
+		output.concat "   rate FILENAME NUMBER      rate a file\n"
+		output.concat "   upload FILENAME           upload a file to the server\n"
+		output.concat "   delete FILENAME           delete a file from the server\n"
+		output.concat "   change-password NEWPASS   change your repository password\n"
+		output.concat "   download-lich             download the latest version of Lich\n"
+		output.concat "   download-mapdb            download the latest map database\n"
+		output.concat "   checkout-mapdb            must be done before editing the map database\n"
+		output.concat "   release-mapdb             if you checkout-mapdb and change your mind\n"
+		output.concat "   upload-mapdb              upload your changes to the map database\n"
+		output.concat "   download-updates          downloads any available updates to scripts/lich/mapdb\n"
+		output.concat "                             if set as updatable with the set-updatable commands\n"
+		output.concat "   show-updatable            shows your current settings for download-updates\n"
+		output.concat "   set-updatable FILENAME    download updates for FILENAME (when using download-updates)\n"
+		output.concat "   set-lich-updatable        download updates for Lich (download-updates)\n"
+		output.concat "   set-mapdb-updatable       download updates for the map database (download-updates)\n"
+		output.concat "   unset-updatable FILENAME  ignore updates to FILENAME\n"
+		output.concat "   unset-lich-updatable      ignore updates to Lich\n"
+		output.concat "   unset-mapdb-updatable     ignore updates to the map database\n"
+		output.concat "\n"
+		output.concat "options:\n"
+		output.concat "\n"
+		output.concat "   --name=TEXT[,TEXT]        only list files whose name contain TEXT\n"
+		output.concat "   --game=CODE[,CODE]        complicated\n"
+		output.concat "   --sort=TEXT               sort list by name,age,size,downloads,rating\n"
+		output.concat "   --reverse                 show the list in reverse order\n"
+		output.concat "   --limit=NUMBER            show at most NUMBER files in the list\n"
+		output.concat "   --limit=OFFSET,NUMBER     show at most NUMBER files after skipping OFFSET files\n"
+		output.concat "   --author=TEXT             specify the author of the file for uploading or listing\n"
+		output.concat "   --password=TEXT           specify the password for the author for uploading\n"
+		output.concat "   --size>NUMBER[k|m|g]      only list files larger than NUMBER bytes (or specified unit)\n"
+		output.concat "   --size<NUMBER[k|m|g]      only list files smaller than NUMBER bytes (or specified unit)\n"
+		output.concat "   --age>NUMBER[m|h|d|w|y]   only list files updated less than NUMBER seconds (or specified unit) ago\n"
+		output.concat "   --age<NUMBER[m|h|d|w|y]   only list files updated more than NUMBER seconds (or specified unit) ago\n"
+		output.concat "   --downloads>NUMBER        only list files with more than NUMBER downloads\n"
+		output.concat "   --downloads<NUMBER        only list files with less than NUMBER downloads\n"
+		output.concat "   --downloads=NUMBER        only list files with exactly NUMBER downloads\n"
+		output.concat "   --rating>NUMBER           only list files with a rating higher than NUMBER\n"
+		output.concat "   --rating<NUMBER           only list files with a rating lower than NUMBER\n"
+		output.concat "   --rating=NUMBER           only list files with a rating equal to NUMBER\n"
+		output.concat "   --tags=TEXT[,TEXT]        only list files with the specified tags\n"
+		output.concat "   --version=<version>       download a specific version\n"
+		output.concat "   --force                   ignore md5sum checks and script requirements\n"
+   		output.concat "\n"
+		output.concat "   --show-tags               show tags in the list\n"
+		output.concat "   --hide-last-update        hide last update in the list\n"
+		output.concat "   --hide-size               hide file size in the list\n"
+		output.concat "   --hide-author             hide author in the list\n"
+		output.concat "   --hide-downloads          hide downloads in the list\n"
+		output.concat "   --hide-rating             hide rating in the list\n"
+   		output.concat "\n"
+		respond output
+
+
+#
+# everything else
+#
+else
+	echo "error: unrecognized command.  Try #{$clean_lich_char}#{script.name} help"
+
+
+end

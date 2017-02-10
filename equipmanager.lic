@@ -29,6 +29,8 @@ class EquipmentManager
 
   def wear_items(items_list)
     items_list.each { |item| wear_item?(item) }
+
+    fput('sort auto head')
   end
 
   def wear_equipment_set?(set_name)
@@ -46,8 +48,11 @@ class EquipmentManager
     remove_unmatched_items(combat_items, worn_items)
 
     lost_items = wear_missing_items(worn_items, combat_items)
+    notify_missing(lost_items)
 
-    lost_items.empty? ? true : notify_missing?(lost_items)
+    fput('sort auto head')
+
+    lost_items.empty?
   end
 
   def desc_to_items(descs)
@@ -55,16 +60,18 @@ class EquipmentManager
   end
 
   def item_by_desc(description)
-    items.find { |item| get_item_regex(item) =~ description }
+    items.find { |item| item.short_regex =~ description }
   end
 
-  def notify_missing?(lost_items)
+  def notify_missing(lost_items)
+    return unless lost_items
+    return if lost_items.empty?
+
     beep
     echo 'MISSING EQUIPMENT: Please verify these items are in a closed container and not lost:'
     echo lost_items.map(&:short_name).join(', ').to_s
     pause
     beep
-    false
   end
 
   def wear_missing_items(worn_items, combat_items)
@@ -75,8 +82,8 @@ class EquipmentManager
     end
 
     missing_items = worn_items
-                    .reject { |item| combat_items.find { |c_item| get_item_regex(item) =~ c_item } }
-                    .reject { |item| [right_hand, left_hand].grep(get_item_regex(item)).any? ? (stow_weapon(item.short_name) || true) : false }
+                    .reject { |item| combat_items.find { |c_item| item.short_regex =~ c_item } }
+                    .reject { |item| [right_hand, left_hand].grep(item.short_regex).any? ? (stow_weapon(item.short_name) || true) : false }
 
     echo("wear missing items #{missing_items}") if !missing_items.empty? && UserVars.equipmanager_debug
     missing_items.reject { |item| wear_item?(item) }
@@ -89,21 +96,27 @@ class EquipmentManager
       echo(worn_items.map(&:short_name).join(',').to_s)
     end
     combat_items
-      .select { |description| !worn_items.find { |item| get_item_regex(item) =~ description } }
-      .map { |description| items.find { |item| get_item_regex(item) =~ description } }
+      .select { |description| !worn_items.find { |item| item.short_regex =~ description } }
+      .map { |description| items.find { |item| item.short_regex =~ description } }
       .compact
       .each { |item| remove_item(item) }
   end
 
   def get_combat_items
     bput('inv combat', 'Type INVENTORY HELP for more options')
-    reget(30)
-      .map(&:strip)
-      .reverse
-      .take_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
-      .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
-      .drop(1)
-      .reverse
+    snapshot = reget(40)
+    if snapshot.grep(/All of your combat|You aren't wearing anything like that/).any? &&
+       snapshot.grep(/Type INVENTORY HELP/).any?
+      snapshot
+        .map(&:strip)
+        .reverse
+        .take_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
+        .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
+        .drop(1)
+        .reverse
+    else
+      get_combat_items
+    end
   end
 
   def worn_items(list)
@@ -138,10 +151,6 @@ class EquipmentManager
     end
   end
 
-  def get_item_regex(item)
-    item.short_regex
-  end
-
   def wield_weapon(description, skill = nil)
     return if description.empty?
 
@@ -152,7 +161,7 @@ class EquipmentManager
       return
     end
 
-    if [left_hand, right_hand].grep(get_item_regex(weapon)).any?
+    if [left_hand, right_hand].grep(weapon.short_regex).any?
       stow_weapon
       get_item?(weapon)
     end
@@ -180,7 +189,7 @@ class EquipmentManager
   end
 
   def is_listed_item?(desc)
-    items.find { |item| get_item_regex(item) =~ desc }
+    items.find { |item| item.short_regex =~ desc }
   end
 
   def return_held_gear(gear_set = 'standard')
@@ -190,10 +199,10 @@ class EquipmentManager
     worn_items = desc_to_items(@gear_sets[gear_set])
 
     todo.all? do |held_item|
-      if info = worn_items.find { |item| get_item_regex(item) =~ held_item }
-        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ')
+      if info = worn_items.find { |item| item.short_regex =~ held_item }
+        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop')
         true
-      elsif info = items.find { |item| get_item_regex(item) =~ held_item }
+      elsif info = items.find { |item| item.short_regex =~ held_item }
         if info.tie_to
           stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy')
         elsif info.wield
@@ -216,28 +225,28 @@ class EquipmentManager
     {
       worn: {
         verb: 'remove',
-        matches: [get_item_regex(item), /^You (get|sling|pull|work|loosen|slide|remove) /, 'Remove what', "You aren't wearing that"],
-        failures: [/^You (get|sling|pull|work|slide|remove) $/],
+        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank) /, 'Remove what', "You aren't wearing that"],
+        failures: [/^You (get|sling|pull|work|slide|remove|yank) $/],
         failure_recovery: proc { |noun| bput("wear my #{noun}", '^You ') },
         exhausted: ['Remove what', "You aren't wearing that"]
       },
       tied: {
         verb: 'untie',
-        matches: [get_item_regex(item), '^You remove', '^What were you referring', '^Untie what'],
+        matches: [/^You .*#{item.short_regex}/, '^You remove', '^What were you referring', '^Untie what'],
         failures: ['You remove'],
         failure_recovery: proc { |_| stow_weapon },
         exhausted: ['What were you referring', 'Untie what']
       },
       stowed: {
         verb: 'get',
-        matches: [get_item_regex(item), '^You get', '^What were you referring', 'But that is already', 'You are already'],
+        matches: [/^You .*#{item.short_regex}/, '^You get', '^What were you referring', 'But that is already', 'You are already'],
         failures: ['You get', /But that is already/],
         failure_recovery: proc { |noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
         exhausted: ['What were you referring']
       },
       transform: {
         verb: item.transform_verb,
-        matches: [get_item_regex(item), item.transform_text, "You'll need a free hand to do that!", "You don't seem to be holding"],
+        matches: [item.transform_text, "You'll need a free hand to do that!", "You don't seem to be holding"],
         failures: [item.transform_text, "You'll need a free hand to do that!", "You don't seem to be holding"],
         failure_recovery: proc do |noun|
                             fput('stow left') if left_hand && left_hand !~ /#{noun}/i
@@ -306,7 +315,7 @@ class EquipmentManager
   end
 
   def unload_weapon(name)
-    result = bput("unload my #{name}", 'You unload', 'Your .* fall from', 'As you release the string')
+    result = bput("unload my #{name}", 'You unload', 'Your .* falls from', 'As you release the string')
     waitrt?
     bput('stow left', 'You put') if result == 'You unload'
   end
@@ -321,9 +330,9 @@ class EquipmentManager
     weapon = item_by_desc(description)
     return unless weapon
     if weapon.wield
-      stow_helper("sheath my #{weapon.short_name}", weapon.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'close the fan', 'You secure your', 'You slip')
+      stow_helper("sheath my #{weapon.short_name}", weapon.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'close the fan', 'You secure your', 'You slip', 'You hang')
     elsif weapon.worn
-      stow_helper("wear my #{weapon.short_name}", weapon.short_name, 'You sling', 'You attach', 'You .* unload', 'You slide', 'You place', 'close the fan', 'You hang', 'You spin')
+      stow_helper("wear my #{weapon.short_name}", weapon.short_name, 'You sling', 'You attach', 'You .* unload', 'You slide', 'You place', 'close the fan', 'You hang', 'You spin', 'You strap', 'You carefully loop')
     elsif !weapon.tie_to.nil?
       stow_helper("tie my #{weapon.short_name} to #{weapon.tie_to}", weapon.short_name, 'You attach', 'close the fan', 'you tie', 'You are a little too busy')
     elsif weapon.transforms_to

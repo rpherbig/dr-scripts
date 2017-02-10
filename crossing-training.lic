@@ -31,6 +31,7 @@ class CrossingTraining
     @settings = get_settings(args.flex)
     @training_room = (@settings.training_rooms || [@settings.safe_room]).sample
     @athletics_options = get_data('athletics').athletics_options
+    @climbing_target = get_data('athletics').practice_options[@settings.climbing_target]
     @song_list = get_data('perform').perform_options
 
     @use_research = @settings.use_research
@@ -219,9 +220,11 @@ class CrossingTraining
     return if (delta < 4 * 60 * 60 && DRStats.paladin?) || (delta < 60 * 10 && DRStats.cleric?)
     return unless withdraw_exact_amount?('5 silver', @settings.hometown)
 
+    wait_for_script_to_complete('pay-debt')
+
     UserVars.tithe_timer = Time.now
     walk_to(741)
-    bput('put 5 silver kronar in almsbox', 'You drop', 'But you do not')
+    bput('put 5 silver kronar in almsbox', 'You drop', 'But you do not', 'attend to thy own woes')
   end
 
   def train_sorcery
@@ -550,6 +553,7 @@ class CrossingTraining
         empty_trash
         return
       when 'You are in no condition'
+        dispose_trash(item)
         wait_for_script_to_complete('safe-room')
         return
       else
@@ -586,16 +590,16 @@ class CrossingTraining
   def train_first_aid
     play_song?
 
-    start_time = Time.now
     wait_for_script_to_complete('first-aid')
-
-    return if Time.now - start_time > 15
-    echo '***UNABLE TO TRAIN FIRST AID, REMOVING IT FROM THE TRAINING LIST***'
-    @settings.crossing_training.delete('First Aid')
   end
 
   def train_scholarship
     play_song?
+
+    if @settings.hometown == 'Crossing' && !DRStats.necromancer?
+      wait_for_script_to_complete('study-art', ['scholarship'])
+      return
+    end
 
     case bput('get my black book', 'What were you', 'You get')
     when 'What were you'
@@ -614,10 +618,13 @@ class CrossingTraining
   end
 
   def train_mechanical_lore
+    waitrt?
+    @equipment_manager.wear_equipment_set?('standard')
     @equipment_manager.empty_hands
     fput "remove #{@settings.hand_armor}"
     fput "stow #{@settings.hand_armor}"
     pause 1
+    release_invisibility
     if @settings.braid_item
       braid_to_fail(@settings.braid_item)
     else
@@ -642,7 +649,11 @@ class CrossingTraining
   end
 
   def train_athletics
-    if DRSkill.getrank('Athletics') >= 400
+    if @climbing_target
+      return if @researching
+      walk_to(@climbing_target['id'])
+      climb_practice(@climbing_target['target'], @climbing_target['hide'])
+    elsif DRSkill.getrank('Athletics') >= 400
       return if @researching
       climb_branch
     else
@@ -656,34 +667,46 @@ class CrossingTraining
     end
   end
 
-  def practice_branch
+  def climb_practice(target, to_hide = false)
+    return unless target
+
     while DRSkill.getxp('Athletics') < 29
       check_osrel unless @researching
       check_research
-      loop do
-        break if hide?
+      retreat
+      if to_hide
+        attempts_to_hide = 5
+        while attempts_to_hide > 0
+          break if hide?
+          attempts_to_hide -= 1
+        end
+        return if attempts_to_hide.zero?
       end
-      bput('climb practice branch', 'You begin to practice ')
-      Flags.add('ct-climbing', 'You finish practicing')
+      Flags.add('ct-climbing-finished', 'You finish practicing')
+      Flags.add('ct-climbing-combat', 'You are engaged in combat')
+      bput("climb practice #{target}", 'You begin to practice ')
       loop do
         pause 1
-        break if Flags['ct-climbing']
+        break if Flags['ct-climbing-finished']
+        return if Flags['ct-climbing-combat']
         if DRSkill.getxp('Athletics') > 28
           fput('stop climb')
           break
         end
       end
     end
+
+    bput('unhide', 'You come out of hiding', 'You slip out of hiding', 'But you are not')
   end
 
   def climb_branch
     start_script('skill-recorder') unless Script.running?('skill-recorder')
-    walk_to(19_074)
+    walk_to(2245)
     check_research
     if DRSkill.getxp('Athletics') < 29
       walk_to(2245)
-      if UserVars.athletics < 540
-        practice_branch
+      if UserVars.athletics < 550
+        climb_practice('branch', true)
       else
         play_song?
         walk_to(9607)
@@ -691,6 +714,7 @@ class CrossingTraining
         while DRSkill.getxp('Athletics') < 29
           walk_to(2245)
           walk_to(9607)
+          walk_to(11_126)
           walk_to(19_464)
           check_osrel unless @researching
           check_research
@@ -704,7 +728,6 @@ class CrossingTraining
     end
     check_osrel unless @researching
     check_research
-    walk_to(1894)
   end
 
   def train_empathy

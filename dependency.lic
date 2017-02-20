@@ -611,6 +611,12 @@ class BankbotManager
     @save = true
   end
 
+  def load_bankbot_ledger
+    @load = true
+  end
+
+  private
+
   def save_transaction
     return unless @save
     File.open("./#{checkname}-transactions.log", 'a') do |file|
@@ -624,17 +630,11 @@ class BankbotManager
     @save = false
   end
 
-  def load_bankbot_ledger
-    @load = true
-  end
-
   def load_ledger
     return unless @load
     @ledger = safe_load_yaml("./#{checkname}-ledger.yaml")
     @load = false
   end
-
-  private
 
   def safe_load_yaml(path)
     OpenStruct.new(YAML.load_file(path)).to_h
@@ -642,6 +642,57 @@ class BankbotManager
     echo('*** ERROR PARSING YAML FILE ***')
     echo(e.message)
     return {}
+  end
+end
+
+class ReportbotManager
+  def initialize(debug)
+    @debug = debug
+    @save = false
+    @load = false
+    @whitelist = []
+  end
+
+  attr_reader :whitelist
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    save_whitelist
+    load_whitelist
+  end
+
+  def save_reportbot_whitelist(whitelist)
+    @whitelist = whitelist.to_yaml
+    @save = true
+  end
+
+  def load_reportbot_whitelist
+    @load = true
+  end
+
+  private
+
+  def save_whitelist
+    return unless @save
+    File.open('./reportbot-whitelist.yaml', 'wb') { |file| file.puts(@whitelist) }
+    @save = false
+  end
+
+  def load_whitelist
+    return unless @load
+    @whitelist = safe_load_yaml('./reportbot-whitelist.yaml')
+    @load = false
+  end
+
+  def safe_load_yaml(path)
+    YAML.load_file(path)
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return []
   end
 end
 
@@ -770,7 +821,40 @@ class SetupFiles
     boxes = @base_files['base-items.yaml'][:box_nouns]
     gems = @base_files['base-items.yaml'][:gem_nouns]
     scrolls = @base_files['base-items.yaml'][:scroll_nouns]
+    spells = @base_files['base-spells.yaml'][:spell_data]
+
     s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
+
+    s.offensive_spells.map! { |spell| spells[spell['name']] ? spells[spell['name']].merge(spell) : spell }
+
+    s.offensive_spells
+     .each_with_index
+     .select { |spell, _i| spell['skill'].casecmp('targeted magic').zero? || (spells[spell['name']]['skill'].casecmp('targeted magic').zero? && spell['skill'].casecmp('sorcery').zero?) }
+     .reject { |spell, _i| spell['prep'] }
+     .each { |_data, i| s.offensive_spells[i]['prep'] = 'target' }
+
+    s.buff_spells
+     .select { |spell| spells[spell] }
+     .each do |name, _data|
+      s.buff_spells[name] = spells[name].merge(s.buff_spells[name])
+    end
+
+    s.lockpick_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+            .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+    end
+
+    s.astrology_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+            .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+    end
+
+    s.waggle_sets
+     .select { |set_name, set_spells| set_spells.select { |spell_name, spell_data| spells[spell_name].each { s.waggle_sets[set_name][spell_name] = spells[spell_name].merge(spell_data) } } }
 
     s
   end
@@ -858,6 +942,7 @@ end
 $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
 $bankbot = BankbotManager.new(debug)
+$reportbot = ReportbotManager.new(debug)
 
 def enable_moon_connection
   $turn_on_moon_watch = true
@@ -887,6 +972,16 @@ def load_bankbot_ledger
   $bankbot.load_bankbot_ledger
   pause 0.1 until $bankbot.loaded?
   $bankbot.ledger
+end
+
+def save_reportbot_whitelist(whitelist)
+  $reportbot.save_reportbot_whitelist(whitelist)
+end
+
+def load_reportbot_whitelist
+  $reportbot.load_reportbot_whitelist
+  pause 0.1 until $reportbot.loaded?
+  $reportbot.whitelist
 end
 
 def format_name(name)
@@ -1097,6 +1192,7 @@ loop do
   $manager.run_queue
   $setupfiles.run_queue
   $bankbot.run_queue
+  $reportbot.run_queue
   $moon_watch.run_queue if $moon_watch
   pause 0.1
 end

@@ -242,6 +242,10 @@ class LootProcess
     @dump_junk = settings.dump_junk
     echo("  @dump_junk: #{@dump_junk}") if $debug_mode_ct
     @dump_timer = Time.now - 300
+	
+    @last_rites = settings.last_rites
+    echo("  @last_rites: #{@last_rites}") if $debug_mode_ct
+    @last_rites_timer = Time.now - 600
   end
 
   def execute(game_state)
@@ -326,16 +330,18 @@ class LootProcess
     end
   end
 
-  def check_rituals(game_state)
+  def check_rituals?(game_state)
     return true unless DRStats.necromancer?
+    mob_noun = DRRoom.dead_npcs.first
+    return true if game_state.construct?(mob_noun)
 
     if @last_ritual.nil?
       if @necro_heal
         game_state.wounds = check_health
         echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
-        do_necro_ritual(DRRoom.dead_npcs.first, 'consume', game_state) unless game_state.wounds.empty?
+        do_necro_ritual(mob_noun, 'consume', game_state) unless game_state.wounds.empty?
       end
-      do_necro_ritual(DRRoom.dead_npcs.first, @ritual_type, game_state) unless game_state.prepare_consume || (DRSkill.getxp('Thanatology') > 30 && @skin)
+      do_necro_ritual(mob_noun, @ritual_type, game_state) unless game_state.prepare_consume || (DRSkill.getxp('Thanatology') > 30 && @skin)
     end
     return false if %w(consume harvest dissect).include?(@last_ritual)
     true
@@ -382,8 +388,16 @@ class LootProcess
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
+    if (Time.now - @last_rites_timer > 600) && @last_rites && game_state.blessed_room
+      bput("pray #{DRRoom.dead_npcs.first}", 'You beseech your god for mercy', 'You pray fervently', 'You continue praying for guidance', 'Quietly touching your lips with the tips of your fingers', 'murmur a brief prayer for its safe travels beyond this life')
+      waitrt?
+      fput "recite Meraud, power the holy fires that unleash my righteous vengeance;Chadatru, guide my sword to swing in justice;Everild, give me the power to conquer my enemies;Truffenyi, let me not lose sight of compassion and mercy;Else, I will become like those I despise;Urrem'tier, receive into your fetid grasp these wicked souls;May the Tamsine's realms never know their evil ways again;May all the Immortals guide your faithful soldier #{checkname}."
+      waitrt?
+      @last_rites_timer = Time.now
+      return
+    end
     arrange_mob(DRRoom.dead_npcs.first, game_state)
-    check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals(game_state)
+    check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals?(game_state)
 
     unless game_state.casting_consume || game_state.prepare_consume
       while 'and get ready to search it' == bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it')
@@ -399,6 +413,7 @@ class LootProcess
     return unless @skin
     return unless @arrange_count > 0
     return unless game_state.skinnable?(mob_noun)
+    return if game_state.casting_consume || game_state.prepare_consume
 
     arranges = 0
     type = @arrange_types[mob_noun] || 'skin'
@@ -563,8 +578,6 @@ class SpellProcess
     @offensive_spell_cycle = settings.offensive_spell_cycle
     echo("  @offensive_spell_cycle: #{@offensive_spell_cycle}") if $debug_mode_ct
 
-    @spell_data = get_data('spells').spell_data
-
     @necromancer_healing = settings.necromancer_healing
     echo("  @necromancer_healing: #{@necromancer_healing}") if $debug_mode_ct
 
@@ -648,6 +661,7 @@ class SpellProcess
       @offensive_spells
         .select { |spell| spell['expire'] }
         .reject { |spell| spell['cyclic'] }
+        .reject { |spell| spell['heavy'] }
         .each { |spell| Flags["ct-#{spell['abbrev']}"] = true }
     end
     check_slivers(game_state)
@@ -684,7 +698,13 @@ class SpellProcess
     return if UserVars.moons['visible'].empty?
 
     fput('pre moonblade')
-    pause
+    if DRSkill.getrank('Lunar Magic') < 300
+      pause 3
+    elsif DRSkill.getrank('Lunar Magic') < 400
+      pause 2
+    else
+      pause
+    end
     fput("cast #{UserVars.moons['visible'].first}")
     fput('break moonblade')
   end
@@ -967,8 +987,7 @@ class SpellProcess
     end
     release_cyclics if data['cyclic']
     command = 'pre'
-    command = data['skill'] != 'Targeted Magic' ? 'pre' : 'tar' if data['skill']
-    command = @spell_data[data['name']]['prep'] if @spell_data[data['name']]['prep']
+    command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
 
     @spell_timers[data['abbrev']] = Time.now if data['recast_every']
@@ -1110,7 +1129,7 @@ class TrainerProcess
 
     @skill_map = { 'Hunt' => 'Perception', 'Pray' => 'Theurgy', 'PercMana' => 'Attunement',
                    'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal',
-                   'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics',
+                   'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics', 'Analyze' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
                    'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
@@ -1167,6 +1186,8 @@ class TrainerProcess
       appraise(game_state, 'careful')
     when 'Tactics'
       bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
+    when 'Analyze'
+      analyze(game_state)
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
     when 'Pray'
@@ -1248,6 +1269,7 @@ class TrainerProcess
     pause
     waitrt?
     fix_standing
+    game_state.blessed_room = true
   end
 
   def ambush_stun(game_state)
@@ -1270,6 +1292,23 @@ class TrainerProcess
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
     DRRoom.dead_npcs.size > dead_count
+  end
+
+  def analyze(game_state)
+    return if game_state.npcs.empty?
+    return if DRSkill.getxp('Tactics') >= 32
+    case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
+    when 'Analyze what'
+      fput('face next')
+      analyze(game_state)
+    when 'You must be closer'
+      fput('engage')
+    when 'Your analysis reveals a massive opening'
+      return
+    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes'
+      analyze(game_state)
+    end
+    waitrt?
   end
 
   def appraise(game_state, modifier)
@@ -1682,7 +1721,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :blessed_room
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1705,6 +1744,7 @@ class GameState
     @prepare_consume = false
     @use_charged_maneuvers = false
     @wounds = {}
+    @blessed_room = false
 
     # private
     @clean_up_step = nil
@@ -1812,13 +1852,13 @@ class GameState
 
     @use_barb_combos = settings.use_barb_combos
     echo("  @use_barb_combos: #{@use_barb_combos}") if $debug_mode_ct
-    
+
     @use_tactics_combos = settings.use_tactics_combos
     echo("  @use_tactics_combos: #{@use_tactics_combos}") if $debug_mode_ct
-    
+
     @attack_overrides = settings.attack_overrides
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
-    
+
     # For deprecation support
     if settings.analyze_combo_type
       echo('***The analyze_combo_type setting is deprecated and can be removed from your YAML. The use_barb_combos setting should be used instead.***')
@@ -1880,10 +1920,10 @@ class GameState
     @current_weapon_skill = weapon_skill
   end
 
-	def attack_override
-		@attack_overrides[weapon_skill]
-	end
-  
+  def attack_override
+    @attack_overrides[weapon_skill]
+  end
+
   def weapon_skill
     @current_weapon_skill
   end

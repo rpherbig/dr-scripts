@@ -10,20 +10,33 @@ class Astrology
 
   def initialize
     settings = get_settings
+    arg_definitions = [
+      [],
+      [{ name: 'rtr', regex: /rtr/i, description: 'Runs Read the Ripples' }]
+    ]
+    args = parse_args(arg_definitions)
+
     @constellations = get_data('constellations').constellations
+    @have_divination_bones = settings.have_divination_bones
+    @divination_bones_container = settings.divination_bones_storage['container']
+    @divination_bones_tied = settings.divination_bones_storage['tied']
     @have_telescope = settings.have_telescope
     @ap_training = settings.astral_plane_training['train_in_ap']
     @ap_source = settings.astral_plane_training['train_source']
     @ap_destination = settings.astral_plane_training['train_destination']
-
     do_buffs(settings)
-
-    check_astral
-    train_astrology
+    if args.rtr
+      check_ripples
+    else
+      train_astrology
+    end
   end
 
   def do_buffs(settings)
     settings.astrology_buffs['spells'].each do |spell|
+      if spell['abbrev'].casecmp('rtr').zero?
+        next if !Flags['rtr-expire'].nil? && !Flags['rtr-expire']
+      end
       echo "Buffing: #{spell}" if UserVars.astrology_debug
       buff(spell, settings)
     end
@@ -39,6 +52,81 @@ class Astrology
     result.compact.select { |data| data['circle'] <= DRStats.circle }
   end
 
+  def check_moons
+    %w(xibar yavash katamba).each do |moon|
+      bput("pow #{moon}", 'roundtime')
+      waitrt?
+    end
+  end
+
+  def check_pools
+    pools = {
+      'lore' => 0,
+      'magic' => 0,
+      'survival' => 0,
+      'offensive combat' => 0,
+      'defensive combat' => 0,
+      'future events' => 0
+    }
+    pools_to_size = {
+      /You have no understanding of the celestial influences over/ => 0,
+      /You have a feeble understanding of the celestial influences over/ => 1,
+      /You have a weak understanding of the celestial influences over/ => 2,
+      /You have a fledgling understanding of the celestial influences over/ => 3,
+      /You have a modest understanding of the celestial influences over/ => 4,
+      /You have a decent understanding of the celestial influences over/ => 5,
+      /You have a significant understanding of the celestial influences over/ => 6,
+      /You have a potent understanding of the celestial influences over/ => 7,
+      /You have an insightful understanding of the celestial influences over/ => 8,
+      /You have a powerful understanding of the celestial influences over/ => 9,
+      /You have a complete understanding of the celestial influences over/ => 10
+    }
+    bput('predict state all', 'roundtime')
+    lines = reget(50).reverse
+    lines.select! { |line| line =~ /celestial influences/ }
+    pools.select! { |name, _level| pools[name] = lines.find { |line| line =~ /#{name}/ } }
+    pools.each { |name, text| pools_to_size.each { |match_text, value| pools[name] = value if match_text =~ text } }
+    echo " pools: #{pools}" if UserVars.astrology_debug
+    waitrt?
+    pools
+  end
+
+  def check_events(pools)
+    waitrt?
+    prev_size = pools['future events']
+    result = nil
+    until ['You are unable to sense additional information'].include? result
+      result = bput('study sky', 'You feel a lingering sense', 'You feel it is too soon', 'Roundtime', 'You are unable to sense additional information', 'detect any portents')
+      waitrt?
+      return if ['detect any portents'].include? result
+      pools = check_pools
+      break if pools['future events'] == prev_size
+      prev_size = pools['future events']
+    end
+    bput('predict event', 'You focus inwardly')
+  end
+
+  def check_weather
+    echo 'Checking the weather' if UserVars.astrology_debug
+    bput('predict weather', 'roundtime', 'You gaze')
+    waitrt?
+  end
+
+  def check_ripples
+    return unless DRSpells.active_spells.include?('Read the Ripples')
+    if Flags['rtr-expire'].nil?
+      Flags.add('rtr-expire', get_data('spells').spell_data['Read the Ripples']['expire'])
+      echo "Flags['rtr-expire']: #{Flags['rtr-expire']}" if UserVars.astrology_debug
+    end
+    while DRSpells.active_spells.include?('Read the Ripples')
+      line = get?
+
+      res = @constellations.find { |body| /As your consciousness drifts amongst the currents of Fate, .* #{body['name']}/i =~ line }
+      observe(res['name']) unless res.nil?
+    end
+    nil
+  end
+
   def check_astral
     return unless DRStats.circle > 99
     return unless @ap_training
@@ -52,10 +140,21 @@ class Astrology
     exit
   end
 
-  def train_astrology
-    fput('predict weather')
-    waitrt?
+  def predict_all(pools)
+    skillset_to_pool = {
+      'offensive combat' => 'offense',
+      'defensive combat' => 'defense',
+      'magic' => 'magic',
+      'survival' => 'survival',
+      'lore' => 'lore',
+      'future events' => 'future events'
+    }
 
+    pools.reject { |_skill, size| size.zero? }
+         .each { |skill, _size| align(skillset_to_pool[skill]) }
+  end
+
+  def check_heavens
     vis_bodies = visible_bodies
 
     night = vis_bodies.find { |body| body['constellation'] }
@@ -68,10 +167,7 @@ class Astrology
 
     waitrt?
 
-    Flags.add('bad-search', 'is foiled by the (daylight|darkness)', 'turns up fruitless')
-
     observed = if @have_telescope
-                 bput('get telescope', 'you get', 'You are already', "That can't be picked up")
                  things_to_try = @constellations.select do |data|
                    data['telescope'] &&
                      data['circle'] <= DRStats.circle &&
@@ -87,47 +183,93 @@ class Astrology
                  echo(things_to_try) if UserVars.astrology_debug
 
                  things_to_try.find do |data|
-                   bput("center telescope on #{data['name']}", 'You put your eye')
                    result = nil
                    until ['Roundtime', 'You peer aimlessly through your telescope'].include?(result)
                      if Flags['bad-search'] == 'is foiled by the daylight'
-                       train_astrology
+                       check_heavens
                        return
                      elsif Flags['bad-search'] == 'turns up fruitless'
                        next
                      end
-                     result = bput('peer telescope', 'You peer aimlessly through your telescope', 'You see nothing regarding the future', 'Roundtime')
+                     result = observe(data['name'])
                    end
                    result == 'Roundtime'
                  end
                else
-                 until ['Roundtime', 'Clouds obscure'].include? bput("observe #{best_eye_data['name']} in sky", 'Your search for', 'You see nothing regarding the future', 'Clouds obscure', 'Roundtime')
+                 until observe(best_eye_data['name'])
                    if Flags['bad-search']
-                     train_astrology
+                     check_heavens
                      return
                    end
                  end
                  best_eye_data
                end
+
     pause 2
     waitrt?
-
-    bput('stow telescope', 'you put') if @have_telescope
 
     observed['pools']
       .reject { |_skill, value| value.nil? }
       .each { |skill, _value| align(skill) }
-    bput('predict anal', 'roundtime')
     waitrt?
   end
 
+  def observe(body)
+    Flags.add('bad-search', 'is foiled by the (daylight|darkness)', 'turns up fruitless')
+
+    if @have_telescope
+      bput('get telescope', 'you get', 'You are already', "That can't be picked up")
+      bput("center telescope on #{body}", 'You put your eye')
+      result = bput('peer telescope', 'You peer aimlessly through your telescope', 'You see nothing regarding the future', 'Roundtime')
+      bput('stow telescope', 'you put', "That can't be picked up")
+      result
+    else
+      ['Roundtime', 'Clouds obscure'].include? bput("observe #{body} in sky", 'Your search for', 'You see nothing regarding the future', 'Clouds obscure', 'Roundtime')
+    end
+  end
+
+  def roll_bones
+    if @divination_bones_tied
+      bput("untie bones from my #{@divination_bones_container}", 'divination bones')
+    else
+      bput("get bones from my #{@divination_bones_container}", 'divination bones', 'you get')
+    end
+    bput('roll my bones', 'roundtime')
+    waitrt?
+    if @divination_bones_tied
+      bput("tie bones to my #{@divination_bones_container}", 'divination bones')
+    else
+      bput("put bones in my #{@divination_bones_container}", 'divination bones', 'you put')
+    end
+  end
+
   def align(skill)
+    if skill == 'future events'
+      bput('predict event', 'You focus inwardly')
+      return
+    end
+    echo "Aligning to #{skill}" if UserVars.astrology_debug
     bput("align #{skill}", 'You focus internally')
     waitrt?
-    bput('predict future', 'roundtime')
+    if @have_divination_bones
+      roll_bones
+    else
+      bput('predict future', 'roundtime')
+    end
     waitrt?
     pause 0.5 while stunned?
     fix_standing
+  end
+
+  def train_astrology
+    check_ripples
+    check_astral
+    check_weather
+    check_events(check_pools)
+    check_moons
+    check_heavens
+    predict_all(check_pools)
+    fput('predict analyze')
   end
 end
 

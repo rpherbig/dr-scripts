@@ -242,6 +242,10 @@ class LootProcess
     @dump_junk = settings.dump_junk
     echo("  @dump_junk: #{@dump_junk}") if $debug_mode_ct
     @dump_timer = Time.now - 300
+
+    @last_rites = settings.last_rites
+    echo("  @last_rites: #{@last_rites}") if $debug_mode_ct
+    @last_rites_timer = Time.now - 600
   end
 
   def execute(game_state)
@@ -384,6 +388,14 @@ class LootProcess
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
+    if (Time.now - @last_rites_timer > 600) && @last_rites && game_state.blessed_room
+      bput("pray #{DRRoom.dead_npcs.first}", 'You beseech your god for mercy', 'You pray fervently', 'You continue praying for guidance', 'Quietly touching your lips with the tips of your fingers', 'murmur a brief prayer for its safe travels beyond this life')
+      waitrt?
+      fput "recite Meraud, power the holy fires that unleash my righteous vengeance;Chadatru, guide my sword to swing in justice;Everild, give me the power to conquer my enemies;Truffenyi, let me not lose sight of compassion and mercy;Else, I will become like those I despise;Urrem'tier, receive into your fetid grasp these wicked souls;May the Tamsine's realms never know their evil ways again;May all the Immortals guide your faithful soldier #{checkname}."
+      waitrt?
+      @last_rites_timer = Time.now
+      return
+    end
     arrange_mob(DRRoom.dead_npcs.first, game_state)
     check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals?(game_state)
 
@@ -1100,7 +1112,17 @@ class ManipulateProcess
 
   def manipulate
     bput('manip stop all', 'You relax your will', 'But you aren')
-    bput("manipulate friendship #{@filtered_npcs.first}",  'You attempt to empathically manipulate', 'You strain')
+    manipulate_count = 0
+
+    @filtered_npcs.each_with_index do |npc, index|
+      break if manipulate_count >= @threshold
+
+      ordinal_string = $ORDINALS[index]
+
+      bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'You attempt to empathically manipulate', 'You strain')
+      manipulate_count += 1
+    end
+
     @last_manip = Time.now
   end
 end
@@ -1122,12 +1144,12 @@ class TrainerProcess
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
                    'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
                    'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
-                   'Barb Research Debilitation' => 'Debilitation' }
+                   'Barb Research Debilitation' => 'Debilitation', 'Collect' => 'Outdoorsmanship' }
 
     @skill_map['Hunt'] = %w(Perception Scouting) if DRStats.ranger?
     @favor_god = settings.favor_god
     if settings.favor_goal && @favor_god && /delicate/ =~ bput("tap #{@favor_god} orb", 'The orb is delicate', 'I could not find')
-      @training_abilities['Favor Orb'] = 300
+      @training_abilities['Favor Orb'] = settings.favor_orb_rub_frequency
     end
 
     @no_app = []
@@ -1152,6 +1174,12 @@ class TrainerProcess
 
     @kneel_khri = settings.kneel_khri
     echo("  @kneel_khri: #{@kneel_khri}") if $debug_mode_ct
+
+    @forage_item = settings.forage_item
+    echo("  @forage_item: #{@forage_item}") if $debug_mode_ct
+
+    @analyze_retry_count = settings.combat_analyze_retry_count
+    echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1175,7 +1203,7 @@ class TrainerProcess
     when 'Tactics'
       bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
     when 'Analyze'
-      analyze(game_state)
+      analyze(game_state, 0)
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
     when 'Pray'
@@ -1211,6 +1239,11 @@ class TrainerProcess
       bput('meditate research turtle', 'You clear ')
     when 'Barb Research Debilitation'
       bput('meditate research earthquake', 'You clear ')
+    when 'Collect'
+      retreat
+      collect(@forage_item)
+      waitrt?
+      bput('kick pile', 'You take a step back', 'I could not find')
     end
     waitrt?
     false
@@ -1223,8 +1256,9 @@ class TrainerProcess
       reset_ability(game_state, 'Meraud')
       return
     end
-    if /meraud/i =~ bput('commune sense', 'roundtime', 'A spark of Meraud')
+    if /meraud/i =~ bput('commune sense', 'roundtime', 'Meraud', 'Meraud\'s')
       reset_ability(game_state, 'Meraud', 60)
+      game_state.blessed_room = true
       return
     end
     waitrt?
@@ -1257,6 +1291,7 @@ class TrainerProcess
     pause
     waitrt?
     fix_standing
+    game_state.blessed_room = true
   end
 
   def ambush_stun(game_state)
@@ -1281,19 +1316,22 @@ class TrainerProcess
     DRRoom.dead_npcs.size > dead_count
   end
 
-  def analyze(game_state)
+  def analyze(game_state, fail_count)
     return if game_state.npcs.empty?
+    return if fail_count > @analyze_retry_count
     return if DRSkill.getxp('Tactics') >= 32
     case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
     when 'Analyze what'
       fput('face next')
-      analyze(game_state)
+      analyze(game_state, fail_count)
     when 'You must be closer'
       fput('engage')
     when 'Your analysis reveals a massive opening'
       return
-    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes'
-      analyze(game_state)
+    when 'You fail to find any holes'
+      analyze(game_state, fail_count + 1)
+    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/
+      analyze(game_state, fail_count)
     end
     waitrt?
   end
@@ -1708,7 +1746,7 @@ class GameState
   $aim_skills = %w(Bow Slings Crossbow)
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :blessed_room
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1731,6 +1769,7 @@ class GameState
     @prepare_consume = false
     @use_charged_maneuvers = false
     @wounds = {}
+    @blessed_room = false
 
     # private
     @clean_up_step = nil

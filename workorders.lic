@@ -332,51 +332,80 @@ class WorkOrders
     end
   end
 
-  def count_combine_rem(stock_room, herb, herb_stock, quantity, herb2)
-    if inside?("first #{herb}", @bag) && inside?("second #{herb}", @bag)
-      bput("get #{herb} from my #{@bag}", 'You get')
-      bput("get #{herb} from my #{@bag}", 'You get')
-      case bput('combine', 'You combine', 'That stack of herbs')
-      when 'That stack of herbs'
-        stow_tool(left_hand)
-        stow_tool(right_hand)
-      when 'You combine'
-        case bput("get #{herb} from my #{@bag}", 'You get', 'What were')
-        when 'You get'
-          case bput('combine', 'You combine', 'That stack of herbs')
-          when 'That stack of herbs', 'You combine'
-            stow_tool(left_hand)
-            stow_tool(right_hand)
-          end
+  # Function which will attempt to combine any stacks of herbs in your inventory, will count them, and determine if more need to be ordered.
+  def count_combine_rem(stock_room, quantity, herb, herb_stock)
+  # Initialize variables
+    found_stack = true;
+    herb_volume_total = 0;
+    last_herb_volume = 0;
+    last_descriptor = "";
+    stack_descriptor = "";
+
+    # We have to only ever use the last word in a multi-word herb.  We will need to be careful when counting because of this.
+    # This is to resolve "red flower" vs "blue flower" because "count third red flower in my bag" fails.
+    # We must instead do a generic "tap third flower in my bag" and determine if we're tapping the right kind of flowers from the response, then actually count them.
+    herb_for_tapping = (herb.gsub(/\s+/m, ' ').strip.split(" ")).last
+
+    # Calculate the volume of the herbs that we will be searching our inventory for and/or buying.
+    # Assume that each unit we need to craft will take 25 volumes of our herb.
+    # Also assume that we also always need double the supply that the workorder would normally take in the event that some of our product is not high enough quality.
+    need_herb_volume = ((quantity * 25.0) * 2)
+
+    # Loop through all the stacks of herbs we might have in our backpack and find out how much volume we have total.
+    descriptors = [ "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth" ]
+    begin
+      stack_descriptor = descriptors.shift
+
+      # TODO: Solve the Inkin problem, which (very rarely) results in never counting any herbs, and always buying extra.
+      # The "You lightly tap" result here is what happens if you try to do this in a room with somebody having a name that start with "In" .... like... "Inkin"
+      # example:
+      #   [workorders]>tap first flower in my haversack
+      #   You lightly tap Inkin on the shoulder.
+      /You tap (.*) inside your|I could not find|You lightly tap/ =~ bput("tap #{stack_descriptor} #{herb_for_tapping} in my #{@bag}", 'You tap (.*) inside your', 'I could not find', 'You lightly tap')
+      tap_result = Regexp.last_match(1)
+      if tap_result.nil?
+        herb_volume = 0
+        found_stack = false
+      else
+        # Check to see if the generic item we just tapped matches the exact item we are looking for.
+        if tap_result.include? herb
+          herb_volume = bput("count #{stack_descriptor} #{herb_for_tapping} in my #{@bag}", 'I could not find', 'You count out \d+ pieces.').scan(/\d+/).first.to_i
+        else
+          # Since this looks like the wrong item, we can't count it's volume, and we just move on.
+          herb_volume = 0
         end
       end
-    end
 
-    if inside?("first #{herb}", @bag)
-      herb_have = bput("count #{herb}", 'You count out \d+ pieces').scan(/\d+/).first.to_i
-      herb_need = if herb2 == 'yes' && herb_have <= quantity
-                    1
-                  else
-                    herb_have / 25
-                  end
-      if herb_stock.nil? && herb_need < quantity
-        bput("You need to forage for more #{herb} before doing this work order.")
-        exit
-      else
-        herb_order = if herb_need <= quantity && herb2 == 'no'
-                       ((quantity - herb_need) / 100.0).ceil
-                     else
-                       herb_need
-                     end
-        order_rem(stock_room, herb_order, herb_stock)
-        bput("get #{herb} from my #{@bag}", 'You get')
-        bput("get #{herb} from my #{@bag}", 'You get')
-        bput('combine', 'You combine', 'That stack of herbs', 'You must be')
-        stow_tool(left_hand)
-        stow_tool(right_hand)
+      if herb_volume > 0
+        herb_volume_total = herb_volume_total + herb_volume
+
+        # For convenience, if the volumes of the last her, and this her, add up to 75 or less, we will combine them.
+        if (herb_volume + last_herb_volume) <= 75 && last_herb_volume > 0
+          bput("get #{stack_descriptor} #{need_herb_volume} from my #{@bag}", 'You get')
+          bput("get #{last_descriptor} #{need_herb_volume} from my #{@bag}", 'You get')
+          case bput('combine', 'You combine', 'That stack of herbs')
+          # If we combine the stacks, we have to account for the fact that we now have one less stack, which means we have to add this descriptor back to our array.
+          # If for some reason we can't seem to combine these, then simply store them back in our bag and keep going.
+          when 'You combine'
+            last_herb_volume = herb_volume + last_herb_volume
+            descriptors.unshift(stack_descriptor)
+          end
+          stow_tool(left_hand)
+          stow_tool(right_hand)
+        else
+          # We can't do any combining with this herb, but let's remember it in case the next herb can combine with it.
+          last_descriptor = stack_descriptor
+          last_herb_volume = herb_volume
+        end
       end
-    else
-      order_rem(stock_room, quantity, herb_stock)
+    end while found_stack && descriptors.count > 0
+
+    # Determine how much volume we are short.
+    # The assumption here is that each stack of what is ordered is 25 pieces.
+    herb_volume_to_purchase = need_herb_volume - herb_volume_total
+    if herb_volume_to_purchase > 0
+      herb_to_purchase = (herb_volume_to_purchase / 25.0).ceil
+      order_rem(stock_room, herb_to_purchase, herb_stock)
       stow_tool(left_hand)
       stow_tool(right_hand)
     end
@@ -388,34 +417,38 @@ class WorkOrders
     liquid_used = ''
     recipe = @recipes.find { |r| r['name'] == item }
 
-    existing = if 'What were' == bput("get #{info['catalyst']} from my #{@bag}", 'What were', 'You get')
-                 0
-               else
-                 needed = bput("app my #{info['catalyst']}", 'You are certain the .* has a volume of \d+.').scan(/\d+/).first.to_i
-                 stow_tool(info['catalyst'])
-                 needed
-               end
-    existing1 = if 'What were' == bput("get second #{info['catalyst']} from my #{@bag}", 'What were', 'You get')
-                  0
-                else
-                  needed = bput("app my #{info['catalyst']}", 'You are certain the .* has a volume of \d+.').scan(/\d+/).first.to_i
-                  stow_tool(info['catalyst'])
-                  needed
-                end
-    catalyst_have = existing + existing1
-    stock_needed = ((quantity * recipe['volume'] - catalyst_have) / 100.0).ceil
+    # Catalysts are not able to be combined, so we will appraise the volume of the first two catalysts in our bag and add them together.
+    catalyst_volume_A = if 'What were' == bput("get #{info['catalyst']} from my #{@bag}", 'What were', 'You get')
+        0
+      else
+        volume = bput("app my #{info['catalyst']}", 'You are certain the .* has a volume of \d+.').scan(/\d+/).first.to_i
+        stow_tool(info['catalyst'])
+        volume
+      end
+    catalyst_volume_B = if 'What were' == bput("get second #{info['catalyst']} from my #{@bag}", 'What were', 'You get')
+        0
+      else
+        volume = bput("app my #{info['catalyst']}", 'You are certain the .* has a volume of \d+.').scan(/\d+/).first.to_i
+        stow_tool(info['catalyst'])
+        volume
+      end
+    have_catalyst_volume = catalyst_volume_A + catalyst_volume_B
 
-    if stock_needed < quantity
-      order_rem(info['catalyst-room'], stock_needed, info['catalyst_number'])
+    # See if we need to buy more catalyst.  Assume that each purchase of catalyst is good for 10 uses.
+    # Also assume that we also always need double the supply that the workorder would normally take in the event that some of our product is not high enough quality.
+    catalyst_to_purchase = (((quantity * recipe['volume'] * 2) - have_catalyst_volume) / 10.0).ceil
+    if catalyst_to_purchase > 0
+      order_rem(info['catalyst-room'], catalyst_to_purchase, info['catalyst_number'])
     end
 
+    do_check_liquid_volume = true;
     if recipe['liquid'].nil?
       liquid_used = 'water'
       case bput("get water from my #{@bag}", 'What were', 'You get')
+      # If we have no water, simply go buy some and don't bother to count how much we have left.
       when 'What were'
-        stock_needed = 1
-        order_rem(info['stock-room'], stock_needed, info['stock-number'])
-        skip = 'yes'
+        order_rem(info['stock-room'], 1, info['stock-number'])
+        do_check_liquid_volume = false
       when 'You get'
         /are (.*) parts left of the water|is only (.*) part left of the water/ =~ bput('count my water', 'are .* parts left of the water', 'is only .* part left of the water')
         amount = Regexp.last_match(1) ? Regexp.last_match(1).scan(/\w+/).to_a : Regexp.last_match(2).scan(/\w+/).to_a
@@ -423,51 +456,56 @@ class WorkOrders
     else
       liquid_used = 'alcohol'
       case bput("get alcohol from my #{@bag}", 'What were', 'You get')
+      # If we have no alcohol, simply go buy some and don't bother to count how much we have left.
       when 'What were'
-        stock_needed = 1
-        order_rem(info['stock-room'], stock_needed, info['stock-number-a'])
-        skip = 'yes'
+        order_rem(info['stock-room'], 1, info['stock-number-a'])
+        do_check_liquid_volume = false
       when 'You get'
         /are (.*) parts left of the grain alcohol|is only (.*) part left of the grain alcohol/ =~ bput('count my alcohol', 'are .* parts left of the grain alcohol', 'is only .* part left of the grain alcohol')
         amount = Regexp.last_match(1) ? Regexp.last_match(1).scan(/\w+/).to_a : Regexp.last_match(2).scan(/\w+/).to_a
       end
     end
 
-    val_map = { 'one' => 1, 'two' => 2, 'three' => 3, 'four' => 4, 'five' => 5, 'six' => 6, 'seven' => 7, 'eight' => 8, 'nine' => 9, 'ten' => 10, 'eleven' => 11, 'twelve' => 12, 'thirteen' => 13, 'fourteen' => 14, 'fifteen' => 15, 'sixteen' => 16, 'seventeen' => 17, 'eighteen' => 18, 'nineteen' => 19, 'twenty' => 20, 'twenty-one' => 21, 'twenty-two' => 22, 'twenty-three' => 23, 'twenty-four' => 24, 'twenty-five' => 25, 'twenty-six' => 26, 'twenty-seven' => 27, 'twenty-eight' => 28, 'twenty-nine' => 29, 'thirty' => 30, 'thirty-one' => 31, 'thirty-two' => 32, 'thirty-three' => 33, 'thirty-four' => 34, 'thirty-five' => 35, 'thirty-six' => 36, 'thirty-seven' => 37, 'thirty-eight' => 38, 'thirty-nine' => 39, 'forty' => 40, 'forty-one' => 41, 'forty-two' => 42, 'forty-three' => 43, 'forty-four' => 44, 'forty-five' => 45, 'forty-six' => 46, 'forty-seven' => 47, 'forty-eight' => 48, 'forty-nine' => 49, 'fifty' => 50, 'sixty' => 60, 'seventy' => 70, 'eighty' => 80, 'ninety' => 90 }
-
-    if skip != 'yes'
-      value = amount.map { |word| val_map[word] }.inject(&:+)
-      stock_needed = ((quantity * recipe['volume'] - value) / 100.0).ceil
+    val_map = { 'one' => 1, 'two' => 2, 'three' => 3, 'four' => 4, 'five' => 5, 'six' => 6, 'seven' => 7, 'eight' => 8, 'nine' => 9, 'ten' => 10, 'eleven' => 11, 'twelve' => 12, 'thirteen' => 13, 'fourteen' => 14, 'fifteen' => 15, 'sixteen' => 16, 'seventeen' => 17, 'eighteen' => 18, 'nineteen' => 19, 'twenty' => 20, 'twenty-one' => 21, 'twenty-two' => 22, 'twenty-three' => 23, 'twenty-four' => 24, 'twenty-five' => 25, 'twenty-six' => 26, 'twenty-seven' => 27, 'twenty-eight' => 28, 'twenty-nine' => 29, 'thirty' => 30, 'thirty-one' => 31, 'thirty-two' => 32, 'thirty-three' => 33, 'thirty-four' => 34, 'thirty-five' => 35, 'thirty-six' => 36, 'thirty-seven' => 37, 'thirty-eight' => 38, 'thirty-nine' => 39, 'forty' => 40, 'forty-one' => 41, 'forty-two' => 42, 'forty-three' => 43, 'forty-four' => 44, 'forty-five' => 45, 'forty-six' => 46, 'forty-seven' => 47, 'forty-eight' => 48, 'forty-nine' => 49, 'fifty' => 50, 'sixty' => 60, 'seventy' => 70, 'eighty' => 80, 'ninety' => 90, 'hundred' => 100 }
+    if do_check_liquid_volume
+      # Convert the wording which describes the volume of our liquid in to an actual integer.
+      have_liquid_volume = amount.map { |word| val_map[word] }.inject(&:+)
+      # See if we need to buy more liquid.  Assume that each purchase of liquid is good for 10 uses.
+      # Also assume that we also always need double the supply that the workorder would normally take in the event that some of our product is not high enough quality.
+      liquid_to_purchase = (((quantity * recipe['volume'] * 2) - have_liquid_volume) / 10.0).ceil
     end
-    if liquid_used == 'water'
-      if stock_needed < quantity
-        order_rem(info['stock-room'], stock_needed, info['stock-number'])
+
+    if liquid_to_purchase > 0
+      if liquid_used == 'water'
+        order_rem(info['stock-room'], liquid_to_purchase, info['stock-number'])
+      else
+        order_rem(info['stock-room'], liquid_to_purchase, info['stock-number-a'])
       end
-    elsif stock_needed < quantity
-      order_rem(info['stock-room'], stock_needed, info['stock-number-a'])
     end
 
+    # Combine any liquids that might be able to be combined.
+    stow_tool(left_hand)
+    stow_tool(right_hand)
     case bput("get #{liquid_used} from #{@bag}", 'You get', 'What were')
     when 'You get'
-      bput("get #{liquid_used} from #{@bag}", 'You get', 'What were')
-      bput("combine #{liquid_used}", 'You combine')
-    when 'What were'
-      stow_tool(liquid_used)
+      case bput("get #{liquid_used} from #{@bag}", 'You get', 'What were')
+      when 'You get'
+        bput("combine #{liquid_used}", 'You combine', 'end result would be too bulky.')
+      end
     end
-
     stow_tool(left_hand)
     stow_tool(right_hand)
 
-    # Check for herb1 first before ordering
+    # Herb #1
     herb2 = 'no'
-    count_combine_rem(info['stock-room'], recipe['herb1'], recipe['herb1_stock'], quantity, herb2)
+    count_combine_rem(info['stock-room'], quantity, recipe['herb1'], recipe['herb1_stock'])
 
-    # herb2, if needed
+    # Herb #2
     if recipe['herb2'].nil?
       herb2_needed = 'na'
     else
       herb2 = 'yes'
-      count_combine_rem(info['stock-room'], recipe['herb2'], recipe['herb2_stock'], quantity, herb2)
+      count_combine_rem(info['stock-room'], quantity, recipe['herb2'], recipe['herb2_stock'])
     end
 
     walk_to(@alchemy_room)

@@ -1,0 +1,1522 @@
+=begin
+
+	This script tracks a bunch of info about your character that isn't available as XML, such as your skills and stats, the spells you have on and their duration, gift of lumis, and other random things.
+	Use   ;magic   to see what spells you have on.
+	Use   ;banks   to see how poor you are.
+
+	         author: Tillmen (tillmen@lichproject.org)
+	original author: Shaelun
+	           game: Gemstone
+	           tags: core
+	       required: Lich > 4.6.10
+	        version: 1.11
+
+	changelog:
+		1.11 (2016-09-19):
+			added Duck and Weave cman support
+		1.10 (2016-05-15):
+			added death message for ants to the missing xml workaround
+		1.9 (2016-01-13):
+			update lumnis start time from "lumnis info"
+
+=end
+=begin
+
+		1.8 (2015-07-02):
+			add support for Medatative Resistance (Takoa)
+		1.7 (2015-05-28):
+			add FoF offset to magic bonuses output
+		1.6 (2015-05-21):
+			recognize Vornavis Caravansary bank as a Vornavis bank
+		1.5 (2015-02-21):
+			remove broken ;magic save/load commands
+		1.4 (2015-02-01):
+			added minotaur magus death message for xml fail workaround
+		1.3 (2014-12-17):
+			recognize spells in "spell active" that have an "Indefinite" time left
+		1.2 (2014-11-14):
+			attempted bugfix
+		1.1 (2014-11-10):
+			don't define check(sleeping|bound|silenced|calmed|cutthroat)
+
+=end
+
+
+unless XMLData.game =~ /^(?:GSF|GSIV|GSPlat|GSTest)$/
+	echo "This script is meant for Gemstone Prime, Platinum, or Shattered.  It will likely cause problems on whatever game you're trying to run it on..."
+	exit
+end
+
+hide_me
+setpriority(1)
+
+=begin
+get_lich_server = proc {
+	begin
+		lich_server = TCPSocket.open('216.224.171.85', 7153)
+	rescue
+		lich_server.close rescue()
+		lich_server = nil
+		echo "error connecting to server: #{$!}"
+	end
+	lich_server
+}
+=end
+
+sleep(0.1) until Char.name and not Char.name.empty?
+CharSettings['active_spells'] = Hash.new unless CharSettings['active_spells'].class == Hash
+CharSettings['bank_accounts'] = Hash.new unless CharSettings['bank_accounts'].class == Hash
+CharSettings['show_circles']  = true     if CharSettings['show_circles'].nil?
+CharSettings['show_bonuses']  = false    if CharSettings['show_bonuses'].nil?
+CharSettings['show_messages'] = true     if CharSettings['show_messages'].nil?
+CharSettings['show_gift']     = true     if CharSettings['show_gift'].nil?
+
+bank_titles = {
+	"Wehnimer's Landing"          => [ '[First Elanith Bank, Teller]', '[Clenchfist Bros. Banking, Lobby]'],
+	'Kharam-Dzu'                  => [ '[The Bank of Kharam-Dzu]' ],
+	'Icemule Trace'               => [ '[Icemule Trace, Bank]' ],
+	'Vornavis'                    => [ '[Bank of Vornavis, Solhaven]', '[Mercantylers\' Banking Hall]' ],
+	"River's Rest"                => [ "[River's Rest Bank, Teller]" ],
+	"Kharag 'doth Dzulthu"        => [ '[Bank of Zul Logoth]' ],
+	'United City-States'          => [ '[United Bank of City-States]', '[The United Bank of City-States]' ],
+	'Isle of the Four Winds Bank' => [ '[Mist Harbor Bank, Bank Windows]', '[Mist Harbor Bank, Windows]' ],
+	'Cysaegir'                    => [ '[Cysaegir Bank]' ],
+}
+
+#
+# Load spell info
+#
+unless Spell.load
+	echo 'error: failed to load spell list'
+	exit
+end
+
+#
+# Load or get character information
+#
+if CharSettings['Stats'] and CharSettings['Skills'] and CharSettings['Spells'] and CharSettings['Society'] and CharSettings['citizenship'] and CharSettings['cman']
+	begin
+		Stats.load_serialized   = CharSettings['Stats']
+		Skills.load_serialized  = CharSettings['Skills']
+		Spells.load_serialized  = CharSettings['Spells']
+		Society.load_serialized = CharSettings['Society']
+		Char.citizenship        = CharSettings['citizenship']
+		begin
+			CharSettings['cman'].each_pair { |cman,rank| CMan.send("#{cman}=", rank) }
+		rescue
+			nil
+		end
+	rescue
+		echo $!
+		echo $!.backtrace[0..1]
+		exit
+	end
+else
+	silence_me
+
+	hide_lines = done = false
+	action = proc { |server_string|
+		if hide_lines
+			if server_string =~ /^\s*Mana\:|<prompt/
+				DownstreamHook.remove('infomon_info')
+				done = true
+			end
+			nil
+		elsif server_string =~ /^\s*Name\:/
+			hide_lines = true
+			nil
+		else
+			server_string
+		end
+	}
+	DownstreamHook.add('infomon_info', action)
+	echo 'checking stats...'
+	put 'info'
+	wait_until { done }
+	
+	hide_lines = done = false
+	action = proc { |server_string|
+		if hide_lines
+			if server_string =~ /<output class=""\/>|<prompt/
+				DownstreamHook.remove('infomon_skills')
+				done = true
+			end
+			nil
+		elsif server_string =~ /^\s*(?:<.*?>)?#{Char.name}(?:<\/a>)? \(at level/o
+			hide_lines = true
+			nil
+		else
+			server_string
+		end
+	}
+	DownstreamHook.add('infomon_skills', action)
+	echo 'checking skills...'
+	put 'skills'
+	wait_until { done }
+	
+	hide_lines = done = false
+	action = proc { |server_string|
+		if hide_lines
+			if server_string =~ /<prompt/
+				DownstreamHook.remove('infomon_society')
+				done = true
+			end
+			nil
+		elsif server_string == "<pushBold/>\r\n"
+			hide_lines = true
+			nil
+		else
+			server_string
+		end
+	}
+	DownstreamHook.add('infomon_society', action)
+	echo 'checking society...'
+	put 'society'
+	wait_until { done }
+
+	done = false
+	action = proc { |server_string|
+		if server_string =~ /You currently have .*? citizenship in|You don't seem to have citizenship\./
+			DownstreamHook.remove('infomon_citizenship')
+			done = true
+			nil
+		else
+			server_string
+		end
+	}
+	DownstreamHook.add('infomon_citizenship', action)
+	echo 'checking citizenship...'
+	put 'citizenship'
+	wait_until { done }
+
+	hide_lines = done = false
+	action = proc { |server_string|
+		if hide_lines
+			if server_string =~ /<output class=""\/>|<prompt/
+				DownstreamHook.remove('infomon_cman')
+				done = true
+			end
+			nil
+		else
+			if server_string =~ /You know absolutely nothing about Combat Maneuvers\./
+				DownstreamHook.remove('infomon_cman')
+				done = true
+				nil
+			elsif server_string =~ /#{Char.name}<\/a>, your Combat Maneuver training is as follows:/
+				hide_lines = true
+				nil
+			else
+				server_string
+			end
+		end
+	}
+	DownstreamHook.add('infomon_cman', action)
+	echo 'checking combat maneuvers...'
+	put 'cman info'
+	wait_until { done }
+
+	echo 'done'
+
+	silence_me
+end
+
+#
+# Load spell timers
+#
+CharSettings['active_spells'].each_pair { |spell_num,timeleft|
+	if (spell = Spell[spell_num.to_i])
+		if defined?(spell.real_time) and spell.real_time
+			timeleft = (timeleft - Time.now.to_f)/60.0
+			if timeleft > 0
+				spell.timeleft = timeleft
+				spell.active = true
+			end
+		else
+			spell.timeleft = timeleft
+			spell.active = true
+		end
+	else
+		echo "spell not loaded: #{spell_num}"
+	end
+}
+Spellsong.load_serialized = CharSettings['Spellsong'] if CharSettings['Spellsong']
+Gift.load_serialized = CharSettings['Gift'] if CharSettings['Gift']
+
+#
+# Register ;magic and ;banks commands
+#
+action = proc { |client_string|
+	if client_string =~ /^(?:<c>)?#{$lich_char}((?:magic|banks).*)/i
+		if scr = (Script.running + Script.hidden).find { |val| val.name == 'infomon' }
+			scr.downstream_buffer.shove("#{$clean_lich_char}#{$1}")
+		else
+			UpstreamHook.remove('infomon')
+		end
+		nil
+	else
+		client_string
+	end
+}
+UpstreamHook.add('infomon', action)
+
+$infomon_sleeping = false
+$infomon_bound = false
+$infomon_silenced = false
+$infomon_calmed = true
+$infomon_cutthroat = false
+
+#
+# Save function
+#
+save_proc = proc {
+	CharSettings['active_spells'] = Hash.new
+	Spell.active.each { |spell|
+		if defined?(spell.real_time) and spell.real_time
+			CharSettings['active_spells'][spell.num.to_s] = Time.now.to_f + (spell.timeleft * 60)
+		else
+			CharSettings['active_spells'][spell.num.to_s] = spell.timeleft
+		end
+	}
+	CharSettings['Spellsong'] = Spellsong.serialize
+	CharSettings['Gift'] = Gift.serialize
+	CharSettings.save
+	if not CharSettings['uploaded_spell_ranks'] and defined?(LNet.upload_spell_ranks)
+		if LNet.upload_spell_ranks
+			CharSettings['uploaded_spell_ranks'] = true
+		end
+	end
+}
+
+#
+# Save current status every five minutes in case of crash
+#
+Thread.new {
+	begin
+		loop {
+			sleep 300
+			save_proc.call
+		}	
+	rescue
+		echo $!
+		echo $!.backtrace[0..1]
+	end
+}
+
+#
+# Save current status on exit
+#
+before_dying {
+	save_proc.call
+	UpstreamHook.remove('infomon')
+}
+
+#
+# Death
+#
+Thread.new {
+	begin
+		loop {
+			wait_until { dead? }
+			Spell.list.each { |killit|
+				if defined?(killit.clear_on_death)
+					killit.putdown if killit.clear_on_death
+				else
+					killit.putdown unless [6666,9009,920,9516,9003,9011].include?(killit.num)
+				end
+			}
+			Spellsong.renewed
+			wait_while { dead? }
+			Spell[6666].putdown
+		}
+	rescue
+		echo $!
+		echo $!.backtrace[0..1]
+		sleep 0.3
+	end
+}
+
+#
+# Another workaround for Simu fail
+#
+fix_gameobj_status = proc { |server_string|
+	# false positive: shudders with sporadic convulsions as pearlescent ripples envelop .*? body
+#The earth elemental rumbles in agony as it teeters for a moment, then tumbles to the ground with a thundering crash! 
+	if server_string =~ /^(?:The fire in the|With a surprised grunt, the|A sudden blue fire bursts over the hair of a|You hear a sound like a weeping child as a white glow separates itself from the|A low gurgling sound comes from deep within the chest of the|The|A|One last prolonged bovine moan escapes from the) (?:<pushBold\/>)?<a.*?exist=["'](\-?[0-9]+)["'].*?>.*?<\/a>(?:<popBold\/>)?(?:'s)? (?:body as it rises, disappearing into the heavens|falls to the ground and dies(?:, its feelers twitching)?|falls back into a heap and dies|body goes rigid and collapses to the ground, dead|body goes rigid and collapses to the floor, dead|slowly settles to the ground and begins to dissipate|falls to the ground motionless|body goes rigid and <pushBold\/><a.*?>\w+<\/a><popBold\/> eyes roll back into <pushBold\/><a.*?>\w+<\/a><popBold\/> head as <pushBold\/><a.*?>\w+<\/a><popBold\/> dies|growls one last time, and crumples to the ground in a heap|spins backwards and collapses dead|falls to the ground as the stillness of death overtakes <pushBold\/><a.*?>(?:him|her|it)<\/a><popBold\/>|crumples to the ground motionless|howls in agony one last time and dies|howls in agony while falling to the ground motionless|moans pitifully as <pushBold\/><a.*?>(?:he|she|it)<\/a><popBold\/> is released|careens to the ground and crumples in a heap|hisses one last time and dies|flutters its wings one last time and dies|slumps to the ground with a final snarl|horn dims as (?:his|her) lifeforce fades away|blinks in astonishment, then collapses in a motionless heap|collapses in a heap, its huge girth shaking the floor around it|goes limp and .*? falls over as the fire slowly fades from .*? eyes|eyes slowly fades|sputters violently, cascading flames all around as .*? collapses in a final fiery display|falls to the ground in a clattering, motionless heap|goes limp and .*? falls over as the fire slowly fades from .*? eyes|collapses to the ground and shudders once before finally going still|crumbles into a pile of rubble|shudders once before .*? finally goes still|totters for a moment and then falls to the ground like a pillar, breaking into pieces that fly out in every direction|collapses into a pile of rubble|rumbles in agony as .*? teeters for a moment, then falls directly at you|twists and coils violently in .*? death throes, finally going still|twitches one final time before falling still upon the floor|, consuming .*? form in the space of a breath|screams one last time and dies|breathes .*? last gasp and dies|rolls over and dies|as .*? falls (?:slack|still) against the (?:floor|ground)|collapses to the ground, emits a final squeal, and dies|cries out in pain one last time and dies|crumples to a heap on the ground and dies|collapses to the ground, emits a final sigh, and dies|crumples to the ground and dies|lets out a final caterwaul and dies|screams evilly one last time and goes still|gurgles eerily and collapses into a puddle of water|shudders, then topples to the ground|shudders one last time before lying still|violently for a moment, then goes still|grumbles in pain one last time before lying still|rumbles in agony and goes still|falls to the ground dead|collapses to the ground, emits a final bleat, and dies|topples to the ground motionless|shudders violently for a moment, then goes still|rumbles in agony as .*? teeters for a moment, then tumbles to the ground with a thundering crash)[\.!]\r?\n?$/
+		npc_id = $1
+		if npc = GameObj.npcs.find { |obj| obj.id == npc_id }
+			npc.status = 'dead'
+		end
+	elsif server_string =~ /^A calm washes over <pushBold\/>(?:a|an|the) <a exist="(.*?)" noun=".*?">.*?<\/a><popBold\/>\.\r?\n?$/
+		npc_id = $1
+		if npc = GameObj.npcs.find { |obj| obj.id == npc_id }
+			npc.status = 'calm'
+		end
+	end
+	server_string
+}
+before_dying { DownstreamHook.remove('fix_gameobj_status') }
+DownstreamHook.add('fix_gameobj_status', fix_gameobj_status)
+
+#
+# Spell tracking
+#
+spell_up_msgs_re = /^#{Spell.upmsgs.join('$|^')}$/o
+spell_dn_msgs_re = /^#{Spell.dnmsgs.join('$|^')}$/o
+caster = 'self'
+multicast = false
+activator = 'cast'
+self_invoke = false
+other_invoke = LimitedArray.new
+other_invoke.max_size = 15
+servant_type = nil
+while line = get
+	begin
+		# fixme: invisible people casting at you
+		# fixme: bard renews his songs when you're in his group
+		# fixme: bard renew message shows up after spell message
+		if line =~ /^You (?:gesture|make a complex gesture|sing a melody|sing with renewed vigor|skillfully begin to weave another verse|weave another verse into your harmony)/
+			caster = 'self'
+			activator = 'cast'
+			if line =~ /^You make a complex gesture/
+				multicast = true
+			else
+				multicast = false
+			end
+			echo "caster = #{caster.inspect}; activator = #{activator.inspect}; multicast = #{multicast.inspect}" if $infomon_debug
+		elsif line =~ /^Sparks begin to fly between the .+ and your fingers.  With a sudden burst of enthusiasm, the sparks jump into your hand and a charged feeling surrounds you\.$/
+			self_invoke = true
+			multicast = false
+			echo "self_invoke = true" if $infomon_debug
+		elsif line =~ /^Your spell is ready\./
+			self_invoke = false
+			echo "self_invoke = false" if $infomon_debug
+		elsif line =~ /^You (?:narrow your eyes in concentration as you |take a )?(rub|raise|wave|tap|drink|bite|gobble)/
+			caster = 'self'
+			multicast = false
+			activator = $1
+			echo "caster = #{caster.inspect}; activator = #{activator.inspect}; multicast = #{multicast.inspect}" if $infomon_debug
+		elsif line =~ /^([A-Z][a-z]+) (?:gestures|makes a complex gesture|sings a melody|sings with renewed vigor|skillfully begins to weave another verse|weave another verse into (?:his|her) harmony)/
+			caster = $1
+			activator = 'cast'
+			if line =~ /^([A-Z][a-z]+) makes a complex gesture/
+				multicast = true
+			else
+				multicast = false
+			end
+			echo "caster = #{caster.inspect}; activator = #{activator.inspect}; multicast = #{multicast.inspect}" if $infomon_debug
+		elsif line =~ /^([A-Z][a-z]+) (?:takes a )?(rubs|raises|waves|taps|drink|bite|gobbles)/
+			caster = $1
+			activator = $2.sub(/s$/, '')
+			multicast = false
+			echo "caster = #{caster.inspect}; activator = #{activator.inspect}; multicast = #{multicast.inspect}" if $infomon_debug
+		elsif line =~ /^Sparks begin to fly between .*? and ([A-Z][a-z]+)'s fingers\./
+			other_invoke.push($1)
+			multicast = false
+			echo "other_invoke.push(#{$1.inspect}) => #{other_invoke.inspect}" if $infomon_debug
+		elsif line =~ /^([A-Z][a-z]+) (begins drawing a faint, twisting symbol as he utters an arcane invocation in hushed tones|folds his hands and deeply intones a sonorous mantra|recites a series of mystical phrases while raising his hands|traces a sign while petitioning the spirits for cognition|gestures while calling upon the lesser spirits for aid|traces a series of glowing runes while chanting an arcane phrase|makes a quick gesture while calling upon the powers of the elements)/
+			# fixme: moar messages
+			other_invoke.delete($1)
+			echo "other_invoke.delete(#{$1.inspect}) => #{other_invoke.inspect}" if $infomon_debug
+		elsif line =~ /^Your songs? renews?/
+			Spellsong.renewed
+		elsif mobj = /^#{$lich_char}magic\s?(clear|set|reset|help|circles|bonus|bonuses|messages|update|load|save|gift|cleanup)?\s?([^\s]+|#{Spell.list.collect { |spell| Regexp.escape(spell.name) }.join('|')})?\s?(\d+\.?\d?\d?)?$/oi.match(line)
+			begin
+				if mobj.captures.first.nil? or mobj.captures.first =~ /cleanup/i
+					output = String.new
+					Spell.active.each { |spell| if spell.timeleft <= 0 then spell.putdown end } if mobj.captures.first =~ /cleanup/i
+					if Spell.active.empty?
+						output.concat("\n(no active spells)\n")
+					else
+						lastcircle = nil
+						Spell.active.compact!
+						total_boltAS, total_physicalAS, total_boltDS, total_physicalDS, total_elementalCS, total_mentalCS, total_spiritCS, total_sorcererCS, total_elementalTD, total_mentalTD, total_spiritTD, total_sorcererTD, total_strength, total_dodging, total_combatmaneuvers, total_damagefactor, total_block, total_constitution, total_health, total_uaf, total_asg, total_fof_offset = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+						Spell.active.sort_by { |spell| spell.num.to_i }.each { |spell|
+							if CharSettings['show_circles'] and (spell.circle != lastcircle) then output.concat("\r\n- #{spell.circlename}:\r\n") end
+							bonus_string = ' - '
+							if CharSettings['show_bonuses']
+								if spell.bolt_as != 0
+									bonus_string.concat "#{spell.bolt_as} bAS, "
+									total_boltAS += spell.bolt_as
+								end
+								if spell.physical_as != 0
+									bonus_string.concat "#{spell.physical_as} pAS, "
+									total_physicalAS += spell.physical_as
+								end
+								if spell.bolt_ds != 0
+									bonus_string.concat "#{spell.bolt_ds} bDS, "
+									total_boltDS += spell.bolt_ds
+								end
+								if spell.physical_ds != 0
+									bonus_string.concat "#{spell.physical_ds} pDS, "
+									total_physicalDS += spell.physical_ds
+								end
+								if spell.elemental_cs != 0
+									bonus_string.concat "#{spell.elemental_cs} elemCS, "
+									total_elementalCS += spell.elemental_cs
+								end
+#								if spell.mental_cs != 0
+#									bonus_string.concat "#{spell.mental_cs} mentCS, "
+#									total_mentalCS += spell.mental_cs
+#								end
+								if spell.spirit_cs != 0
+									bonus_string.concat "#{spell.spirit_cs} spirCS, "
+									total_spiritCS += spell.spirit_cs
+								end
+								if spell.sorcerer_cs != 0
+									bonus_string.concat "#{spell.sorcerer_cs} sorcCS, "
+									total_sorcererCS += spell.sorcerer_cs
+								end
+								if spell.elemental_td != 0
+									bonus_string.concat "#{spell.elemental_td} elemTD, "
+									total_elementalTD += spell.elemental_td
+								end
+								if spell.mental_td != 0
+									bonus_string.concat "#{spell.mental_td} mentTD, "
+									total_mentalTD += spell.mental_td
+								end
+								if spell.spirit_td != 0
+									bonus_string.concat "#{spell.spirit_td} spirTD, "
+									total_spiritTD += spell.spirit_td
+								end
+								if spell.sorcerer_td != 0
+									bonus_string.concat "#{spell.sorcerer_td} sorcTD, "
+									total_sorcererTD += spell.sorcerer_td
+								end
+								if spell.strength.to_i != 0
+									bonus_string.concat "#{spell.strength} str, "
+									total_strength += spell.strength.to_i
+								end
+								if spell.dodging.to_i != 0
+									bonus_string.concat "#{spell.dodging} dodge, "
+									total_dodging += spell.dodging.to_i
+								end
+								if spell.combatmaneuvers.to_i != 0
+									bonus_string.concat "#{spell.combatmaneuvers} CM, "
+									total_combatmaneuvers += spell.combatmaneuvers.to_i
+								end
+								if spell.damagefactor.to_i != 0
+									bonus_string.concat "#{spell.damagefactor}% DF, "
+									total_damagefactor += spell.damagefactor.to_i
+								end
+								if spell.block.to_i != 0
+									bonus_string.concat "#{spell.block}% block, "
+									total_block += spell.block.to_i
+								end
+								if spell.constitution.to_i != 0
+									bonus_string.concat "#{spell.constitution} con, "
+									total_constitution += spell.constitution.to_i
+								end
+								if spell.health.to_i != 0
+									bonus_string.concat "#{spell.health} health, "
+									total_health += spell.health.to_i
+								end
+								if spell.unarmed_af.to_i != 0
+									bonus_string.concat "#{spell.unarmed_af} UAF, "
+									total_uaf += spell.unarmed_af.to_i
+								end
+								if spell.asg.to_i != 0
+									bonus_string.concat "#{spell.asg} AsG, "
+									total_asg += spell.asg.to_i
+								end
+								begin
+									if spell.fof_offset.to_i != 0
+										bonus_string.concat "#{spell.fof_offset} FoF offset, "
+										total_fof_offset += spell.fof_offset.to_i
+									end
+								rescue
+									nil
+								end
+							end
+							output.concat(sprintf("  %04s:  %-023s - %s%s\n", spell.num.to_s, spell.name, spell.remaining, bonus_string.chop.chop))
+							lastcircle = spell.circle
+						}
+						output.concat("\n")
+						if CharSettings['show_bonuses']
+							total_offense_string = ''
+                            total_defense_string = ''
+                            total_stat_string    = ''
+                            total_skill_string   = ''
+                            
+							total_offense_string = total_offense_string + total_boltAS.to_s + ' bAS, ' if total_boltAS != 0
+							total_offense_string = total_offense_string + total_physicalAS.to_s + ' pAS, ' if total_physicalAS != 0
+							total_offense_string = total_offense_string + total_elementalCS.to_s + ' elemCS, ' if total_elementalCS != 0
+							total_offense_string = total_offense_string + total_mentalCS.to_s + ' mentCS, ' if total_mentalCS != 0
+							total_offense_string = total_offense_string + total_spiritCS.to_s + ' spirCS, ' if total_spiritCS != 0
+							total_offense_string = total_offense_string + total_sorcererCS.to_s + ' sorcCS, ' if total_sorcererCS != 0
+                            total_offense_string = total_offense_string + total_damagefactor.to_s + '% DF ' if total_damagefactor != 0
+                            total_offense_string = total_offense_string + total_uaf.to_s + ' UAF, ' if total_uaf != 0
+                            total_offense_string.chop!.chop!
+                            
+							total_defense_string = total_defense_string + total_boltDS.to_s + ' bDS, ' if total_boltDS != 0
+							total_defense_string = total_defense_string + total_physicalDS.to_s + ' pDS, ' if total_physicalDS != 0
+							total_defense_string = total_defense_string + total_elementalTD.to_s + ' elemTD, ' if total_elementalTD != 0
+							total_defense_string = total_defense_string + total_mentalTD.to_s + ' mentTD, ' if total_mentalTD != 0
+							total_defense_string = total_defense_string + total_spiritTD.to_s + ' spirTD, ' if total_spiritTD != 0
+							total_defense_string = total_defense_string + total_sorcererTD.to_s + ' sorcTD, ' if total_sorcererTD != 0
+                            total_defense_string = total_defense_string + total_block.to_s + '% block, ' if total_block != 0
+                            total_defense_string = total_defense_string + total_asg.to_s + ' AsG, ' if total_asg != 0
+                            total_defense_string = total_defense_string + total_fof_offset.to_s + ' FoF offset, ' if total_fof_offset != 0
+                            total_defense_string.chop!.chop!
+                            
+							total_stat_string = total_stat_string + total_strength.to_s + ' str, ' if total_strength != 0
+                            total_stat_string = total_stat_string + total_constitution.to_s + ' con, ' if total_constitution != 0
+                            total_stat_string = total_stat_string + total_health.to_s + ' health, ' if total_health != 0
+                            total_stat_string.chop!.chop!
+                            
+							total_skill_string = total_skill_string + total_dodging.to_s + ' dodge, ' if total_dodging != 0
+                            total_skill_string = total_skill_string + total_combatmaneuvers.to_s + ' CM, ' if total_combatmaneuvers != 0
+                            total_skill_string.chop!.chop!
+                            
+                            output.concat("- Totals:\n")
+							output.concat("  Offense: #{total_offense_string}\n") if total_offense_string.length > 0
+                            output.concat("  Defense: #{total_defense_string}\n") if total_defense_string.length > 0
+                            output.concat("    Stats: #{total_stat_string}\n") if total_stat_string.length > 0
+                            output.concat("   Skills: #{total_skill_string}\n") if total_skill_string.length > 0
+                            output.concat("\n\n")
+						end
+					end					
+					if CharSettings['show_gift']
+						giftleft = Gift.remaining
+						unless Time.now > Gift.restarts_on
+							cyclemins = (Gift.restarts_on.to_i - Time.now.to_i) / 60.00
+							days = cyclemins.as_time.slice(/\d+/).to_i / 24
+							hours = cyclemins.as_time.slice(/\d+/).to_i % 24
+							mins, secs = cyclemins.as_time.split(':')[-2..-1]
+							mins, secs = mins.to_i, secs.to_i
+							if days > 1
+								output.concat("Your Gift of Lumnis cycle will restart in #{days} days, ")
+							elsif days == 1
+								output.concat("Your Gift of Lumnis cycle will restart in #{days} day, ")
+							else
+								output.concat("Your Gift of Lumnis cycle will restart in 0 days, ")
+							end
+							if hours == 1
+								output.concat("#{hours} hour, ")
+							elsif hours > 1
+								output.concat("#{hours} hours, ")
+							else
+								output.concat("0 hours, ")
+							end
+							if mins == 1
+								output.concat("#{mins} minute, ")
+							elsif mins > 1
+								output.concat("#{mins} minutes, ")
+							else
+								output.concat("0 minutes, ")
+							end
+							if secs > 1
+								output.concat("#{secs} seconds.")
+							elsif secs == 1
+								output.concat("#{secs} second.")
+							else
+								output.concat("0 seconds.")
+							end
+							output.concat("\n\n")
+							if giftleft <= 0
+								nil
+							elsif giftleft < 10800
+								output.concat("Time remaining for double learning: #{(giftleft / 60).as_time}.\n\n")
+							else
+								giftleft -= 10800
+								output.concat("Time remaining for triple learning: #{(giftleft / 60).as_time}.\n\n")
+							end
+						else
+							output.concat("Your Gift of Lumnis cycle will begin when you next learn from an experience.\n\n")
+						end
+					end
+					respond output
+				elsif mobj.captures.first =~ /help/i
+					respond
+					respond 'Magic usage:'
+					respond '   ;magic                     - Shows your active spells and their durations.'
+					respond "   ;magic set [spell#] [mins] - Sets a spell's duration."
+					respond '   ;magic clear [spell]       - Remove a single spell.'
+					respond '   ;magic clear               - Clears the whole list.'
+					respond '   ;magic circles             - Toggles the display of spell circle labels with the active spell list.'
+					respond '   ;magic bonuses             - Toggles the display of spell bonuses with the active spell list.'
+					respond '   ;magic gift                - Toggles the display of Gift of Lumnis information with the active spell list.'
+					respond '   ;magic messages            - Toggles the display of a duration message after each cast.'
+#					respond '   ;magic save                - Saves your currently active spells and currently tracked skills/stats on the Lich server.'
+#					respond '   ;magic load                - Load your currently active spells and skills/stats from the Lich server.'
+					respond
+				elsif mobj.captures.first =~ /clear|reset/i
+					if mobj.captures[1].nil? or mobj.captures[1].empty?
+						while spell = Spell.active.first
+							spell.putdown
+						end
+						Spell.active.clear
+						respond('Active spell list cleared.')
+					else
+						if mobj.captures[1].to_i == 0
+							spell = Spell[mobj.captures[1]]
+						else
+							spell = Spell[mobj.captures[1].to_i]
+						end
+						if spell.nil?
+							respond("Could not identify spell #{$1}")
+						else
+							spell.putdown
+							respond("#{spell} has been removed from the list.")
+						end
+					end
+				elsif mobj.captures.first =~ /circle/i
+					if CharSettings['show_circles'] == false
+						CharSettings['show_circles'] = true
+						echo('Spell circle labels will be displayed in the active spell list.')
+					else
+						CharSettings['show_circles'] = false
+						echo('Spell circle labels will not be displayed in the active spell list.')
+					end
+				elsif mobj.captures.first =~ /messages/i
+					if CharSettings['show_messages'] == false
+						CharSettings['show_messages'] = true
+						echo('Showing spell duration messages after each cast is now on.')
+					else
+						CharSettings['show_messages'] = false
+						echo('Showing spell duration messages after each cast is now off.')
+					end
+				elsif mobj.captures.first =~ /bonus/i
+					if CharSettings['show_bonuses'] == false
+						CharSettings['show_bonuses'] = true
+						echo('Spell bonuses will be displayed in the active spell list.')
+					else
+						CharSettings['show_bonuses'] = false
+						echo('Spell bonuses will not be displayed in the active spell list.')
+					end
+				elsif mobj.captures.first =~ /gift/i
+					if CharSettings['show_gift'] == false
+						CharSettings['show_gift'] = true
+						echo('Gift of Lumnis will be displayed in the active spell list.')
+					else
+						CharSettings['show_gift'] = false
+						echo('Gift of Lumnis will not be displayed in the active spell list.')
+					end
+				elsif mobj.captures.first =~ /update/i
+					echo 'this setting is no longer used'
+				elsif mobj.captures.first =~ /set/i
+					if (mobj.captures[1].nil? || mobj.captures[2].nil?)
+						echo("Magic error! Type ';magic help' for usage information.")
+					else
+						if mobj.captures[1].to_i == 0
+							spell = Spell[mobj.captures[1]]
+						else
+							spell = Spell[mobj.captures[1].to_i]
+						end
+						if spell.nil?
+							echo("Magic error! Type ';magic help' for usage information.")
+						else
+							spell.putup
+							spell.timeleft = mobj.captures[2].to_i
+							echo("Spell '#{spell.to_s}' is now set as having #{spell.timeleft} minutes left.")
+						end
+					end
+				elsif mobj.captures.first =~ /save/i
+					echo 'this function no longer works'
+=begin
+					if $SAFE == 0
+						echo("Saving your current active spells on the Lich server for later use on a different computer... please be patient, it can sometimes take up to half a minute to initiate the connection...")
+						if lich_server = get_lich_server.call
+							lich_server.send('x',0)
+							lich_server.puts("#{XMLData.game}:#{XMLData.name}")
+							lich_server.binmode
+							remote_save = Hash.new
+							remote_save['active_spells'] = Hash.new
+							Spells.active.each { |spell|
+								if defined?(spell.real_time) and spell.real_time
+									remote_save['active_spells'][spell.num.to_s] = Time.now.to_f + (spell.timeleft * 60)
+								else
+									remote_save['active_spells'][spell.num.to_s] = spell.timeleft
+								end
+							}
+							remote_save['Spellsong'] = Spellsong.serialize
+							remote_save['Stats'] = Stats.serialize
+							remote_save['Skills'] = Skills.serialize
+							remote_save['Spells'] = Spells.serialize
+							remote_save['Gift'] = Gift.serialize
+							remote_save['Society'] = Society.serialize
+							remote_save['citizenship'] = Char.citizenship
+							lich_server.write(Marshal.dump(remote_save))
+							lich_server.close rescue()
+							echo
+							echo "Data has been cached remotely! Simply type '#{$clean_lich_char}magic load' when you wish to restore the current state of your character on the other computer."
+							echo
+						end
+					else
+						echo 'This script must be trusted to use this function. (;trust infomon)'
+					end
+=end
+				elsif mobj.captures.first =~ /load/i
+					echo 'this function no longer works'
+=begin
+					if $SAFE == 0
+						echo("Loading your current active spells from the remote cache on the Lich server... please be patient, it can sometimes take up to half a minute to initiate the connection...")
+						if lich_server = get_lich_server.call
+							lich_server.send("z",0)
+							lich_server.puts("#{XMLData.game}:#{XMLData.name}")
+							lich_server.binmode
+							begin
+								remote_load = Marshal.load(lich_server.read)
+								Stats.load_serialized   = remote_load['Stats']
+								Skills.load_serialized  = remote_load['Skills']
+								Spells.load_serialized  = remote_load['Spells']
+								Society.load_serialized = remote_load['Society']
+								Char.citizenship        = remote_load['citizenship']
+								remote_load['active_spells'].each_pair { |num,timeleft|
+									if spell = Spell[num]
+										if defined?(spell.real_time) and spell.real_time
+											timeleft = (timeleft - Time.now.to_f)/60.0
+											if timeleft > 0
+												spell.timeleft = timeleft
+												spell.active = true
+											end
+										else
+											spell.timeleft = timeleft
+											spell.active = true
+										end
+									end
+								}
+								Spellsong.load_serialized = remote_load['Spellsong'] if remote_load['Spellsong']
+								Gift.load_serialized = remote_load['Gift'] if remote_load['Gift']
+							rescue
+								echo("There was an error loading your status information from the server.  Are you certain you have status info saved on it?  Type `;magic help' for more.")
+								lich_server.close rescue()
+								next
+							end
+							lich_server.close rescue()
+							echo
+							echo 'Data has been loaded!'
+							echo
+						end
+					else
+						echo 'This script must be trusted to use this function. (;trust infomon)'
+					end
+=end
+				else
+					echo "Magic error! Type ';magic help' for usage information."
+				end
+			rescue
+				echo $!
+			end
+		elsif line =~ /^#{$lich_char}banks$/
+			if CharSettings['bank_accounts'].empty?
+				respond
+				respond 'No bank account info recorded.'
+				respond
+			elsif Char.name == 'Tillmen'
+				respond
+				subtotal = 0
+				total = 0
+				for town,amount in CharSettings['bank_accounts']
+					if town =~ /Icemule Trace|Wehnimer's Landing/
+						respond "#{town.rjust(27)}:#{amount.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+						subtotal += amount
+						total += amount
+					end
+				end
+				respond '                      -------------------'
+				respond "                   Subtotal:#{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+				respond
+				for town,amount in CharSettings['bank_accounts']
+					if town !~ /Icemule Trace|Wehnimer's Landing/
+						respond "#{town.rjust(27)}:#{amount.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+						total += amount
+					end
+				end
+				respond '                      -------------------'
+				respond "                      Total:#{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+				respond
+			else
+				respond
+				total = 0
+				for town,amount in CharSettings['bank_accounts']
+					respond "#{town.rjust(27)}:#{amount.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+					total += amount
+				end
+				respond '                      -------------------'
+				respond "                      Total:#{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}"
+				respond
+			end
+		elsif line =~ /^(?:You hand your silvers? over to the|You hand your notes to the|You hand over your notes to the|You deposit [0-9]+ silvers? into your account.  The|The) (?:teller|dwarf).*(?:balance is |balance of |balance to |balance up to |balance is currently at |New balance\: )([0-9]+)/
+			for town,titles in bank_titles
+				if titles.include?(checkroom)
+					CharSettings['bank_accounts'][town] = $1.to_i
+					break
+				end
+			end
+		elsif line =~ /^The (?:teller|dwarf) (?:carefully records the transaction,|scribbles the transaction into a book)(?: and)?(?: then)?(?: reluctantly)? hands you ([0-9]+)/
+			for town,titles in bank_titles
+				if titles.include?(checkroom)
+					CharSettings['bank_accounts'][town] = CharSettings['bank_accounts'][town].to_i - $1.to_i
+					break
+				end
+			end
+		elsif line =~ /^You deposit(?: your note worth| your chit worth)? ([0-9]+)/
+			for town,titles in bank_titles
+				if titles.include?(checkroom)
+					CharSettings['bank_accounts'][town] = CharSettings['bank_accounts'][town].to_i + $1.to_i
+					break
+				end
+			end
+		elsif line =~ /^The (?:teller|dwarf).* ([0-9]+) silver surchar?ge/
+			surcharge = $1.to_i
+			if line = $_CLIENTBUFFER_.reverse.find { |line| line =~ /^(?:\[.*?\]>)?(?:<c>)?(?:wit|with|withd|withr|withdra|withdraw)\s+[0-9]+/i }
+				amount = line.slice(/[0-9]+/).to_i
+				for town,titles in bank_titles
+					if titles.include?(checkroom)
+						CharSettings['bank_accounts'][town] = [ (CharSettings['bank_accounts'][town].to_i - amount - surcharge), 0 ].max
+						break
+					end
+				end
+			end
+		elsif line =~ /^The (?:teller|dwarf).*you don't(?: seem to)? have an (?:open )?account/
+			for town,titles in bank_titles
+				if titles.include?(checkroom)
+					CharSettings['bank_accounts'][town] = 0
+					break
+				end
+			end
+		elsif line == 'You study your current bank balances...'
+			15.times {
+				line = get
+				if line =~ /\s*(Wehnimer's Landing|Kharam-Dzu|Icemule Trace|Vornavis|River's Rest|Kharag 'doth Dzulthu|United City-States|Isle of the Four Winds Bank|Cysaegir):\s+([0-9]+)/
+					CharSettings['bank_accounts'][$1] = $2.to_i
+				elsif line =~ /Your total silvers/
+					break
+				end
+			}
+#		elsif line =~ /^You stop singing\.$|^But you are not singing any spellsongs\.$/
+#			Spell.list.each { |spell| spell.putdown if spell.circle.to_i == 10 }
+		elsif line =~ /^The soft feeling of serenity slowly dissipates from your mind\.$/
+			Gift.ended
+			CharSettings['Gift'] = Gift.serialize
+		elsif line =~ /^A soft feeling of serenity touches your mind, providing you with a clearer understanding of recent events\.$/
+			Gift.started
+			CharSettings['Gift'] = Gift.serialize
+		elsif line =~ /^Your Gift of Lumnis (is currently in effect|has expired for this week)\.\s+It is scheduled to refresh in (\d+ days?, )?(\d+ hours? and )?(\d+) minutes?\./
+			gift_active = ($1 == 'is currently in effect')
+			days = $2
+			hours = $3
+			minutes = $4.to_i
+			days = (days ? days.slice(/\d+/).to_i : 0)
+			hours = (hours ? hours.slice(/\d+/).to_i : 0)
+			gift_start = Time.now + (minutes * 60) + (hours * 3600) + (days * 86400) - 594000
+			pulse_count = Gift.serialize[1]
+			if (pulse_count < 360) and not gift_active
+				pulse_count = 360
+			elsif (pulse_count > 360) and gift_active
+				# fixme
+			end
+			Gift.load_serialized = [gift_start,pulse_count]
+			CharSettings['Gift'] = Gift.serialize
+#		elsif line =~ /^You feel a strange sense of serenity and find that you are able to reflect on recent events with uncommon clarity and understanding\.$/
+		elsif line == 'Repeating the sign has no effect!'
+			if spell_name = [ 'Sign of Striking', 'Sign of Smiting', 'Sign of Swords', 'Sign of Warding', 'Sign of Defending', 'Sign of Shields', 'Sign of Deflection', 'Sign of Dissipation' ].find { |name| (XMLData.active_spells[name] > Time.now) and not Spell[name].active? }
+				spell = Spell[spell_name]
+				spell.putup
+				respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+			elsif mangled_name = $_CLIENTBUFFER_.reverse.find { |cmd| cmd =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(st|str|stri|strik|striki|strikin|striking|sm|smi|smit|smiti|smitin|smiting|sw|swo|swor|sword|swords|wa|war|ward|wardi|wardin|warding|de|def|defe|defen|defend|defendi|defendin|defending|sh|shi|shie|shiel|shield|shields|defl|defle|deflec|deflect|deflecti|deflectio|deflection|di|dis|diss|dissi|dissip|dissipa|dissipat|dissipati|dissipatio|dissipation)\s*$/i }
+				mangled_name =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(st|str|stri|strik|striki|strikin|striking|sm|smi|smit|smiti|smitin|smiting|sw|swo|swor|sword|swords|wa|war|ward|wardi|wardin|warding|defl|defle|deflec|deflect|deflecti|deflectio|deflection|de|def|defe|defen|defend|defendi|defendin|defending|sh|shi|shie|shiel|shield|shields|di|dis|diss|dissi|dissip|dissipa|dissipat|dissipati|dissipatio|dissipation)\s*$/i
+				spell = Spell["Sign of #{$1}"]
+				spell.putup
+				respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+			end
+		elsif line =~ /^The High Taskmaster looks at you, consults her notes, and then announces in a loud voice\: "Congratulations, [A-Z][a-z]+!  By the power invested in me by the Grand Poohbah, I declare you to be .*? of rank ([0-9]+)!/
+			Society.status = 'Council of Light'
+			Society.rank = $1.dup
+			CharSettings['Society'] = Society.serialize
+		elsif line =~ /^The monk concludes ceremoniously,|^The Grandmaster says, "Welcome to the Order/
+			hide_lines = done = false
+			action = proc { |server_string|
+				if hide_lines
+					if server_string =~ /<prompt/
+						DownstreamHook.remove('infomon_society')
+						done = true
+					end
+					nil
+				elsif server_string == "<pushBold/>\r\n"
+					hide_lines = true
+					nil
+				else
+					server_string
+				end
+			}
+			DownstreamHook.add('infomon_society', action)
+			# echo 'checking society...'
+			silence_me unless undo_silence = silence_me
+			put 'society'
+			silence_me if undo_silence
+			wait_until { done }
+		elsif line =~ /^\s+You are a (Master|member) (?:in|of) the (Order of Voln|Council of Light|Guardians of Sunfist)( at rank [0-9]+| at step [0-9]+)?\.$/
+			Society.status = $2.dup
+			if $1 == 'Master'
+				if $2 == 'Order of Voln'
+					Society.rank = '26'
+				else
+					Society.rank = '20'
+				end
+			else
+				Society.rank = $3.dup
+			end
+			CharSettings['Society'] = Society.serialize
+		elsif line == '   You are not a member of any society at this time.'
+			Society.status = 'None'
+			Society.rank = '0'
+			CharSettings['Society'] = Society.serialize
+		elsif line =~ /^\s#{Char.name} \(at level/o
+			begin
+				before_ranks = [ Spells.minorelemental, Spells.minormental, Spells.majorelemental, Spells.minorspiritual, Spells.majorspiritual, Spells.wizard, Spells.sorcerer, Spells.ranger, Spells.paladin, Spells.empath, Spells.cleric, Spells.bard, Skills.magicitemuse, Skills.arcanesymbols ]
+				Skills.armoruse, Skills.shielduse, Skills.combatmaneuvers, Skills.edgedweapons, Skills.bluntweapons, Skills.twohandedweapons, Skills.rangedweapons, Skills.thrownweapons, Skills.polearmweapons, Skills.brawling, Skills.ambush, Skills.multiopponentcombat, Skills.combatleadership, Skills.physicalfitness, Skills.dodging, Skills.arcanesymbols, Skills.magicitemuse, Skills.spellaiming, Skills.harnesspower, Skills.emc, Skills.mmc, Skills.smc, Skills.elair, Skills.elearth, Skills.elfire, Skills.elwater, Skills.slblessings, Skills.slreligion, Skills.slsummoning, Skills.sldemonology, Skills.slnecromancy, Skills.mldivination, Skills.mlmanipulation, Skills.mltelepathy, Skills.mltransference, Skills.mltransformation, Skills.survival, Skills.disarmingtraps, Skills.pickinglocks, Skills.stalkingandhiding, Skills.perception, Skills.climbing, Skills.swimming, Skills.firstaid, Skills.trading, Skills.pickpocketing, Spells.minorelemental, Spells.minormental, Spells.majorelemental, Spells.minorspiritual, Spells.majorspiritual, Spells.wizard, Spells.sorcerer, Spells.ranger, Spells.paladin, Spells.empath, Spells.cleric, Spells.bard = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+				until (line = get) =~ /\(Use |[0-9]+ days? remain|You started this migration period|Further information can be found in the FAQs./
+					if line =~ /Two Weapon Combat/
+						Skills.twoweaponcombat = $'.split[2].to_i
+					elsif line =~ /Armor Use/
+						Skills.armoruse = $'.split[2].to_i
+					elsif line =~ /Shield Use/
+						Skills.shielduse = $'.split[2].to_i
+					elsif line =~ /Combat Maneuvers/
+						Skills.combatmaneuvers = $'.split[2].to_i
+					elsif line =~ /Edged Weapons/
+						Skills.edgedweapons = $'.split[2].to_i
+					elsif line =~ /Blunt Weapons/
+						Skills.bluntweapons = $'.split[2].to_i
+					elsif line =~ /Two-Handed Weapons/
+						Skills.twohandedweapons = $'.split[2].to_i
+					elsif line =~ /Ranged Weapons/
+						Skills.rangedweapons = $'.split[2].to_i
+					elsif line =~ /Thrown Weapons/
+						Skills.thrownweapons = $'.split[2].to_i
+					elsif line =~ /Polearm Weapons/
+						Skills.polearmweapons = $'.split[2].to_i
+					elsif line =~ /Brawling/
+						Skills.brawling = $'.split[2].to_i
+					elsif line =~ /Ambush/
+						Skills.ambush = $'.split[2].to_i
+					elsif line =~ /Multi Opponent Combat/
+						Skills.multiopponentcombat = $'.split[2].to_i
+					elsif line =~ /Combat Leadership/
+						Skills.combatleadership = $'.split[2].to_i
+					elsif line =~ /Physical Fitness/
+						Skills.physicalfitness = $'.split[2].to_i
+					elsif line =~ /Dodging/
+						Skills.dodging = $'.split[2].to_i
+					elsif line =~ /Arcane Symbols/
+						Skills.arcanesymbols = $'.split[2].to_i
+					elsif line =~ /Magic Item Use/
+						Skills.magicitemuse = $'.split[2].to_i
+					elsif line =~ /Spell Aiming/
+						Skills.spellaiming = $'.split[2].to_i
+					elsif line =~ /Harness Power/
+						Skills.harnesspower = $'.split[2].to_i
+					elsif line =~ /Elemental Mana Control/
+						Skills.emc = $'.split[2].to_i
+					elsif line =~ /Mental Mana Control/
+						Skills.mmc = $'.split[2].to_i
+					elsif line =~ /Spirit Mana Control/
+						Skills.smc = $'.split[2].to_i
+					elsif line =~ /Elemental Lore - ([A-Z][a-z]+)/
+						if $1 == "Air"
+							Skills.elair = $'.split[2].to_i
+						elsif $1 == "Earth"
+							Skills.elearth = $'.split[2].to_i
+						elsif $1 == "Fire"
+							Skills.elfire = $'.split[2].to_i
+						elsif $1 == "Water"
+							Skills.elwater = $'.split[2].to_i
+						end
+					elsif line =~ /Spiritual Lore - ([A-Z][a-z]+)/
+						if $1 == "Blessings"
+							Skills.slblessings = $'.split[2].to_i
+						elsif $1 == "Religion"
+							Skills.slreligion = $'.split[2].to_i
+						elsif $1 == "Summoning"
+							Skills.slsummoning = $'.split[2].to_i
+						end
+					elsif line =~ /Sorcerous Lore - ([A-Z][a-z]+)/
+						if $1 == "Demonology"
+							Skills.sldemonology = $'.split[2].to_i
+						elsif $1 == "Necromancy"
+							Skills.slnecromancy = $'.split[2].to_i
+						end
+					elsif line =~ /Mental Lore - ([A-Z][a-z]+)/
+						if $1 == "Divination"
+							Skills.mldivination = $'.split[2].to_i
+						elsif $1 == "Manipulation"
+							Skills.mlmanipulation = $'.split[2].to_i
+						elsif $1 == "Telepathy"
+							Skills.mltelepathy = $'.split[2].to_i
+						elsif $1 == "Transference"
+							Skills.mltransference = $'.split[2].to_i
+						elsif $1 == "Transformation"
+							Skills.mltransformation = $'.split[2].to_i
+						end
+					elsif line =~ /Survival/
+						Skills.survival = $'.split[2].to_i
+					elsif line =~ /Disarming Traps/
+						Skills.disarmingtraps = $'.split[2].to_i
+					elsif line =~ /Picking Locks/
+						Skills.pickinglocks = $'.split[2].to_i
+					elsif line =~ /Stalking and Hiding/
+						Skills.stalkingandhiding = $'.split[2].to_i
+					elsif line =~ /Perception/
+						Skills.perception = $'.split[2].to_i
+					elsif line =~ /Climbing/
+						Skills.climbing = $'.split[2].to_i
+					elsif line =~ /Swimming/
+						Skills.swimming = $'.split[2].to_i
+					elsif line =~ /First Aid/
+						Skills.firstaid = $'.split[2].to_i
+					elsif line =~ /Trading/
+						Skills.trading = $'.split[2].to_i
+					elsif line =~ /Pickpocketing/
+						Skills.pickpocketing = $'.split[2].to_i
+					elsif line =~ /Minor Elemental/
+						Spells.minorelemental = $'.split[1].to_i
+					elsif line =~ /Major Elemental/
+						Spells.majorelemental = $'.split[1].to_i
+					elsif line =~ /Minor Mental/
+						Spells.minormental = $'.split[1].to_i
+					elsif line =~ /Minor Spirit/
+						Spells.minorspiritual = $'.split[1].to_i
+					elsif line =~ /Major Spirit/
+						Spells.majorspiritual = $'.split[1].to_i
+					elsif line =~ /Wizard/
+						Spells.wizard = $'.split[1].to_i
+					elsif line =~ /Sorcerer/
+						Spells.sorcerer = $'.split[1].to_i
+					elsif line =~ /Ranger/
+						Spells.ranger = $'.split[1].to_i
+					elsif line =~ /Paladin/
+						Spells.paladin = $'.split[1].to_i
+					elsif line =~ /Empath/
+						Spells.empath = $'.split[1].to_i
+					elsif line =~ /Cleric/
+						Spells.cleric = $'.split[1].to_i
+					elsif line =~ /Bard/
+						Spells.bard = $'.split[1].to_i
+					end
+				end
+				CharSettings['Skills'] = Skills.serialize
+				CharSettings['Spells'] = Spells.serialize
+				if (before_ranks != [ Spells.minorelemental, Spells.minormental, Spells.majorelemental, Spells.minorspiritual, Spells.majorspiritual, Spells.wizard, Spells.sorcerer, Spells.ranger, Spells.paladin, Spells.empath, Spells.cleric, Spells.bard, Skills.magicitemuse, Skills.arcanesymbols ])
+					if defined?(LNet.upload_spell_ranks)
+						if LNet.upload_spell_ranks
+							CharSettings['uploaded_spell_ranks'] = true
+						else
+							CharSettings['uploaded_spell_ranks'] = false
+						end
+					else
+						CharSettings['uploaded_spell_ranks'] = false
+					end
+				end
+			rescue
+			  	echo $!
+			end
+		elsif line =~ /^Name:\s+[-A-z\s']+Race:\s+([-A-z\s]+)\s+Profession:\s+([-A-z\s]+)/
+			Stats.race = $1.strip
+			Stats.prof = $2.strip
+			if get =~ /Gender:\s+([A-z]+)\s+Age:\s+([0-9]+)\s+Expr:\s+([0-9]+)\s+Level:\s+([0-9]+)/
+				Stats.gender = $1
+				Stats.age = $2.to_i
+				Stats.exp = $3.to_i
+				Stats.level = $4.to_i
+				get
+				while get =~ /^\s*[A-Z][a-z]+\s\((STR|CON|DEX|AGI|DIS|AUR|LOG|INT|WIS|INF)\):\s+([0-9]+)\s\((\-?[0-9]+)\)/
+					Stats.send("#{$1.downcase}=", [ $2.to_i, $3.to_i])
+				end
+			end
+			CharSettings['Stats'] = Stats.serialize
+		elsif line =~ /^You are now level ([0-9]+)!$/
+			Stats.level = $1.to_i
+			get
+			while get =~ /^\s*(?:Strength|Constitution|Dexterity|Agility|Discipline|Aura|Logic|Intuition|Wisdom|Influence|Dexterity)\s+\((STR|CON|DEX|AGI|DIS|AUR|LOG|INT|WIS|INF)\)\s*\:\s+([0-9]+)\s+\+([0-9]+)\s+\.\.\.\s+(\-?[0-9]+)\s*\+?([0-9]+)\s*$/
+				Stats.send("#{$1.downcase}=", [ $2.to_i + $3.to_i, $4.to_i + $5.to_i ])
+			end
+			CharSettings['Stats'] = Stats.serialize
+		elsif (line == 'You know absolutely nothing about Combat Maneuvers.') and defined?(CMan)
+			begin
+				CharSettings['cman'].keys.each { |cman| CMan[cman] = nil }
+			rescue
+				nil
+			end
+			CharSettings['cman'] = Hash.new
+		elsif (line =~ /#{Char.name}, your Combat Maneuver training is as follows:/) and defined?(CMan)
+			begin
+				CharSettings['cman'].keys.each { |cman| CMan[cman] = nil }
+			rescue
+				nil
+			end
+			CharSettings['cman'] = Hash.new
+			get
+			while get =~ /^([A-z\s']+)\s+([a-z0-9]+)\s+([0-9])\s*$/
+                cman_rank = $3
+				cman_name = $1.strip.downcase.gsub(/[\s\-]/,'_').gsub("'", "")
+				
+				CharSettings['cman'][cman_name] = cman_rank.to_i
+				begin
+					CMan[cman_name] = cman_rank
+				rescue
+					nil
+				end
+			end
+		elsif (line =~ /^You have now achieved the (first|second|third|fourth|fifth) rank of (.*)\.$/)
+			fix_num = { 'first' => 1, 'second' => 2, 'third' => 3, 'fourth' => 4, 'fifth' => 5 }
+			cman_name = $2
+			cman_rank = $1
+			CharSettings['cman'][cman_name.gsub(/[\s\-]/,'_').gsub("'", "").downcase] = fix_num[cman_rank]
+			begin
+				CMan[cman_name] = fix_num[cman_rank]
+			rescue
+				nil
+			end
+		elsif (line =~ /^You decide to unlearn your (first|second|third|fourth|fifth) rank of (.*),/)
+			fix_num = { 'first' => 0, 'second' => 1, 'third' => 2, 'fourth' => 3, 'fifth' => 4 }
+			cman_name = $2
+			cman_rank = $1
+			CharSettings['cman'][cman_name.gsub(/[\s\-]/,'_').gsub("'", "").downcase] = fix_num[cman_rank]
+			begin
+				CMan[cman_name] = fix_num[cman_rank]
+			rescue
+				nil
+			end
+		elsif line =~ /^\.\.\.departing in ([0-9]+) mins\.\.\.$/
+			Spell[6666].putup
+			Spell[6666].timeleft = $1.to_i
+		elsif line =~ /^\((?:You sense that your soul has been bound to your body for|Thy soul is bound to thy body for an extra) ([0-9]+) minutes( and 30 seconds)?/
+			#The hermit gestures at you.  A web of light surrounds you then the web fades into your body.
+			time_added = $1.to_f
+			time_added += 0.5 if $2
+			time_added += Spell[6666].minsleft
+			Spell[6666].putup
+			Spell[6666].timeleft = time_added
+		elsif line =~ spell_up_msgs_re
+			spell = Spell.list.find { |s| line =~ /^#{s.msgup}$/ }
+			if spell.num == 218
+				if line =~ /^You infuse your (.*?) spirit with the mana necessary to maintain its corporeal form\.$/
+					servant_type = $1
+				else
+					servant_type = nil
+				end
+			elsif spell.num == 9812
+				if line =~ /^With difficulty, you manage to will yourself into the space between the corporeal and ethereal realms\.$/
+					$infomon_transcendance_emergency = true
+				else
+					$infomon_transcendance_emergency = false
+				end
+			elsif spell.num == 9043
+				Spell[9042].putdown
+			elsif spell.num == 9627
+				Spell[9052].timeleft = 5
+				Spell[9052].putup
+			elsif spell.name =~ /^Meditative Resistance/
+				Spell.list.each { |s| s.putdown if s.name =~ /^Meditative/ }
+			end
+			if (spell.circle.to_i == 10) and not Spell.active.any? { |s| s.circle.to_i == 10 }
+				Spellsong.renewed
+			end
+			if spell.nil?
+				echo("Error finding matching spell-active message!")
+			elsif line =~ /^Your punishment does not end for another ([0-9]+) minutes?\.$/
+				spell.putup
+				spell.timeleft = $1.to_f
+				respond "[ #{spell.name}: +#{$1.to_f.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+			elsif spell.name =~ /^Sign of (?:Striking|Smiting|Swords)$/
+				if spell_name = [ 'Sign of Striking', 'Sign of Smiting', 'Sign of Swords' ].find { |name| (XMLData.active_spells[name] > Time.now) and not Spell[name].active? }
+					spell = Spell[spell_name]
+					spell.putup
+					respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				elsif mangled_name = $_CLIENTBUFFER_.reverse.find { |cmd| cmd =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(st|str|stri|strik|striki|strikin|striking|sm|smi|smit|smiti|smitin|smiting|sw|swo|swor|sword|swords)\s*$/i }
+					fix_sign = { 'st' => 'Striking', 'sm' => 'Smiting', 'sw' => 'Swords' }
+					mangled_name =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(st|str|stri|strik|striki|strikin|striking|sm|smi|smit|smiti|smitin|smiting|sw|swo|swor|sword|swords)\s*$/i
+					spell = Spell["Sign of #{fix_sign[$1[0..1].downcase]}"]
+					spell.putup
+					respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				end
+			elsif spell.name =~ /^Sign of (?:Warding|Defending|Shields)$/
+				if spell_name = [ 'Sign of Warding', 'Sign of Defending', 'Sign of Shields' ].find { |name| (XMLData.active_spells[name] > Time.now) and not Spell[name].active? }
+					spell = Spell[spell_name]
+					spell.putup
+					respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				elsif mangled_name = $_CLIENTBUFFER_.reverse.find { |cmd| cmd =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(wa|war|ward|wardi|wardin|warding|de|def|defe|defen|defend|defendi|defendin|defending|sh|shi|shie|shiel|shield|shields)\s*$/i }
+					fix_sign = { 'wa' => 'Warding', 'de' => 'Defending', 'sh' => 'Shields' }
+					mangled_name =~ /^(?:\[[^\]]+\])?>?(?:<c>)?(?:si|sig|sign)\s+(?:of\s+)?(wa|war|ward|wardi|wardin|warding|de|def|defe|defen|defend|defendi|defendin|defending|sh|shi|shie|shiel|shield|shields)\s*$/i
+					spell = Spell["Sign of #{fix_sign[$1[0..1].downcase]}"]
+					spell.putup
+					respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				end
+			elsif spell.num.to_i == 9516
+				# fixme
+				mana_per_minute = (1+(Skills.emc/20))*2.5
+				mana_drained = line.slice(/[0-9]+/).to_i
+				if spell.active?
+					time_before = spell.timeleft
+					mana_drained += time_before * mana_per_minute
+					timeleft = (mana_drained/mana_per_minute).ceil
+#					mana_drained += time_before.ceil * mana_per_minute
+#					timeleft = (mana_drained/mana_per_minute.to_f).ceil
+					spell.timeleft = timeleft
+					respond "[ #{spell.name}: +#{(timeleft - time_before).as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				else
+					timeleft = (mana_drained/mana_per_minute).ceil.to_f
+					spell.putup
+					spell.timeleft = timeleft
+					respond "[ #{spell.name}: +#{timeleft.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				end
+			elsif (spell.num.to_i >= 9000 and spell.num.to_i != 9011) or (spell.num.to_i == 725)
+				spell.putup
+                respond "[ #{spell.name}: +#{spell.time_per.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+                
+                # Assume Aspect cooldowns
+                if spell.num.to_i > 9013 and spell.num.to_i < 9042
+					cooldown_spell = Spell[spell.num+1]
+					cooldown_spell.putup
+					respond "[ #{cooldown_spell.name}: +#{cooldown_spell.timeleft.as_time}, #{cooldown_spell.remaining} remaining. ]" if CharSettings['show_messages']
+				end
+			else
+				if caster == 'self'
+					if self_invoke
+						options = { :caster => 'self', :activator => 'invoke' }
+					else
+						options = { :caster => 'self', :activator => activator }
+					end
+				elsif other_invoke.include?(caster)
+					options = { :caster => caster, :activator => 'invoke' }
+					other_invoke.delete(caster)
+				else
+					options = { :caster => caster, :activator => activator }
+				end
+				options[:line] = line
+				echo "spell.putup(#{options.inspect})" if $infomon_debug
+				if spell.name == 'Curse of the Star (bonus)'
+					before_xml_end_time = XMLData.active_spells[spell.name]
+					xml_end_time = nil
+					15.times {
+						sleep 0.1
+						xml_end_time = XMLData.active_spells[spell.name]
+						unless before_xml_end_time == xml_end_time
+							echo "got spell active change" if $infomon_debug
+							break
+						end
+					}
+					if xml_end_time
+						xml_timeleft = ((xml_end_time - Time.now) / 60.0) + 1.5
+						xml_minutes_left = (xml_end_time - Time.now).to_i / 60
+						timeleft = xml_minutes_left + (spell.timeleft.to_i * 60) % 60
+						difference = (xml_minutes_left - spell.timeleft).round
+						spell.putup
+						spell.timeleft = timeleft
+						respond "[ #{spell.name}: +#{difference.as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+					else
+						spell.putup(options)
+						respond "[ #{spell.name}: +#{spell.time_per(options).as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+					end
+				elsif multicast
+					echo XMLData.active_spells[spell.name].inspect if $infomon_debug
+					before_xml_end_time = (XMLData.active_spells[spell.name] || XMLData.active_spells[spell.num.to_s])
+					xml_end_time = nil
+					15.times {
+						sleep 0.1
+						xml_end_time = (XMLData.active_spells[spell.name] || XMLData.active_spells[spell.num.to_s])
+						unless before_xml_end_time == xml_end_time
+							echo "got spell active change" if $infomon_debug
+							echo XMLData.active_spells[spell.name].inspect if $infomon_debug
+							break
+						end
+					}
+					if xml_end_time
+						xml_timeleft = ((xml_end_time - Time.now) / 60.0) + 1.5
+						multicast_num = 0
+						echo "xml_timeleft: #{xml_timeleft}" if $infomon_debug
+						echo "spell.timeleft + spell.time_per(options): #{spell.timeleft} + #{spell.time_per(options)} = #{spell.timeleft + spell.time_per(options)}" if $infomon_debug
+						19.times {
+							if spell.timeleft + spell.time_per(options) < xml_timeleft
+								echo "spell.timeleft + spell.time_per(options) < xml_timeleft" if $infomon_debug
+								multicast_num += 1
+								spell.putup(options)
+							elsif xml_timeleft > spell.max_duration(options)
+								echo "xml_timeleft > spell.max_duration(options)" if $infomon_debug
+								multicast_num += 1
+								spell.putup(options)
+								break
+							end
+						}
+						respond "[ #{spell.name}: +#{(spell.time_per(options)*multicast_num).as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+					else
+						2.times { spell.putup(options) }
+						respond "[ #{spell.name}: +#{(spell.time_per(options)*2).as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+					end
+				else
+					spell.putup(options)
+					respond "[ #{spell.name}: +#{spell.time_per(options).as_time}, #{spell.remaining} remaining. ]" if CharSettings['show_messages']
+				end
+			end
+		elsif line =~ spell_dn_msgs_re
+			if spell = (Spell.active.find { |s| line =~ /^#{s.msgdn}$/ } || Spell.list.find { |s| line =~ /^#{s.msgdn}$/ })
+				if (spell.num == 218) and servant_type
+					if line =~ /(?:An?|The) #{servant_type} spirit fades into ethereal form and wafts away\.$/
+						spell.putdown
+						servant_type = nil
+					end
+				elsif spell.num == 725
+					spell.putdown
+					Spell['Illusion - Demon'].putdown
+				elsif spell.num == 9009
+					unless spell.timeleft > 50
+						spell.putdown
+					end
+				else
+					spell.putdown
+				end
+			else
+				echo 'Error finding matching spell-melted message!'
+			end
+		elsif line =~ /^As you remove your .*?, it falls out of alignment\.$/
+			for num in 9501..9509
+				spell.putdown if (spell = Spell[num]) and spell.active?
+			end
+		elsif line =~ /^You sense that you are losing control of .+ and will need to send it back soon\.$/
+			# fixme
+		elsif line =~ /^Your mind goes completely blank\.$|^You close your eyes and slowly drift off to sleep\.$|^You slump to the ground and immediately fall asleep\.  You must have been exhausted!$/
+			$infomon_sleeping = true
+		elsif line =~ /^Your thoughts slowly come back to you as you find yourself lying on the ground\.  You must have been sleeping\.$|^You wake up from your slumber\.$|^You are awoken|^You awake/
+			$infomon_sleeping = false
+		elsif line == 'An unseen force envelopes you, restricting all movement.'
+			$infomon_bound = true
+		elsif line =~ /^The restricting force that envelops you dissolves away\.|^You shake off the immobilization that was restricting your movements!/
+			$infomon_bound = false
+		elsif line =~ /^A pall of silence settles over you\.|^The pall of silence settles more heavily over you\./
+			$infomon_silenced = true
+		elsif line == 'The pall of silence leaves you.'
+			$infomon_silenced = false
+		elsif line == 'A calm washes over you.'
+			$infomon_calmed = true
+		elsif line =~ /^You are enraged by .*? attack!|^The feeling of calm leaves you\./
+			$infomon_calmed = false
+		elsif line =~ /slices deep into your vocal chords\!$|^All you manage to do is cough up some blood\.$/
+			$infomon_cutthroat = true
+		elsif line =~ /^\s*The horrible pain in your vocal chords subsides as you spit out the last of the blood clogging your throat\.$/
+			$infomon_cutthroat = false
+		elsif line == "You currently have the following active spells:"
+			while (line = get)
+				if line =~ /([A-z0-9\s\'\(\)]+) \.* (([0-9]+)\:([0-9]+)\:([0-9]+)|Indefinite)$/
+					spell_name = $1
+					if $2 == 'Indefinite'
+						spell_time = 599.0
+					else
+						spell_time = ($3.to_i * 60) + $4.to_i + ($5.to_i / 60.0)
+					end 
+					if spell_name == 'Raise Dead Recovery'
+						# fixme
+						spell_name = 'Raise Dead Cooldown'
+					end
+					if spell = Spell.list.find { |s| s.name == spell_name or s.num.to_s == spell_name }
+						spell.active = true
+						spell.timeleft = spell_time
+					else
+						echo "no spell matches #{spell_name}" if $infomon_debug
+					end
+				elsif line
+					script.downstream_buffer.unshift(line)
+					break
+				else
+					break
+				end
+			end
+		elsif line =~ /^You currently have .*? citizenship in (.*)\.$/
+			Char.citizenship = $1
+			CharSettings['citizenship'] = Char.citizenship
+		elsif line =~ /^\s*You don't seem to have citizenship\.$/
+			Char.citizenship = 'None'
+			CharSettings['citizenship'] = Char.citizenship
+		elsif line =~ /^Leaving your room, you check back out of the .*?, wander over to the front desk and hand the room key back to the innkeeper\./
+			hide_lines = done = false
+			action = proc { |server_string|
+				if hide_lines
+					if server_string =~ /^\s*Mana\:/
+						DownstreamHook.remove('infomon_info')
+						done = true
+					end
+					nil
+				elsif server_string =~ /^\s*Name\:/
+					hide_lines = true
+					nil
+				else
+					server_string
+				end
+			}
+			DownstreamHook.add('infomon_info', action)
+			# echo 'checking stats...'
+			save_silent = script.silent
+			script.silent = true
+			put 'info'
+			script.silent = save_silent
+			wait_until { done }
+	
+			hide_lines = done = false
+			action = proc { |server_string|
+				if hide_lines
+					if server_string =~ /<output class=""\/>/
+						DownstreamHook.remove('infomon_skills')
+						done = true
+					end
+					nil
+				elsif server_string =~ /^\s*(?:<.*?>)?#{Char.name}(?:<\/a>)? \(at level/o
+					hide_lines = true
+					nil
+				else
+					server_string
+				end
+			}
+			DownstreamHook.add('infomon_skills', action)
+			# echo 'checking skills...'
+			save_silent = script.silent
+			script.silent = true
+			put 'skills'
+			script.silent = save_silent
+			wait_until { done }
+		elsif line =~ /^You sign your name into the citizenship/
+			done = false
+			action = proc { |server_string|
+				if server_string =~ /You currently have .*? citizenship in|You don't seem to have citizenship\./
+					DownstreamHook.remove('infomon_citizenship')
+					done = true
+					nil
+				else
+					server_string
+				end
+			}
+			DownstreamHook.add('infomon_citizenship', action)
+			# echo 'checking citizenship...'
+			save_silent = script.silent
+			script.silent = true
+			put 'citizenship'
+			script.silent = save_silent
+			wait_until { done }
+		end
+	rescue Exception
+		echo $!
+		echo $!.backtrace.first
+		sleep 1
+	rescue ThreadError
+		echo $!
+		echo $!.backtrace.first
+		sleep 1
+	rescue
+		echo $!
+		echo $!.backtrace.first
+		sleep 1
+	end
+end
+
+=begin
+
+	fixme: track enhanced skills and stats
+
+	You sense the link between you and your .+ begin to slowly weaken\.
+	You sense that you are losing control of .+ and will need to send it back soon\.
+
+	fixme: track group members
+		You reach out and hold Name's hand.
+
+	The Grandmaster says, "You are now a member of the Guardians of Sunfist.  Welcome.  As a member you are expected to slay our enemies whenever possible.  If this is all that you wish to do, then you are welcome to do only that."
+
+=end

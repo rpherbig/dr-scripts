@@ -1,0 +1,169 @@
+exit if DRSkill.getxp('Performance') >= 30
+
+  def assess_teach
+    case DRC.bput('assess teach', 'is teaching a class', 'No one seems to be teaching', 'You are teaching a class')
+    when 'No one seems to be teaching', 'You are teaching a class'
+      waitrt?
+      return {}
+    end
+    results = reget(20, 'is teaching a class')
+    waitrt?
+
+    results.each_with_object({}) do |line, hash|
+      line.match(/(.*) is teaching a class on (.*) which is still open to new students/) do |match|
+        teacher = match[1]
+        skill = match[2]
+        # Some classes match the first format, some have additional text in the 'skill' string that needs to be filtered
+        skill.match(/.* \(compared to what you already know\) (.*)/) { |m| skill = m[1] }
+        hash[teacher] = skill
+      end
+    end
+  end
+
+
+  def check_listening
+    return if DRRoom.pcs.empty?
+    classes = assess_teach
+    @last_teacher = classes
+                    .reject { |t, s| t.nil? || s.nil? }
+                    .sort_by { |_t, s| [DRSkill.getxp(s), DRSkill.getrank(s)] }
+                    .find { |t, _s| DRC.listen?(t) }
+                    .first
+
+    @listen_timer = @last_teacher ? nil : Time.now
+  end
+
+
+check_listening
+
+#DRC.bput('release all', 'You')
+#DRC.bput('prep fae 6', 'With a|You begin')
+#pause 30
+#DRC.bput('cast', "Your spell|You release")
+
+
+custom_require.call(%w(common common-travel))
+  
+class Performance
+  
+  include DRC
+  include DRCT
+  
+  def initialize
+    no_pause_all
+    startTime = Time.new.to_i
+
+    @settings = get_settings()
+    @song_list = get_data('perform').perform_options
+    UserVars.song = @song_list.first.first unless UserVars.song
+    if play_song
+      loop do 
+        runTime = Time.new.to_i - startTime
+        return if runTime > 600
+        return if DRSkill.getxp('Performance') > 30
+        line = get
+        pause 0.05 unless line
+        case line
+        when /You begin (.*)/, /You continue (.*)/, /You find yourself relaxing (.*)/, /You concentrate on your sense of rhythm (.*)/, /You continue (.*)/
+          if DRSkill.getxp('Performance') > 30
+            fput('stop play')
+            exit
+          end
+        when /You finish (.*)/
+          if DRSkill.getxp('Performance') <= 30
+            play_song
+          else
+            exit
+          end
+        when /Perhaps you should find somewhere drier/
+          exit
+        end
+      end
+    end
+  end
+  
+  def play_song
+    @did_play = true
+    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'Your zills is submerged in the water','You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'You fumble slightly as you begin','Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
+    when 'Play on what instrument'
+      fput('get zills')
+      fput('wear zills')
+      @no_instrument = true
+      return false
+    when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play'
+      return false
+    when 'You\'re already playing a song'
+      fput('stop play')
+      return play_song
+    when 'You cannot play'
+      wait_for_script_to_complete('safe-room')
+    when 'dirtiness may affect your performance'
+      if DRSkill.getrank('Performance') < 20
+        echo "Skipping cleaning of zills due to low rank of Performance: #{DRSkill.getrank('Performance')}" if UserVars.crossing_trainer_debug
+        return true
+      end
+      stop_play
+      clean_zills
+      return play_song
+    when 'You begin a', 'You effortlessly begin', 'You begin some'
+      stop_play
+      UserVars.song = @song_list[UserVars.song] || @song_list.first.first
+      return play_song
+    when 'You struggle to begin'
+      if UserVars.song != @song_list.first.first
+        stop_play
+        UserVars.song = @song_list.first.first
+        return play_song
+	  else
+	    return true
+      end
+	  
+	when 'slightest hint of difficulty', 'You fumble slightly as you begin'
+	  return true
+    end
+
+    return
+  end
+  
+  def stop_play
+    return unless @did_play
+    return if @no_instrument
+    @did_play = false
+    bput('stop play', 'You stop playing your song', 'In the name of', "But you're not performing")
+    Flags['ct-song'] = true
+  end
+  
+  def clean_zills
+    cloth = @settings.cleaning_cloth
+    bput('remove my zills', 'You slide')
+    bput("get my #{cloth}", 'You get')
+
+    loop do
+      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
+      when 'not in need of drying'
+        break
+      when 'You should be sitting up'
+        fix_standing
+        next
+      end
+      pause 1
+      waitrt?
+
+      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
+        pause 1
+        waitrt?
+      end
+    end
+
+    until /not in need of cleaning/i =~ bput("clean my zills with my #{cloth}", 'Roundtime', 'not in need of cleaning')
+      pause 1
+      waitrt?
+    end
+
+    bput('wear my zills', 'You slide')
+    bput("stow my #{cloth}", 'You put')
+  end
+  
+end
+
+Performance.new

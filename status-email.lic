@@ -1,0 +1,337 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#status-monitor
+=end
+
+require 'mail'
+
+@sendAddress = "smtp.gmail.com"
+@sendPort = 587
+@sendDomain = "gmail.com"
+## CHANGE THIS TO YOUR USER NAME
+@sendUserName = "gemstoneruby.smtp" # this is your username excluding @gmail.com 
+@sendPassword = "Mail123!" # CHANGE
+@fromEmail = "gemstoneruby.smtp@gmail.com" # ex, gemstoneruby@gmail.com
+
+## TO EMAILS - Max of 2 emails currently
+@email1 = "4153775105@msg.fi.google.com"  # example of email to text for ATT
+@email2 = "brycole@gmail.com" # Email notification is sent here.
+
+
+options = { :address              => @sendAddress,
+            :port                 => @sendPort,
+            :domain               => @sendDomain,
+            :user_name            => @sendUserName,
+            :password             => @sendPassword,
+            :authentication       => 'plain', # this might need to change if you don't use gmail.
+            :enable_starttls_auto => true  }
+
+Mail.defaults do
+  delivery_method :smtp, options
+end
+
+def sendMail(message, type)
+  for toEmail in [@email1, @email2]
+    Mail.new(
+      to:       toEmail,
+      from:     @fromEmail,
+      subject:  type,
+      body:     message
+    ).deliver!
+  end
+end
+
+sendMail("Test!", "Starting status script.")
+
+status_tags
+
+arg_definitions = [
+  [
+    { name: 'debug', regex: /debug/i, optional: true },
+    { name: 'nowindow', regex: /nowindow/i, optional: true }
+  ]
+]
+
+args = parse_args(arg_definitions)
+
+nowindow = args.nowindow || get_settings.status_monitor_no_window
+
+class GameFilter
+  attr_accessor :seen_lines, :spam_line
+
+  def initialize(slackbot)
+    @seen_cache_name = "seen_messages_#{checkname}.dat"
+    @seen_lines = if File.exist?(@seen_cache_name)
+                    Marshal.load(File.open(@seen_cache_name, 'rb'))
+                  else
+                    {}
+                  end
+    @recent_seen_lines = {}
+    @valid_commands = %w(ACTION ADVICE AFT AGREE ANSWER APPLAUD ASK AVOID AWAKEN BABBLE BALANCE BANDAGE BARK BARTER BASK BAWL BEAM BEARD BECKON BELCH BITE BLAME BLANCH BLAZE BLINK BLOCK BLUFF BLUSH BONDED BOO BOP BOUNCE BOW BRAWL BREAK BREATHE BRUSH BUTT BUY CACKLE CARDS CARVE CENTER CHANT CHAT CHECK CHEER CHIRR CHOKE CHOOSE CHOP CHORTLE CHORUS CHUCKLE CLAIM CLAP CLEAN CLENCH CLIMB CLOSE CLUTCH COIN COLLECT COMBAT COMPARE CONCENTRATE CONTACT COUGH COUNT COVER COWER CRAWL CRINGE CRUSH CRY CURSE CURTSY CUT DANCE DANCE FLOOR DAYDREAM DEAD DESCRIBE DRAG DRINK DROOL DROP DUCK DUMP EAR EAT ELBOW EMAIL EMPTY ENCUMBRANCE ENGAGE EXAMINE EXCHANGE EXHALE EXPRESS FACE FAINT FALL FATIGUE FEED FEMALE FIDGET FIGURE FIND FIRE FIT FIX FLAGS FLAIL FLAP FLETCH FLINCH FLIRT FLUSTER FLY FOCUS FOLLOW FORAGE FRET FROWN FURROW GASP GAWK GAZE GEM GET GIGGLE GLANCE GLARE GLOWER GNASH GO GOBBLE GRIEVE GRIMACE GRIN GRIND GROAN GROVEL GROWL GRUMBLE GRUNT GUARD GULP GUZZLE HACK HAIL HAIR HANGBACK HELLO HICCUP HIDE HISS HOLD HOME HOOT HOWL HUG HUM HUZZAH IGNORE INFAMY INFO INFUSE INHALE INSTRUCT INSULT INTELLIGENCE INVENTORY INVFIX JAB JOIN JUGGLE JUMP KHRI KICK KILL KISS KNEE KNEEL KNOCK LANGUAGE LATCH LAUGH LEAD LEAN LEAP LEAVE LECTURE LICK LIE LIGHT LINK LISTEN LOAD LOAN LOCK LOOK LOWER LUNGE MAKE MALE MANA MARCH MARK MEDITATE MEETING MENU MEOW MESSAGE MIND MIX MOAN MOCK MONEY MOOR MORE MOTION MOUNT MUMBLE MUSS MUTTER NAG NAME NIBBLE NOCK NOD NOTE NUDGE OBSERVE OFFER OPEN ORDER PACE PANIC PANT PARRY PAT PATHWAY PAY PEER PERCEIVE PET PICK PIN PINCH PLANT PLAY PLAYACT POACH POINT POKE POLICY PONDER PORT PORTRAIT POSE POUND POUR POUT PRACTICE PRAISE PRAY PREACH PREDICT PREEN PREMIUM PREPARE PROCRASTINATE PROD PROTECT PUCKER PULL PUMMEL PUNCH PUNISH PURR PUSH PUT PUZZLE QUEST QUEUE QUIT RAISE RASPBERRY READ RECALL RECITE REFER REFLEX REFUSE RELEASE REMOVE REPAIR REPENT REROLL RETREAT RETURN RING ROAR ROFL ROLL ROSHAMBO ROW RPA RUB RUMMAGE SALUTE SCOFF SCOUT SCOWL SCRAPE SCRATCH SCREAM SCRIBE SEARCH SELL SHAKE SHAPE SHARE SHEATHE SHIFT SHIP SHIVER SHOOT SHOVE SHOW SHRIEK SHRUG SHUDDER SHUFFLE SHUN SIGH SIGN SIGNAL SIGNATURE SING SIT SKATE SKILLS SKIN SLAP SLEEP SLICE SLINK SLIP SMELL SMILE SMIRK SMOOCH SNAP SNARL SNEAK SNEER SNEEZE SNICKER SNIFFLE SNORE SNORT SNUFF SNUGGLE SOB SONG SORT SPECULATE SPELLS SPIT SPLASH SPLUTTER SPRINKLE SQUINT SQUIRM STABLE STALK STAMINA STANCE STAND STARBOARD STARE STATUS STEAL STIR STITCH STOMP STOP STOW STRENGTH STRETCH STRING STUBBLE STUDY SULK SUMMON SURPRISE SURRENDER SURVEY SWAP SWEAR SWEAT SWEEP SWIM SWIMMING SWING TACKLE TAG TAIL TAKE TALK TAP TARGET TEACH TEASE TELL TEND THINK THROW THRUST THUMP TICKLE TIE TILT TIME TIP TITLE TOSS TOUCH TRACE TRACK TRAIN TRANSFER TRILL TUNE TURN TYPO UNBRAID UNBUNDLE UNCOIL UNHIDE UNLATCH UNLOAD UNLOCK UNTIE UNWRAP VAULT VOTE WAIL WAIT WAKE WARN WATCH WAVE WEALTH WEAR WEAVE WEDDING WEEP WHEEZE WHIMPER WHINE WHIRLWIND WHISTLE WHO WIELD WINCE WINK WIPE WITHDRAW WOBBLE WRING WRITE YANK YAWN YELP)
+    @room_players = []
+    @filter_strings = get_data('filters')['filter_strings'].map { |string| /#{string}/ }
+    @non_useful_tags = [
+      /<preset id='roomDesc'>/i,
+      /pushStream id="atmospherics"/i,
+      /pushStream id="thoughts"/i,
+      /pushStream id="talk"/i,
+      /pushStream id="death"/i,
+      /pushStream id="group"/i,
+      /pushStream id="percWindow"/i,
+      /component id='room/i,
+      /component id='exp/i,
+      %r{</prompt>$},
+      /preset id='roomDesc'/,
+      /style id="roomName"/,
+      /<spell exist='spell'>/,
+      %r{<spell>None</spell>},
+      /&lt; .*/,
+      /<clearContainer/,
+      /<right/,
+      /<left/,
+      /<indicator id='IconINVISIBLE'/,
+      %r{<roundTime value='\d+'/>}
+    ]
+    @responses = ["'Hmmm?", "'Yes", "'Ok?"].shuffle
+    @recent_seen = []
+    @quit_on_flag = get_settings.quit_on_status_warning
+    @slackbot = slackbot
+  end
+
+  def clean_seen_with_filters
+    @seen_lines.reject! { |line, _| @filter_strings.find { |regex| line =~ regex } }
+  end
+
+  def save
+    base = {}
+    if File.exist?(@seen_cache_name)
+      base = Marshal.load(File.open(@seen_cache_name, 'rb'))
+    end
+    @seen_lines.merge!(base)
+    clean_seen_with_filters
+    File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(@seen_lines, file) }
+  end
+
+  def migrate_recent
+    save_required = false
+    @recent_seen_lines.select { |_, timestamp| Time.now - timestamp > 60 }.each do |line, _|
+      save_required = true
+      @seen_lines[line] = true
+      @recent_seen_lines.delete(line)
+    end
+    save if save_required
+  end
+
+  def unseen?(line)
+    return nil if line.nil? || line.empty?
+    return nil if @filter_strings.find { |regex| line =~ regex }
+    return nil if @seen_lines[line]
+    spam_check(line)
+    return nil if @recent_seen_lines[line]
+    @recent_seen_lines[line] = Time.now
+  end
+
+  def find_pcs(room_players)
+    room_players.sub(/ and (.*)$/) { ", #{Regexp.last_match(1)}" }
+                .split(', ')
+                .map { |obj| obj.sub(/ who (has|is) .+/, '').sub(/ \(.+\)/, '') }
+                .map { |obj| obj.strip.scan(/\w+$/).first }
+  end
+
+  attr_reader :last_player_line
+
+  def update_players(line)
+    return unless line =~ %r{\'room players\'>Also here: (.*)\.</component>}
+
+    @last_player_line = line
+    @room_players += find_pcs(Regexp.last_match(1).dup)
+    @room_players.uniq!
+  end
+
+  def spam_check(line)
+    @recent_seen << line
+    @recent_seen = @recent_seen[1..10] if @recent_seen.length > 10
+    counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
+    return if counts.values.max < 5
+
+    echo("\a")
+    pause 0.25
+    echo("\a")
+    pause 0.25
+    echo("\a")
+    pause 0.25
+    command_check(line)
+    fput @responses.first
+    echo(counts.inspect)
+    @slackbot.direct_message(counts.inspect) if defined?(@slackbot)
+    fput('exit') if @quit_on_flag
+    @responses.rotate!
+    @spam_line = line
+    pause 2
+    @recent_seen = []
+  end
+
+  def command_check(line)
+    line.scan(/[A-Z]{3,}/)
+        .select { |item| @valid_commands.include?(item) }
+        .each do |prompt|
+          pause 3
+          fput(prompt)
+          pause 5
+        end
+  end
+
+  def clean(line)
+    update_players(line)
+    migrate_recent
+    return nil if line.nil? || line.empty? || @non_useful_tags.find { |bad_tag| bad_tag =~ line }
+    return nil if @room_players.find { |name| line.include?(name) } || UserVars.npcs.find { |name| line.include?(name) }
+    return nil if UserVars.players_online && UserVars.players_online.find { |name| line.include?(name) }
+    line.gsub!(/<[^>]+>/, '')
+    line
+  end
+end
+
+if get_settings['slack_username']
+  custom_require.call('slackbot')
+  slackbot = SlackBot.new
+end
+
+def update_health_bar(entry)
+  hp = health
+  if hp >= 75
+    entry.modify_base(Gtk::STATE_NORMAL, Gdk::Color.parse('green'))
+  else
+    entry.modify_base(Gtk::STATE_NORMAL, Gdk::Color.parse('red'))
+  end
+  entry.text = "#{hp}%"
+end
+
+filter = GameFilter.new(slackbot)
+
+if nowindow
+  loop do
+    line = script.gets
+    back = line.dup if args.debug
+    if filter.unseen?(filter.clean(line))
+      if args.debug
+        open("status-monitor-debug-#{checkname}.txt", 'a') do |f|
+          f.puts(back)
+          f.puts(line)
+          f.puts(filter.last_player_line)
+        end
+      end
+    end
+    if filter.spam_line
+      filter.spam_line.dup
+      filter.spam_line = nil
+    end
+  end
+end
+
+unless HAVE_GTK
+  respond
+  respond 'error: ruby-gtk bindings are not installed or failed to load'
+  respond
+  exit
+end
+
+window = nil
+window_done = false
+load_window_position = CharSettings['window_position'] || []
+load_window_width    = CharSettings['window_width'] || 300
+load_window_height   = CharSettings['window_height'] || 100
+window_title = "#{checkname} Status"
+save_window_position = nil
+save_window_width    = nil
+save_window_height   = nil
+healthbar_et = nil
+messages_tv = nil
+
+before_dying do
+  CharSettings['window_position'] = save_window_position if (save_window_position.class == Array) && (save_window_position[0].to_i >= 0) && (save_window_position[1].to_i >= 0)
+  CharSettings['window_width']    = save_window_width    if (save_window_width.class == Integer) && (save_window_width > 100)
+  CharSettings['window_height']   = save_window_height   if (save_window_height.class == Integer) && (save_window_height > 100)
+  Gtk.queue { window.destroy }
+  filter.save
+end
+
+begin
+  Gtk.queue do
+    messages_tv = Gtk::TextView.new
+    messages_tv.editable = false
+    messages_tv.cursor_visible = false
+
+    messages_sw = Gtk::ScrolledWindow.new
+    messages_sw.add(messages_tv)
+    messages_sw.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC)
+
+    healthbar_et = Gtk::Entry.new
+    healthbar_et.editable = false
+    healthbar_et.xalign = 0.5
+    health_font = Pango::FontDescription.new
+    health_font.weight = Pango::FontDescription::WEIGHT_BOLD
+    healthbar_et.modify_font(health_font)
+
+    vbox = Gtk::VBox.new
+    vbox.pack_start(messages_sw)
+    vbox.pack_start(healthbar_et, false)
+
+    window              = Gtk::Window.new
+    window.title        = window_title
+    window.keep_above = true
+    window.border_width = 1
+    window.resize(load_window_width, load_window_height)
+    unless load_window_position.empty?
+      window.move(load_window_position[0], load_window_position[1])
+    end
+    window.add(vbox)
+
+    window.signal_connect('delete_event') do
+      save_window_position = window.position
+      save_window_width    = window.allocation.width
+      save_window_height   = window.allocation.height
+      window_done = true
+    end
+    window.show_all
+  end
+  prev_health = 0
+
+  loop do
+    line = script.gets?
+    back = line.dup if args.debug
+    if prev_health != health
+      prev_health = health
+      Gtk.queue { update_health_bar(healthbar_et) }
+    end
+    if filter.unseen?(filter.clean(line))
+      if args.debug
+        open("status-monitor-debug-#{checkname}.txt", 'a') do |f|
+          f.puts(back)
+          f.puts(line)
+          f.puts(filter.last_player_line)
+        end
+      end
+      # Gtk.queue do
+      #   text_buffer = messages_tv.buffer
+      #   text_buffer.insert(text_buffer.end_iter, line)
+      #   text_buffer.insert(text_buffer.end_iter, "\r\n")
+      #   messages_tv.scroll_to_iter(text_buffer.end_iter, 0.0, true, 0, 0)
+      # end
+    else
+      pause 0.1 unless back
+    end
+    if filter.spam_line
+      spam = filter.spam_line.dup
+      filter.spam_line = nil
+      Gtk.queue do
+        text_buffer = messages_tv.buffer
+        text_buffer.insert(text_buffer.end_iter, "spam:'#{spam}'")
+        text_buffer.insert(text_buffer.end_iter, "\r\n")
+        messages_tv.scroll_to_iter(text_buffer.end_iter, 0.0, true, 0, 0)
+      end
+      sendMail(spam, "Status Monitor Alert!")
+      #slackbot.direct_message(spam) if defined?(slackbot)
+    end
+    break if window_done
+  end
+end

@@ -7,6 +7,9 @@ require 'net/http'
 require 'base64'
 require 'yaml'
 require 'ostruct'
+require 'digest/sha1'
+
+$DEPENDENCY_VERSION = '1.1'
 
 gem_name, *gem_ver_reqs = 'rest-firebase', '~> 1.1.0'
 gdep = Gem::Dependency.new(gem_name, *gem_ver_reqs)
@@ -34,6 +37,7 @@ require 'rest-firebase'
 
 toggle_unique
 no_pause_all
+no_kill_all
 
 class Object
   # IMPORT FUTURE LAWLZ
@@ -200,6 +204,8 @@ class ScriptManager
     @shop_update_queue = []
 
     @enable_fork = LICH_VERSION =~ /f/
+
+    @versions = nil
   end
 
   def updated_dependency?
@@ -223,23 +229,20 @@ class ScriptManager
   end
 
   def get_versions
-    if File.exist?('script_versions.dat')
-      Marshal.load(File.open('script_versions.dat', 'rb'))
+    if @versions
+      @versions
     else
-      {}
+      @versions = build_version_hash
     end
   end
 
-  def set_version(filename, sha)
-    data = get_versions
-    data[filename] = sha
-    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
-  end
-
-  def remove_script(filename)
-    data = get_versions
-    data.delete(filename)
-    File.open('script_versions.dat', 'wb') { |file| Marshal.dump(data, file) }
+  def build_version_hash
+    Dir['./scripts/*.lic'].each_with_object({}) do |path, versions|
+      file = File.basename(path)
+      body = File.open("./scripts/#{file}", 'r').readlines.join('')
+      sha = Digest::SHA1.hexdigest('blob' + " #{body.size}" + "\0" + body)
+      versions[file] = sha
+    end
   end
 
   def autos_proccessed?
@@ -303,12 +306,6 @@ class ScriptManager
     end
   end
 
-  def load_script(filename, force = false)
-    return if filename.nil? || filename.empty?
-    get_script(filename, force)
-    run_script(filename)
-  end
-
   def get_script(filename, force = false)
     filename = filename.dup
     echo("checking:#{filename} force:#{force}") if @debug
@@ -320,8 +317,9 @@ class ScriptManager
   end
 
   def start_scripts(force = false)
+    @versions = nil
     repo_scripts.each { |name, _| get_script(name, force) }
-    autostarts.each { |name| run_script(name) }
+    custom_require.call(autostarts)
   end
 
   def queue_lich
@@ -353,22 +351,12 @@ class ScriptManager
     echo("downloading:#{filename}") if @debug
     info = get_file_status(filename)
     return unless info
-    if @developer
-      set_version(filename, info['sha'])
-      return
-    end
+    return if @developer
     return if get_versions[filename] == info['sha'] && !force
-
-    if File.exist?("./scripts/#{filename}") && !get_versions[filename]
-      new_name = "#{filename}#{Time.now.to_i}.bak"
-      echo "Renaming existing script #{filename} to #{new_name}"
-      File.rename("./scripts/#{filename}", "./scripts/#{new_name}")
-    end
 
     echo("info:#{info}") if @debug
     blob = make_request(info['url'])
     File.open("./scripts/#{filename}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
-    set_version(filename, blob['sha'])
 
     @self_updated = true if filename == 'dependency.lic'
   end
@@ -583,6 +571,8 @@ class ScriptManager
     message_body += "\n"
     message_body += "Ruby Version: #{RUBY_VERSION}"
     message_body += "\n"
+    message_body += "Dependency Version: #{$DEPENDENCY_VERSION}"
+    message_body += "\n"
 
     Dir['./scripts/profiles/*.yaml'].map { |item| File.path(item) }.select { |path| path.include?("#{checkname}-") }.each do |path|
       message_body += "\n****\n" * 3
@@ -592,6 +582,117 @@ class ScriptManager
     end
 
     submit_pastebin(message_body)
+  end
+end
+
+class BankbotManager
+  def initialize(debug)
+    @debug = debug
+    @save = false
+    @load = false
+    @transaction = ''
+    @ledger = {}
+  end
+
+  attr_reader :ledger
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    save_transaction
+    load_ledger
+  end
+
+  def save_bankbot_transaction(transaction, ledger)
+    @transaction = transaction
+    @ledger = ledger.to_yaml
+    @save = true
+  end
+
+  def load_bankbot_ledger
+    @load = true
+  end
+
+  private
+
+  def save_transaction
+    return unless @save
+    File.open("./#{checkname}-transactions.log", 'a') do |file|
+      file.puts('----------')
+      file.puts(Time.now)
+      file.puts(@transaction)
+      file.puts(@ledger)
+      file.puts('----------')
+    end
+    File.open("./#{checkname}-ledger.yaml", 'wb') { |file| file.puts(@ledger) }
+    @save = false
+  end
+
+  def load_ledger
+    return unless @load
+    @ledger = safe_load_yaml("./#{checkname}-ledger.yaml")
+    @load = false
+  end
+
+  def safe_load_yaml(path)
+    OpenStruct.new(YAML.load_file(path)).to_h
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return {}
+  end
+end
+
+class ReportbotManager
+  def initialize(debug)
+    @debug = debug
+    @save = false
+    @load = false
+    @whitelist = []
+  end
+
+  attr_reader :whitelist
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    save_whitelist
+    load_whitelist
+  end
+
+  def save_reportbot_whitelist(whitelist)
+    @whitelist = whitelist.to_yaml
+    @save = true
+  end
+
+  def load_reportbot_whitelist
+    @load = true
+  end
+
+  private
+
+  def save_whitelist
+    return unless @save
+    File.open('./reportbot-whitelist.yaml', 'wb') { |file| file.puts(@whitelist) }
+    @save = false
+  end
+
+  def load_whitelist
+    return unless @load
+    @whitelist = safe_load_yaml('./reportbot-whitelist.yaml')
+    @load = false
+  end
+
+  def safe_load_yaml(path)
+    YAML.load_file(path)
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return []
   end
 end
 
@@ -630,7 +731,6 @@ class SetupFiles
 
   def run_queue
     load_base_settings if @load
-    load_data_settings if @load
     load_settings if @load && !@data_load
     load_data if @load && @data_load
     save_settings if @save
@@ -721,7 +821,40 @@ class SetupFiles
     boxes = @base_files['base-items.yaml'][:box_nouns]
     gems = @base_files['base-items.yaml'][:gem_nouns]
     scrolls = @base_files['base-items.yaml'][:scroll_nouns]
+    spells = @base_files['base-spells.yaml'][:spell_data]
+
     s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
+
+    s.offensive_spells.map! { |spell| spells[spell['name']] ? spells[spell['name']].merge(spell) : spell }
+
+    s.offensive_spells
+     .each_with_index
+     .select { |spell, _i| spell['skill'].casecmp('targeted magic').zero? || (spells[spell['name']]['skill'].casecmp('targeted magic').zero? && spell['skill'].casecmp('sorcery').zero?) }
+     .reject { |spell, _i| spell['prep'] }
+     .each { |_data, i| s.offensive_spells[i]['prep'] = 'target' }
+
+    s.buff_spells
+     .select { |spell| spells[spell] }
+     .each do |name, _data|
+      s.buff_spells[name] = spells[name].merge(s.buff_spells[name])
+    end
+
+    s.lockpick_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+            .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+    end
+
+    s.astrology_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+            .each { |_name, data| s.astrology_buffs['spells'][i] = data.merge(spell) }
+    end
+
+    s.waggle_sets
+     .select { |set_name, set_spells| set_spells.select { |spell_name, spell_data| spells[spell_name].each { s.waggle_sets[set_name][spell_name] = spells[spell_name].merge(spell_data) } } }
 
     s
   end
@@ -808,6 +941,8 @@ end
 
 $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
+$bankbot = BankbotManager.new(debug)
+$reportbot = ReportbotManager.new(debug)
 
 def enable_moon_connection
   $turn_on_moon_watch = true
@@ -829,6 +964,26 @@ def save_character_profile(new_file_contents)
   $setupfiles.save_character_settings(new_file_contents)
 end
 
+def save_bankbot_transaction(transaction, ledger)
+  $bankbot.save_bankbot_transaction(transaction, ledger)
+end
+
+def load_bankbot_ledger
+  $bankbot.load_bankbot_ledger
+  pause 0.1 until $bankbot.loaded?
+  $bankbot.ledger
+end
+
+def save_reportbot_whitelist(whitelist)
+  $reportbot.save_reportbot_whitelist(whitelist)
+end
+
+def load_reportbot_whitelist
+  $reportbot.load_reportbot_whitelist
+  pause 0.1 until $reportbot.loaded?
+  $reportbot.whitelist
+end
+
 def format_name(name)
   name =~ /\.lic$/ ? name : "#{name}.lic"
 end
@@ -841,13 +996,13 @@ def custom_require
   lambda do |script_names|
     script_names = [script_names] unless script_names.is_a?(Array)
     before = Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
-    echo("#{before}:#{script_names}") if UserVars.bootstrap_debug
+    respond("CR:#{before}:#{script_names}") if UserVars.bootstrap_debug
     force_start_script('bootstrap', script_names)
     until before >= Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
       pause 0.05
-      echo("waiting #{before}:#{script_names}") if UserVars.bootstrap_debug
+      respond("CR:waiting #{before}:#{script_names}") if UserVars.bootstrap_debug
     end
-    echo("done #{before}:#{script_names}") if UserVars.bootstrap_debug
+    respond("CR:done #{before}:#{script_names}") if UserVars.bootstrap_debug
   end
 end
 
@@ -858,7 +1013,7 @@ def verify_script(script_names)
     .reject { |name| Script.exists?(name) }
     .each do |name|
       echo "*** Failed to find #{name} ***"
-      echo '*** Please report this to Etreu, Torgro, or https://github.com/rpherbig/dr-scripts/issues  ***'
+      echo '*** Please report this to Etreu, Sheltim, or https://github.com/rpherbig/dr-scripts/issues  ***'
       state = false
     end
   state
@@ -870,10 +1025,6 @@ end
 
 def force_refresh_scripts
   $manager.start_scripts
-end
-
-def stop_updating_script(filename)
-  $manager.remove_script(format_name(filename))
 end
 
 def list_tracked_scripts
@@ -894,15 +1045,8 @@ def full_install
   respond 'Finished install!'
 end
 
-def migrate_scripts
-  remove_from_autostart(managed_scripts)
-  add_self_to_autostart
-  managed_scripts.each(&method(:get_script))
-end
-
 def replace_all
   managed_scripts
-    .select { |script| File.exist?("./scripts/#{script}") }
     .each do |script|
       new_name = "#{script}#{Time.now.to_i}.bak"
       respond "Renaming existing script #{script} to #{new_name}"
@@ -1047,6 +1191,8 @@ loop do
 
   $manager.run_queue
   $setupfiles.run_queue
+  $bankbot.run_queue
+  $reportbot.run_queue
   $moon_watch.run_queue if $moon_watch
   pause 0.1
 end

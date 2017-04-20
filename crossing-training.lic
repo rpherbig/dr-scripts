@@ -31,6 +31,7 @@ class CrossingTraining
     @settings = get_settings(args.flex)
     @training_room = (@settings.training_rooms || [@settings.safe_room]).sample
     @athletics_options = get_data('athletics').athletics_options
+    @climbing_target = get_data('athletics').practice_options[@settings.climbing_target]
     @song_list = get_data('perform').perform_options
 
     @use_research = @settings.use_research
@@ -45,20 +46,14 @@ class CrossingTraining
       'Remedies' => 'Alchemy'
     }
     @skills_requiring_movement = @settings.crossing_training_requires_movement
-    @bad_classes = %w(Thievery Sorcery)
-    @bad_classes += ['Arcana'] if DRStats.barbarian?
-    @bad_classes += ['Arcana', 'Inner Magic', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Utility', 'Augmentation', 'Debilitation', 'Warding'] if DRStats.trader?
-    @bad_classes += ['Arcana', 'Targeted Magic', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Attunement', 'Warding'] if DRStats.thief?
 
-    EquipmentManager.instance.refresh(@settings)
+    @equipment_manager = EquipmentManager.new(@settings)
 
     UserVars.crossing_timers ||= {}
 
     release_cyclics
 
-    Flags.add('ct-spellcast', '^You feel fully prepared to cast your spell\.')
     Flags.add('ct-song', 'you finish playing')
-    Flags.add('ct-spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires')
     Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were')
     Flags.add('research-complete', '^Breakthrough!')
   end
@@ -85,18 +80,18 @@ class CrossingTraining
   def empty_trash
     trash_nouns = get_data('items').trash_nouns
 
-    if trash_nouns.any? { |noun| /\b#{noun}/i =~ GameObj.right_hand.noun } && !EquipmentManager.instance.is_listed_item?(right_hand)
+    if trash_nouns.any? { |noun| /\b#{noun}/i =~ GameObj.right_hand.noun } && !@equipment_manager.is_listed_item?(right_hand)
       dispose_trash(right_hand)
     end
 
-    if trash_nouns.any? { |noun| /\b#{noun}/i =~ GameObj.left_hand.noun } && !EquipmentManager.instance.is_listed_item?(left_hand)
+    if trash_nouns.any? { |noun| /\b#{noun}/i =~ GameObj.left_hand.noun } && !@equipment_manager.is_listed_item?(left_hand)
       dispose_trash(left_hand)
     end
   end
 
   def event_loop
     empty_trash
-    EquipmentManager.instance.empty_hands
+    @equipment_manager.empty_hands
 
     # The next skill to train is the one with the lowest field experience
     skill = @settings.crossing_training
@@ -225,9 +220,11 @@ class CrossingTraining
     return if (delta < 4 * 60 * 60 && DRStats.paladin?) || (delta < 60 * 10 && DRStats.cleric?)
     return unless withdraw_exact_amount?('5 silver', @settings.hometown)
 
+    wait_for_script_to_complete('pay-debt')
+
     UserVars.tithe_timer = Time.now
     walk_to(741)
-    bput('put 5 silver kronar in almsbox', 'You drop', 'But you do not')
+    bput('put 5 silver kronar in almsbox', 'You drop', 'But you do not', 'attend to thy own woes')
   end
 
   def train_sorcery
@@ -243,22 +240,24 @@ class CrossingTraining
   end
 
   def check_teaching
+    return unless @settings.classes_to_teach
     return if @settings.classes_to_teach.empty?
     return if @last_teacher
 
     if @class_timer.nil? || Time.now - @class_timer > 10 * 60
       @settings.classes_to_teach.rotate!
       bput('stop teach', 'You stop', 'you aren\'t teaching')
+      pause
       @class_timer = Time.now
     end
 
     to_teach = @settings.classes_to_teach.first
-    DRRoom.pcs.each { |character| bput("teach #{to_teach} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching') }
+    DRRoom.pcs.each { |character| bput("teach #{to_teach} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching', 'You are already teaching', 'You cannot teach two different classes at the same time', 'is not paying attention to you') }
   end
 
   def check_listening
     return unless @settings.listen
-    return if listen?(@last_teacher, @bad_classes)
+    return if listen?(@last_teacher)
     return if DRRoom.pcs.empty?
     return unless @listen_timer.nil? || Time.now - @listen_timer > 5 * 60
     return unless @class_timer.nil?
@@ -266,9 +265,8 @@ class CrossingTraining
     classes = assess_teach
     @last_teacher = classes
                     .reject { |t, s| t.nil? || s.nil? }
-                    .reject { |_t, s| @bad_classes.include? s }
                     .sort_by { |_t, s| [DRSkill.getxp(s), DRSkill.getrank(s)] }
-                    .find { |t, _s| listen?(t, @bad_classes) }
+                    .find { |t, _s| listen?(t) }
                     .first
 
     @listen_timer = @last_teacher ? nil : Time.now
@@ -334,8 +332,10 @@ class CrossingTraining
     return true unless @use_research
     return (['Summoning', 'Attunement', 'Athletics', 'Outdoorsmanship', 'Perception', 'Appraisal', 'Empathy', 'Mechanical Lore', 'Theurgy'] - @settings.research_skills).include?(skill) if @researching
     research = @settings.research_skills.include?(skill)
-    return research && DRSkill.getxp(skill) < 18 if ['Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Arcana'].include?(skill)
-    return research && DRSkill.getxp(skill) < 9 if %w(Warding Utility Augmentation Attunement).include?(skill)
+    return true unless research
+    return DRSkill.getxp(skill) < 18 if ['Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic', 'Arcana'].include?(skill)
+    return DRSkill.getxp(skill) < 9 if %w(Warding Utility Augmentation Attunement).include?(skill)
+    echo("You have #{skill} listed as a research skill, which is not a valid research option")
     true
   end
 
@@ -476,7 +476,6 @@ class CrossingTraining
   end
 
   def cast_spell(data, skill)
-    Flags.reset('ct-spellcast')
     check_discern(data)
     if data['abbrev'] =~ /^comp/i
       walk_to @settings.compost_room
@@ -487,7 +486,7 @@ class CrossingTraining
     if (data['abbrev'] =~ /locat/i) && !DRSpells.active_spells['Clear Vision']
       fput('prep cv')
       pause 5
-      cast
+      cast?
     end
 
     if data['moon']
@@ -521,20 +520,17 @@ class CrossingTraining
 
     find_charge_invoke_stow(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap, @settings.dedicated_camb_use, data['cambrinth'])
 
-    pause 0.5 until Flags['ct-spellcast']
+    waitcastrt?
 
     snapshot = DRSkill.getxp(skill) if data['symbiosis']
 
-    Flags.reset('ct-spell-fail')
-
-    cast(data['cast'], data['before'], data['after']) while DRSpells.prep_spell
+    success = cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
 
     return unless data['symbiosis']
 
     start = Time.now
-    pause 0.5 until snapshot != DRSkill.getxp(skill) || Time.now - start > 10 || Flags['ct-spell-fail']
-    if Flags['ct-spell-fail']
-      fput('rel symb')
+    pause 0.5 until snapshot != DRSkill.getxp(skill) || Time.now - start > 10 || !success
+    if !success
       UserVars.discerns[data['abbrev']]['more'] = [UserVars.discerns[data['abbrev']]['more'] - 1, 0].max
     elsif DRSkill.getxp(skill) - snapshot < @settings.symbiosis_learning_threshold
       UserVars.discerns[data['abbrev']]['more'] = UserVars.discerns[data['abbrev']]['more'] + 1
@@ -559,6 +555,7 @@ class CrossingTraining
         empty_trash
         return
       when 'You are in no condition'
+        dispose_trash(item)
         wait_for_script_to_complete('safe-room')
         return
       else
@@ -581,12 +578,12 @@ class CrossingTraining
   end
 
   def train_outdoorsmanship
-    if DRSkill.getrank('Outdoorsmanship') < 30
+    if DRSkill.getrank('Outdoorsmanship') < 20
       forage?('rock')
       dispose_trash 'rock'
     else
       item = @settings.forage_item || 'rock'
-      bput("collect #{item}", 'You manage to collect', 'The room is too cluttered to find anything here')
+      collect(item)
       waitrt?
       kick_pile? unless kick_pile?("#{item}s")
     end
@@ -595,16 +592,16 @@ class CrossingTraining
   def train_first_aid
     play_song?
 
-    start_time = Time.now
     wait_for_script_to_complete('first-aid')
-
-    return if Time.now - start_time > 15
-    echo '***UNABLE TO TRAIN FIRST AID, REMOVING IT FROM THE TRAINING LIST***'
-    @settings.crossing_training.delete('First Aid')
   end
 
   def train_scholarship
     play_song?
+
+    if @settings.hometown == 'Crossing' && !DRStats.necromancer?
+      wait_for_script_to_complete('study-art', ['scholarship'])
+      return
+    end
 
     case bput('get my black book', 'What were you', 'You get')
     when 'What were you'
@@ -623,16 +620,19 @@ class CrossingTraining
   end
 
   def train_mechanical_lore
-    EquipmentManager.instance.empty_hands
+    waitrt?
+    @equipment_manager.wear_equipment_set?('standard')
+    @equipment_manager.empty_hands
     fput "remove #{@settings.hand_armor}"
     fput "stow #{@settings.hand_armor}"
     pause 1
+    release_invisibility
     if @settings.braid_item
       braid_to_fail(@settings.braid_item)
     else
       braid_to_fail(DRSkill.getrank('Outdoorsmanship') < 110 ? 'grass' : 'vine')
     end
-    EquipmentManager.instance.empty_hands
+    @equipment_manager.empty_hands
     fput "get my #{@settings.hand_armor}"
     fput "wear my #{@settings.hand_armor}"
   end
@@ -651,13 +651,17 @@ class CrossingTraining
   end
 
   def train_athletics
-    if DRSkill.getrank('Athletics') >= 400
+    if @climbing_target
+      return if @researching
+      walk_to(@climbing_target['id'])
+      climb_practice(@climbing_target['target'], @climbing_target['hide'])
+    elsif DRSkill.getrank('Athletics') >= 400
       return if @researching
       climb_branch
     else
       play_song?
       @athletics_options
-        .reject { |data| DRStats.necromancer? && data['justice'] }
+        .reject { |data| @settings.avoid_athletics_in_justice && data['justice'] }
         .each do |data|
           check_research
           break unless climb?(data['room'], data['targets'])
@@ -665,39 +669,54 @@ class CrossingTraining
     end
   end
 
-  def practice_branch
+  def climb_practice(target, to_hide = false)
+    return unless target
+
     while DRSkill.getxp('Athletics') < 29
       check_osrel unless @researching
       check_research
-      loop do
-        break if hide?
+      retreat
+      if to_hide
+        attempts_to_hide = 5
+        while attempts_to_hide > 0
+          break if hide?
+          attempts_to_hide -= 1
+        end
+        return if attempts_to_hide.zero?
       end
-      bput('climb practice branch', 'You begin to practice ')
-      Flags.add('ct-climbing', 'You finish practicing')
+      Flags.add('ct-climbing-finished', 'You finish practicing')
+      Flags.add('ct-climbing-combat', 'You are engaged in combat')
+      bput("climb practice #{target}", 'You begin to practice ')
       loop do
         pause 1
-        break if Flags['ct-climbing']
+        break if Flags['ct-climbing-finished']
+        return if Flags['ct-climbing-combat']
         if DRSkill.getxp('Athletics') > 28
           fput('stop climb')
           break
         end
       end
     end
+
+    bput('unhide', 'You come out of hiding', 'You slip out of hiding', 'But you are not')
   end
 
   def climb_branch
     start_script('skill-recorder') unless Script.running?('skill-recorder')
-    walk_to(19_074)
+    walk_to(2245)
     check_research
     if DRSkill.getxp('Athletics') < 29
       walk_to(2245)
-      if UserVars.athletics < 540
-        practice_branch
+      if UserVars.athletics < 550
+        climb_practice('branch', true)
       else
         play_song?
+        walk_to(9607)
         walk_to(19_464)
         while DRSkill.getxp('Athletics') < 29
           walk_to(2245)
+          walk_to(9607)
+          walk_to(11_126)
           walk_to(19_464)
           check_osrel unless @researching
           check_research
@@ -711,7 +730,6 @@ class CrossingTraining
     end
     check_osrel unless @researching
     check_research
-    walk_to(1894)
   end
 
   def train_empathy

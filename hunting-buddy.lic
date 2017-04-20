@@ -34,6 +34,8 @@ class HuntingBuddy
   def main
     check_bundling_rope
 
+    check_prehunt_buffs
+
     @hunting_info.each do |info|
       if @stop_hunting
         echo('***STATUS*** stopping all hunting due to manual intervention')
@@ -47,20 +49,40 @@ class HuntingBuddy
       end
 
       args = info['args']
+      before_actions = info['before']
+      after_actions = info['after']
       duration = info[:duration]
       stop_on_skills = info['stop_on']
 
-      next if all_skills_at_cap?(stop_on_skills)
+      # Execute scripts to run before the hunt
+      execute_actions(before_actions)
+
+      if all_skills_at_cap?(stop_on_skills)
+        # Execute scripts to run after the hunt
+        execute_actions(after_actions)
+        next
+      end
       next unless find_hunting_room?(info[:zone])
 
       args.each_with_index { |arg, index| hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil) }
 
       wait_for_script_to_complete('bescort', @exit) if @exit
       release_cyclics
-      fput('release EOTB') if DRSpells.active_spells.keys.include?('Eyes of the Blind')
+
+      # Execute scripts to run after the hunt
+      execute_actions(after_actions)
     end
     walk_to(@settings.safe_room)
-    EquipmentManager.instance.wear_equipment_set?('standard')
+    EquipmentManager.new.wear_equipment_set?('standard')
+  end
+
+  def execute_actions(actions)
+    actions.each do |action|
+      echo "***STATUS*** EXECUTE #{action}"
+      action_parts = action.split(' ')
+      script_name = action_parts.shift
+      wait_for_script_to_complete(script_name, action_parts)
+    end
   end
 
   def check_bundling_rope
@@ -77,6 +99,12 @@ class HuntingBuddy
     bput("stow my #{description}", 'You put')
   end
 
+  def check_prehunt_buffs
+    walk_to(@settings.prehunt_buffs)
+
+    wait_for_script_to_complete('buff', ['prehunt_buffs'])
+  end
+
   def find_hunting_room?(zone_name)
     UserVars.friends = @settings.hunting_buddies || []
     if rooms = @hunting_zones[zone_name]
@@ -89,7 +117,9 @@ class HuntingBuddy
                         UserVars.friends.each { |friend| Flags.add("room-check-#{friend}", friend) }
                         Flags.add('room-check', 'says, ', 'say, ', 'You hear')
                         fput("say #{@settings.empty_hunting_room_messages.sample}")
-                        unless 'You don\'t find anything of interest here' == bput('search', 'You don\'t find anything of interest here', 'vague silhouette', 'attempting to remain hidden', 'see signs that')
+                        bput('search', 'roundtime')
+                        data = reget(40).reverse.take_while { |x| x !~ /You search around/ }
+                        if data.grep(/vague silhouette|You notice \w+, who is|see signs that/).any?
                           pause
                           waitrt?
                           return UserVars.friends.find { |friend| Flags["room-check-#{friend}"] }
@@ -120,6 +150,7 @@ class HuntingBuddy
   end
 
   def hunt(args, duration, stop_on_skills)
+    echo("***STATUS*** beginning hunt '#{args}' for '#{duration}' minutes")
     verify_script('combat-trainer')
     start_script('combat-trainer', args)
     pause 1 until $COMBAT_TRAINER.running

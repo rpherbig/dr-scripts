@@ -172,6 +172,12 @@ class SetupProcess
     else
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
     end
+
+    # Invoke Focus
+    if game_state.weapon_skill == 'Targeted Magic' && game_state.weapon_name
+      bput("invoke #{game_state.weapon_name}", 'You')
+      waitrt?
+    end
   end
 end
 
@@ -217,11 +223,23 @@ class LootProcess
     @necro_heal = thanatology['heal'] || false
     echo("  @necro_heal: #{@necro_heal}") if $debug_mode_ct
 
+    @necro_store = thanatology['store'] || false
+    echo("  @necro_store: #{@necro_store}") if $debug_mode_ct
+
+    @necro_container = thanatology['harvest_container']
+    echo("  @necro_container: #{@necro_container}") if $debug_mode_ct
+
+    @necro_count = thanatology['harvest_count']
+    echo("  @necro_count: #{@necro_count}") if $debug_mode_ct
+
     @gem_nouns = get_data('items').gem_nouns
     echo("  @gem_nouns: #{@gem_nouns}") if $debug_mode_ct
 
     @spare_gem_pouch_container = settings.spare_gem_pouch_container
     echo("  @spare_gem_pouch_container: #{@spare_gem_pouch_container}") if $debug_mode_ct
+
+    @full_pouch_container = settings.full_pouch_container
+    echo("  @full_pouch_container: #{@full_pouch_container}") if $debug_mode_ct
 
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
@@ -292,7 +310,11 @@ class LootProcess
       return
     end
     bput("remove my #{@gem_pouch_adjective} pouch", 'You remove')
-    bput("stow my #{@gem_pouch_adjective} pouch", 'You put')
+    if @full_pouch_container
+      bput("put my #{@gem_pouch_adjective} pouch in my #{@full_pouch_container}", 'You put')
+    else
+      bput("stow my #{@gem_pouch_adjective} pouch", 'You put')
+    end
     bput("get #{@gem_pouch_adjective} pouch from my #{@spare_gem_pouch_container}", 'You get a')
     bput('wear my pouch', 'You attach')
     bput("stow #{item}", 'You pick')
@@ -351,7 +373,6 @@ class LootProcess
     return unless DRStats.necromancer?
     return unless ritual
     return if game_state.construct?(mob_noun)
-
     echo "Attempting necromancer ritual #{ritual} on #{mob_noun}" if $debug_mode_ct
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w(consume harvest arise).include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
@@ -369,7 +390,7 @@ class LootProcess
       echo 'Detected harvest messaging' if $debug_mode_ct
       @last_ritual = ritual
       waitrt?
-      bput('drop material', 'you discard it')
+      necro_harvest_check
     when @rituals['construct']
       echo 'Detected an attempt to do ritual on a construct' if $debug_mode_ct
       game_state.construct(mob_noun)
@@ -377,6 +398,32 @@ class LootProcess
       echo 'Failure detected' if $debug_mode_ct
     end
     echo "Last ritual performed: #{@last_ritual}" if $debug_mode_ct
+  end
+
+  def necro_harvest_check
+    unless @necro_store
+      echo 'Store material: false, dropping harvested material' if $debug_mode_ct
+      bput('drop material', 'you discard it')
+      return
+    end
+
+    echo 'Store material: true, checking count of stored material' if $debug_mode_ct
+    materials = rummage('C material', @necro_container)
+    if materials.count >= @necro_count
+      bput('drop material', 'you discard it')
+      echo 'Already full on stored material, dropping harvested material.' if $debug_mode_ct
+      return
+    end
+
+    quality = fput('glance left')
+    if quality['great'] || quality['excellent'] || quality['perfect']
+      bput("put material in my #{@necro_container}", 'You put')
+      echo 'Storing high quality material.' if $debug_mode_ct
+      return
+    end
+
+    bput('drop material', 'you discard it')
+    echo 'dropping low quality material.' if $debug_mode_ct
   end
 
   def dispose_body(game_state)
@@ -1036,10 +1083,13 @@ class SpellProcess
     @custom_cast = data['cast']
     @symbiosis = data['symbiosis']
     @after = data['after']
+    @skill = data['skill']
+    @prep = data['prep']
     @command = data['command']
     @reset_expire = data['expire'] ? data['abbrev'] : nil
     Flags.reset('ct-spellcast')
     @before = data['before']
+    game_state.action_taken if (@skill == 'Targeted Magic' || @prep == 'target') && game_state.weapon_skill == 'Targeted Magic'
   end
 end
 
@@ -1112,7 +1162,17 @@ class ManipulateProcess
 
   def manipulate
     bput('manip stop all', 'You relax your will', 'But you aren')
-    bput("manipulate friendship #{@filtered_npcs.first}",  'You attempt to empathically manipulate', 'You strain')
+    manipulate_count = 0
+
+    @filtered_npcs.each_with_index do |npc, index|
+      break if manipulate_count >= @threshold
+
+      ordinal_string = $ORDINALS[index]
+
+      bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'You attempt to empathically manipulate', 'You strain')
+      manipulate_count += 1
+    end
+
     @last_manip = Time.now
   end
 end
@@ -1134,12 +1194,12 @@ class TrainerProcess
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Favor Orb' => 'Anything',
                    'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
                    'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
-                   'Barb Research Debilitation' => 'Debilitation' }
+                   'Barb Research Debilitation' => 'Debilitation', 'Collect' => 'Outdoorsmanship' }
 
     @skill_map['Hunt'] = %w(Perception Scouting) if DRStats.ranger?
     @favor_god = settings.favor_god
     if settings.favor_goal && @favor_god && /delicate/ =~ bput("tap #{@favor_god} orb", 'The orb is delicate', 'I could not find')
-      @training_abilities['Favor Orb'] = 300
+      @training_abilities['Favor Orb'] = settings.favor_orb_rub_frequency
     end
 
     @no_app = []
@@ -1164,6 +1224,12 @@ class TrainerProcess
 
     @kneel_khri = settings.kneel_khri
     echo("  @kneel_khri: #{@kneel_khri}") if $debug_mode_ct
+
+    @forage_item = settings.forage_item
+    echo("  @forage_item: #{@forage_item}") if $debug_mode_ct
+
+    @analyze_retry_count = settings.combat_analyze_retry_count
+    echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1187,7 +1253,7 @@ class TrainerProcess
     when 'Tactics'
       bput(%w(weave bob circle).sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
     when 'Analyze'
-      analyze(game_state)
+      analyze(game_state, 0)
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
     when 'Pray'
@@ -1223,6 +1289,11 @@ class TrainerProcess
       bput('meditate research turtle', 'You clear ')
     when 'Barb Research Debilitation'
       bput('meditate research earthquake', 'You clear ')
+    when 'Collect'
+      retreat
+      collect(@forage_item)
+      waitrt?
+      bput('kick pile', 'You take a step back', 'I could not find')
     end
     waitrt?
     false
@@ -1235,15 +1306,16 @@ class TrainerProcess
       reset_ability(game_state, 'Meraud')
       return
     end
-    if /meraud/i =~ bput('commune sense', 'roundtime', 'A spark of Meraud')
+    if /meraud/i =~ bput('commune sense', 'roundtime', 'Meraud', 'Meraud\'s')
       reset_ability(game_state, 'Meraud', 60)
+      game_state.blessed_room = true
       return
     end
     waitrt?
     @equipment_manager.stow_weapon(game_state.weapon_name)
-    fput "get #{@water_holder}"
-    if /that/i =~ bput("sprinkle #{@water_holder} on #{checkname}", 'You sprinkle', 'Sprinkle that')
-      fput "stow #{@water_holder}"
+    fput "get #{@water_holder} from my #{@theurgy_supply_container}"
+    if /that/i =~ bput("sprinkle #{@water_holder} on #{checkname}", 'You sprinkle', 'Sprinkle what?', 'Sprinkle that')
+      fput "put #{@water_holder} in my #{@theurgy_supply_container}"
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
       @training_abilities.delete('Meraud')
       return
@@ -1294,19 +1366,22 @@ class TrainerProcess
     DRRoom.dead_npcs.size > dead_count
   end
 
-  def analyze(game_state)
+  def analyze(game_state, fail_count)
     return if game_state.npcs.empty?
+    return if fail_count > @analyze_retry_count
     return if DRSkill.getxp('Tactics') >= 32
     case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
     when 'Analyze what'
       fput('face next')
-      analyze(game_state)
+      analyze(game_state, fail_count)
     when 'You must be closer'
       fput('engage')
     when 'Your analysis reveals a massive opening'
       return
-    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes'
-      analyze(game_state)
+    when 'You fail to find any holes'
+      analyze(game_state, fail_count + 1)
+    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/
+      analyze(game_state, fail_count)
     end
     waitrt?
   end
@@ -1396,7 +1471,7 @@ class AttackProcess
       game_state.no_stab_current_mob = false
     end
 
-    if game_state.dancing? || (@is_empath && !(@undead && DRSpells.active_spells['Absolution']))
+    if game_state.dancing? || game_state.weapon_skill == 'Targeted Magic' || (@is_empath && !(@undead && DRSpells.active_spells['Absolution']))
       if game_state.finish_killing?
         echo('AttackProcess::clean_up') if $debug_mode_ct
         game_state.next_clean_up_step
@@ -2237,6 +2312,10 @@ class GameState
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
   attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos
+end
+
+before_dying do
+  DRCA.release_cyclics
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

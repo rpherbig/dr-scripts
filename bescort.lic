@@ -134,6 +134,10 @@ class Bescort
       [
         { name: 'iceroad', regex: /iceroad/i, description: 'The ice road between Shard and Hibarnhvidar' },
         { name: 'mode', options: %w(shard hibarnhvidar), description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'basalt', regex: /basalt/i, description: 'The ferry between Ratha and Necromancer Island' },
+        { name: 'mode', options: %w(island ratha), description: 'Where do you need to get to?' }
       ]
     ]
 
@@ -159,6 +163,8 @@ class Bescort
       take_mammoth(args.mode)
     elsif args.iceroad
       iceroad(args.mode)
+    elsif args.basalt
+      take_crawling_plague(args.mode)
     end
   end
 
@@ -223,10 +229,10 @@ class Bescort
       end
       true
     elsif XMLData.room_exits.empty?
-      $turns_since_bad += 1
       # fog?
-      move dir_priority.sample
-      $turns_since_bad > 10
+      move dir_priority[$turns_since_bad % dir_priority.size]
+      $turns_since_bad += 1
+      $turns_since_bad < 15
     else
       false
     end
@@ -379,6 +385,8 @@ class Bescort
     path = mode == 'shard' ? $ICE_PATH_SHARD : $ICE_PATH_HIB
 
     if exists?('skates')
+      footwear = get_settings.footwear
+      fput("remove #{footwear}") if footwear
       fput('get skates')
       fput('wear skates')
       path.each do |movement|
@@ -386,6 +394,7 @@ class Bescort
       end
       fput('rem skates')
       fput('stow skates')
+      fput("wear #{footwear}") if footwear
     else
       path.each do |movement|
         move(movement)
@@ -436,6 +445,24 @@ class Bescort
       take_mammoth(mode)
     when /You join the Merelew driver/
       waitfor 'The burly beast trumpets a series of watery blasts', 'Here we are, ladies and gentlemen'
+    end
+  end
+
+  def take_crawling_plague(mode)
+    case mode
+    when 'island'
+      manual_go2(12_282)
+    when 'ratha'
+      manual_go2(12_292)
+    end
+    case bput('join crawling plague', "You join the ship's captain", 'What were you referring to?')
+    when /You join the ship's captain/
+      board_time = Time.now if UserVars.bescort_debug
+      pause 1 until XMLData.room_title != '[[The Crawling Plague, Deck]]'
+      echo "Trip time: #{Time.now - board_time} seconds" if UserVars.bescort_debug
+    when /What were you referring to/
+      waitfor 'JOIN CRAWLING PLAGUE before it leaves if you would like to go'
+      take_crawling_plague(mode)
     end
   end
 
@@ -567,6 +594,7 @@ class Bescort
     result = bput('pow', pattern)
     result =~ pattern
     waitrt
+    return if result.eql?('You are already at the end of the conduit.')
     if Flags['pattern-shift']
       Flags.reset('pattern-shift')
     else
@@ -579,16 +607,22 @@ class Bescort
     result != 'Roundtime'
   end
 
+  def focus_shard(name)
+    stow_hands
+    bput("focus #{name}", 'Roundtime', 'You move into the chaotic tides of energy')
+  end
+
   def open_gate(shard, entering_ap)
     Flags.reset('gate-failure')
+    release_cyclics
     prepare?('mg', 5)
     if entering_ap
-      bput("focus #{shard}", 'Roundtime') if DRStats.circle < 100
+      focus_shard(shard) if DRStats.circle < 100
       3.times { harness_mana(20) }
       waitcastrt?
       DRStats.circle > 99 ? cast?('cast grazhir') : cast?("cast #{shard}")
     else
-      bput("focus #{shard}", 'Roundtime')
+      focus_shard(shard)
       waitcastrt?
       cast?("cast #{shard}")
     end
@@ -650,7 +684,7 @@ class Bescort
 
     direction_to_pattern = {
       'center' => /the microcosm is to the (?<direction>.*)\.$/,
-      'exit' => /You believe the end of the conduit lies (?<direction>.*)\.$/
+      'exit' => /You believe the end of the conduit lies (?<direction>.*)\.$|^You are already at the end of the conduit\.$/
     }
 
     destination_shard = mode_to_shard[mode]
@@ -664,17 +698,14 @@ class Bescort
       echo 'You are not in a room with a Grazhir shard.'
       exit
     end
-
     open_gate(source_shard, true)
     pause 0.25 until XMLData.room_exits.empty?
     power_walk(direction_to_pattern['center']) while XMLData.room_exits.empty?
     walk_to mode_to_pillar_roomid[mode]
-    bput("focus #{destination_shard}", 'You move into the chaotic tides of energy')
+    focus_shard(destination_shard)
     while DRRoom.room_objs.empty?
       power_walk(direction_to_pattern['exit'])
-      unless XMLData.room_exits.empty?
-        bput("focus #{destination_shard}", 'You move into the chaotic tides of energy')
-      end
+      focus_shard(destination_shard) unless XMLData.room_exits.empty?
     end
     open_gate(destination_shard, false)
     fput('rel mana')

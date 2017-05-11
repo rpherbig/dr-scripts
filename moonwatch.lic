@@ -9,25 +9,30 @@ arg_definitions = [
     { name: 'debug', regex: /debug/i, optional: true },
     { name: 'alias', regex: /alias/i, optional: true, description: 'Add an alias for the command moon that will display moon status.' },
     { name: 'window', regex: /window/i, optional: true, description: 'Toggle a window for the moon status.' },
-    { name: 'correct', regex: /correct/i, optional: true, description: 'Set up a moonbot to deal with new moons' }
+    { name: 'correct', regex: /correct/i, optional: true, description: 'Set up a moonbot to deal with new moons.' },
+    { name: 'offline', regex: /offline/i, optional: true, description: 'Downloads latest data from firebase and then runs without autoupdating.' }
+
   ]
 ]
 
 args = parse_args(arg_definitions)
-
 $debug_mode_mm = UserVars.moon_debug || args.debug
 
 enable_moon_connection
 pause 3
 
+ENGLISH_VALUE = {}
+ENGLISH_VALUE['hundred'] = 100
+%w[zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen].each_with_index{ |word,i| ENGLISH_VALUE[word] = i }
+
+%w[zero ten twenty thirty forty fifty sixty seventy eighty ninety].each_with_index{ |word,i| ENGLISH_VALUE[word] = i*10 }
+
+%w[one thousand million billion trillion].each_with_index{ |word,i| ENGLISH_VALUE[word] = 10**(i*3) }
+
 if args.alias
-  UpstreamHook.run("<c>#{$clean_lich_char}alias add --global moon = #{$clean_lich_char}eq respond(\"#{UserVars.moons['katamba']['pretty']} : #{UserVars.moons['yavash']['pretty']} : #{UserVars.moons['xibar']['pretty']}\")")
+  UpstreamHook.run("<c>#{$clean_lich_char}alias add --global moon = #{$clean_lich_char}eq self.print_moon_status")
 end
-
 CharSettings['moon_window'] = !CharSettings['moon_window'] if args.window
-
-UserVars.moons = { 'katamba' => {}, 'yavash' => {}, 'xibar' => {}, 'visible' => [] }
-UserVars.sun = {}
 
 Settings['xibar'] ||= Time.now
 Settings['yavash'] ||= Time.now
@@ -53,6 +58,12 @@ if CharSettings['moon_window']
   CharSettings['moon_window_cache'] = nil
 end
 
+def print_moon_status
+  respond("#{UserVars.moons['katamba']['pretty']}")
+  respond("#{UserVars.moons['yavash']['pretty']}")
+  respond("#{UserVars.moons['xibar']['pretty']}")
+end
+
 def check_for_new_moons
   UserVars.moons.each do |moon, data|
     next if moon == 'visible' || data['timer'] >= 0
@@ -60,6 +71,25 @@ def check_for_new_moons
     moon_change(moon, !set) if data[(set ? 'set' : 'rise')]
     waitrt?
   end
+end
+
+
+def string_to_number(string)
+  values = string.downcase.split( /\W+/ ).map{ |word|
+    ENGLISH_VALUE[word]
+  }
+  time = 0
+  values.each_with_index {|num, idx|
+    next_idx = idx + 1
+    if (values[next_idx] > 99)
+      next_num = values.slice(next_idx)
+      values.delete_at(next_idx)
+      time = time + (num * next_num)
+    else
+      time = time + num
+    end
+  }
+  return time
 end
 
 def update_moon_window
@@ -71,14 +101,20 @@ def update_moon_window
 end
 
 def moon_change(moon, is_up)
-  echo("moon_change #{moon}:#{is_up}") if $debug_mode_mm
   snapshot = Time.now
   snapshot = (snapshot - snapshot.sec).utc.to_s
   update_moon_data(moon, 'time' => snapshot, 'event' => is_up ? 'rise' : 'set')
 end
 
 def minutes_apart(first, second)
-  ((first - second) / 60).to_i
+  ((first - second) / 60).ceil
+end
+
+def get_latest_moon
+  UserVars.moons = { 'katamba' => {}, 'yavash' => {}, 'xibar' => {}, 'visible' => [] }
+  UserVars.sun = {}
+  update_moon_info(get_all_moon_data)
+  update_sun_info(get_all_moon_data)
 end
 
 def minutes_to_next_sun_event(past, current)
@@ -104,6 +140,7 @@ end
 
 def update_moon_info(latest_data)
   return if latest_data.nil? || latest_data.empty?
+  echo "#{latest_data}"
   %w[katamba yavash xibar].each do |moon|
     data = latest_data[moon]
     event = data['event']
@@ -126,24 +163,99 @@ def update_moon_info(latest_data)
   end
 end
 
+def handle_moon_timers(line)
+  case line
+  when /that (Katamba|Xibar|Yavash) is (\w+\-?\w+?) degrees above the (eastern|western)/
+    moon = Regexp.last_match(1).downcase
+    minutes = string_to_number(Regexp.last_match(2))
+    timer = Regexp.last_match(3) == 'eastern' ? (Settings['set'][moon] / 60 - minutes).to_i : minutes.to_i
+    offline_update_moon_info(moon, 'timer' => timer, 'event' => 'rise')
+  when /that (Katamba|Xibar|Yavash) is exactly at zenith/
+    moon = Regexp.last_match(1).downcase
+    timer = (Settings['set'][moon] / (60 * 2)).to_i
+    offline_update_moon_info(moon, 'timer' => timer, 'event' => 'rise')
+  when /^(Katamba|Xibar|Yavash) is a .* should rise in about (\d+)/
+    moon = Regexp.last_match(1).downcase
+    timer = (Regexp.last_match(2).to_i * 30).to_i
+    offline_update_moon_info(moon, 'timer' => timer, 'event' => 'set')
+  when /^(Katamba|Xibar|Yavash) sets/
+    moon = Regexp.last_match(1).downcase
+    offline_update_moon_info(moon, 'timer' => Settings['rise'][moon] / 60, 'event' => 'set')
+  when /^(Katamba|Xibar|Yavash) slowly rises/
+    moon = Regexp.last_match(1).downcase
+    offline_update_moon_info(moon, 'timer' => Settings['set'][moon] / 60, 'event' => 'rise')
+  when /heralding another fine day|rises to create the new day|as the sun rises, hidden|as the sun rises behind it|faintest hint of the rising sun|The rising sun slowly/
+    old = UserVars.sun
+    UserVars.sun['set'] = old['set']
+    UserVars.sun['rise'] = Time.now.utc.to_s
+  when /The sun sinks below the horizon|night slowly drapes its starry banner|sun slowly sinks behind the scattered clouds and vanishes|grey light fades into a heavy mantle of black/
+    old = UserVars.sun
+    UserVars.sun['rise'] = old['rise']
+    UserVars.sun['set'] = Time.now.utc.to_s
+  else
+    time_now = Time.now
+    time_now = time_now - time_now.sec
+    %w[katamba yavash xibar].each do |moon|
+      old = UserVars.moons[moon]
+      event = old.key?('set') ? 'set' : 'rise'
+      timer = minutes_apart(old[event], time_now)
+      offline_update_moon_info(moon, 'event' => (%w[rise set] - [event]).first, 'time' => time_now) if (old['timer'] - timer) > 5
+    end
+  end
+  pause 0.1 unless line
+end
+
+def offline_update_moon_info(moon, data)
+  return if data.nil? || data.empty?
+  event = data['event']
+  coming_event = (%w[rise set] - [event]).first
+  time_now = data['time']
+  if !time_now.nil?
+    data['timer'] = minutes_apart(UserVars.moons[moon][coming_event], time_now)
+  else
+    time_now = Time.now
+    time_now = time_now - time_now.sec
+  end
+  UserVars.moons[moon].delete(coming_event)
+  UserVars.moons[moon][coming_event] = time_now + (data['timer'] * 60)
+  UserVars.moons[moon]['timer'] = data['timer']
+  if event == 'rise'
+    UserVars.moons[moon]['pretty'] = "#{moon} is up for #{UserVars.moons[moon]['timer']} minutes"
+    UserVars.moons[moon]['short'] = "[#{moon[0]}]+(#{UserVars.moons[moon]['timer']})"
+    UserVars.moons['visible'].push(moon) unless UserVars.moons['visible'].include?(moon)
+  else
+    UserVars.moons[moon]['pretty'] = "#{moon} will rise in #{UserVars.moons[moon]['timer']} minutes"
+    UserVars.moons[moon]['short'] = "[#{moon[0]}]-(#{UserVars.moons[moon]['timer']})"
+    UserVars.moons['visible'].delete(moon) if UserVars.moons['visible'].include?(moon)
+  end
+end
+
+
+if args.offline
+  get_latest_moon
+end
+
 loop do
   line = script.gets?
-  case line
-  when /^(Katamba|Xibar|Yavash) sets/
-    moon_change(Regexp.last_match(1).downcase, false)
-  when /^(Katamba|Xibar|Yavash) slowly rises/
-    moon_change(Regexp.last_match(1).downcase, true)
-  when /heralding another fine day|rises to create the new day|as the sun rises, hidden|as the sun rises behind it|faintest hint of the rising sun|The rising sun slowly/
-    old = get_all_moon_data['sun']
-    update_moon_data('sun', 'set' => old['set'], 'rise' => Time.now.utc.to_s)
-  when /The sun sinks below the horizon|night slowly drapes its starry banner|sun slowly sinks behind the scattered clouds and vanishes|grey light fades into a heavy mantle of black/
-    old = get_all_moon_data['sun']
-    update_moon_data('sun', 'rise' => old['rise'], 'set' => Time.now.utc.to_s)
+  if args.offline
+    handle_moon_timers(line)
+  else
+    case line
+    when /^(Katamba|Xibar|Yavash) sets/
+      moon_change(Regexp.last_match(1).downcase, false)
+    when /^(Katamba|Xibar|Yavash) slowly rises/
+      moon_change(Regexp.last_match(1).downcase, true)
+    when /heralding another fine day|rises to create the new day|as the sun rises, hidden|as the sun rises behind it|faintest hint of the rising sun|The rising sun slowly/
+      old = get_all_moon_data['sun']
+      update_moon_data('sun', 'set' => old['set'], 'rise' => Time.now.utc.to_s)
+    when /The sun sinks below the horizon|night slowly drapes its starry banner|sun slowly sinks behind the scattered clouds and vanishes|grey light fades into a heavy mantle of black/
+      old = get_all_moon_data['sun']
+      update_moon_data('sun', 'rise' => old['rise'], 'set' => Time.now.utc.to_s)
+    end
+    update_moon_info(get_all_moon_data)
+    update_sun_info(get_all_moon_data)
+    pause 0.1 unless line
   end
-
-  update_moon_info(get_all_moon_data)
-  update_sun_info(get_all_moon_data)
-  update_moon_window if CharSettings['moon_window']
   check_for_new_moons if args.correct
-  pause 0.1 unless line
+  update_moon_window if CharSettings['moon_window']
 end

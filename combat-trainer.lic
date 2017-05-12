@@ -73,6 +73,8 @@ class SetupProcess
 
     @last_cycle_time = Time.now
 
+    @equipment_manager.stow_weapon(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding? 
+
     if @last_worn_type
       @equipment_manager.desc_to_items(@cycle_armors[@last_worn_type]).each { |item| @equipment_manager.remove_item(item) }
     else
@@ -83,6 +85,8 @@ class SetupProcess
     @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[next_armor_type]))
 
     @last_worn_type = next_armor_type
+
+    @equipment_manager.wield_weapon_offhand(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?
   end
 
   def determine_next_to_train(game_state, weapon_training, ending_ranged)
@@ -158,6 +162,7 @@ class SetupProcess
     # Clean up the previous weapon
     if !last_summoned
       @equipment_manager.stow_weapon(game_state.last_weapon_name)
+      @equipment_manager.stow_weapon(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?    
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
@@ -171,12 +176,27 @@ class SetupProcess
       game_state.prepare_summoned_weapon(last_summoned)
     else
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      if game_state.use_whirlwind? && game_state.is_whirlwind_trainable?(game_state.weapon_skill)
+        determine_whirlwind_weapon(game_state)
+        echo("Combat-Trainer:: Whirlwinding with -=== MAIN: #{game_state.weapon_skill}  OFF: #{game_state.whirlwind_offhand_skill} ===-") if $debug_mode_ct
+        game_state.set_currently_whirlwinding(true)         
+      else
+        game_state.set_currently_whirlwinding(false)
+      end
     end
 
     # Invoke Focus
     return unless game_state.weapon_skill == 'Targeted Magic' && game_state.weapon_name
     bput("invoke #{game_state.weapon_name}", 'You')
     waitrt?
+  end
+
+  def determine_whirlwind_weapon(game_state)
+    temp_array = game_state.whirlwind_trainables
+    temp_array -= [game_state.weapon_skill]
+    offhand_skill = temp_array.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    game_state.update_whirlwind_weapon_info(offhand_skill)
+    @equipment_manager.wield_weapon_offhand(game_state.whirlwind_offhand_name)
   end
 end
 
@@ -332,14 +352,20 @@ class LootProcess
 
     pair = [left_hand, right_hand]
     tried_loot = false
+    items_to_loot = Array.new
     @lootables
       .select { |item| game_state.lootable?(item) }
       .each do |item|
         item_reg = item.split.join('.*')
         matches = DRRoom.room_objs.grep(/\b#{item_reg}$/)
         tried_loot ||= !matches.empty?
-        matches.each { |_| stow_loot(item, game_state); }
+        matches.each { |_| items_to_loot.push(item); }
       end
+    if items_to_loot.any?
+      @equipment_manager.stow_weapon(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?
+      items_to_loot.each { |item| stow_loot(item, game_state)}
+      @equipment_manager.wield_weapon_offhand(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?
+    end
     return unless tried_loot
     pause 1
     if left_hand != pair.first && !@equipment_manager.is_listed_item?(left_hand)
@@ -450,8 +476,13 @@ class LootProcess
       @last_rites_timer = Time.now
       return
     end
+
+    @equipment_manager.stow_weapon(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?
+
     arrange_mob(DRRoom.dead_npcs.first, game_state)
     check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals?(game_state)
+
+    @equipment_manager.wield_weapon_offhand(game_state.whirlwind_offhand_name) if game_state.currently_whirlwinding?
 
     unless game_state.casting_consume || game_state.prepare_consume
       while 'and get ready to search it' == bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it')
@@ -1844,6 +1875,7 @@ class GameState
     @aim_queue = []
     @dance_queue = []
     @analyze_combo_array = []
+    @currently_whirlwinding = false
 
     @dance_skill = settings.dance_skill
     echo("  @dance_skill: #{@dance_skill}") if $debug_mode_ct
@@ -1895,6 +1927,9 @@ class GameState
     @fatigue_regen_threshold = settings.fatigue_regen_threshold
     echo("  @fatigue_regen_threshold: #{@fatigue_regen_threshold}") if $debug_mode_ct
 
+    @balance_regen_threshold = settings.balance_regen_threshold
+    echo("  @balance_regen_threshold: #{@balance_regen_threshold}") if $debug_mode_ct
+
     @aim_fillers = settings.aim_fillers
     echo("  @aim_fillers: #{@aim_fillers}") if $debug_mode_ct
 
@@ -1940,11 +1975,14 @@ class GameState
     @attack_overrides = settings.attack_overrides
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
 
-    # For deprecation support
-    if settings.analyze_combo_type
-      echo('***The analyze_combo_type setting is deprecated and can be removed from your YAML. The use_barb_combos setting should be used instead.***')
-      @use_barb_combos = true
-    end
+    @use_whirlwind = settings.use_whirlwind
+    echo("  @use_whirlwind: #{@use_whirlwind}") if $debug_mode_ct
+
+    @whirlwind_trainables = settings.whirlwind_trainables
+    echo("  @whirlwind_trainables: #{@whirlwind_trainables}") if $debug_mode_ct
+
+    @use_barb_combos = settings.use_barb_combos
+    echo("  @use_barb_combos: #{@use_barb_combos}") if $debug_mode_ct
 
     if @use_barb_combos
       Flags.add('ct-accuracy-ready', 'You sense your combat accuracy decrease')
@@ -2005,6 +2043,55 @@ class GameState
     @attack_overrides[weapon_skill]
   end
 
+  def use_whirlwind?
+    @use_whirlwind
+  end
+
+  def set_currently_whirlwinding(setting)
+    @currently_whirlwinding = setting
+  end
+
+  def currently_whirlwinding?
+    @currently_whirlwinding
+  end
+
+  def whirlwind_trainables
+    @whirlwind_trainables
+  end
+
+  def whirlwind_offhand_name
+    weapon_training[@current_whirlwind_offhand_skill]
+  end
+
+  def last_whirlwind_offhand_weapon_name
+    weapon_training[@last_whirlwind_offhand_skill]
+  end
+
+  def update_whirlwind_weapon_info(weapon_skill)
+    @last_whirlwind_offhand_skill = @current_whirlwind_offhand_skill
+    @current_whirlwind_offhand_skill = weapon_skill
+  end
+
+  def whirlwind_offhand_skill
+    @current_whirlwind_offhand_skill
+  end
+
+  def is_whirlwind_trainable?(weapon_skill)
+    whirlwind_trainables.include? (weapon_skill)
+  end
+
+  def determine_whirlwind_action
+    if @use_weak_attacks && Flags["ct-accuracy-ready"]
+      update_analyze_array(true) if @analyze_combo_array.empty?
+      return @analyze_combo_array.shift
+    elsif (npcs.length > 2) && !balance_low? 
+      return 'whirlwind' 
+    elsif balance_low? 
+      return 'gouge'
+    end
+    'jab'
+  end
+ 
   def weapon_skill
     @current_weapon_skill
   end
@@ -2133,6 +2220,12 @@ class GameState
     DRStats.fatigue < @fatigue_regen_threshold
   end
 
+  def balance_low?
+    echo("***Balance: #{DRStats.balance}***") if $debug_mode_ct
+    echo("***Target: #{@balance_regen_threshold}***") if $debug_mode_ct
+    DRStats.balance < @balance_regen_threshold
+  end
+
   def reset_action_count
     @action_count = 0
   end
@@ -2237,12 +2330,14 @@ class GameState
   end
 
   def melee_attack_verb
-    if attack_override
+    if currently_whirlwinding?
+      determine_whirlwind_action
+    elsif attack_override
       attack_override
     elsif @use_weak_attacks
       brawling? ? 'gouge' : 'jab'
     elsif @use_barb_combos && !offhand? && !brawling?
-      update_analyze_array if @analyze_combo_array.empty?
+      update_analyze_array(false) if @analyze_combo_array.empty?
       @analyze_combo_array.shift
     else
       'attack'
@@ -2301,10 +2396,11 @@ class GameState
     true
   end
 
-  def update_analyze_array
-    { 'accuracy' => 50, 'damage' => 125, 'flame' => 0 }.each do |type, expertise|
-      break if perform_analyze?(type, expertise)
-    end
+  def update_analyze_array(only_accuracy)    
+    return perform_analyze?('accuracy', 50) if only_accuracy    
+    { 'accuracy' => 50, 'damage' => 125, 'flame' => 0 }.each do |type, expertise|      
+      break if perform_analyze?(type, expertise)    
+    end  
   end
 
   def dance_stealth?

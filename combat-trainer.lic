@@ -73,6 +73,8 @@ class SetupProcess
 
     @last_cycle_time = Time.now
 
+    game_state.sheath_whirlwind_offhand 
+
     if @last_worn_type
       @equipment_manager.desc_to_items(@cycle_armors[@last_worn_type]).each { |item| @equipment_manager.remove_item(item) }
     else
@@ -83,6 +85,8 @@ class SetupProcess
     @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[next_armor_type]))
 
     @last_worn_type = next_armor_type
+
+    game_state.wield_whirlwind_offhand
   end
 
   def determine_next_to_train(game_state, weapon_training, ending_ranged)
@@ -158,6 +162,7 @@ class SetupProcess
     # Clean up the previous weapon
     if !last_summoned
       @equipment_manager.stow_weapon(game_state.last_weapon_name)
+      game_state.sheath_whirlwind_offhand   
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
@@ -171,12 +176,26 @@ class SetupProcess
       game_state.prepare_summoned_weapon(last_summoned)
     else
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      if game_state.is_whirlwind_trainable?
+        game_state.currently_whirlwinding = true
+        determine_whirlwind_weapon(game_state)
+        echo("Combat-Trainer:: Whirlwinding with -=== MAIN: #{game_state.weapon_skill}  OFF: #{game_state.whirlwind_offhand_skill} ===-") if $debug_mode_ct
+      else
+        game_state.currently_whirlwinding = false
+      end
     end
 
     # Invoke Focus
     return unless game_state.weapon_skill == 'Targeted Magic' && game_state.weapon_name
     bput("invoke #{game_state.weapon_name}", 'You')
     waitrt?
+  end
+
+  def determine_whirlwind_weapon(game_state)
+    temp_array = (game_state.whirlwind_trainables - [game_state.weapon_skill])
+    offhand_skill = temp_array.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    game_state.update_whirlwind_weapon_info(offhand_skill)
+    game_state.wield_whirlwind_offhand
   end
 end
 
@@ -332,14 +351,20 @@ class LootProcess
 
     pair = [left_hand, right_hand]
     tried_loot = false
+    items_to_loot = Array.new
     @lootables
       .select { |item| game_state.lootable?(item) }
       .each do |item|
         item_reg = item.split.join('.*')
         matches = DRRoom.room_objs.grep(/\b#{item_reg}$/)
         tried_loot ||= !matches.empty?
-        matches.each { |_| stow_loot(item, game_state); }
+        matches.each { |_| items_to_loot.push(item); }
       end
+    if items_to_loot.any?
+      game_state.sheath_whirlwind_offhand
+      items_to_loot.each { |item| stow_loot(item, game_state)}
+      game_state.wield_whirlwind_offhand
+    end
     return unless tried_loot
     pause 1
     if left_hand != pair.first && !@equipment_manager.is_listed_item?(left_hand)
@@ -450,8 +475,13 @@ class LootProcess
       @last_rites_timer = Time.now
       return
     end
+
+    game_state.sheath_whirlwind_offhand
+
     arrange_mob(DRRoom.dead_npcs.first, game_state)
     check_skinning(DRRoom.dead_npcs.first, game_state) if check_rituals?(game_state)
+
+    game_state.wield_whirlwind_offhand
 
     unless game_state.casting_consume || game_state.prepare_consume
       while 'and get ready to search it' == bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it')
@@ -1682,7 +1712,7 @@ class AttackProcess
 
   def use_charged_maneuver(action, game_state)
     game_state.cooldown_timers[action] = Time.now
-    attempt = bput("maneuver #{action}", 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet')
+    attempt = bput("maneuver #{action}", 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet', 'You crouch down', 'You step to the side')
     return if attempt == 'rest a bit longer'
 
     # Maneuvers have extra non-RT delays
@@ -1805,7 +1835,7 @@ class GameState
   $aim_skills = %w[Bow Slings Crossbow]
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :blessed_room
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1844,6 +1874,7 @@ class GameState
     @aim_queue = []
     @dance_queue = []
     @analyze_combo_array = []
+    @currently_whirlwinding = false
 
     @dance_skill = settings.dance_skill
     echo("  @dance_skill: #{@dance_skill}") if $debug_mode_ct
@@ -1895,6 +1926,9 @@ class GameState
     @fatigue_regen_threshold = settings.fatigue_regen_threshold
     echo("  @fatigue_regen_threshold: #{@fatigue_regen_threshold}") if $debug_mode_ct
 
+    @balance_regen_threshold = settings.balance_regen_threshold
+    echo("  @balance_regen_threshold: #{@balance_regen_threshold}") if $debug_mode_ct
+
     @aim_fillers = settings.aim_fillers
     echo("  @aim_fillers: #{@aim_fillers}") if $debug_mode_ct
 
@@ -1939,6 +1973,9 @@ class GameState
 
     @attack_overrides = settings.attack_overrides
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
+
+    @whirlwind_trainables = settings.whirlwind_trainables
+    echo("  @whirlwind_trainables: #{@whirlwind_trainables}") if $debug_mode_ct
 
     if @use_barb_combos
       Flags.add('ct-accuracy-ready', 'You sense your combat accuracy decrease')
@@ -1999,6 +2036,46 @@ class GameState
     @attack_overrides[weapon_skill]
   end
 
+  def whirlwind_offhand_name
+    weapon_training[@current_whirlwind_offhand_skill]
+  end
+
+  def update_whirlwind_weapon_info(weapon_skill)
+    @last_whirlwind_offhand_skill = @current_whirlwind_offhand_skill
+    @current_whirlwind_offhand_skill = weapon_skill
+  end
+
+  def whirlwind_offhand_skill
+    @current_whirlwind_offhand_skill
+  end
+
+  def is_whirlwind_trainable?
+    return false if whirlwind_trainables.empty?
+    whirlwind_trainables.include?(weapon_skill)
+  end
+
+  def sheath_whirlwind_offhand
+    return unless currently_whirlwinding
+    @equipment_manager.stow_weapon(whirlwind_offhand_name)
+  end
+
+  def wield_whirlwind_offhand
+    return unless currently_whirlwinding
+    @equipment_manager.wield_weapon_offhand(whirlwind_offhand_name)
+  end
+
+  def determine_whirlwind_action
+    if @use_weak_attacks && Flags["ct-accuracy-ready"]
+      update_analyze_array(true) if @analyze_combo_array.empty?
+      return @analyze_combo_array.shift
+    elsif (npcs.length > 2) && !balance_low? 
+      return 'whirlwind' 
+    elsif balance_low? 
+      return 'gouge'
+    end
+    'jab'
+  end
+ 
   def weapon_skill
     @current_weapon_skill
   end
@@ -2118,6 +2195,7 @@ class GameState
   end
 
   def charged_maneuver
+    return @charged_maneuvers['Dual Wield'] if currently_whirlwinding
     @charged_maneuvers[weapon_skill]
   end
 
@@ -2125,6 +2203,12 @@ class GameState
     echo("***Fatigue: #{DRStats.fatigue}***") if $debug_mode_ct
     echo("***Target: #{@fatigue_regen_threshold}***") if $debug_mode_ct
     DRStats.fatigue < @fatigue_regen_threshold
+  end
+
+  def balance_low?
+    echo("***Balance: #{DRStats.balance}***") if $debug_mode_ct
+    echo("***Target: #{@balance_regen_threshold}***") if $debug_mode_ct
+    DRStats.balance < @balance_regen_threshold
   end
 
   def reset_action_count
@@ -2231,12 +2315,14 @@ class GameState
   end
 
   def melee_attack_verb
-    if attack_override
+    if currently_whirlwinding
+      determine_whirlwind_action
+    elsif attack_override
       attack_override
     elsif @use_weak_attacks
       brawling? ? 'gouge' : 'jab'
     elsif @use_barb_combos && !offhand? && !brawling?
-      update_analyze_array if @analyze_combo_array.empty?
+      update_analyze_array(false) if @analyze_combo_array.empty?
       @analyze_combo_array.shift
     else
       'attack'
@@ -2295,10 +2381,11 @@ class GameState
     true
   end
 
-  def update_analyze_array
-    { 'accuracy' => 50, 'damage' => 125, 'flame' => 0 }.each do |type, expertise|
-      break if perform_analyze?(type, expertise)
-    end
+  def update_analyze_array(only_accuracy)    
+    return perform_analyze?('accuracy', 50) if only_accuracy    
+    { 'accuracy' => 50, 'damage' => 125, 'flame' => 0 }.each do |type, expertise|      
+      break if perform_analyze?(type, expertise)    
+    end  
   end
 
   def dance_stealth?
@@ -2314,7 +2401,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos, :balance_regen_threshold
 end
 
 before_dying do

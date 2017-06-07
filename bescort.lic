@@ -140,6 +140,14 @@ class Bescort
       [
         { name: 'therenropebridge', regex: /therenropebridge/i, description: 'The rope bridge between Theren and Rossman\'s Landing' },
         { name: 'mode', options: %w[totheren torossman], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'gondola', regex: /gondola/i, description: 'Gondola between Shard and Leth Deriel' },
+        { name: 'mode', options: %w[north south], description: 'Which direction are you going?' }
+      ],
+      [
+        { name: 'desert', regex: /desert/i, description: 'Hidasharon Desert on Mriss for hunting armadillos' },
+        { name: 'mode', options: %w[adult juvenile elder oasis exit], description: 'Where to?' }
       ]
     ]
 
@@ -169,6 +177,10 @@ class Bescort
       take_crawling_plague(args.mode)
     elsif args.therenropebridge
       take_theren_rope_bridge(args.mode)
+    elsif args.gondola
+      ride_gondola(args.mode)
+    elsif args.desert
+      desert(args.mode)
     end
   end
 
@@ -278,6 +290,49 @@ class Bescort
     when /kartais/i
       wait_for_script_to_complete('oshu_manor', ['kartais'])
       find_room_list(%w[e e w w w n n n])
+    end
+  end
+
+  def desert_enter
+    walk_to(12_581)
+    move 'down'
+  end
+
+  def desert(mode)
+    if mode !~ /exit/i && Room.current.id != 6760
+      echo('Desert script must be started in 6760')
+      exit
+    end
+    case mode
+    when /oasis/
+      echo 'Not implemented'
+      exit
+    when /juvenile/
+      desert_enter
+      find_room_maze
+    when /adult/
+      desert_enter
+      until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+        move_direction?(%w[northeast east])
+      end
+      move 'go trail'
+      find_room_maze
+    when /elder/
+      echo 'Not implemented'
+      exit
+    when /exit/
+      if XMLData.room_title.include?('Sand Valley') # Adult Area
+        until DRRoom.room_objs.include?('faint trail leading to some nearby dunes')
+          move XMLData.room_exits.sample unless move_direction?(%w[northeast])
+        end
+        move 'go trail'
+        desert(mode)
+      end
+      if XMLData.room_title.include?('High Dunes') # Juvie Area
+        move_direction?(%w[northeast east]) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+        move 'south'
+        move 'northeast'
+      end
     end
   end
 
@@ -646,7 +701,7 @@ class Bescort
   end
 
   def power_walk(pattern)
-    fput 'exit' if dead? && @exit_if_killed
+    fput 'exit' if dead? || Flags['ap-danger']
     if Flags['harness-check']
       harness_mana(20) unless Flags['harness-check'].include?('effortlessly')
       Flags.reset('harness-check')
@@ -662,9 +717,12 @@ class Bescort
     end
   end
 
-  def know_shard?(shard_name)
-    result = bput('recall heavens grazhir', shard_name, 'Roundtime')
-    result != 'Roundtime'
+  def know_shard?(shard_name, shard_list)
+    return true if UserVars.known_shards.include?(shard_name)
+    bput('recall heavens grazhir', shard_name, 'Roundtime')
+    lines = reget(30).map(&:strip)
+    UserVars.known_shards = lines & shard_list
+    UserVars.known_shards.include?(shard_name)
   end
 
   def focus_shard(name)
@@ -675,12 +733,23 @@ class Bescort
   def open_gate(shard, entering_ap)
     Flags.reset('gate-failure')
     release_cyclics
-    prepare?('mg', 5)
+    unless prepare?('mg', 5)
+      echo 'You may need to move to another room'
+      exit
+    end
     if entering_ap
       focus_shard(shard) if DRStats.circle < 100
       3.times { harness_mana(20) }
       waitcastrt?
-      DRStats.circle > 99 ? cast?('cast grazhir') : cast?("cast #{shard}")
+      if DRStats.circle > 99
+        unless cast?('cast grazhir')
+          echo 'You may need to move to another room'
+          fput('release mana')
+          exit
+        end
+      else
+        cast?("cast #{shard}")
+      end
     else
       focus_shard(shard)
       waitcastrt?
@@ -691,11 +760,10 @@ class Bescort
   end
 
   def astral_walk(mode)
-    @exit_if_killed = get_settings.quit_on_death_in_ap
-
     Flags.add('harness-check', /You (.*) maintain your place among the shifting streams of mana\./)
     Flags.add('pattern-shift', 'A wave of rippling air sweeps through the conduit!  The streams of mana writhe violently before settling into new patterns')
     Flags.add('gate-failure', 'With supreme effort, you are able to bring the spell to an end without harm.')
+    Flags.add('ap-danger', "Unlike most astral phenomena, the static does not go away after a few moments. In fact, it's getting stronger. Closer.")
 
     room_id_to_shard = {
       9999 => "Asharshpar'i",
@@ -707,7 +775,8 @@ class Bescort
       4542 => 'Tamigen',
       5050 => 'Erekinzil',
       6867 => 'Auilusi',
-      8302 => 'Vellano'
+      8302 => 'Vellano',
+      3777 => "Dor'na'torna"
     }
 
     mode_to_shard = {
@@ -748,7 +817,7 @@ class Bescort
     }
 
     destination_shard = mode_to_shard[mode]
-    unless know_shard?(destination_shard)
+    unless know_shard?(destination_shard, mode_to_shard.values)
       echo 'You dont know that shard!'
       exit
     end
@@ -769,6 +838,18 @@ class Bescort
     end
     open_gate(destination_shard, false)
     fput('rel mana')
+  end
+
+  def ride_gondola(mode)
+    case bput('go gondola', 'There is no wooden gondola here', 'Gondola, Cab')
+    when /no wooden gondola here/i
+      waitfor 'The gondola stops on the platform and the door silently swings open'
+      ride_gondola(mode)
+    when /Gondola, Cab/
+      move mode
+      waitfor 'With a soft bump, the gondola comes to a stop at its destination'
+      move 'out'
+    end
   end
 end
 

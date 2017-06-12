@@ -25,13 +25,24 @@ class Bankbot
   end
 
   def help(character)
-    fput "whisper #{character} Supported commands are:"
-    fput "whisper #{character}   (help) - this list"
-    fput "whisper #{character}   (bal|balance) - view your current balance (bankbot will also respond to an LNet private message)"
-    fput "whisper #{character}   (with|withdraw) [amount] [currency] - withdraw [amount] [currency] from your bankbot balance."
-    fput "whisper #{character}   (with|withdraw) all [currency] - withdraw all [currency] from your bankbot balance."
-    fput "whisper #{character}   (where|room|location) - view the current location of bankbot (bankbot will only respond to an LNet private message)"
-    fput "whisper #{character} I accept coins via TIPs to hold for you."
+    get_help_content.each { |line| fput "whisper #{character} #{line}" }
+  end
+
+  def get_help_content
+    [
+      "I accept coins via TIPs to hold for you.",
+      "Supported commands are:",
+      "  (help) - this list",
+      "  (bal|balance) - view your current balance",
+      "  (with|withdraw) [amount] [currency] - withdraw [amount] [currency] from your bankbot balance.",
+      "  (with|withdraw) all [currency] - withdraw all [currency] from your bankbot balance.",
+      "  (transfer) [amount] [currency] [destination] - transfer [amount] [currency] from your bankbot balance to the [destination] account (case-sensitive). Destination character must already have a bankbot account.",
+      "  (transfer) all [currency] [destination] - transfer all [currency] from your bankbot balance to the [destination] account.",
+      # "  (proxy) set [character name] - all deposits you make will now be directed to the account of [character name]. This overwrites any previous proxy. [Character name] must already have an account with bankbot.",
+      # "  (proxy) (list|clear) - list or clear your deposit proxy.",
+      "  (where|room|location) - view the current location of bankbot",
+      "Help, balance, transfer, and location can be done via LNet private message: ';chat to #{checkname} [command]'."
+    ]
   end
 
   def report_balance(character)
@@ -74,7 +85,7 @@ class Bankbot
     end
 
     log(character, 'withdrawal all', 'all', input_currency, 'withdrawal all attempted')
-    withdraw(character, @ledger[character][currency], currency)
+    withdraw(character, withdrawal_amount, currency)
   end
 
   def withdraw(character, amount, input_currency)
@@ -131,6 +142,56 @@ class Bankbot
     report_balance(character)
   end
 
+  def transfer(character, amount, input_currency, destination)
+    transfer_amount = amount.to_i
+    currency = determine_currency(input_currency)
+    unless currency
+      log(character, 'transfer', transfer_amount, input_currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{input_currency}'."
+      return
+    end
+
+    if transfer_amount < 1
+      log(character, 'transfer', transfer_amount, currency, 'invalid transfer amount')
+      fput "whisper #{character} That is an invalid amount to transfer."
+      return
+    end
+
+    if @ledger[character][currency] < transfer_amount
+      log(character, 'transfer', transfer_amount, currency, 'insufficient funds')
+      fput "whisper #{character} You don't have that much money."
+      report_balance(character)
+      return
+    end
+
+    unless @ledger.has_key?(destination)
+      log(character, 'transfer', transfer_amount, currency, "destination does not exist: #{destination}")
+      fput "whisper #{character} The destination character does not have a bankbot account."
+      report_balance(character)
+      return
+    end
+
+    @ledger[character][currency] -= transfer_amount
+    @ledger[destination][currency] += transfer_amount
+    log(character, 'transfer', transfer_amount, currency, "succeeded to: #{destination}")
+    fput "whisper #{character} Transfer succeeded!"
+    report_balance(character)
+  end
+
+  def transfer_all(character, input_currency, destination)
+    currency = determine_currency(input_currency)
+    transfer_amount = @ledger[character][currency]
+
+    if transfer_amount < 1
+      log(character, 'transfer all', transfer_amount, currency, 'no balance to transfer all')
+      fput "whisper #{character} You do not have any #{currency} to transfer."
+      return
+    end
+
+    log(character, 'transfer all', 'all', input_currency, 'transfer all attempted')
+    transfer(character, transfer_amount, currency, destination)
+  end
+
   private
 
   def log(character, action, amount, currency, message)
@@ -161,6 +222,7 @@ validator = CharacterValidator.new(args.announce, false, args.greet, 'Bankbot')
 loop do
   line = script.gets?
   pause 0.05 unless line
+
   if DRRoom.pcs != @last_room_list
     (DRRoom.pcs - @last_room_list).each { |name| validator.validate(name) }
     @last_room_list = DRRoom.pcs
@@ -204,6 +266,21 @@ loop do
 
     next unless validator.valid?(character)
     bankbot.report_balance(character)
+  when /^(.*) whispers, "(transfer) (\d+) (K.*|L.*|D.*) (.*)"$/i
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(3)
+    currency = Regexp.last_match(4)
+    destination = Regexp.last_match(5)
+
+    next unless validator.valid?(character)
+    bankbot.transfer(character, amount, currency, destination)
+  when /^(.*) whispers, "(transfer) all (K.*|L.*|D.*) (.*)"$/i
+    character = Regexp.last_match(1)
+    currency = Regexp.last_match(3)
+    destination = Regexp.last_match(4)
+
+    next unless validator.valid?(character)
+    bankbot.transfer_all(character, currency, destination)
   when /^(.*) whispers, ".*"$/i
     character = Regexp.last_match(1)
 
@@ -227,6 +304,28 @@ loop do
     character = Regexp.last_match(1)
 
     validator.confirm(character)
+    validator.send_bankbot_balance(character, bankbot.get_balance(character))
+  when /^\[Private\]-.*:(.*): "(help)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
+    character = Regexp.last_match(1)
+
+    validator.confirm(character)
+    validator.send_bankbot_help(character, bankbot.get_help_content)
+  when /^\[Private\]-.*:(.*): "(transfer) (\d+) (K.*|L.*|D.*) (.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
+    character = Regexp.last_match(1)
+    amount = Regexp.last_match(3)
+    currency = Regexp.last_match(4)
+    destination = Regexp.last_match(5)
+
+    validator.confirm(character)
+    bankbot.transfer(character, amount, currency, destination)
+    validator.send_bankbot_balance(character, bankbot.get_balance(character))
+  when /^\[Private\]-.*:(.*): "(transfer) all (K.*|L.*|D.*) (.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
+    character = Regexp.last_match(1)
+    currency = Regexp.last_match(3)
+    destination = Regexp.last_match(4)
+
+    validator.confirm(character)
+    bankbot.transfer_all(character, currency, destination)
     validator.send_bankbot_balance(character, bankbot.get_balance(character))
   when /^\[Private\]-.*:(.*): "(where|room|location)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
     character = Regexp.last_match(1)

@@ -700,6 +700,50 @@ class ReportbotManager
   end
 end
 
+class SlackbotManager
+  def initialize(debug)
+    @debug = debug
+    @slackbot = nil
+    @username = nil
+    @messages = []
+  end
+
+  def run_queue
+    register_slackbot
+    send_messages
+  end
+
+  def register(username)
+    return if @slackbot
+
+    @username = username
+  end
+
+  def send_message(message)
+    return unless @slackbot
+    return unless message
+
+    @messages << message
+  end
+
+  private
+
+  def register_slackbot
+    return if @slackbot
+    return unless @username
+
+    custom_require.call('slackbot')
+    @slackbot = SlackBot.new
+  end
+
+  def send_messages
+    until @messages.empty?
+      message = @messages.shift
+      @slackbot.direct_message(@username, message)
+    end
+  end
+end
+
 class SetupFiles
   def initialize(debug)
     @debug = debug
@@ -720,6 +764,10 @@ class SetupFiles
 
   def request_data(file)
     request(file, true)
+  end
+
+  def pending?
+    @load
   end
 
   def request(options, data_load = false)
@@ -819,16 +867,17 @@ class SetupFiles
   def transform_settings(settings)
     s = OpenStruct.new(settings)
 
+    # Populate nil settings with default values
     @base_files['base-empty.yaml'][:empty_values].each { |name, value| s[name] ||= value }
 
-    base_lootables = @base_files['base-items.yaml'][:lootables]
-    boxes = @base_files['base-items.yaml'][:box_nouns]
-    gems = @base_files['base-items.yaml'][:gem_nouns]
-    scrolls = @base_files['base-items.yaml'][:scroll_nouns]
-    spells = @base_files['base-spells.yaml'][:spell_data]
-
+    base_items = @base_files['base-items.yaml']
+    base_lootables = base_items[:lootables]
+    boxes = base_items[:box_nouns]
+    gems = base_items[:gem_nouns]
+    scrolls = base_items[:scroll_nouns]
     s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
 
+    spells = @base_files['base-spells.yaml'][:spell_data]
     s.offensive_spells.map! { |spell| spells[spell['name']] ? spells[spell['name']].merge(spell) : spell }
 
     s.offensive_spells
@@ -839,26 +888,35 @@ class SetupFiles
 
     s.buff_spells
      .select { |spell| spells[spell] }
-     .each do |name, _data|
-      s.buff_spells[name] = spells[name].merge(s.buff_spells[name])
-    end
+     .each { |name, _data| s.buff_spells[name] = spells[name].merge(s.buff_spells[name]) }
 
     s.lockpick_buffs['spells']
      .each_with_index
      .select do |spell, i|
-      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
-            .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
-    end
+       spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+             .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+     end
 
     s.astrology_buffs['spells']
      .each_with_index
      .select do |spell, i|
-      spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
-            .each { |_name, data| s.astrology_buffs['spells'][i] = data.merge(spell) }
-    end
+       spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+             .each { |_name, data| s.astrology_buffs['spells'][i] = data.merge(spell) }
+     end
 
     s.waggle_sets
      .select { |set_name, set_spells| set_spells.select { |spell_name, spell_data| spells[spell_name].each { s.waggle_sets[set_name][spell_name] = spells[spell_name].merge(spell_data) } } }
+
+    # Pull sensitive settings from UserVars
+    s.crossing_training_sorcery_room ||= UserVars.crossing_training_sorcery_room
+    s.engineering_room ||= UserVars.engineering_room
+    s.outfitting_room ||= UserVars.outfitting_room
+    s.safe_room ||= UserVars.safe_room
+    s.safe_room_id ||= UserVars.safe_room_id
+    s.safe_room_empath ||= UserVars.safe_room_empath
+    s.slack_username ||= UserVars.slack_username
+    s.bankbot_name ||= UserVars.bankbot_name
+    s.bankbot_room_id ||= UserVars.bankbot_room_id
 
     s
   end
@@ -890,11 +948,10 @@ class MoonWatch
     @reconnect = true
 
     @moon_source = @f.event_source('moon_data')
-    @moon_source.onmessage { |event, data, _sock| update_moon_state(data) if %w(put patch).include? event }
+    @moon_source.onmessage { |event, data, _sock| update_moon_state(data) if %w[put patch].include? event }
     @moon_source.onerror { |error, _sock| Lich.log(error) }
 
     @moon_source.start
-
   rescue => e
     echo("error in moonwatch #{e.inspect}")
   end
@@ -947,20 +1004,23 @@ $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
 $bankbot = BankbotManager.new(debug)
 $reportbot = ReportbotManager.new(debug)
+$slackbot = SlackbotManager.new(debug)
 
 def enable_moon_connection
   $turn_on_moon_watch = true
 end
 
 def get_settings(options = [])
+  pause 0.05 while $setupfiles.pending?
   $setupfiles.request_settings(options)
-  pause 0.1 until $setupfiles.loaded?
+  pause 0.05 until $setupfiles.loaded?
   $setupfiles.settings
 end
 
 def get_data(file)
+  pause 0.05 while $setupfiles.pending?
   $setupfiles.request_data(file)
-  pause 0.1 until $setupfiles.loaded?
+  pause 0.05 until $setupfiles.loaded?
   $setupfiles.settings
 end
 
@@ -986,6 +1046,14 @@ def load_reportbot_whitelist
   $reportbot.load_reportbot_whitelist
   pause 0.1 until $reportbot.loaded?
   $reportbot.whitelist
+end
+
+def send_slackbot_message(message)
+  $slackbot.send_message(message)
+end
+
+def register_slackbot(username)
+  $slackbot.register(username)
 end
 
 def format_name(name)
@@ -1197,6 +1265,7 @@ loop do
   $setupfiles.run_queue
   $bankbot.run_queue
   $reportbot.run_queue
+  $slackbot.run_queue
   $moon_watch.run_queue if $moon_watch
   pause 0.1
 end

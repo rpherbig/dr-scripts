@@ -309,6 +309,88 @@ class BankbotController
   end
 end
 
+class BankbotParser
+  attr_reader :controller
+
+  def initialize(announce, greet)
+    @controller = BankbotController.new(announce, greet)
+  end
+
+  def handle_new_character_seen(character)
+    @controller.validate(character)
+  end
+
+  def handle_whisper(character, message)
+    case message
+    when /^(help)$/i
+      @controller.whisper_help(character)
+    when /^(with|withdraw) (\d+) (K.*|L.*|D.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      @controller.withdraw(character, amount, currency)
+    when /^(with|withdraw) all (K.*|L.*|D.*)$/i
+      currency = Regexp.last_match(2)
+      @controller.withdraw_all(character, currency)
+    when /^(bal|balance)$/i
+      @controller.whisper_balance(character)
+    when /^(transfer) (\d+) (K.*|L.*|D.*) (.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      destination = Regexp.last_match(4)
+      @controller.whisper_transfer(character, amount, currency, destination)
+    when /(transfer) all (K.*|L.*|D.*) (.*)$/i
+      currency = Regexp.last_match(2)
+      destination = Regexp.last_match(3)
+      @controller.whisper_transfer_all(character, currency, destination)
+    else
+      @controller.whisper_unknown_command(character)
+    end
+  end
+
+  def handle_lnet_player_message(character, message)
+    # TODO: Handle the 'else' case
+    case message
+    when /^RequestSlackToken/
+      @controller.send_slack_token(character)
+    when /^(bal|balance)$/i
+      @controller.lnet_balance(character)
+    when /^(help)$/i
+      @controller.lnet_help(character)
+    when /^(transfer) (\d+) (K.*|L.*|D.*) (.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      destination = Regexp.last_match(4)
+      @controller.lnet_transfer(character, amount, currency, destination)
+    when /^(transfer) all (K.*|L.*|D.*) (.*)$/i
+      currency = Regexp.last_match(2)
+      destination = Regexp.last_match(3)
+      @controller.lnet_transfer_all(character, currency, destination)
+    when /^(where|room|location)$/i
+      @controller.lnet_send_location(character)
+    end
+  end
+
+  def handle_lnet_server_message(message)
+    case message
+    when /^(.*) is tuned to the following channels.*$/
+      character = Regexp.last_match(1)
+      @controller.lnet_confirm(character)
+    when /^(.*) is connected but not tuned to any channels.*$/
+      character = Regexp.last_match(1)
+      @controller.lnet_confirm(character)
+    end
+  end
+
+  def handle_tip(character, message)
+    case message
+    when /^(\d+) (\w+)$/
+      amount = Regexp.last_match(1)
+      currency = Regexp.last_match(2)
+      @controller.accept_tip(character, amount, currency)
+    end
+  end
+end
+
 arg_definitions = [
   [
     { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up bankbot' },
@@ -319,7 +401,7 @@ arg_definitions = [
 
 args = parse_args(arg_definitions)
 
-controller = BankbotController.new(args.announce, args.greet)
+parser = BankbotParser.new(args.announce, args.greet)
 
 @last_room_list = []
 loop do
@@ -327,7 +409,7 @@ loop do
   pause 0.05 unless line
 
   if DRRoom.pcs != @last_room_list
-    (DRRoom.pcs - @last_room_list).each { |character| controller.validate(character) }
+    (DRRoom.pcs - @last_room_list).each { |character| parser.handle_new_character_seen(character) }
     @last_room_list = DRRoom.pcs
   end
 
@@ -336,68 +418,20 @@ loop do
     thief = Regexp.last_match(1)
     echo "***EXITING, CAUGHT #{thief} TRYING TO STEAL***"
     fput('exit')
-  when /^(.*) whispers, "(help)"$/i
+  when /^(.*) whispers, "(.*)"$/i
     character = Regexp.last_match(1)
-    controller.whisper_help(character)
-  when /^(.*) offers you a tip of (\d+) (\w+)\.  Type ACCEPT TIP, to accept it or DECLINE TIP to refuse it\.$/
+    message = Regexp.last_match(2)
+    parser.handle_whisper(character, message)
+  when /^(.*) offers you a tip of (.*)\.  Type ACCEPT TIP, to accept it or DECLINE TIP to refuse it\.$/
     character = Regexp.last_match(1)
-    amount = Regexp.last_match(2)
-    currency = Regexp.last_match(3)
-    controller.accept_tip(character, amount, currency)
-  when /^(.*) whispers, "(with|withdraw) (\d+) (K.*|L.*|D.*)"$/i
+    message = Regexp.last_match(2)
+    parser.handle_tip(character, message)
+  when /^\[server\]: "DR:(.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/
+    message = Regexp.last_match(1)
+    parser.handle_lnet_server_message(message)
+  when /^\[Private\]-.*:(.*): "(.*)"/
     character = Regexp.last_match(1)
-    amount = Regexp.last_match(3)
-    currency = Regexp.last_match(4)
-    controller.withdraw(character, amount, currency)
-  when /^(.*) whispers, "(with|withdraw) all (K.*|L.*|D.*)"$/i
-    character = Regexp.last_match(1)
-    currency = Regexp.last_match(3)
-    controller.withdraw_all(character, currency)
-  when /^(.*) whispers, "(bal|balance)"$/i
-    character = Regexp.last_match(1)
-    controller.whisper_balance(character)
-  when /^(.*) whispers, "(transfer) (\d+) (K.*|L.*|D.*) (.*)"$/i
-    character = Regexp.last_match(1)
-    amount = Regexp.last_match(3)
-    currency = Regexp.last_match(4)
-    destination = Regexp.last_match(5)
-    controller.whisper_transfer(character, amount, currency, destination)
-  when /^(.*) whispers, "(transfer) all (K.*|L.*|D.*) (.*)"$/i
-    character = Regexp.last_match(1)
-    currency = Regexp.last_match(3)
-    destination = Regexp.last_match(4)
-    controller.whisper_transfer_all(character, currency, destination)
-  when /^(.*) whispers, ".*"$/i
-    character = Regexp.last_match(1)
-    controller.whisper_unknown_command(character)
-  when /^\[server\]: "DR:(.*) is tuned to the following channels.*"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/
-    character = Regexp.last_match(1)
-    controller.lnet_confirm(character)
-  when /^\[server\]: "DR:(.*) is connected but not tuned to any channels.*"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/
-    character = Regexp.last_match(1)
-    controller.lnet_confirm(character)
-  when /^\[Private\]-.*:(.*): "RequestSlackToken"/
-    character = Regexp.last_match(1)
-    controller.send_slack_token(character)
-  when /^\[Private\]-.*:(.*): "(bal|balance)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
-    character = Regexp.last_match(1)
-    controller.lnet_balance(character)
-  when /^\[Private\]-.*:(.*): "(help)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
-    character = Regexp.last_match(1)
-    controller.lnet_help(character)
-  when /^\[Private\]-.*:(.*): "(transfer) (\d+) (K.*|L.*|D.*) (.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
-    character = Regexp.last_match(1)
-    amount = Regexp.last_match(3)
-    currency = Regexp.last_match(4)
-    destination = Regexp.last_match(5)
-    controller.lnet_transfer(character, amount, currency, destination)
-  when /^\[Private\]-.*:(.*): "(transfer) all (K.*|L.*|D.*) (.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
-    character = Regexp.last_match(1)
-    currency = Regexp.last_match(3)
-    destination = Regexp.last_match(4)
-    controller.lnet_transfer_all(character, currency, destination)
-  when /^\[Private\]-.*:(.*): "(where|room|location)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/i
-    character = Regexp.last_match(1)
-    controller.lnet_send_location(character)
+    message = Regexp.last_match(2)
+    parser.handle_lnet_player_message(character, message)
   end
 end

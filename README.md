@@ -5,6 +5,8 @@ A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (htt
 
 To get started, see the setup guide on the wiki: https://github.com/rpherbig/dr-scripts/wiki/First-Time-Setup
 
-Each script has some brief documentation in its header, but better documentation can be found on the wiki: https://github.com/rpherbig/dr-scripts/wiki/List-of-All-Scripts and https://github.com/rpherbig/dr-scripts/wiki/Introduction-to-Character-Settings
+For script-specific documentation, follow the link in its header or visit the main documentation page at https://elanthipedia.play.net/Lich_script_repository
 
-If you have some feedback or suggestions, please contact us in-game or [open a pull request](https://github.com/rpherbig/dr-scripts/pulls). We look forward to hearing from you!
+For YAML documentation, see https://github.com/rpherbig/dr-scripts/wiki/Introduction-to-Character-Settings
+
+If you have some feedback or suggestions, please contact us in-game or [open an issue](https://github.com/rpherbig/dr-scripts/issues). We look forward to hearing from you!

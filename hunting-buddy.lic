@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#hunting-buddy
 =end
 
-custom_require.call(%w(common common-arcana common-items common-travel drinfomon events spellmonitor equipmanager))
+custom_require.call(%w[common common-arcana common-items common-travel drinfomon events spellmonitor equipmanager])
 
 class HuntingBuddy
   include DRC
@@ -64,7 +64,14 @@ class HuntingBuddy
       end
       next unless find_hunting_room?(info[:zone])
 
-      args.each_with_index { |arg, index| hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil) }
+      args.each_with_index do |arg, index|
+        if @stopped_for_bleeding
+          retreat
+          stop_script('tendme') if Script.running?('tendme')
+          break
+        end
+        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil)
+      end
 
       wait_for_script_to_complete('bescort', @exit) if @exit
       release_cyclics
@@ -107,10 +114,22 @@ class HuntingBuddy
 
   def find_hunting_room?(zone_name)
     UserVars.friends = @settings.hunting_buddies || []
-    if rooms = @hunting_zones[zone_name]
+    zones = Array(zone_name).flatten.compact
+    rooms = @hunting_zones.values_at(*zones.select { |name| @hunting_zones.include?(name) }).flatten.compact unless @escort_zones.include?(zones.first)
+    if rooms.empty? || rooms.nil?
+      escort_info = @escort_zones[zones.first]
+      unless escort_info
+        echo "FAILED TO FIND THE HUNTING ZONE(S) #{zones} IN BASE.YAML"
+        return false
+      end
+      walk_to(escort_info['base'])
+      wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
+      @exit = [escort_info['area'], 'exit']
+    else
       @exit = nil
       find_empty_room(rooms, @settings.safe_room,
                       lambda do
+                        return false if DRRoom.pcs.size > 2
                         return true if (DRRoom.pcs & UserVars.friends).any?
                         return false if (DRRoom.pcs - DRRoom.group_members).any?
                         # No visible friends in the room and no visible people
@@ -133,15 +152,6 @@ class HuntingBuddy
                       end,
                       @settings.hunting_room_min_mana,
                       @settings.hunting_room_strict_mana)
-    else
-      escort_info = @escort_zones[zone_name]
-      unless escort_info
-        echo "FAILED TO FIND HUNTING ZONE #{zone_name} IN BASE.YAML"
-        return false
-      end
-      walk_to(escort_info['base'])
-      wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
-      @exit = [escort_info['area'], 'exit']
     end
 
     true
@@ -192,7 +202,7 @@ class HuntingBuddy
       pause 1
     end
     $COMBAT_TRAINER.stop
-    pause 1 while $COMBAT_TRAINER.running && Script.running?('combat-trainer')
+    pause 1 while $COMBAT_TRAINER.running || Script.running?('combat-trainer')
     retreat
   end
 
@@ -204,12 +214,16 @@ class HuntingBuddy
           info['args'] = [info['args'] || []]
           info[:duration] = [info[:duration]]
           info['stop_on'] = [info['stop_on']]
+          info['before'] = info['before']
+          info['after'] = info['after']
         end
         hunting_info << info
       else
         hunting_info.last['args'] << info['args']
         hunting_info.last[:duration] << info[:duration]
         hunting_info.last['stop_on'] << info['stop_on']
+        hunting_info.last['before'] ||= info['before']
+        hunting_info.last['after'] ||= info['after']
       end
     end
     hunting_info

@@ -8,7 +8,7 @@ class TestValidate < Minitest::Test
 
   def setup
     $test_settings = nil
-    $test_data = OpenStruct.new({ :mining_buddy_rooms => []})
+    $test_data = OpenStruct.new(mining_buddy_rooms: [])
     $warn_msgs = []
     $error_msgs = []
   end

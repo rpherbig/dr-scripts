@@ -8,12 +8,13 @@ class TestValidate < Minitest::Test
 
   def setup
     $test_settings = nil
+    $test_data = OpenStruct.new({ :mining_buddy_rooms => []})
     $warn_msgs = []
     $error_msgs = []
   end
 
   def setup_settings(settings)
-    $test_settings = OpenStruct.new(settings)
+    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
   end
 
   def test_parse_args

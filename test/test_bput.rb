@@ -16,7 +16,7 @@ class TestCommon < Minitest::Test
 
   def test_bput_sends_message
     @test = run_script_with_proc('common', proc do
-      DRC.bput('a test message')
+      DRC.bput('a test message', 'some results')
     end)
 
     assert_sends_messages ['a test message']
@@ -43,7 +43,7 @@ class TestCommon < Minitest::Test
 
     @test = run_script_with_proc('common', proc do
       start = Time.now
-      assert_equal false, DRC.bput('a test message', 'result')
+      assert_equal '', DRC.bput('a test message', 'result')
       Thread.current.thread_variable_set('runtime', Time.now - start)
     end)
 
@@ -58,7 +58,7 @@ class TestCommon < Minitest::Test
 
     @test = run_script_with_proc('common', proc do
       start = Time.now
-      assert_equal false, DRC.bput('a test message', 'result')
+      assert_equal '', DRC.bput('a test message', 'result')
       Thread.current.thread_variable_set('runtime', Time.now - start)
     end)
 

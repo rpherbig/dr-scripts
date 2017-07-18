@@ -26,6 +26,11 @@ module Harness
     $test_settings
   end
 
+  def get_data(dummy)
+    $data_called_with = dummy
+    $test_data
+  end
+
   def echo(message)
     print(message.to_s + "\n") if $audible
     displayed_messages << message

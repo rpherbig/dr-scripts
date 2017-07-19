@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#equipmanager
 =end
 
-custom_require.call(%w(common common-items common-travel events))
+custom_require.call(%w[common common-items common-travel events])
 
 class EquipmentManager
   include DRC
@@ -17,6 +17,7 @@ class EquipmentManager
     return @items if @items
     settings ||= get_settings
     @gear_sets = settings.gear_sets
+    @sort_head = settings.sort_auto_head
     @items = settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges]) }
   end
 
@@ -30,7 +31,7 @@ class EquipmentManager
   def wear_items(items_list)
     items_list.each { |item| wear_item?(item) }
 
-    fput('sort auto head')
+    fput('sort auto head') if @sort_head
   end
 
   def wear_equipment_set?(set_name)
@@ -50,7 +51,7 @@ class EquipmentManager
     lost_items = wear_missing_items(worn_items, combat_items)
     notify_missing(lost_items)
 
-    fput('sort auto head')
+    fput('sort auto head') if @sort_head
 
     lost_items.empty?
   end
@@ -96,7 +97,7 @@ class EquipmentManager
       echo(worn_items.map(&:short_name).join(',').to_s)
     end
     combat_items
-      .select { |description| !worn_items.find { |item| item.short_regex =~ description } }
+      .reject { |description| worn_items.find { |item| item.short_regex =~ description } }
       .map { |description| items.find { |item| item.short_regex =~ description } }
       .compact
       .each { |item| remove_item(item) }
@@ -126,7 +127,7 @@ class EquipmentManager
   end
 
   def remove_item(item)
-    bput("remove my #{item.short_name}", "You .*#{item.name}")
+    bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide')
     waitrt?
     if /more room/ =~ bput("stow my #{item.short_name}", 'You put', 'There isn\'t any more room')
       bput("wear my #{item.short_name}", 'You ')
@@ -149,6 +150,18 @@ class EquipmentManager
     else
       return false
     end
+  end
+
+  def wield_weapon_offhand(description)
+    return if description.empty?
+
+    weapon = item_by_desc(description)
+    unless weapon
+      echo("failed to match a weapon for #{description}")
+      return
+    end
+
+    get_item?(weapon)
   end
 
   def wield_weapon(description, skill = nil)
@@ -174,8 +187,7 @@ class EquipmentManager
 
   def get_item?(item)
     if item.wield
-      bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip')
-      true
+      bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'Wield what') != 'Wield what'
     elsif item.transforms_to
       item = item_by_desc(item.transforms_to)
       item.worn ? get_item_helper(item, :worn) : get_item_helper(item, :stowed)
@@ -200,13 +212,13 @@ class EquipmentManager
 
     todo.all? do |held_item|
       if info = worn_items.find { |item| item.short_regex =~ held_item }
-        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop')
+        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your')
         true
       elsif info = items.find { |item| item.short_regex =~ held_item }
         if info.tie_to
           stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy')
         elsif info.wield
-          stow_helper("sheath my #{info.short_name}", info.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You strap')
+          stow_helper("sheath my #{info.short_name}", info.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap')
         else
           stow_helper("stow my #{info.short_name}", info.short_name, 'You put', 'You should unload', 'You easily strap')
         end
@@ -225,21 +237,29 @@ class EquipmentManager
     {
       worn: {
         verb: 'remove',
-        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank) /, 'Remove what', "You aren't wearing that"],
+        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank).*#{item.name}/, 'Remove what', "You aren't wearing that", 'slide themselves off of your'],
         failures: [/^You (get|sling|pull|work|slide|remove|yank) $/],
         failure_recovery: proc { |noun| bput("wear my #{noun}", '^You ') },
         exhausted: ['Remove what', "You aren't wearing that"]
       },
       tied: {
         verb: 'untie',
-        matches: [/^You .*#{item.short_regex}/, '^You remove', '^What were you referring', '^Untie what'],
-        failures: ['You remove'],
-        failure_recovery: proc { |_| stow_weapon },
+        matches: [/^You .*#{item.short_regex}/, "^You remove.*#{item.name}", /^.*you untie your .*#{item.short_regex} from it./, '^What were you referring', '^Untie what', '^You are a little too busy'],
+        failures: ['You remove', /^You are a little too busy/],
+        failure_recovery: proc { |_noun, item, *matches|
+                            case matches
+                            when ['You are a little too busy']
+                              retreat
+                              get_item?(item)
+                            else
+                              stow_weapon
+                            end
+                          },
         exhausted: ['What were you referring', 'Untie what']
       },
       stowed: {
         verb: 'get',
-        matches: [/^You .*#{item.short_regex}/, '^You get', '^What were you referring', 'But that is already', 'You are already'],
+        matches: [/^You .*#{item.short_regex}/, "^You get.*#{item.name}", '^What were you referring', 'But that is already', 'You are already'],
         failures: ['You get', /But that is already/],
         failure_recovery: proc { |noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
         exhausted: ['What were you referring']
@@ -263,11 +283,12 @@ class EquipmentManager
     data = verb_data(item)[type]
     snapshot = [left_hand, right_hand]
     waitrt?
-    case bput("#{data[:verb]} my #{item.short_name}", *data[:matches])
+    response = bput("#{data[:verb]} my #{item.short_name}", *data[:matches])
+    case response
     when *data[:exhausted]
       return false
     when *data[:failures]
-      data[:failure_recovery].call(item.name)
+      data[:failure_recovery].call(item.name, item, response)
     else
       pause 0.05 while snapshot == [left_hand, right_hand]
       return true
@@ -296,7 +317,9 @@ class EquipmentManager
                    when /lt|light thrown/i
                      'light thrown'
                    when /stave/i
-                     'short staff'
+                     '(short|quarter) staff'
+                   when /polearms/i
+                     'halberd'
                    when /ow|offhand weapon/i
                      return
                    else
@@ -305,7 +328,7 @@ class EquipmentManager
 
     Flags.add('hand-full', 'You must have two free hands')
     skill_match = / #{proper_skill} /i
-    until skill_match =~ bput("swap my #{noun}", skill_match, "\\b#{noun}\\b.*(heavy edged|two-handed edged|heavy blunt|two-handed blunt|light edged|medium edged|light blunt|medium blunt|light thrown|short staff)")
+    until skill_match =~ bput("swap my #{noun}", skill_match, "\\b#{noun}\\b.*(heavy edged|two-handed edged|heavy blunt|two-handed blunt|light edged|medium edged|light blunt|medium blunt|light thrown|short staff|quarter staff|halberd)")
       pause 0.25
       next unless Flags['hand-full']
       fput('stow left') if left_hand && left_hand !~ /#{noun}/i

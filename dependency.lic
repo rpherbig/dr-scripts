@@ -9,33 +9,8 @@ require 'yaml'
 require 'ostruct'
 require 'digest/sha1'
 
-$DEPENDENCY_VERSION = '1.1'
+$DEPENDENCY_VERSION = '1.2'
 
-gem_name, *gem_ver_reqs = 'rest-firebase', '~> 1.1.0'
-gdep = Gem::Dependency.new(gem_name, *gem_ver_reqs)
-
-found_gspec = gdep.matching_specs.max_by(&:version)
-
-unless found_gspec
-  echo('Installing rest-firebase gem, this may take a few minutes.')
-  Gem.install gem_name, gdep.requirement
-  echo('Finished Installing rest-firebase gem.')
-end
-
-gem_name, *gem_ver_reqs = 'hitimes', '~> 1.2.4'
-gdep = Gem::Dependency.new(gem_name, *gem_ver_reqs)
-
-found_gspec = gdep.matching_specs.max_by(&:version)
-
-unless found_gspec
-  echo('Installing hitimes gem due to a failed install, this may take a few minutes.')
-  Gem.install gem_name, gdep.requirement
-  echo('Finished Installing hitimes gem.')
-end
-
-require 'rest-firebase'
-
-toggle_unique
 no_pause_all
 no_kill_all
 
@@ -700,6 +675,50 @@ class ReportbotManager
   end
 end
 
+class SlackbotManager
+  def initialize(debug)
+    @debug = debug
+    @slackbot = nil
+    @username = nil
+    @messages = []
+  end
+
+  def run_queue
+    register_slackbot
+    send_messages
+  end
+
+  def register(username)
+    return if @slackbot
+
+    @username = username
+  end
+
+  def queue_message(message)
+    return unless message
+
+    @messages << message
+  end
+
+  private
+
+  def register_slackbot
+    return if @slackbot
+    return unless @username
+    custom_require.call('slackbot')
+    @slackbot = SlackBot.new
+  end
+
+  def send_messages
+    return unless @slackbot
+
+    until @messages.empty?
+      message = @messages.shift
+      @slackbot.direct_message(@username, message)
+    end
+  end
+end
+
 class SetupFiles
   def initialize(debug)
     @debug = debug
@@ -722,6 +741,10 @@ class SetupFiles
     request(file, true)
   end
 
+  def pending?
+    @load
+  end
+
   def request(options, data_load = false)
     @data_load = data_load
     @load = true
@@ -735,6 +758,7 @@ class SetupFiles
 
   def run_queue
     load_base_settings if @load
+    load_data_settings if @load
     load_settings if @load && !@data_load
     load_data if @load && @data_load
     save_settings if @save
@@ -870,7 +894,22 @@ class SetupFiles
     s.bankbot_name ||= UserVars.bankbot_name
     s.bankbot_room_id ||= UserVars.bankbot_room_id
 
+    # Merge legacy appraisal settings into target appraisal settings
+    unless s.appraisal_training.include?('pouches')
+      s.appraisal_training.unshift('pouches') if s.train_appraisal_with_pouches
+    end
+
+    unless s.appraisal_training.include?('gear')
+      s.appraisal_training.unshift('gear') if s.train_appraisal_with_gear
+    end
+
     s
+  rescue => e
+    echo('*** ERROR MODIFYING DATA ***')
+    echo('*** Commonly this is malformed spell entries in your yaml file ***')
+    echo(e.message)
+    @settings = {}
+    @load = false
   end
 end
 
@@ -882,7 +921,7 @@ class MoonWatch
     @moon_data = {}
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
     @queue = []
-    start
+    load_moon_data
   end
 
   def debug
@@ -894,40 +933,33 @@ class MoonWatch
     [@f, @moon_source]
   end
 
-  def start
+  def load_moon_data
     @last_connect = Time.now
-    @f = RestFirebase.new site: @firebase_url, log_method: nil, timeout: 10, max_retries: 3, retry_exceptions: [IOError, SystemCallError, Timeout::Error], error_callback: Lich.method(:log), auth_ttl: false, auth: false
-    @reconnect = true
 
-    @moon_source = @f.event_source('moon_data')
-    @moon_source.onmessage { |event, data, _sock| update_moon_state(data) if %w(put patch).include? event }
-    @moon_source.onerror { |error, _sock| Lich.log(error) }
+    uri = URI.parse("#{@firebase_url}/moon_data.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-    @moon_source.start
-
+    request = Net::HTTP::Get.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    response = http.request(request)
+    @moon_data = nil if response.body.nil?
+    begin
+      @moon_data = JSON.parse(response.body.chomp)
+    rescue
+      @moon_data = nil
+    end
   rescue => e
     echo("error in moonwatch #{e.inspect}")
   end
 
-  def close
-    @reconnect = false
-    @moon_source.close
-    RestFirebase.shutdown
-    @f = nil
-  end
-
   def queue_update(moon, data)
-    return unless @f
     @queue << [moon, data]
   end
 
   def run_queue
-    if Time.now - @last_connect > 60 * 60 * 6
-      echo('Restarting moonwatch connection')
-      close
-      start
-      pause 3
-    end
+    load_moon_data if Time.now - @last_connect > 60
     return if @queue.empty?
     item = @queue.shift
     update_moon(item.first, item.last)
@@ -937,19 +969,16 @@ class MoonWatch
 
   def update_moon(moon, data)
     echo("updating #{moon} with #{data}") if @debug
-    @moon_data[moon] = data
-    @f.put("moon_data/#{moon}", data)
-  end
+    uri = URI.parse("#{@firebase_url}/moon_data/#{moon}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
-  def update_moon_state(raw_data)
-    echo(raw_data.to_s) if @debug
-    key = raw_data['path'][1..-1]
-    data = raw_data['data']
-    if key.nil? || key.empty?
-      @moon_data = data
-    else
-      @moon_data[key] = data
-    end
+    request = Net::HTTP::Put.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    request.body = data.to_json
+    response = http.request(request)
+    response.body.chomp
   end
 end
 
@@ -957,20 +986,23 @@ $setupfiles = SetupFiles.new(debug)
 $manager = ScriptManager.new(debug)
 $bankbot = BankbotManager.new(debug)
 $reportbot = ReportbotManager.new(debug)
+$slackbot = SlackbotManager.new(debug)
 
 def enable_moon_connection
   $turn_on_moon_watch = true
 end
 
 def get_settings(options = [])
+  pause 0.05 while $setupfiles.pending?
   $setupfiles.request_settings(options)
-  pause 0.1 until $setupfiles.loaded?
+  pause 0.05 until $setupfiles.loaded?
   $setupfiles.settings
 end
 
 def get_data(file)
+  pause 0.05 while $setupfiles.pending?
   $setupfiles.request_data(file)
-  pause 0.1 until $setupfiles.loaded?
+  pause 0.05 until $setupfiles.loaded?
   $setupfiles.settings
 end
 
@@ -996,6 +1028,14 @@ def load_reportbot_whitelist
   $reportbot.load_reportbot_whitelist
   pause 0.1 until $reportbot.loaded?
   $reportbot.whitelist
+end
+
+def send_slackbot_message(message)
+  $slackbot.queue_message(message)
+end
+
+def register_slackbot(username)
+  $slackbot.register(username)
 end
 
 def format_name(name)
@@ -1194,7 +1234,7 @@ if $manager.updated_dependency?
 end
 
 before_dying do
-  $moon_watch.close if $moon_watch
+  $moon_watch = nil
 end
 
 loop do
@@ -1207,6 +1247,8 @@ loop do
   $setupfiles.run_queue
   $bankbot.run_queue
   $reportbot.run_queue
+  $slackbot.run_queue
   $moon_watch.run_queue if $moon_watch
+  clear
   pause 0.1
 end

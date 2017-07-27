@@ -20,7 +20,7 @@ class Athletics
     @end_exp = [start_exp + 15, 29].min
 
     if have_climbing_rope
-      climb_practice(get_settings.safe_room, 'climbing rope', false)
+      train_with_rope
     elsif @climbing_target
       climb_practice(@climbing_target['id'], @climbing_target['target'], @climbing_target['hide'])
     elsif @settings.hometown == 'Crossing'
@@ -38,6 +38,111 @@ class Athletics
 
   def done_training?
     DRSkill.getxp('Athletics') >= @end_exp
+  end
+  
+  def stop_play
+    bput('stop play', 'You stop playing your song', 'In the name of', "But you're not performing")
+    Flags['ct-song'] = true
+  end
+
+  def clean_zills
+    cloth = @settings.cleaning_cloth
+    stow_hands
+    bput('remove my zills', 'You slide')
+    bput("get my #{cloth}", 'You get')
+
+    loop do
+      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
+      when 'not in need of drying'
+        break
+      when 'You should be sitting up'
+        fix_standing
+        next
+      end
+      pause 1
+      waitrt?
+
+      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
+        pause 1
+        waitrt?
+      end
+    end
+
+    until /not in need of cleaning/i =~ bput("clean my zills with my #{cloth}", 'Roundtime', 'not in need of cleaning')
+      pause 1
+      waitrt?
+    end
+
+    bput('wear my zills', 'You slide')
+    bput("stow my #{cloth}", 'You put')
+  end
+
+  def play_climbing_song?(blocking = false)
+    UserVars.song = @song_list.first.first unless UserVars.song
+    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
+    when 'Play on what instrument'
+      return false
+    when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play'
+      return false
+    when 'You cannot play'
+      wait_for_script_to_complete('safe-room')
+      return false
+    when 'dirtiness may affect your performance'
+      if DRSkill.getrank('Performance') < 20
+        echo "Skipping cleaning of zills due to low rank of Performance: #{DRSkill.getrank('Performance')}" if UserVars.athletics_debug
+        return true
+      end
+      stop_play
+      clean_zills
+      return play_climbing_song?
+    when 'You begin a', 'You effortlessly begin', 'You begin some'
+      stop_play
+      UserVars.song = @song_list[UserVars.song] || @song_list.first.first
+      return play_climbing_song?
+    when 'You struggle to begin'
+      if UserVars.song != @song_list.first.first
+        stop_play
+        UserVars.song = @song_list.first.first
+        return play_climbing_song?
+      end
+    end
+
+    return true unless blocking
+
+    Flags.reset('ct-song')
+    pause 1 until Flags['ct-song']
+    true
+  end
+
+  def train_with_rope
+    return unless exists?('climbing rope')
+    return unless exists?('zills')
+
+    # TODO: Move setup logic to its own method
+    Flags.add('climbing-finished', 'You finish practicing your climbing', 'The rope\'s will quickly fades away')
+    stow_hands
+    @song_list = get_data('perform').perform_options
+    climbing_song = UserVars.song
+    walk_to @settings.safe_room
+    bput('get climbing rope', 'You are already holding that', 'You get', 'What were you')
+    until done_training?
+      fix_standing
+      break unless play_climbing_song?
+      case bput("climb practice climbing rope", 'You begin to practice ', 'you mime a convincing climb while pulling the rope hand over hand', 'Directing your attention toward your rope', 'Allows you to climb various things like a tree', 'But you aren\'t holding')
+      when /you mime/
+        break unless play_climbing_song?
+      when /Directing your/
+        res = waitfor 'You finish practicing your climbing', 'The rope\'s will quickly fades away', 'Your focus diverts away from the rope'
+      when /Allows you to climb various things like a tree/
+        echo "Waiting for rope to become climbable again"
+        pause 10
+      when /But you aren't holding/
+        bput('get climbing rope', 'You are already holding that', 'You get', 'What were you')
+      end
+    end
+    # TODO: Move cleanup logic to its own method
+    fix_standing
+    stow_hands
   end
 
   def crossing_athletics
@@ -115,7 +220,6 @@ class Athletics
   def climb_practice(room, target, to_hide = false)
     return unless target
     walk_to(room)
-    bput('get climbing rope', 'You are already holding that', 'You get') if target.eql?('climbing rope')
     until done_training?
       retreat
       if to_hide
@@ -128,9 +232,7 @@ class Athletics
       end
       Flags.add('ct-climbing-finished', 'You finish practicing your climbing', 'The rope\'s will quickly fades away')
       Flags.add('ct-climbing-combat', 'You are engaged in combat')
-      fix_standing
-      bput("play #{UserVars.song} on zills", 'You begin', 'You\'re already playing a song') if target.eql?('climbing rope') 
-      bput("climb practice #{target}", 'You begin to practice ', 'you mime a convincing climb while pulling the rope hand over hand', 'Directing your attention toward your rope')
+      bput("climb practice #{target}", 'You begin to practice ')
       loop do
         pause
         return if Flags['ct-climbing-combat']
@@ -140,7 +242,6 @@ class Athletics
     end
 
     bput('unhide', 'You come out of hiding', 'You slip out of hiding', 'But you are not') if to_hide
-    stow_hands if target.eql?('climbing rope')
   end
 
   def climb?(room, targets)

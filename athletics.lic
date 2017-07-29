@@ -78,8 +78,8 @@ class Athletics
   end
 
   def play_climbing_song?
-    UserVars.song = @song_list.first.first unless UserVars.song
-    case bput("play #{UserVars.song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
+    UserVars.climbing_song = @song_list.first.first unless UserVars.climbing_song
+    case bput("play #{UserVars.climbing_song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
     when 'Play on what instrument'
       return false
     when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play'
@@ -96,25 +96,57 @@ class Athletics
       clean_zills
       return play_climbing_song?
     when 'You begin a', 'You effortlessly begin', 'You begin some'
-      stop_play
-      UserVars.song = @song_list[UserVars.song] || @song_list.first.first
-      return play_climbing_song?
-    when 'You struggle to begin'
-      if UserVars.song != @song_list.first.first
+      # Ignore difficulty messages if we have an offset
+      unless UserVars.climbing_song_offset
         stop_play
-        UserVars.song = @song_list.first.first
+        UserVars.climbing_song = @song_list[UserVars.climbing_song] || @song_list.first.first
         return play_climbing_song?
+      else
+        return true
+      end
+    when 'You struggle to begin'
+      # Ignore difficulty message if we have an offset
+      unless UserVars.climbing_song_offset
+        if UserVars.climbing_song != @song_list.first.first
+          stop_play
+          UserVars.climbing_song = @song_list.first.first
+          return play_climbing_song?
+        end
+      else
+        return true
       end
     end
 
     true
   end
 
+  def offset_climbing_song(direction)
+    return unless UserVars.climbing_song_offset
+    return unless @song_list
+
+    if direction.eql?(1)
+      UserVars.climbing_song = @song_list[UserVars.climbing_song]
+    elsif direction.eql?(-1)
+      UserVars.climbing_song = @song_list.key(UserVars.climbing_song)
+    else
+      echo "Invalid offset direction"
+    end 
+  end
+
   def train_with_rope
     return unless exists?('climbing rope')
     return unless exists?('zills')
 
+    UserVars.climbing_song ||= UserVars.song
+    echo "UserVars.climbing_song: #{UserVars.climbing_song}" if UserVars.athletics_debug
+
     @song_list = get_data('perform').perform_options
+    echo "@song_list: #{@song_list}" if UserVars.athletics_debug
+
+    Flags.add('climbing-finished', 'You finish practicing your climbing', 'The rope\'s will quickly fades away', 'Your focus diverts away from the rope')
+    Flags.add('climbing-too-hard', 'This climb is too difficult')
+    Flags.add('climbing-too-easy', 'This climb is no challenge at all, so you stop practicing') 
+
     stow_hands
     walk_to @settings.safe_room
     bput('get climbing rope', 'You are already holding that', 'You get', 'What were you')
@@ -125,14 +157,33 @@ class Athletics
       when /you mime/
         break unless play_climbing_song?
       when /Directing your/
-        waitfor 'You finish practicing your climbing', 'The rope\'s will quickly fades away', 'Your focus diverts away from the rope'
+        loop do
+          pause 1
+          break if Flags['climbing-finished']
+          if Flags['climbing-too-hard']
+            Flags.reset('climbing-too-hard')
+            stop_play
+            UserVars.climbing_song_offset = true
+            offset_climbing_song(-1)
+            break
+          elsif Flags['climbing-too-easy']
+            stop_play
+            Flags.reset('climbing-too-easy')
+            UserVars.climbing_song_offset = true
+            offset_climbing_song(1)
+            break
+          end
+        end
       when /Allows you to climb various things like a tree/
         echo "Waiting for rope to become climbable again"
-        pause 10
+        pause 20
       when /But you aren't holding/
         bput('get climbing rope', 'You are already holding that', 'You get', 'What were you')
       end
     end
+    Flags.delete('finished-climbing')
+    Flags.delete('climbing-too-easy')
+    Flags.delete('climbing-too-hard')
     fix_standing
     stow_hands
   end
@@ -222,13 +273,14 @@ class Athletics
         end
         return if remaining_attempts.zero?
       end
-      Flags.add('ct-climbing-finished', 'You finish practicing your climbing', 'The rope\'s will quickly fades away')
+      Flags.add('ct-climbing-finished', 'You finish practicing your climbing')
       Flags.add('ct-climbing-combat', 'You are engaged in combat')
       bput("climb practice #{target}", 'You begin to practice ')
       loop do
         pause
+        break if Flags['ct-climbing-finished']
         return if Flags['ct-climbing-combat']
-        break if done_training? || Flags['ct-climbing-finished']
+        break if done_training?
       end
       bput('stop climb', 'You stop practicing your climbing skills.', "You weren't practicing your climbing skills anyway.")
     end

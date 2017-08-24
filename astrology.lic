@@ -2,13 +2,16 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#astrology
 =end
 
-custom_require.call(%w[common common-arcana drinfomon spellmonitor])
+custom_require.call(%w[common common-arcana common-travel drinfomon spellmonitor])
 
 class Astrology
   include DRC
   include DRCA
+  include DRCT
 
   def initialize
+    exit unless DRStats.moon_mage?
+
     settings = get_settings
     arg_definitions = [
       [],
@@ -24,31 +27,40 @@ class Astrology
     @divination_bones_container = settings.divination_bones_storage['container']
     @divination_bones_tied = settings.divination_bones_storage['tied']
     @have_telescope = settings.have_telescope
-    @ap_training = settings.astral_plane_training['train_in_ap']
     @ap_source = settings.astral_plane_training['train_source']
     @ap_destination = settings.astral_plane_training['train_destination']
-    @predict_event = settings.predict_event
-	@full_pools = settings.astrology_use_full_pools
+    @prediction_pool_target = settings.astrology_use_full_pools ? 10 : 1 
+    @rtr_data = nil
+    echo " Flags['rtr-expire'].nil? #{Flags['rtr-expire'].nil?}" if UserVars.astrology_debug
+    echo " Flags['rtr-expire'] = #{Flags['rtr-expire']}" if UserVars.astrology_debug
+
     do_buffs(settings)
     if args.rtr
-      check_ripples
+      check_ripples(settings)
     else
-      train_astrology
+      train_astrology(settings)
     end
   end
 
   def do_buffs(settings)
+    return unless settings
+
+    # Pop out rtr data from buffs and save it for later
     if settings.waggle_sets['astrology']
-      wait_for_script_to_complete('buff', ['astrology'])
-    else
-      # this should probably be deprecated, this doesn't allow you to NOT cast the spells if they are up already
-      settings.astrology_buffs['spells'].each do |spell|
-        if spell['abbrev'].casecmp('rtr').zero?
-          next if !Flags['rtr-expire'].nil? && !Flags['rtr-expire']
-        end
-        echo "Buffing: #{spell}" if UserVars.astrology_debug
-        buff(spell, settings)
-      end
+      buffs = settings.waggle_sets['astrology']
+      @rtr_data = buffs.select { |spell| spell.eql?('Read the Ripples') }
+                       .values
+                       .first
+      buffs.reject! { |spell| spell.eql?('Read the Ripples') }
+      cast_spells(buffs, settings)
+    elsif settings.astrology_buffs
+      echo "******************"
+      echo "astrology_buffs has been deprecated in favor of 'astrology' waggle set and will be removed in a future version"
+      echo "******************"
+      buffs = settings.astrology_buffs['spells']
+      @rtr_data = buffs.select { |spell| spell['abbrev'].casecmp('rtr').zero? }.first
+      buffs.reject { |spell| spell['abbrev'].casecmp('rtr').zero? }
+           .each { |buff| cast_spell(buff, settings) }
     end
   end
 
@@ -123,21 +135,23 @@ class Astrology
     waitrt?
   end
 
-  def check_ripples
-    pause 1
-    return unless DRSpells.active_spells.include?('Read the Ripples')
+  def check_ripples(settings)
+    return unless @rtr_data
+    return unless settings
+    return if !Flags['rtr-expire'].nil? && !Flags['rtr-expire']
+
+    cast_spell(@rtr_data, settings)
     while DRSpells.active_spells.include?('Read the Ripples')
       line = get?
-
       res = @constellations.find { |body| /As your consciousness drifts amongst the currents of Fate, .* #{body['name']}/i =~ line }
       observe(res['name']) unless res.nil?
+      pause 1
     end
     nil
   end
 
   def check_astral
     return unless DRStats.circle > 99
-    return unless @ap_training
     return unless @ap_source
     return unless @ap_destination
     return if !UserVars.astral_plane_exp_timer.nil? && Time.now - UserVars.astral_plane_exp_timer < 3600
@@ -158,9 +172,8 @@ class Astrology
       'future events' => 'future events'
     }
 
-	target = @full_pools ? 10 : 1
-	pools.reject { |_skill, size| (size < target) }
-		.each { |skill, _size| align(skillset_to_pool[skill]) }
+    pools.reject { |_skill, size| (size < @prediction_pool_target) }
+         .each { |skill, _size| align(skillset_to_pool[skill]) }
   end
 
   def check_heavens
@@ -172,7 +185,7 @@ class Astrology
                     .select { |data| @have_telescope || !data['telescope'] }
                     .max_by { |data| [data['pools'].values.compact.size, data['circle']] }
 
-    echo(best_eye_data) if UserVars.astrology_debug
+    echo(" best_eye_data = #{best_eye_data}") if UserVars.astrology_debug
 
     waitrt?
 
@@ -189,7 +202,7 @@ class Astrology
 
                  things_to_try.sort! { |data| data['circle'] }.reverse!
 
-                 echo(things_to_try) if UserVars.astrology_debug
+                 echo(" things_to_try = #{things_to_try}") if UserVars.astrology_debug
 
                  things_to_try.find do |data|
                    result = nil
@@ -217,12 +230,11 @@ class Astrology
     pause 2
     waitrt?
 
-	target = @full_pools ? 10 : 1
-	observed['pools']
-	.reject { |_skill, value| value.nil? }
-	.reject { |_skill, value| value < target }
-	.each { |skill, _value| align(skill) }
-	waitrt?
+    observed['pools']
+      .reject { |_skill, value| value.nil? }
+      .reject { |_skill, value| value < @prediction_pool_target }
+      .each { |skill, _value| align(skill) }
+    waitrt?
   end
 
   def observe(body)
@@ -234,7 +246,16 @@ class Astrology
         bput('open my telescope', 'extend your telescope')
         return observe(body)
       end
-      result = bput('peer telescope', 'You peer aimlessly through your telescope', 'You see nothing regarding the future', 'Roundtime')
+      result = bput('peer telescope', 'You peer aimlessly through your telescope', 'You see nothing regarding the future', 'The pain is too much', 'Roundtime')
+        if result =~ /The pain is too much/
+          bput('stow telescope', 'you put', "That can't be picked up")
+          snapshot = Room.current.id
+          wait_for_script_to_complete('safe-room')
+          walk_to(snapshot)
+          settings = get_settings
+          do_buffs(settings)
+          return observe(body)
+        end
       bput('stow telescope', 'you put', "That can't be picked up")
       result
     else
@@ -262,7 +283,6 @@ class Astrology
       bput('predict event', 'You focus inwardly')
       return
     end
-    echo "Aligning to #{skill}" if UserVars.astrology_debug
     bput("align #{skill}", 'You focus internally')
     waitrt?
     if @have_divination_bones
@@ -276,15 +296,35 @@ class Astrology
     fix_standing
   end
 
-  def train_astrology
-    check_ripples
-    check_astral
-    check_weather
-    check_events(check_pools) if @predict_event
-    check_moons
-    check_heavens
+  def train_astrology(settings)
+    return unless settings
+    if settings.astrology_training.nil? # TODO: Temporary until everyone is updated
+      echo " Astrology training settings have been updated, please restart dependency!"
+      exit
+    end
+    return unless settings.astrology_training.kind_of?(Array)
+    return if settings.astrology_training.none?
+
+    settings.astrology_training.each do |task|
+      break if DRSkill.getxp('Astrology') > 30
+      case task
+      when 'ways'
+        check_astral
+      when 'observe'
+        check_heavens
+      when 'rtr'
+        check_ripples(settings)
+      when 'weather'
+        check_weather
+      when 'events'
+        check_events(check_pools)
+      when 'moons'
+        check_moons
+      end
+    end
     predict_all(check_pools)
-    fput('predict analyze')
+    bput('predict analyze', 'Roundtime')
+    waitrt?
   end
 end
 

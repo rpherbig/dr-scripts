@@ -256,6 +256,9 @@ class LootProcess
     @necro_count = thanatology['harvest_count']
     echo("  @necro_count: #{@necro_count}") if $debug_mode_ct
 
+    @make_zombie = settings.zombie['make']
+    echo("  @make_zombie: #{@make_zombie}") if $debug_mode_ct
+
     @gem_nouns = get_data('items').gem_nouns
     echo("  @gem_nouns: #{@gem_nouns}") if $debug_mode_ct
 
@@ -391,9 +394,20 @@ class LootProcess
     end
   end
 
-  def should_perform_ritual(prepare_consume)
-    !prepare_consume &&
-      ((@necro_train_first_aid && DRSkill.getxp('First Aid') < 32) || DRSkill.getxp('Thanatology') < 32)
+  def can_perform_training_ritual?(game_state)
+    return false unless can_perform_priority_ritual?(game_state)
+    return false if @necro_train_first_aid && DRSkill.getxp('First Aid') < 32
+    return false if DRSkill.getxp('Thanatology') < 32
+    true
+  end
+
+  def can_perform_priority_ritual?(game_state)
+    return false unless DRStats.necromancer?
+    return false if game_state.prepare_cfb
+    return false if game_state.casting_cfb
+    return false if game_state.prepare_consume
+    return false if game_state.casting_consume
+    true
   end
 
   def check_rituals?(game_state)
@@ -402,12 +416,16 @@ class LootProcess
     return true if game_state.construct?(mob_noun)
 
     if @last_ritual.nil?
-      if @necro_heal
+      if @necro_heal && can_perform_priority_ritual?(game_state)
         game_state.wounds = check_health
         echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
         do_necro_ritual(mob_noun, 'consume', game_state) unless game_state.wounds.empty?
       end
-      do_necro_ritual(mob_noun, @ritual_type, game_state) if should_perform_ritual(game_state.prepare_consume)
+      if @make_zombie && can_perform_priority_ritual?(game_state)
+        echo "Making zombie" if $debug_mode_ct
+        do_necro_ritual(mob_noun, 'arise', game_state) unless game_state.cfb_active? 
+      end
+      do_necro_ritual(mob_noun, @ritual_type, game_state) if can_perform_training_ritual?(game_state)
     end
     return false if %w[consume harvest dissect].include?(@last_ritual)
     true
@@ -417,12 +435,17 @@ class LootProcess
     return unless DRStats.necromancer?
     return unless ritual
     return if game_state.construct?(mob_noun)
+
     echo "Attempting necromancer ritual #{ritual} on #{mob_noun}" if $debug_mode_ct
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w[consume harvest arise].include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
-    result = bput(perform_message, @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], @rituals['construct'], @rituals['failures'])
+    result = bput(perform_message, @rituals['arise'], @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], @rituals['construct'], @rituals['failures'])
     echo result if $debug_mode_ct
     case result
+    when @rituals['arise']
+      echo 'Detected arise messaging' if $debug_mode_ct
+      game_state.prepare_cfb = true
+      @last_ritual = ritual
     when @rituals['preserve'], @rituals['dissect']
       echo 'Detected preserve or dissect messaging' if $debug_mode_ct
       @last_ritual = ritual
@@ -498,7 +521,7 @@ class LootProcess
 
     game_state.wield_whirlwind_offhand
 
-    unless game_state.casting_consume || game_state.prepare_consume
+    if can_perform_priority_ritual?(game_state)
       while bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it') == 'and get ready to search it'
         pause
         waitrt?
@@ -512,7 +535,7 @@ class LootProcess
     return unless @skin
     return unless @arrange_count > 0
     return unless game_state.skinnable?(mob_noun)
-    return if game_state.casting_consume || game_state.prepare_consume
+    return if necro_casting?(game_state)
 
     arranges = 0
     type = @arrange_types[mob_noun] || 'skin'
@@ -680,6 +703,9 @@ class SpellProcess
     @necromancer_healing = settings.necromancer_healing
     echo("  @necromancer_healing: #{@necromancer_healing}") if $debug_mode_ct
 
+    @necromancer_zombie = settings.waggle_sets['zombie']
+    echo("  @necromancer_zombie: #{@necromancer_zombie}") if $debug_mode_ct
+
     @empath_spells = settings.empath_healing
     echo("  @empath_spells: #{@empath_spells}") if $debug_mode_ct
 
@@ -777,6 +803,7 @@ class SpellProcess
     end
     check_slivers(game_state)
     check_consume(game_state)
+    check_cfb(game_state)
     check_bless(game_state)
     check_ignite(game_state)
     check_rutilors_edge(game_state)
@@ -914,7 +941,8 @@ class SpellProcess
     game_state.cast_timer = nil
 
     game_state.casting_weapon_buff = false
-    game_state.casting_consume = false if game_state.casting_consume
+    game_state.casting_consume = false
+    game_state.casting_cfb = false
 
     if game_state.casting_moonblade
       if left_hand =~ /moon/ || game_state.brawling? || game_state.offhand?
@@ -1026,6 +1054,18 @@ class SpellProcess
       data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
       prepare_spell(data, game_state)
     end
+  end
+
+  def check_cfb(game_state)
+    return unless DRStats.necromancer?
+    return unless @necromancer_zombie['Call from Beyond']
+    return if game_state.casting
+    return unless game_state.prepare_cfb
+
+    game_state.casting_cfb = true
+    game_state.prepare_cfb = false
+    data = @necromancer_zombie['Call from Beyond']
+    prepare_spell(data, game_state)
   end
 
   def check_consume(game_state)
@@ -1155,6 +1195,90 @@ class SpellProcess
     Flags.reset('ct-spellcast')
     @before = data['before']
     game_state.action_taken if (@skill == 'Targeted Magic' || @prep == 'target') && game_state.weapon_skill == 'Targeted Magic'
+  end
+end
+
+class PetProcess
+  include DRC
+
+  def initialize(settings)
+    echo('New Pet Process') if $debug_mode_ct
+
+    @zombie = settings.zombie
+    echo("  @zombie: #{@zombie}") if $debug_mode_ct
+    
+    @is_present = false
+    @current_stance = nil
+    @current_behavior = nil
+  end
+
+  def execute(game_state)
+    check_zombie(game_state)
+    if game_state.dismiss_pet?
+      dismiss_zombie(game_state)
+      game_state.next_clean_up_step
+      return true
+    end
+    false
+  end
+ 
+  def summon_zombie(game_state)
+    return unless game_state.cfb_active?
+    return unless @zombie['summon']
+    return if @is_present
+
+    command_zombie('come', game_state)
+  end
+
+  def dismiss_zombie(game_state)
+    return unless @is_present
+    return unless game_state.cfb_active?
+
+    command_zombie('leave', game_state)
+  end
+
+  def update_behavior(game_state)
+    return unless game_state.cfb_active?
+    return unless @zombie['behavior']
+    return if @zombie['behavior'].eql?(@current_behavior)
+
+    command_zombie("behavior #{@zombie['behavior']}", game_state)
+  end
+
+  def update_stance(game_state)
+    return unless game_state.cfb_active?
+    return unless @zombie['stance']
+    return if @zombie['stance'].eql?(@current_stance)
+
+    command_zombie("stance #{@zombie['stance']}", game_state)
+  end
+
+  def check_zombie(game_state)
+    return unless DRStats.necromancer?
+    return unless game_state.cfb_active?
+
+    summon_zombie(game_state)
+    update_behavior(game_state)
+    update_stance(game_state)
+  end
+
+  def command_zombie(command, game_state)
+    return unless game_state.cfb_active?
+
+    case bput("command zombie #{command}", 'willing it to come back to you', 'You have already shifted', 'That is not a valid stance', 'is already right beside you', 'zombie shambles off with a groan', 'You sense a flicker of acknowledgement through the link', 'you sense your .+ shift into a \w+ stance', 'you sense your .+ behavior shift')
+    when 'is already right beside you'
+      echo("  Zombie is present") if $debug_mode_ct
+      @is_present = true
+    when 'zombie shambles off with a groan'
+      echo("  Zombie is no longer present") if $debug_mode_ct
+      @is_present = false
+    when /shift into a \w+ stance/
+      echo("  Zombie stance set to #{@zombie['stance']}") if $debug_mode_ct
+      @current_stance = @zombie['stance']
+    when /you sense your .+ behavior shift/
+      echo("  Zombie behavior set to #{@zombie['behavior']}") if $debug_mode_ct
+      @current_behavior = @zombie['behavior']
+    end
   end
 end
 
@@ -1878,6 +2002,7 @@ class CombatTrainer
     [
       SetupProcess.new(settings, @equipment_manager),
       SpellProcess.new(settings, @equipment_manager),
+      PetProcess.new(settings),
       AbilityProcess.new(settings),
       LootProcess.new(settings, @equipment_manager),
       ManipulateProcess.new(settings),
@@ -1917,7 +2042,7 @@ class GameState
   $aim_skills = %w[Bow Slings Crossbow]
   $ranged_skills = $thrown_skills + $aim_skills
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1938,6 +2063,8 @@ class GameState
     @casting_weapon_buff = false
     @casting_consume = false
     @prepare_consume = false
+    @prepare_cfb = false
+    @casting_cfb = false
     @use_charged_maneuvers = false
     @wounds = {}
     @blessed_room = false
@@ -2084,6 +2211,8 @@ class GameState
     when 'kill'
       @clean_up_step = 'clear_magic'
     when 'clear_magic'
+      @clean_up_step = 'dismiss_pet'
+    when 'dismiss_pet'
       @clean_up_step = 'stow'
     when 'stow'
       @clean_up_step = 'done'
@@ -2100,6 +2229,10 @@ class GameState
 
   def finish_spell_casting?
     @clean_up_step == 'clear_magic'
+  end
+
+  def dismiss_pet?
+    @clean_up_step == 'dismiss_pet'
   end
 
   def stowing?
@@ -2428,6 +2561,10 @@ class GameState
     else
       "get my #{weapon_name}"
     end
+  end
+
+  def cfb_active?
+    DRSpells.active_spells.include?('Call from Beyond')
   end
 
   private

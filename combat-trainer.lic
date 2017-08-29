@@ -235,6 +235,9 @@ class LootProcess
     @ritual_type = thanatology['ritual_type'].downcase
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
 
+    @cycle_rituals = @ritual_type == 'cycle'
+    echo("  @cycle_rituals: #{@cycle_rituals}") if $debug_mode_ct
+
     @rituals = get_data('spells').rituals
     echo("  @rituals: #{@rituals}") if $debug_mode_ct
 
@@ -243,9 +246,6 @@ class LootProcess
 
     @necro_heal = thanatology['heal'] || false
     echo("  @necro_heal: #{@necro_heal}") if $debug_mode_ct
-
-    @necro_train_first_aid = thanatology['train_first_aid'] || false
-    echo("  @necro_train_first_aid: #{@necro_train_first_aid}") if $debug_mode_ct
 
     @necro_store = thanatology['store'] || false
     echo("  @necro_store: #{@necro_store}") if $debug_mode_ct
@@ -394,12 +394,27 @@ class LootProcess
     end
   end
 
-  def can_perform_training_ritual?(game_state)
+  def should_perform_ritual?(game_state)
     return false unless DRStats.necromancer?
     return false unless @ritual_type
     return false if game_state.necro_casting?
-    return false if DRSkill.getxp('First Aid') > 31 && DRSkill.getxp('Thanatology') > 31 && DRSkill.getxp('Skinning') > 31
-    true
+    return true if @ritual_type == 'dissect' && DRSkill.getxp('First Aid') < 32
+    return true if @ritual_type == 'harvest' && DRSkill.getxp('Skinning') < 32
+    return true if DRSkill.getxp('Thanatology') < 32
+    false
+  end
+
+  def determine_next_ritual
+    return unless @cycle_rituals
+
+    next_ritual = if DRSkill.getxp('Skinning') > 31 && DRSkill.getxp('First Aid') > 31 && DRSkill.getxp('Thanatology') > 31
+                    'preserve'
+                  elsif DRSkill.getxp('Skinning') < DRSkill.getxp('First Aid')
+                    'harvest'
+                  else
+                    'dissect'
+                  end
+    next_ritual
   end
 
   def check_rituals?(game_state)
@@ -407,7 +422,7 @@ class LootProcess
     mob_noun = DRRoom.dead_npcs.first
     return true if game_state.construct?(mob_noun)
 
-    echo "  can_perform_training_ritual? #{can_perform_training_ritual?(game_state)}" if $debug_mode_ct
+    echo "  should_perform_ritual? #{should_perform_ritual?(game_state)}" if $debug_mode_ct
     if @last_ritual.nil?
       if @necro_heal && !game_state.necro_casting?
         game_state.wounds = check_health
@@ -418,7 +433,12 @@ class LootProcess
         echo 'Making zombie' if $debug_mode_ct
         do_necro_ritual(mob_noun, 'arise', game_state)
       end
-      do_necro_ritual(mob_noun, @ritual_type, game_state) if can_perform_training_ritual?(game_state)
+      ritual = if @cycle_rituals
+                 determine_next_ritual
+               else
+                 @ritual_type
+               end
+      do_necro_ritual(mob_noun, ritual, game_state) if should_perform_ritual?(game_state.prepare_consume)
     end
     return false if %w[consume harvest dissect].include?(@last_ritual)
     true
@@ -437,7 +457,7 @@ class LootProcess
     case result
     when @rituals['arise']
       echo 'Detected arise messaging' if $debug_mode_ct
-      game_state.prepare_cfb = true
+      game_state.prepare_cfb = true if @make_zombie
       @last_ritual = ritual
     when @rituals['preserve'], @rituals['dissect']
       echo 'Detected preserve or dissect messaging' if $debug_mode_ct
@@ -1453,6 +1473,9 @@ class TrainerProcess
 
     @analyze_retry_count = settings.combat_analyze_retry_count
     echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
+
+    @combat_training_abilities_target = settings.combat_training_abilities_target
+    echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1515,10 +1538,11 @@ class TrainerProcess
     when 'Collect'
       game_state.sheath_whirlwind_offhand
       retreat
+      put('eng')
       collect(@forage_item)
       waitrt?
       game_state.wield_whirlwind_offhand
-      bput('kick pile', 'You take a step back', 'I could not find')
+      kick_pile?
     end
     waitrt?
     false
@@ -1594,7 +1618,7 @@ class TrainerProcess
   def analyze(game_state, fail_count)
     return if game_state.npcs.empty?
     return if fail_count > @analyze_retry_count
-    return if DRSkill.getxp('Tactics') >= 32
+    return if DRSkill.getxp('Tactics') >= @combat_training_abilities_target
     case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
     when 'Analyze what'
       fput('face next')
@@ -1656,7 +1680,7 @@ class TrainerProcess
     check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
     check = [check].flatten
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
-    expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < 32 }
+    expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < @combat_training_abilities_target }
     return expcheck unless game_state.cooldown_timers[name]
 
     Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false

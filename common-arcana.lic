@@ -16,6 +16,7 @@ module DRCA
   module_function
 
   def infuse_om(harness, amount)
+    return unless DRSpells.active_spells['Osrel Meraud'] && DRSpells.active_spells['Osrel Meraud'] < 90
     return unless amount
 
     success = ['having reached its full capacity', 'a sense of fullness', 'Something in the area is interfering with your attempt to harness']
@@ -64,29 +65,19 @@ module DRCA
     true
   end
 
-  def buff(spell, settings)
-    if spell['ritual']
-      ritual(spell)
-      return
-    end
-    prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
-    find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, spell['cambrinth'])
-    waitcastrt?
-    cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
-  end
-
   def ritual(spell)
     DRCT.retreat
+    DRC.release_invisibility
     DRC.bput('stance set 100 0 80', 'Setting your')
 
-    prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
+    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
     find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
 
     invoke(spell['focus'], nil)
     stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
     DRCT.retreat
     waitcastrt?
-    cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
+    return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
     DRCT.retreat
   end
 
@@ -235,5 +226,67 @@ module DRCA
       mana_msg = DRC.bput('perc', '^You reach out with your .* and (see|hear) \w+')
       return parse_mana_message(mana_msg)
     end
+  end
+
+  def cast_spells(spells, settings)
+    infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
+    spells.each do |name, data|
+      next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
+      while mana < 40
+        echo('Waiting on mana...')
+        pause 15
+      end
+
+      cast_spell(data, settings)
+    end
+  end
+
+  def set_moon_data(data)
+    return data unless data['moon']
+
+    check_moonwatch
+    # Look for a moon that will be up for the next few minutes
+    moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
+    unless moon
+      echo "No moon available to cast #{data['abbrev']}"
+      return nil # Return nil to indicate that setting moon casting data failed
+    end
+    data['cast'] = "cast #{moon}"
+    data
+  end
+
+  def check_moonwatch
+    return if Script.running? 'moonwatch'
+
+    echo 'moonwatch is not running. Starting it now'
+    custom_require.call('moonwatch')
+    echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
+  end
+
+  def buff(spell, settings)
+    cast_spell(spell, settings)
+  end
+
+  def cast_spell(data, settings)
+    return unless data
+    return unless settings
+
+    data = set_moon_data(data)
+    return unless data # set_moon_data returns nil on failure
+
+    release_cyclics if data['cyclic']
+
+    if data['ritual']
+      ritual(data)
+      return
+    end
+
+    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'])
+
+    find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, data['cambrinth'])
+
+    waitcastrt?
+
+    cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
   end
 end

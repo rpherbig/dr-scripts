@@ -288,6 +288,9 @@ class LootProcess
     @last_rites = settings.last_rites
     echo("  @last_rites: #{@last_rites}") if $debug_mode_ct
     @last_rites_timer = Time.now - 600
+
+    Flags.add('using-corpse', 'begins arranging', 'completes arranging', 'kneels down briefly and draws a knife', 'cruelly into the body and carving out a chunk', 'makes additional cuts, purposeful but seemingly at random')
+    Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into', 'You\'d better tie it up before putting')
   end
 
   def execute(game_state)
@@ -299,6 +302,12 @@ class LootProcess
     dispose_body(game_state)
     stow_lootables(game_state)
     if (game_state.mob_died || game_state.npcs.empty?) && game_state.finish_killing?
+      15.times do
+        break unless Flags['using-corpse']
+        break if DRRoom.dead_npcs.empty?
+        pause
+      end
+      stow_lootables(game_state)
       echo('LootProcess::clean_up') if $debug_mode_ct
       game_state.next_clean_up_step
     end
@@ -307,7 +316,7 @@ class LootProcess
   end
 
   def stow_loot(item, game_state)
-    Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into', 'You\'d better tie it up before putting')
+    Flags.reset('pouch-full')
 
     special = @loot_specials.find { |x| x['name'] == item }
     if special
@@ -464,12 +473,15 @@ class LootProcess
   def dispose_body(game_state)
     return unless @loot_bodies
     if DRRoom.dead_npcs.empty?
+      Flags.reset('using-corpse')
       @last_ritual = nil
       return
     end
     return if Time.now - @loot_timer < @loot_delay
 
     game_state.mob_died = true
+    waitrt?
+    return if Flags['using-corpse']
     if (Time.now - @last_rites_timer > 600) && @last_rites && game_state.blessed_room
       bput("pray #{DRRoom.dead_npcs.first}", 'You beseech your god for mercy', 'You pray fervently', 'You continue praying for guidance', 'Quietly touching your lips with the tips of your fingers', 'murmur a brief prayer for')
       waitrt?
@@ -728,8 +740,13 @@ class SpellProcess
 
     @tk_ammo = settings.tk_ammo
     @tk_spell = @offensive_spells.find { |spell| spell['abbrev'] =~ /tkt|tks/i }
+    drop_tkt_ammo
+    Flags.add('need-tkt-ammo', 'There is nothing here that can be thrown')
+  end
+
+  def drop_tkt_ammo
     return unless @tk_ammo
-    fput("get #{@tk_ammo}")
+    fput("get my #{@tk_ammo}")
     fput("drop #{@tk_ammo}")
   end
 
@@ -753,6 +770,10 @@ class SpellProcess
         .reject { |spell| spell['cyclic'] }
         .reject { |spell| spell['heavy'] }
         .each { |spell| Flags["ct-#{spell['abbrev']}"] = true }
+    end
+    if Flags['need-tkt-ammo']
+      Flags.reset('need-tkt-ammo')
+      drop_tkt_ammo
     end
     check_slivers(game_state)
     check_consume(game_state)
@@ -1237,15 +1258,19 @@ class ManipulateProcess
 
   def manipulate
     bput('manip stop all', 'You relax your will', 'But you aren')
-    manipulate_count = 0
 
-    @filtered_npcs.each_with_index do |npc, index|
+    manipulate_count = 0
+    npc_occurrences = Hash.new(0)
+
+    @filtered_npcs.each do |npc|
       break if manipulate_count >= @threshold
 
+      index = npc_occurrences[npc]
       ordinal_string = $ORDINALS[index]
 
       bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'beyond your ken', 'You attempt to empathically manipulate', 'You strain')
       manipulate_count += 1
+      npc_occurrences[npc] += 1
     end
 
     @last_manip = Time.now
@@ -1311,6 +1336,9 @@ class TrainerProcess
 
     @analyze_retry_count = settings.combat_analyze_retry_count
     echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
+
+    @combat_training_abilities_target = settings.combat_training_abilities_target
+    echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1373,10 +1401,11 @@ class TrainerProcess
     when 'Collect'
       game_state.sheath_whirlwind_offhand
       retreat
+      put('eng')
       collect(@forage_item)
       waitrt?
       game_state.wield_whirlwind_offhand
-      bput('kick pile', 'You take a step back', 'I could not find')
+      kick_pile?
     end
     waitrt?
     false
@@ -1437,7 +1466,7 @@ class TrainerProcess
     end
 
     if hide?
-      bput('ambush stun', 'Wouldn\'t it be better if you used a melee weapon?', 'You must be hidden or invisible to ambush', 'You aren\'t close enough to attack', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'Roundtime')
+      bput('ambush stun', 'Wouldn\'t it be better if you used a melee weapon?', 'You must be hidden or invisible to ambush', 'You aren\'t close enough to attack', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'Roundtime', 'is already out cold')
       pause
       waitrt?
     end
@@ -1452,7 +1481,7 @@ class TrainerProcess
   def analyze(game_state, fail_count)
     return if game_state.npcs.empty?
     return if fail_count > @analyze_retry_count
-    return if DRSkill.getxp('Tactics') >= 32
+    return if DRSkill.getxp('Tactics') >= @combat_training_abilities_target
     case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
     when 'Analyze what'
       fput('face next')
@@ -1492,7 +1521,7 @@ class TrainerProcess
     retreat
     bput('predict weather', 'You predict that', 'You are far too', 'you lack the skill to grasp them fully')
     waitrt?
-    fput('eng')
+    fput('engage')
   end
 
   def reset_ability(game_state, ability_name, offset = 0)
@@ -1514,7 +1543,7 @@ class TrainerProcess
     check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
     check = [check].flatten
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
-    expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < 32 }
+    expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < @combat_training_abilities_target }
     return expcheck unless game_state.cooldown_timers[name]
 
     Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false
@@ -1631,7 +1660,7 @@ class AttackProcess
     end
 
     if reget(5, 'You aren\'t close enough to attack', 'It would help if you were closer')
-      fput('eng')
+      fput('engage')
       pause 6
     else
       game_state.action_taken
@@ -1742,7 +1771,11 @@ class AttackProcess
       pause 1
     else
       game_state.set_dance_queue
-      fput(game_state.next_dance_action)
+      case bput(game_state.next_dance_action, 'You must be closer', /.*/)
+      when 'You must be closer'
+        fput('engage')
+        pause 2
+      end
       pause 0.5
       waitrt?
     end

@@ -235,6 +235,9 @@ class LootProcess
     @ritual_type = thanatology['ritual_type'].downcase
     echo("  @ritual_type: #{@ritual_type}") if $debug_mode_ct
 
+    @cycle_rituals = @ritual_type == 'cycle'
+    echo("  @cycle_rituals: #{@cycle_rituals}") if $debug_mode_ct
+
     @rituals = get_data('spells').rituals
     echo("  @rituals: #{@rituals}") if $debug_mode_ct
 
@@ -243,9 +246,6 @@ class LootProcess
 
     @necro_heal = thanatology['heal'] || false
     echo("  @necro_heal: #{@necro_heal}") if $debug_mode_ct
-
-    @necro_train_first_aid = thanatology['train_first_aid'] || false
-    echo("  @necro_train_first_aid: #{@necro_train_first_aid}") if $debug_mode_ct
 
     @necro_store = thanatology['store'] || false
     echo("  @necro_store: #{@necro_store}") if $debug_mode_ct
@@ -394,20 +394,27 @@ class LootProcess
     end
   end
 
-  def can_perform_training_ritual?(game_state)
-    return false unless can_perform_priority_ritual?(game_state)
-    return false if @necro_train_first_aid && DRSkill.getxp('First Aid') < 32
-    return false if DRSkill.getxp('Thanatology') < 32
-    true
+  def should_perform_ritual?(game_state)
+    return false unless DRStats.necromancer?
+    return false unless @ritual_type
+    return false if game_state.necro_casting?
+    return true if @ritual_type == 'dissect' && DRSkill.getxp('First Aid') < 32
+    return true if @ritual_type == 'harvest' && DRSkill.getxp('Skinning') < 32
+    return true if DRSkill.getxp('Thanatology') < 32
+    false
   end
 
-  def can_perform_priority_ritual?(game_state)
-    return false unless DRStats.necromancer?
-    return false if game_state.prepare_cfb
-    return false if game_state.casting_cfb
-    return false if game_state.prepare_consume
-    return false if game_state.casting_consume
-    true
+  def determine_next_ritual
+    return unless @cycle_rituals
+
+    next_ritual = if DRSkill.getxp('Skinning') > 31 && DRSkill.getxp('First Aid') > 31 && DRSkill.getxp('Thanatology') > 31
+                    'preserve'
+                  elsif DRSkill.getxp('Skinning') < DRSkill.getxp('First Aid')
+                    'harvest'
+                  else
+                    'dissect'
+                  end
+    next_ritual
   end
 
   def check_rituals?(game_state)
@@ -415,17 +422,27 @@ class LootProcess
     mob_noun = DRRoom.dead_npcs.first
     return true if game_state.construct?(mob_noun)
 
+    echo "  should_perform_ritual? #{should_perform_ritual?(game_state)}" if $debug_mode_ct
     if @last_ritual.nil?
-      if @necro_heal && can_perform_priority_ritual?(game_state)
+      if @necro_heal && !game_state.necro_casting?
         game_state.wounds = check_health
         echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
-        do_necro_ritual(mob_noun, 'consume', game_state) unless game_state.wounds.empty?
+        unless game_state.wounds.empty?
+          do_necro_ritual(mob_noun, 'consume', game_state)
+          return false
+        end
       end
-      if @make_zombie && can_perform_priority_ritual?(game_state)
-        echo "Making zombie" if $debug_mode_ct
-        do_necro_ritual(mob_noun, 'arise', game_state) unless game_state.cfb_active? 
+      if @make_zombie && !game_state.necro_casting? && !game_state.cfb_active?
+        echo 'Making zombie' if $debug_mode_ct
+        do_necro_ritual(mob_noun, 'arise', game_state)
+        return false
       end
-      do_necro_ritual(mob_noun, @ritual_type, game_state) if can_perform_training_ritual?(game_state)
+      ritual = if @cycle_rituals
+                 determine_next_ritual
+               else
+                 @ritual_type
+               end
+      do_necro_ritual(mob_noun, ritual, game_state) if should_perform_ritual?(game_state)
     end
     return false if %w[consume harvest dissect].include?(@last_ritual)
     true
@@ -444,7 +461,7 @@ class LootProcess
     case result
     when @rituals['arise']
       echo 'Detected arise messaging' if $debug_mode_ct
-      game_state.prepare_cfb = true
+      game_state.prepare_cfb = true if @make_zombie
       @last_ritual = ritual
     when @rituals['preserve'], @rituals['dissect']
       echo 'Detected preserve or dissect messaging' if $debug_mode_ct
@@ -521,7 +538,7 @@ class LootProcess
 
     game_state.wield_whirlwind_offhand
 
-    if can_perform_priority_ritual?(game_state)
+    unless game_state.necro_casting?
       while bput("loot #{@custom_loot_type}".strip, 'You search', 'I could not find what you were referring to', 'and get ready to search it') == 'and get ready to search it'
         pause
         waitrt?
@@ -535,7 +552,7 @@ class LootProcess
     return unless @skin
     return unless @arrange_count > 0
     return unless game_state.skinnable?(mob_noun)
-    return if necro_casting?(game_state)
+    return if game_state.necro_casting?
 
     arranges = 0
     type = @arrange_types[mob_noun] || 'skin'
@@ -1206,7 +1223,7 @@ class PetProcess
 
     @zombie = settings.zombie
     echo("  @zombie: #{@zombie}") if $debug_mode_ct
-    
+
     @is_present = false
     @current_stance = nil
     @current_behavior = nil
@@ -1221,7 +1238,7 @@ class PetProcess
     end
     false
   end
- 
+
   def summon_zombie(game_state)
     return unless game_state.cfb_active?
     return unless @zombie['summon']
@@ -1267,10 +1284,10 @@ class PetProcess
 
     case bput("command zombie #{command}", 'willing it to come back to you', 'You have already shifted', 'That is not a valid stance', 'is already right beside you', 'zombie shambles off with a groan', 'You sense a flicker of acknowledgement through the link', 'you sense your .+ shift into a \w+ stance', 'you sense your .+ behavior shift')
     when 'is already right beside you'
-      echo("  Zombie is present") if $debug_mode_ct
+      echo('  Zombie is present') if $debug_mode_ct
       @is_present = true
     when 'zombie shambles off with a groan'
-      echo("  Zombie is no longer present") if $debug_mode_ct
+      echo('  Zombie is no longer present') if $debug_mode_ct
       @is_present = false
     when /shift into a \w+ stance/
       echo("  Zombie stance set to #{@zombie['stance']}") if $debug_mode_ct
@@ -1529,7 +1546,7 @@ class TrainerProcess
       collect(@forage_item)
       waitrt?
       game_state.wield_whirlwind_offhand
-      bput('kick pile', 'You take a step back', 'I could not find')
+      kick_pile?
     end
     waitrt?
     false
@@ -2103,9 +2120,6 @@ class GameState
     @target_increment = settings.combat_trainer_target_increment
     echo("  @target_increment: #{@target_increment}") if $debug_mode_ct
 
-    @kill_last_enemy = settings.kill_last_enemy
-    echo("  @kill_last_enemy: #{@kill_last_enemy}") if $debug_mode_ct
-
     @stances = settings.stances
     echo("  @stances: #{@stances}") if $debug_mode_ct
 
@@ -2182,6 +2196,9 @@ class GameState
 
     @use_barb_combos = settings.use_barb_combos
     echo("  @use_barb_combos: #{@use_barb_combos}") if $debug_mode_ct
+
+    @kill_last_enemy = settings.kill_last_enemy
+    echo("  @kill_last_enemy: #{@kill_last_enemy}") if $debug_mode_ct
 
     @attack_overrides = settings.attack_overrides
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
@@ -2278,6 +2295,15 @@ class GameState
   def sheath_whirlwind_offhand
     return unless currently_whirlwinding
     @equipment_manager.stow_weapon(whirlwind_offhand_name)
+  end
+
+  def necro_casting?
+    return false unless DRStats.necromancer?
+    return true if @prepare_cfb
+    return true if @casting_cfb
+    return true if @prepare_consume
+    return true if @casting_consume
+    false
   end
 
   def wield_whirlwind_offhand

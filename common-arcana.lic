@@ -123,7 +123,7 @@ module DRCA
     if worn
       DRC.bput("remove my #{focus}", 'You remove', 'You slide', 'You sling', 'You take')
     elsif tied
-      DRC.bput("untie my #{focus} from my #{tied}", 'You remove')
+      DRC.bput("untie my #{focus} from my #{tied}", 'You remove', '[Y|y]ou untie')
     else
       DRC.bput("get my #{focus}", 'You get')
     end
@@ -135,9 +135,13 @@ module DRCA
     if worn
       DRC.bput("wear my #{focus}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place')
     elsif tied
-      DRC.bput("tie my #{focus} to my #{tied}", 'You attach')
+      case DRC.bput("tie my #{focus} to my #{tied}", 'You attach', '[Y|y]ou tie', 'You are a little too busy to be worrying')
+      when 'You are a little too busy to be worrying'
+        DRCT.retreat
+        stow_focus(focus, worn, tied)
+      end
     else
-      DRC.bput("stow my #{focus}", 'You put')
+      DRC.bput("stow my #{focus}", 'You put', 'You easily strap your')
     end
   end
 
@@ -177,7 +181,7 @@ module DRCA
     result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages)
     pause
     waitrt?
-    result == 'absorbs all of the energy'
+    result =~ /absorbs? all of the energy/
   end
 
   def release_cyclics
@@ -241,6 +245,48 @@ module DRCA
     end
   end
 
+  def update_astral_data(data)
+    if data['moon']
+      data = set_moon_data(data)
+    elsif data['stats']
+      data = set_planet_data(data)
+    end
+    data
+  end
+
+  def find_visible_planets(planets)
+    return if DRC.bput('get my telescope', 'You get', 'What were you', 'You are already') == 'What were you'
+
+    Flags.add('planet-not-visible', 'turns up fruitless')
+    observed_planets = []
+
+    planets.each do |planet|
+      DRC.bput("center telescope on #{planet}", 'You put your eye')
+      observed_planets << planet unless Flags['planet-not-visible']
+      Flags.reset('planet-not-visible')
+    end
+
+    Flags.delete('planet-not-visible')
+    DRC.bput('stow telescope', 'You put')
+    observed_planets
+  end
+
+  def set_planet_data(data)
+    return data unless data['stats']
+
+    planets = get_data('constellations')[:constellations].select { |planet| planet['stats'] }
+    planet_names = planets.map { |planet| planet['name'] }
+    visible_planets = find_visible_planets(planet_names)
+    data['stats'].each do |stat|
+      cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
+      next unless cast_on
+      data['cast'] = "cast #{cast_on}"
+      return data
+    end
+    echo 'Could not find any planets to cast on'
+    nil
+  end
+
   def set_moon_data(data)
     return data unless data['moon']
 
@@ -271,10 +317,11 @@ module DRCA
     return unless data
     return unless settings
 
-    data = set_moon_data(data)
-    return unless data # set_moon_data returns nil on failure
+    data = update_astral_data(data)
+    return unless data # update_astral_data returns nil on failure
 
     release_cyclics if data['cyclic']
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
 
     if data['ritual']
       ritual(data)
@@ -282,10 +329,15 @@ module DRCA
     end
 
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'])
+    prepare_time = Time.now
 
     find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, data['cambrinth'])
 
-    waitcastrt?
+    if data['prep_time']
+      pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
+    else
+      waitcastrt?
+    end
 
     cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
   end

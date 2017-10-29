@@ -20,30 +20,29 @@ class TheurgyActions
                     :recite_prayer,
                     :clean_altar,
                     :embarass_myself]
-  @@commune_order = [:eluned,
-                     :tamsine,
-                     :truffenyi,
-                     :kertigen]
 
   def initialize(settings, data)
     @settings = settings
     @hometown = @settings.hometown
     @data = data
 
-    @theurgy_supply_container = settings.theurgy_supply_container
-    @water_holder = settings.water_holder
-    @immortal_aspect = settings.immortal_aspect
-    @flint_lighter = settings.flint_lighter
-    @safe_room = settings.safe_room
+    @theurgy_supply_container = @settings.theurgy_supply_container
+    @water_holder = @settings.water_holder
+    @immortal_aspect = @settings.immortal_aspect
+    @flint_lighter = @settings.flint_lighter
+    @safe_room = @settings.safe_room
 
     @rituals = @@ritual_order.select { |ritual| should_perform_ritual?(ritual) }
     @communes = get_communes
+
+    echo "Rituals: #{@rituals.join(', ')}"
+    echo "Communes: #{@communes.join(', ')}"
   end
 
   def should_perform_ritual?(ritual)
-    return false if (@settings.theurgy_blacklist || []).include? ritual
+    return false if (@settings.theurgy_blacklist || []).include? ritual.to_s
     if !(@settings.theurgy_whitelist || []).empty?
-      return false unless @settings.theurgy_whitelist.include? ritual
+      return false unless @settings.theurgy_whitelist.include? ritual.to_s
     end
 
     return false unless supplies_available?(ritual)
@@ -75,13 +74,13 @@ class TheurgyActions
 
   def get_communes
     res = []
-    if DRStats.circle > 3 && DRSkill.getrank('Outdoorsmanship') > 20 && @data['dir_foraging']
+    if DRStats.circle > 3 && DRSkill.getrank('Outdoorsmanship') > 20 && @data['dirt_foraging']
       res << :eluned
     end
     (res << :tamsine) if DRStats.circle > 2
     (res << :truffenyi) if DRStats.circle > 60
     (res << :kertigen) if DRStats.circle > 8
-    res.select { |commune| supplies_available_for?(commune) }
+    res.select { |commune| supplies_available?(commune) }
   end
 
   def rituals_remain?
@@ -91,7 +90,7 @@ class TheurgyActions
   def supplies_available?(ritual_or_commune)
     supplies_needed_for(ritual_or_commune).none? do |item|
       !on_hand?(item) && !supply_shop(item)
-    end                                      
+    end
   end
 
   def supplies_needed_for(ritual_or_commune)
@@ -117,6 +116,8 @@ class TheurgyActions
       [:taffelberries]
     when :kertigen
       [:oil]
+    else
+      []
     end
   end
     
@@ -126,8 +127,11 @@ class TheurgyActions
       inside_container?('holy oil') || inside_container?('some oil')
     when :taffelberries
       inside_container?('Taffelberries')
+    when :carving_knife, :shaper, :prayer_chain
+      # These don't have to be in the theurgy supplies container
+      exists?(item.to_s.humanize.downcase)
     else
-      inside_container?(item.to_s)
+      inside_container?(item.to_s.humanize.downcase)
     end
   end
 
@@ -165,13 +169,18 @@ class TheurgyActions
   def buy_supplies
     items_to_buy = (@rituals + @communes).map { |r| supplies_needed_for(r) }.flatten
     items_to_buy.uniq!
-    items_to_buy.filter! { |item| on_hand?(item) }
+    items_to_buy.reject! { |item| on_hand?(item) }
     
     shops_and_items = items_to_buy.map { |i| [supply_shop(i), i] }
     shops_and_items.sort_by { |shop, _item| shop['id'] }
 
+    ensure_copper_on_hand(600, @hometown) unless items_to_buy.empty?
+
     # TODO: Need special handling for certain items
-    shops_and_items.each { |shop, item| buy_item(shop['id'], item) }
+    shops_and_items.each do |shop, item|
+      buy_item(shop['id'], item)
+      put_in_container(item)
+    end
   end
 
   def perform_next_action
@@ -228,7 +237,7 @@ class TheurgyActions
     put_in_container(@water_holder)
     fput('drop dirt') if [left_hand, right_hand].include?('dirt')
 
-    match ~= 'grind some dirt'
+    match == 'You grind some dirt in your fist'
   end
 
   def commune_tamsine
@@ -243,7 +252,7 @@ class TheurgyActions
                  'You feel warmth spread throughout your body')
     put_in_container(@water_holder)
 
-    match ~= 'feel warmth spread'
+    match == 'You feel warmth spread throughout your body'
   end
 
   def commune_truffenyi
@@ -270,7 +279,7 @@ class TheurgyActions
       cast_spell({'abbrev' => 'bless',
                   'mana' => 1,
                   'prep_time' => 5,
-                  'cast' => 'cast oil'})
+                  'cast' => 'cast oil'}, @settings)
     end
     
     if right_hand.include? 'holy oil'
@@ -279,7 +288,7 @@ class TheurgyActions
       match = bput('commune kertigen',
                    'completed this commune too recently',
                    'The thick smell of ozone fills your nostrils')
-      return match ~= 'ozone'
+      return match =~ /ozone/
     else
       stow_items
       return false
@@ -376,7 +385,8 @@ class TheurgyActions
       fput "rub #{herb}"
       pause 1
     end
-    waitfor #TODO
+    waitfor 'You wake up once more, blinking dazedly.'
+    # waitfor @data['bath']['room_name']
     fix_standing
     (@data['bath']['path_out'] || []).each { |dir| move(dir) }
     true
@@ -488,12 +498,12 @@ class Theurgy
 
   def initialize
     @settings = get_settings
-    @hometown = settings.hometown
+    @hometown = @settings.hometown
     @town_data = get_data('town')[@hometown] || {}
     @theurgy_data = get_data('theurgy')[@hometown] || {}
     @merged_data = @town_data.merge(@theurgy_data)
-
-    @favor_god = settings.favor_god
+    
+    @favor_god = @settings.favor_god
 
     Flags.add('theurgy-commune', 'fully prepared to seek assistance from the Immortals once again', 'You will not be able to open another divine conduit yet', 'You grind some dirt in your fist', 'You feel warmth spread throughout your body', 'The power of Truffenyi has answered your prayer', 'The thick smell of ozone fills your nostrils')
     Flags.add('theurgy-eluned', 'You grind some dirt in your fist', 'The waters of Eluned are still in your thoughts')
@@ -502,7 +512,7 @@ class Theurgy
     Flags.add('theurgy-kertigen', 'The thick smell of ozone fills your nostrils', 'The sounds of Kertigen\'s forge still ring in your ears')
     Flags.add('research_done', '^Breakthrough!')
 
-    @actions = TheurgyActions.new(@settings, @data)
+    @actions = TheurgyActions.new(@settings, @merged_data)
     
     pray
     @actions.buy_supplies

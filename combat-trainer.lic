@@ -20,6 +20,19 @@ class SetupProcess
     @cycle_armors = settings.cycle_armors
     echo("  @cycle_armors: #{@cycle_armors}") if $debug_mode_ct
     @last_cycle_time = Time.now - 125
+
+    @warhorn = settings.warhorn
+    echo("  @warhorn: #{@warhorn}") if $debug_mode_ct
+    @last_warhorn = Time.now - 305
+    if @warhorn
+      if DRCI.wearing?(@warhorn)
+        @warhorn_get_verb = "remove"
+        @warhorn_store_verb = "wear"
+      else
+        @warhorn_get_verb = "get"
+        @warhorn_store_verb = "stow"
+      end
+    end
   end
 
   def execute(game_state)
@@ -44,6 +57,7 @@ class SetupProcess
     was_retreating = game_state.retreating?
     game_state.update_room_npcs
     if game_state.dancing?
+      blow_warhorn(game_state)
       game_state.dance
     elsif game_state.retreating?
       determine_next_to_train(game_state, game_state.retreat_weapons, false)
@@ -64,6 +78,26 @@ class SetupProcess
   end
 
   private
+
+  def blow_warhorn(game_state)
+    return unless @warhorn
+    return if Time.now - @last_warhorn < 600
+
+    game_state.sheath_whirlwind_offhand
+
+    case bput("#{@warhorn_get_verb} my #{@warhorn}", 'You get', 'You remove', 'What were you referring to', 'You need a free hand', 'Remove what')
+    when 'You get', 'You remove'
+      bput('exhale warhorn lure','You sound a series of bursts from the warhorn','Your lungs are tired from having sounded a warhorn so recently.')
+      @last_warhorn = Time.now
+      waitrt?
+      bput("#{@warhorn_store_verb} my #{@warhorn}",'You put','You attach')
+    when 'What were you referring to'
+      echo "#{warhorn} NOT FOUND! Removing from hunt."
+      @warhorn = nil
+    end
+
+    game_state.wield_whirlwind_offhand
+  end
 
   def check_armor_swap(game_state)
     return if Time.now - @last_cycle_time < 120
@@ -298,6 +332,7 @@ class LootProcess
 
     Flags.add('using-corpse', 'begins arranging', 'completes arranging', 'kneels down briefly and draws a knife', 'cruelly into the body and carving out a chunk', 'makes additional cuts, purposeful but seemingly at random')
     Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into', 'You\'d better tie it up before putting')
+    Flags.add('container-full', 'There isn\'t any more room')
   end
 
   def execute(game_state)
@@ -324,6 +359,7 @@ class LootProcess
 
   def stow_loot(item, game_state)
     Flags.reset('pouch-full')
+    Flags.reset('container-full')
 
     special = @loot_specials.find { |x| x['name'] == item }
     if special
@@ -343,6 +379,11 @@ class LootProcess
       end
     end
     pause 0.25
+    if Flags['container-full']
+      bput("drop #{item}", 'You drop')
+      game_state.unlootable(item)
+    end
+
     return unless Flags['pouch-full']
     bput("drop my #{item}", 'You drop', 'What were')
     unless @spare_gem_pouch_container
@@ -357,7 +398,7 @@ class LootProcess
     end
     bput("get #{@gem_pouch_adjective} pouch from my #{@spare_gem_pouch_container}", 'You get a')
     bput('wear my pouch', 'You attach')
-    bput("stow #{item}", 'You pick')
+    bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
     if Flags['pouch-full'].first =~ /tie it up/
       fput('close my pouch')
     else
@@ -430,7 +471,9 @@ class LootProcess
     echo "  should_perform_ritual? #{should_perform_ritual?(game_state)}" if $debug_mode_ct
     if @last_ritual.nil?
       if @necro_heal && !game_state.necro_casting?
-        game_state.wounds = check_health
+        # TODO: combine lines 430 and 431 when everyone has updated common-healing
+        health = check_health
+        game_state.wounds = health['wounds'] || health
         echo "Severity to Wounds: #{game_state.wounds}" if $debug_mode_ct
         echo "wound_level_threshold: #{@wound_level_threshold}" if $debug_mode_ct
         unless game_state.wounds.empty?
@@ -1402,9 +1445,9 @@ class ManipulateProcess
   end
 
   def execute(game_state)
-    return if game_state.danger || @threshold.nil?
+    return if game_state.danger || @threshold.nil? || game_state.construct_mode?
     @filtered_npcs = game_state.npcs
-    manipulate if should_manipulate?
+    manipulate(game_state) if should_manipulate?
   end
 
   private
@@ -1413,21 +1456,26 @@ class ManipulateProcess
     @filtered_npcs.length >= @threshold && Time.now - @last_manip > 120
   end
 
-  def manipulate
+  def manipulate(game_state)
     bput('manip stop all', 'You relax your will', 'But you aren')
 
     manipulate_count = 0
     npc_occurrences = Hash.new(0)
 
     @filtered_npcs.each do |npc|
+      next if game_state.construct?(npc)
       break if manipulate_count >= @threshold
 
       index = npc_occurrences[npc]
       ordinal_string = $ORDINALS[index]
 
-      bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'beyond your ken', 'You attempt to empathically manipulate', 'You strain')
-      manipulate_count += 1
-      npc_occurrences[npc] += 1
+      case bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'beyond your ken', 'You attempt to empathically manipulate', 'You strain', 'does not seem to have a life essence')
+      when 'does not seem to have a life essence'  then
+        game_state.construct(npc)
+      else
+        manipulate_count += 1
+        npc_occurrences[npc] += 1
+      end
     end
 
     @last_manip = Time.now
@@ -1716,7 +1764,7 @@ class AttackProcess
     @fatigue_regen_action = settings.fatigue_regen_action
     echo("  @fatigue_regen_action: #{@fatigue_regen_action}") if $debug_mode_ct
 
-    @is_empath = DRStats.empath? && !settings.construct(false)
+    @is_empath = DRStats.empath?
     echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
 
     @undead = DRStats.empath? && settings.undead
@@ -1739,6 +1787,11 @@ class AttackProcess
   end
 
   def execute(game_state)
+    if @is_empath && game_state.construct_mode?
+      @is_empath = false
+      echo '  setting @is_empath to false due to construct_mode override' if $debug_mode_ct
+    end
+
     check_face(game_state)
     if game_state.npcs.uniq.length == 1 && !game_state.stabbable?(game_state.npcs.uniq.first)
       game_state.no_stab_current_mob = true
@@ -1786,7 +1839,7 @@ class AttackProcess
 
   def attack_melee(charged_maneuver, game_state)
     waitrt?
-    if charged_maneuver.empty?
+    unless charged_maneuver
       if game_state.backstab? || game_state.use_stealth_attack? || game_state.ambush?
         hide?(@hide_type)
       end
@@ -1873,7 +1926,7 @@ class AttackProcess
     game_state.clear_aim_queue if Flags['ct-ranged-ready']
 
     if game_state.loaded && game_state.done_aiming?
-      if game_state.selected_maneuver.empty?
+      unless game_state.selected_maneuver
         command = if game_state.use_stealth_attack? && hide?(@hide_type)
                     @stealth_attack_aimed_action
                   else
@@ -1901,7 +1954,7 @@ class AttackProcess
 
       waitrt?
       game_state.loaded = true
-      if game_state.selected_maneuver.empty?
+      unless game_state.selected_maneuver
         game_state.set_aim_queue
         aim(game_state)
         Flags.reset('ct-ranged-ready')
@@ -1949,11 +2002,11 @@ class AttackProcess
   end
 
   def check_charged_maneuver(game_state)
-    return '' unless game_state.use_charged_maneuvers
-    return '' unless game_state.charged_maneuver
+    return nil unless game_state.use_charged_maneuvers
+    return nil unless game_state.charged_maneuver
 
     timer = game_state.cooldown_timers[game_state.charged_maneuver]
-    return '' if timer && (Time.now - timer).to_i < 60
+    return nil if timer && (Time.now - timer).to_i < 60
 
     echo "***Ready to use charged maneuver: #{game_state.charged_maneuver}***" if $debug_mode_ct
     game_state.charged_maneuver
@@ -2100,7 +2153,7 @@ class GameState
     @cooldown_timers = {}
     @no_stab_current_mob = false
     @loaded = false
-    @selected_maneuver = ''
+    @selected_maneuver = nil
     @cast_timer = nil
     @casting_moonblade = false
     @casting_weapon_buff = false
@@ -2162,6 +2215,11 @@ class GameState
 
     @weapons_to_train = settings.weapon_training
     echo("  @weapons_to_train: #{@weapons_to_train}") if $debug_mode_ct
+    if is_brawling_ranged?
+      echo("  Augmenting ranged groups due to brawling with blowgun") if $debug_mode_ct
+      $aim_skills << 'Brawling'
+      $ranged_skills << 'Brawling'
+    end
 
     @use_stealth_attacks = settings.use_stealth_attacks
     echo("  @use_stealth_attacks: #{@use_stealth_attacks}") if $debug_mode_ct
@@ -2243,6 +2301,10 @@ class GameState
     echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
 
     $thrown_skills << 'Offhand Weapon' if settings.offhand_thrown
+
+    @construct_mode = settings.construct(false)
+    echo("  @construct_mode: #{@construct_mode}") if $debug_mode_ct
+
   end
 
   def next_clean_up_step
@@ -2340,13 +2402,12 @@ class GameState
   def determine_whirlwind_action
     if @use_weak_attacks && Flags['ct-accuracy-ready']
       update_analyze_array(true) if @analyze_combo_array.empty?
-      return @analyze_combo_array.shift
+      @analyze_combo_array.shift
     elsif (npcs.length > 2) && !balance_low?
-      return 'whirlwind'
-    elsif balance_low?
-      return 'gouge'
+      'whirlwind'
+    else
+      'jab'
     end
-    'jab'
   end
 
   def weapon_skill
@@ -2444,7 +2505,11 @@ class GameState
   end
 
   def brawling?
-    weapon_skill == 'Brawling'
+    weapon_skill == 'Brawling' && !is_brawling_ranged?
+  end
+
+  def is_brawling_ranged?
+    /(?:\b|^)blowgun(?:\b|$)/i.match(weapon_training['Brawling'])
   end
 
   def use_stealth_attack?
@@ -2622,6 +2687,10 @@ class GameState
 
   def cfb_active?
     DRSpells.active_spells.include?('Call from Beyond')
+  end
+
+  def construct_mode?
+    @construct_mode
   end
 
   private

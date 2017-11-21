@@ -1,0 +1,194 @@
+custom_require.call(%w[common common-arcana events spellmonitor])
+
+# expects a 'gate' waggle set
+# expects raw channeling feat 
+
+class Moongate
+  include DRC
+  include DRCA
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'person', regex: /\w+/, description: 'Person to gate' },
+        { name: 'release', regex: /release/i, optional: true, description: 'Release gate once person comes through' },
+        { name: 'teleport', regex: /teleport/i, optional: true, description: 'Cast teleport instead of moongate' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    @lnet = (Script.running + Script.hidden).find { |val| val.name == 'lnet' }
+    gate_prep(args.person, args.release, args.teleport)
+
+  end
+
+  def gate_prep(person, release, teleport)
+    send_message(person,"Lets try to gate!")
+    check_buffs
+    moon = get_moon
+    unless moon
+      send_message(person,"No moons, no gates!")
+      exit
+    end
+    focus_moonbeam(moon)
+    send_message(person,"Locating and shifting...")
+    locate_and_shift(moon, person)
+    unless verify_moon?(moon)
+      send_message(person, "The moon is no longer visible. Try again!")
+      echo "#{moon} is no longer visible. Try again!"
+      exit
+    end
+
+    unless teleport
+      send_message(person,"Here comes the gate...")
+      cast_moongate(moon)
+      send_message(person,"Moongate should be open!")
+
+      if release
+        bput('mana',"#{person} came through a")
+        bput('release moongate','You release your mental hold on the lunar energy that sustains your moongate.')
+      end
+     else
+      cast_teleport(moon)
+    end
+  end
+def cast_moongate(moon)
+    data = {'abbrev' => 'MG'}
+    check_discern(data)
+    cast_spell('moongate', data['mana'], moon)
+  end
+
+  def cast_teleport(moon)
+    data = {'abbrev' => 'teleport'}
+    check_discern(data)
+    cast_spell('teleport', data['mana'], moon)
+  end
+
+  def focus_moonbeam(moon)
+    cast_spell('fm', 1, moon, true)
+  end
+
+  def shift_moonbeam
+    return if check_if_buff_active('Shift Moonbeam', 6)
+    cast_spell('sm', 25, 'self')
+  end
+
+  def locate(person, mana = 25)
+    cast_spell('locate', mana, person)
+  end
+
+  def locate_and_shift(moon, person)
+    shift_moonbeam
+    cast_cv
+    locate(person)
+    send_message(person, "found you!")
+    bput("gesture #{moon} #{person}", 'Roundtime')
+  end
+
+  def cast_cv
+    return if check_if_buff_active('Clear Vision', 4)
+    cast_spell('cv', 1, 'self', true)
+  end
+
+  def verify_moon?(moon, uptime = 4)
+
+    is_vis = UserVars.moons['visible'].include? moon
+    is_time = UserVars.moons[moon]['timer'] >= uptime
+    return is_vis && is_time
+
+  end
+
+  def check_if_buff_active(spell, time)
+    return DRSpells.active_spells[spell] && DRSpells.active_spells[spell] > time
+  end
+def get_moon
+    unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 8 }.first
+      unless Script.running? 'moonwatch'
+        echo 'moonwatch is not running. Starting it now'
+        custom_require.call('moonwatch')
+        echo "Run `;e autostart('moonwatch')` to avoid this in the future"
+      end
+
+      unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 8 }.first
+        echo "Couldn't find any moons to cast with."
+        UserVars.moons.values[0..2].each { |x| echo x['pretty'] }
+        return false
+      end
+    end
+    return moon
+  end
+
+  def check_buffs
+    wait_for_script_to_complete('buff',['gate'])
+  end
+
+  def send_message(character, message)
+    @lnet.unique_buffer.push("chat to #{character} #{message}")
+  end
+
+  # copied from crossing-trianing
+  def check_discern(data)
+    UserVars.discerns = {} unless UserVars.discerns
+    discern_data = UserVars.discerns[data['abbrev']] || {}
+    if data['symbiosis']
+      if discern_data.empty? || discern_data['min'].nil?
+        /requires at minimum (\d+) mana streams/ =~ bput("discern #{data['abbrev']}", 'requires at minimum \d+ mana streams')
+        discern_data['mana'] = Regexp.last_match(1).to_i
+        discern_data['cambrinth'] = nil
+        discern_data['min'] = Regexp.last_match(1).to_i
+        discern_data['more'] = 0
+      end
+      calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
+    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > 24 * 60 * 60 || !discern_data['more'].nil?
+      discern_data['time_stamp'] = Time.now
+      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
+      when /you don't think you are able/i, 'You have no idea how to cast that spell'
+        discern_data['mana'] = 1
+        discern_data['cambrinth'] = nil
+      else
+        discern =~ /minimum (\d+) mana streams and you think you can reinforce it with (\d+) more/i
+        calculate_mana(Regexp.last_match(1).to_i, Regexp.last_match(2).to_i, discern_data, data['cyclic'])
+      end
+    end
+    pause 1
+    waitrt?
+    UserVars.discerns[data['abbrev']] = discern_data
+    data['mana'] = discern_data['mana']
+    data['cambrinth'] = discern_data['cambrinth']
+  end
+
+def calculate_mana(min, more, discern_data, cyclic)
+    total = min + more
+    total = (total * @settings.prep_scaling_factor).floor
+    discern_data['mana'] = [(total / 4.0).ceil, min].max
+    remaining = total - discern_data['mana']
+    if remaining > @settings.cambrinth_cap
+      discern_data['mana'] = discern_data['mana'] + (remaining - @settings.cambrinth_cap)
+      remaining = total - discern_data['mana']
+    end
+    if cyclic
+      discern_data['cambrinth'] = nil
+      discern_data['mana'] = discern_data['mana'] + remaining
+    elsif remaining > 0
+      discern_data['cambrinth'] = []
+      step_size = (remaining / 3.0).ceil
+      while remaining > 0
+        discern_data['cambrinth'] << [remaining, step_size].min
+        remaining -= step_size
+      end
+    else
+      discern_data['cambrinth'] = nil
+    end
+  end
+
+  def cast_spell(spell, mana, target, snap = false)
+
+    prepare?(spell, mana, false)
+    snap ? pause(5) : waitcastrt?
+    cast?("cast #{target}")
+
+  end
+end
+
+Moongate.new

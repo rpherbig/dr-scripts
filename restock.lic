@@ -1,0 +1,107 @@
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#restock
+
+custom_require.call(%w[common common-items common-money])
+
+class Restock
+  include DRC
+  include DRCM
+  include DRCI
+
+  def initialize
+    setup
+
+    items = parse_restockable_items
+    items_to_restock = []
+    coin_needed = 0
+
+    items.each do |item|
+      remaining = if item['stackable']
+                    count_stackable_item(item['name'])
+                  else
+                    count_nonstackable_item(item['name'])
+                  end
+
+      next unless remaining < item['quantity']
+      num_needed = item['quantity'] - remaining
+      buy_num = (num_needed / item['size'].to_f).ceil
+      coin_needed += buy_num * item['price']
+      item['buy_num'] = buy_num
+      items_to_restock.push(item)
+    end
+
+    ensure_copper_on_hand(coin_needed, @hometown) if coin_needed > 0
+
+    items_to_restock.each do |item|
+      item['buy_num'].times do
+        buy_item(item['room'], item['name'])
+        stow_hands
+      end
+    end
+  end
+
+  def setup
+    @restock = get_settings.restock
+    @hometown = get_settings.hometown
+    get_settings.storage_containers.each { |container| fput("open my #{container}") }
+  end
+
+  def parse_restockable_items
+    item_list = @restock
+    hometown_data = get_data('consumables')[@hometown]
+    items = []
+
+    item_list.each do |key, value|
+      if hometown_data.key?(key)
+        ht_data = hometown_data[key]
+        data = ht_data.each { |k, _v| ht_data[k] = value[k] if value.key?(k) }
+        items.push(data)
+      elsif valid_item_data?(value)
+        items.push(value)
+      else
+        echo "No hometown of explicit data for '#{key}'"
+      end
+    end
+
+    items
+  end
+
+  def count_stackable_item(item)
+    count_msg = bput("count my #{item}", 'I could not find what you were referring to.', 'tell you much of anything.', 'and see there \w+ .+ left.')
+    case count_msg
+    when 'I could not find what you were referring to.'
+      count = 0
+    when 'tell you much of anything.'
+      echo "#{item} is marked as stackable but is not!"
+      count = count_nonstackable_item(item)
+    else
+      count_txt = count_msg.match(/and see there \w+ (.+) left./).captures.first.tr('-', ' ')
+      count = text2num(count_txt)
+    end
+    waitrt?
+    count
+  end
+
+  def count_nonstackable_item(item)
+    /inside your (.*).|I could not find/ =~ bput("tap my #{item}", 'inside your (.*).', 'I could not find')
+    tap_result = Regexp.last_match(1)
+    if tap_result.nil?
+      return 0
+    else
+      container = tap_result
+      contents = bput("rummage /C #{item.split.last} IN MY #{container}", '^You rummage .*')
+      return contents.scan(/#{item}/).size
+    end
+  end
+
+  def valid_item_data?(item_data)
+    return false unless item_data.key?('name')
+    return false unless item_data.key?('size')
+    return false unless item_data.key?('room')
+    return false unless item_data.key?('price')
+    return false unless item_data.key?('stackable')
+    return false unless item_data.key?('quantity')
+    true
+  end
+end
+
+Restock.new

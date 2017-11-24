@@ -5,10 +5,9 @@
     - Add support for prayer mats.
     - Support purchasing multiples of each item, especially stackables like oil/incense.
     - Support varying prices for supplies in different towns.
-    - Support entering/exiting unmapped shops.
 =end
 
-custom_require.call(%w[common common-arcana common-items common-money common-travel drinfomon spellmonitor equipmanager])
+custom_require.call(%w[common common-arcana common-items common-money common-travel events drinfomon spellmonitor equipmanager])
 
 class TheurgyActions
   include DRC
@@ -17,7 +16,7 @@ class TheurgyActions
   include DRCM
   include DRCA
 
-  def initialize(settings, data)
+  def initialize(settings)
     @settings = settings
     @hometown = @settings.hometown
     @data = data
@@ -98,7 +97,7 @@ class TheurgyActions
       herbs = @data['herbs'] || %w[sage lavender]
       rituals << {
         method: :bathe,
-        items: herbs.map { |h| { name: h, shop: @data['theurgy_supplies'] } }
+        items: herbs.map { |h| { name: h, shop: @data['herb_shop'] } }
       }
     end
     rituals << {
@@ -122,14 +121,14 @@ class TheurgyActions
       rituals << {
         method: :incense,
         items: [
-          { name: 'incense', shop: @data['theurgy_supplies'] },
+          { name: 'incense', shop: @data['incense_shop'] },
           { name: 'flint', shop: @data['flint_shop'] }
         ]
       }
       rituals << {
         method: :wine,
         items: [
-          { name: 'wine', shop: @data['theurgy_supplies'] }
+          { name: 'wine', shop: @data['wine_shop'] }
         ]
       }
       rituals << {
@@ -168,17 +167,19 @@ class TheurgyActions
       }
     end
     if DRStats.circle > 60
-      communes << {
+      truffenyi_commune = {
         name: :truffenyi,
         method: :commune_truffenyi,
-        items: [
-          {
-            name: 'Taffelberries',
-            shop: @data['taffelberry_shop'],
-            purchase_method: :buy_taffelberries
-          }
-        ]
+        items: []
       }
+      unless @known_spells.include? 'Glythtide\'s Gift'
+        truffenyi_commune[:items] << {
+          name: 'Taffelberries',
+          shop: @data['taffelberry_shop'],
+          purchase_method: :buy_taffelberries
+        }
+      end
+      communes << truffenyi_commune
     end
     if DRStats.circle > 8
       communes << {
@@ -238,7 +239,7 @@ class TheurgyActions
 
   def get_from_container(item_name)
     bput("get #{item_name} from my #{@theurgy_supply_container}",
-         'You get', 'I could not find', 'What were you referring to')
+         'You get', 'I could not find', 'What were you referring to') == 'You get'
   end
 
   def have_holy_water?
@@ -251,7 +252,7 @@ class TheurgyActions
     items_to_buy.reject! { |item| item[:on_hand] }
     items_to_buy.sort_by! { |item| item[:shop]['id'] }
 
-    ensure_copper_on_hand(600, @hometown) unless items_to_buy.empty?
+    ensure_copper_on_hand(3000, @hometown) unless items_to_buy.empty?
 
     items_to_buy.each do |item|
       walk_to(item[:shop]['id'])
@@ -261,6 +262,16 @@ class TheurgyActions
       else
         buy_item(item[:shop]['id'], item[:name])
       end
+
+      if item[:shop]['needs_bless'] && @known_spells.include?('Bless')
+        complete_or_interrupt_research
+        cast_spell({ 'abbrev' => 'bless',
+                     'mana' => 1,
+                     'prep_time' => 2,
+                     'cast' => "cast my #{item[:name]}" }, @settings)
+        continue_research
+      end
+
       put_in_container(item[:name])
     end
   end
@@ -353,7 +364,32 @@ class TheurgyActions
   end
 
   def commune_truffenyi
-    get_from_container('Taffelberries')
+    stow_hands
+
+    offered_item = nil
+    if inside_container?('Taffelberries')
+      offered_item = 'Taffelberries'
+      get_from_container('Taffelberries')
+    elsif @known_spells.include? 'Glythtide\'s Gift'
+      complete_or_interrupt_research
+      Flags.add('theurgy-gg-drink',
+                /hearty chuckle as .*?(\w+) appears in your (?:right|left) hand!/,
+                'Both your hands are full!')
+      cast_spell({ 'abbrev' => 'gg',
+                   'mana' => 5,
+                   'prep_time' => 2,
+                   'cast' => 'cast drink' }, @settings)
+      if Flags['theurgy-gg-drink'] &&
+         !Flags['theurgy-gg-drink'].include?('Both your hands are full!')
+        offered_item = Flags['theurgy-gg-drink'][1]
+      end
+      Flags.delete('theurgy-gg-drink')
+      return false unless offered_item
+      continue_research
+    else
+      return false
+    end
+
     bput('commune truffenyi',
          'completed this commune too recently',
          'you have attempted a commune too recently in the past',
@@ -362,11 +398,14 @@ class TheurgyActions
     if right_hand.include? 'orb'
       fput 'drop orb'
       return true
-    else
+    elsif offered_item == 'Taffelberries'
       fput 'get Taffelberries'
       put_in_container('Taffelberries')
-      return false
+    else
+      bput("drop #{offered_item}", 'You drop',
+           'What were you referring', 'But you aren\'t holding')
     end
+    false
   end
 
   def commune_kertigen
@@ -740,9 +779,6 @@ class Theurgy
   def initialize
     settings = get_settings
     hometown = settings.hometown
-    town_data = get_data('town')[hometown] || {}
-    theurgy_data = get_data('theurgy')[hometown] || {}
-    merged_data = town_data.merge(theurgy_data)
 
     @favor_god = settings.favor_god
     @theurgy_exp_threshold = settings.theurgy_exp_threshold
@@ -754,7 +790,7 @@ class Theurgy
     Flags.add('theurgy-kertigen', 'The thick smell of ozone fills your nostrils', 'The sounds of Kertigen\'s forge still ring in your ears')
     Flags.add('research_done', '^Breakthrough!')
 
-    @actions = TheurgyActions.new(settings, merged_data)
+    @actions = TheurgyActions.new(settings)
 
     pray
     @actions.buy_supplies

@@ -4,23 +4,22 @@
   Planned improvements:
     - Add support for prayer mats.
     - Support purchasing multiples of each item, especially stackables like oil/incense.
-    - Support varying prices for supplies in different towns.
-    - Support entering/exiting unmapped shops.
 =end
 
-custom_require.call(%w[common common-arcana common-items common-money common-travel events drinfomon spellmonitor equipmanager])
+custom_require.call(%w[common common-arcana common-crafting common-items common-money common-travel events drinfomon spellmonitor equipmanager])
 
 class TheurgyActions
   include DRC
+  include DRCC
   include DRCI
   include DRCT
   include DRCM
   include DRCA
 
-  def initialize(settings, data)
+  def initialize(settings)
     @settings = settings
     @hometown = @settings.hometown
-    @data = data
+    @data = get_data('theurgy')[@hometown]
     @bag = settings.crafting_container
     @bag_items = settings.crafting_items_in_container
     @belt = settings.engineering_belt
@@ -98,7 +97,7 @@ class TheurgyActions
       herbs = @data['herbs'] || %w[sage lavender]
       rituals << {
         method: :bathe,
-        items: herbs.map { |h| { name: h, shop: @data['theurgy_supplies'] } }
+        items: herbs.map { |h| { name: h, shop: @data['herb_shop'] } }
       }
     end
     rituals << {
@@ -122,14 +121,14 @@ class TheurgyActions
       rituals << {
         method: :incense,
         items: [
-          { name: 'incense', shop: @data['theurgy_supplies'] },
+          { name: 'incense', shop: @data['incense_shop'] },
           { name: 'flint', shop: @data['flint_shop'] }
         ]
       }
       rituals << {
         method: :wine,
         items: [
-          { name: 'wine', shop: @data['theurgy_supplies'] }
+          { name: 'wine', shop: @data['wine_shop'] }
         ]
       }
       rituals << {
@@ -145,7 +144,6 @@ class TheurgyActions
         {
           name: 'golden parchment',
           shop: @data['parchment_shop'],
-          purchase_method: :buy_parchment
         }
       ]
     }
@@ -171,7 +169,6 @@ class TheurgyActions
         truffenyi_commune[:items] << {
           name: 'Taffelberries',
           shop: @data['taffelberry_shop'],
-          purchase_method: :buy_taffelberries
         }
       end
       communes << truffenyi_commune
@@ -253,20 +250,44 @@ class TheurgyActions
     items_to_buy.reject! { |item| item[:on_hand] }
     items_to_buy.sort_by! { |item| item[:shop]['id'] }
 
-    ensure_copper_on_hand(3000, @hometown) unless items_to_buy.empty?
+    total_cost = items_to_buy.map { |i| i[:shop]['price'] }.reduce(:+)
+    ensure_copper_on_hand(total_cost, @hometown) unless items_to_buy.empty?
 
     items_to_buy.each do |item|
-      walk_to(item[:shop]['id'])
-
-      if item[:purchase_method]
-        send(item[:purchase_method])
-      else
-        buy_item(item[:shop]['id'], item[:name])
+      shop = item[:shop]
+      if shop['method'] &&
+         !(purchase_method_whitelist.include?(shop['method']))
+        echo "method #{shop['method']} not whitelisted"
+        next
       end
+
+      walk_to(shop['id'])
+
+      if shop['method']
+        send(shop['method'])
+      else
+        buy_item(shop['id'], item[:name])
+      end
+
+      if shop['needs_bless'] && @known_spells.include?('Bless')
+        complete_or_interrupt_research
+        cast_spell({ 'abbrev' => 'bless',
+                     'mana' => 1,
+                     'prep_time' => 2,
+                     'cast' => "cast my #{item[:name]}" }, @settings)
+        continue_research
+      end
+
       put_in_container(item[:name])
     end
   end
 
+  def purchase_method_whitelist
+    ['buy_taffelberries',
+     'buy_parchment',
+     'buy_wine_shard']
+  end
+  
   def buy_taffelberries
     bput('order 14',
          'puts some sugar-dipped taffelberries on the bar',
@@ -281,6 +302,12 @@ class TheurgyActions
          'You realize you don\'t have enough')
     bput('unroll my parchment', 'You reverently unroll',
          'I could not find', 'What were you referring to')
+  end
+
+  def buy_wine_shard
+    bput('order 10', 'The publican places a flute',
+         'You don\'t have enough money to afford that')
+    bput('get wine on bar', 'You get a flute', 'What were you referring') 
   end
 
   def perform_next_action
@@ -770,9 +797,6 @@ class Theurgy
   def initialize
     settings = get_settings
     hometown = settings.hometown
-    town_data = get_data('town')[hometown] || {}
-    theurgy_data = get_data('theurgy')[hometown] || {}
-    merged_data = town_data.merge(theurgy_data)
 
     @favor_god = settings.favor_god
     @theurgy_exp_threshold = settings.theurgy_exp_threshold
@@ -784,7 +808,7 @@ class Theurgy
     Flags.add('theurgy-kertigen', 'The thick smell of ozone fills your nostrils', 'The sounds of Kertigen\'s forge still ring in your ears')
     Flags.add('research_done', '^Breakthrough!')
 
-    @actions = TheurgyActions.new(settings, merged_data)
+    @actions = TheurgyActions.new(settings)
 
     pray
     @actions.buy_supplies

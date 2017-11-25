@@ -2,7 +2,6 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#theurgy
 
   Planned improvements:
-    - Add support for prayer mats.
     - Support purchasing multiples of each item, especially stackables like oil/incense.
 =end
 
@@ -20,15 +19,18 @@ class TheurgyActions
     @settings = settings
     @hometown = @settings.hometown
     @data = get_data('theurgy')[@hometown]
+    @safe_room = @settings.safe_room
+    @immortal_aspect = @settings.immortal_aspect
+
     @bag = settings.crafting_container
     @bag_items = settings.crafting_items_in_container
     @belt = settings.engineering_belt
-
     @theurgy_supply_container = @settings.theurgy_supply_container
     @water_holder = @settings.water_holder
-    @immortal_aspect = @settings.immortal_aspect
     @flint_lighter = @settings.flint_lighter
-    @safe_room = @settings.safe_room
+
+    @prayer_mat = @settings.theurgy_prayer_mat
+    @prayer_mat_room = @settings.theurgy_prayer_mat_room
 
     @known_spells = check_spells
     @rituals = get_rituals
@@ -103,8 +105,7 @@ class TheurgyActions
     rituals << {
       method: :pray_badge
     }
-    # TODO: prayer mat support
-    if @data['altar']
+    if @data['altar'] && !@prayer_mat
       if @immortal_aspect
         rituals << {
           method: :meditate_bead,
@@ -113,6 +114,17 @@ class TheurgyActions
           ]
         }
       end
+      rituals << {
+        method: :clean_altar
+      }
+      rituals << {
+        method: :recite_prayer
+      }
+    end
+    if @data['altar'] || @prayer_mat
+      rituals << {
+        method: :kiss_altar
+      }
       if DRStats.circle >= 10
         rituals << {
           method: :dance
@@ -131,19 +143,13 @@ class TheurgyActions
           { name: 'wine', shop: @data['wine_shop'] }
         ]
       }
-      rituals << {
-        method: :recite_prayer
-      }
-      rituals << {
-        method: :clean_altar
-      }
     end
     rituals << {
       method: :embarass_myself,
       items: [
         {
           name: 'golden parchment',
-          shop: @data['parchment_shop'],
+          shop: @data['parchment_shop']
         }
       ]
     }
@@ -168,7 +174,7 @@ class TheurgyActions
       unless @known_spells.include? 'Glythtide\'s Gift'
         truffenyi_commune[:items] << {
           name: 'Taffelberries',
-          shop: @data['taffelberry_shop'],
+          shop: @data['taffelberry_shop']
         }
       end
       communes << truffenyi_commune
@@ -251,17 +257,17 @@ class TheurgyActions
     items_to_buy.sort_by! { |item| item[:shop]['id'] }
 
     total_cost = items_to_buy.map { |i| i[:shop]['price'] }.reduce(:+)
-    ensure_copper_on_hand(total_cost, @hometown) unless items_to_buy.empty?
+    ensure_copper_on_hand(total_cost + 300, @hometown) unless items_to_buy.empty?
 
     items_to_buy.each do |item|
       shop = item[:shop]
       if shop['method'] &&
-         !(purchase_method_whitelist.include?(shop['method']))
+         !purchase_method_whitelist.include?(shop['method'])
         echo "method #{shop['method']} not whitelisted"
         next
       end
 
-      walk_to(shop['id'])
+      safe_walk_to shop['id']
 
       if shop['method']
         send(shop['method'])
@@ -283,11 +289,11 @@ class TheurgyActions
   end
 
   def purchase_method_whitelist
-    ['buy_taffelberries',
-     'buy_parchment',
-     'buy_wine_shard']
+    %w[buy_taffelberries
+       buy_parchment
+       buy_wine_shard]
   end
-  
+
   def buy_taffelberries
     bput('order 14',
          'puts some sugar-dipped taffelberries on the bar',
@@ -307,11 +313,42 @@ class TheurgyActions
   def buy_wine_shard
     bput('order 10', 'The publican places a flute',
          'You don\'t have enough money to afford that')
-    bput('get wine on bar', 'You get a flute', 'What were you referring') 
+    bput('get wine on bar', 'You get a flute', 'What were you referring')
   end
 
   def perform_next_action
     perform_next_ritual unless perform_next_commune
+  end
+
+  def safe_walk_to(id)
+    roll_prayer_mat
+    walk_to id
+  end
+
+  def walk_to_altar_or_prayer_mat
+    return if @mat_unrolled
+
+    if @prayer_mat
+      walk_to @prayer_mat_room['id'] if @prayer_mat_room
+      stow_hands
+      get_from_container(@prayer_mat)
+      bput("unroll #{@prayer_mat}",
+           'reverently lay your', 'need to be holding that first')
+      @mat_unrolled = true
+    else
+      walk_to @data['altar']['id']
+    end
+  end
+
+  def roll_prayer_mat
+    if @mat_unrolled
+      stow_hands
+      bput("roll #{@prayer_mat}",
+           'carefully gather up',
+           'need to be holding that first', 'not on the ground')
+      put_in_container(@prayer_mat)
+      @mat_unrolled = false
+    end
   end
 
   ### COMMUNES ###
@@ -346,7 +383,7 @@ class TheurgyActions
   end
 
   def commune_eluned
-    walk_to @data['dirt_foraging']['id']
+    safe_walk_to @data['dirt_foraging']['id']
     forage? 'dirt'
 
     get_from_container(@water_holder)
@@ -471,7 +508,7 @@ class TheurgyActions
     end
     return false unless withdraw_exact_amount?('5 silver', @hometown)
 
-    walk_to @data['almsbox']['id']
+    safe_walk_to @data['almsbox']['id']
     UserVars.tithe_timer = Time.now
     # TODO: does almsbox name vary by location?
     bput("put 5 silver #{hometown_currency(@hometown)} in almsbox",
@@ -485,10 +522,10 @@ class TheurgyActions
       end
     end
 
-    walk_to '5872'
+    safe_walk_to '5872'
     move 'go stair'
     waitfor 'Four beautifully detailed figures'
-    walk_to '5846'
+    safe_walk_to '5846'
     case bput('pull candle',
               'You tug at the silver candlestick but it',
               'You grasp hold of the silver candlestick and pull it back')
@@ -504,14 +541,14 @@ class TheurgyActions
       pause
       move 'go hatch'
     end
-    walk_to '5756'
+    safe_walk_to '5756'
     move 'go stair'
     waitfor 'A low relief has been carefully carved'
     true
   end
 
   def refectory
-    walk_to '5988'
+    safe_walk_to '5988'
     bput('meditate', 'You bow your head and contemplate')
     waitrt?
     true
@@ -527,7 +564,7 @@ class TheurgyActions
 
   def carve_bead
     return false unless have_holy_water?
-    walk_to @data['limb_foraging']['id']
+    safe_walk_to @data['limb_foraging']['id']
     stow_hands
 
     unless get_prayer_chain?
@@ -589,7 +626,7 @@ class TheurgyActions
       replace_prayer_chain
       return false
     end
-    walk_to @data['altar']['id']
+    safe_walk_to @data['altar']['id']
     fput 'kneel'
     bput('meditate my prayer chain', 'You clutch')
     waitfor 'suddenly detaches from your prayer bead chain'
@@ -631,7 +668,7 @@ class TheurgyActions
 
   def sirese_seed
     return false unless have_holy_water?
-    walk_to @data['gather_sirese']['id']
+    safe_walk_to @data['gather_sirese']['id']
 
     exit unless (DRRoom.npcs - @settings.ignored_npcs).empty? # Invasion check
     waitrt? while bput('gather seed',
@@ -639,7 +676,7 @@ class TheurgyActions
                        'This is not a good',
                        'You come up empty') == 'You come up empty'
     waitrt?
-    walk_to @data['plant_sirese']['id']
+    safe_walk_to @data['plant_sirese']['id']
     bput('plant seed', 'You carefully dig a hole')
     get_from_container(@water_holder)
     bput("sprinkle #{@water_holder} on room", 'You sprinkle some holy water')
@@ -648,7 +685,7 @@ class TheurgyActions
   end
 
   def bathe
-    walk_to @data['bath']['id']
+    safe_walk_to @data['bath']['id']
     (@data['bath']['path_in'] || []).each { |dir| move(dir) }
     (@data['herbs'] || %w[sage lavender]).each do |herb|
       get_from_container(herb)
@@ -680,7 +717,7 @@ class TheurgyActions
   end
 
   def dance
-    walk_to @data['altar']['id']
+    walk_to_altar_or_prayer_mat
     end_conds =  ['flawless performance to those on high',
                   'In your condition',
                   'Your dance reaches its conclusion']
@@ -688,7 +725,7 @@ class TheurgyActions
                                 'Your actions grow',
                                 'Your dance',
                                 'but you falt']
-    until end_conds.include? bput('dance', *all_messages)
+    until end_conds.include? bput("dance #{@prayer_mat}", *all_messages)
       pause 1
       waitrt?
       fix_standing
@@ -697,8 +734,7 @@ class TheurgyActions
   end
 
   def incense
-    walk_to @data['altar']['id']
-
+    walk_to_altar_or_prayer_mat
     bput("get #{@flint_lighter}",
          'You get', 'I could not find', 'What were you referring to')
     get_from_container('incense')
@@ -708,25 +744,30 @@ class TheurgyActions
                        'bursts into flames',
                        'much too dark in here to do that') == 'nothing happens'
     waitrt?
-    fput 'wave incense at altar'
+    fput "wave incense at #{@prayer_mat || 'altar'}"
     fput 'snuff incense'
     put_in_container('incense')
     stow_hands
-    fput "stow #{@flint_lighter}", 'You put your', 'Stow what'
     pause 1
     true
   end
 
   def wine
-    walk_to @data['altar']['id']
+    walk_to_altar_or_prayer_mat
     get_from_container('wine')
-    fput 'pour wine on altar'
+    if @prayer_mat
+      fix_standing
+      bput("kneel #{@prayer_mat}", 'You humbly kneel')
+    end
+    bput("pour wine on #{@prayer_mat || 'altar'}",
+         'You quietly pour', 'Pour what')
+    fix_standing
     put_in_container('wine')
     true
   end
 
   def recite_prayer
-    walk_to @data['altar']['id']
+    safe_walk_to @data['altar']['id']
     fput "recite Meraud, power the holy fires that unleash my righteous vengeance;Chadatru, guide my sword to swing in justice;Everild, give me the power to conquer my enemies;Truffenyi, let me not lose sight of compassion and mercy;Else, I will become like those I despise;Urrem'tier, receive into your fetid grasp these wicked souls;May the Tamsine's realms never know their evil ways again;May all the Immortals guide your faithful soldier #{checkname}."
     pause 1
     waitrt?
@@ -734,7 +775,7 @@ class TheurgyActions
 
   def clean_altar
     return false unless inside?('holy water', @water_holder)
-    walk_to @data['altar']['id']
+    safe_walk_to @data['altar']['id']
     get_from_container(@water_holder)
     fput 'clean altar with holy water'
     waitfor 'You finish your job'
@@ -743,9 +784,22 @@ class TheurgyActions
     true
   end
 
+  def kiss_altar
+    walk_to_altar_or_prayer_mat
+    if @prayer_mat
+      fix_standing
+      bput("kneel #{@prayer_mat}", 'You humbly kneel')
+    else
+      bput('kneel', 'You kneel down', 'Subservient type')
+    end
+    bput("kiss #{@prayer_mat || 'altar'}", 'You bend forward to kiss')
+    fix_standing
+    true
+  end
+
   def embarass_myself
     return unless inside_container?('parchment')
-    walk_to(@safe_room)
+    safe_walk_to @safe_room
     get_from_container('golden parchment')
     fput 'invoke my parchment'
     waitfor 'You conclude'
@@ -813,6 +867,7 @@ class Theurgy
     pray
     @actions.buy_supplies
     @actions.perform_next_action while @actions.rituals_remain? && should_continue?
+    @actions.roll_prayer_mat
 
     fput 'commune'
   end

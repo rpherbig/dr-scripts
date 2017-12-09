@@ -22,7 +22,17 @@ class HuntingBuddy
     hunting_info = []
     if @settings.hunting_file_list || args.flex.any?
       (args.flex.any? ? args.flex : @settings.hunting_file_list).each do |file|
-        hunting_info += file == 'setup' ? get_settings.hunting_info : get_settings([file]).hunting_info
+        if file == 'setup'
+          hunting_info += get_settings.hunting_info
+        else
+          # Hunting info from extra config needs the config name passed on in args.
+          infos = get_settings([file]).hunting_info
+          infos.each do |info|
+            info['args'] = info['args'] || []
+            (info['args'] << file) unless info['args'].include? file
+          end
+          hunting_info += infos
+        end
       end
     else
       hunting_info = @settings.hunting_info
@@ -33,8 +43,7 @@ class HuntingBuddy
 
   def main
     check_bundling_rope
-
-    check_prehunt_buffs
+    wait_for_script_to_complete('restock')
 
     @hunting_info.each do |info|
       if @stop_hunting
@@ -51,6 +60,7 @@ class HuntingBuddy
       args = info['args']
       before_actions = info['before']
       after_actions = info['after']
+      during_actions = info['during']
       duration = info[:duration]
       stop_on_skills = info['stop_on']
 
@@ -58,13 +68,27 @@ class HuntingBuddy
       execute_actions(before_actions)
 
       if all_skills_at_cap?(stop_on_skills)
+        stop_actions(during_actions)
         # Execute scripts to run after the hunt
         execute_actions(after_actions)
         next
       end
+
+      check_prehunt_buffs
+
       next unless find_hunting_room?(info[:zone])
 
-      args.each_with_index { |arg, index| hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil) }
+      args.each_with_index do |arg, index|
+        if @stopped_for_bleeding
+          retreat
+          stop_script('tendme') if Script.running?('tendme')
+          break
+        end
+        execute_nonblocking_actions(during_actions)
+        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil)
+      end
+
+      stop_actions(during_actions)
 
       wait_for_script_to_complete('bescort', @exit) if @exit
       release_cyclics
@@ -82,6 +106,21 @@ class HuntingBuddy
       action_parts = action.split(' ')
       script_name = action_parts.shift
       wait_for_script_to_complete(script_name, action_parts)
+    end
+  end
+
+  def execute_nonblocking_actions(actions)
+    actions.each do |action|
+      echo "***STATUS*** EXECUTE #{action}"
+      action_parts = action.split(' ')
+      script_name = action_parts.shift
+      start_script(script_name, action_parts)
+    end
+  end
+
+  def stop_actions(actions)
+    actions.each do |script_name|
+      stop_script(script_name) if Script.running?(script_name)
     end
   end
 
@@ -107,10 +146,22 @@ class HuntingBuddy
 
   def find_hunting_room?(zone_name)
     UserVars.friends = @settings.hunting_buddies || []
-    if rooms = @hunting_zones[zone_name]
+    zones = Array(zone_name).flatten.compact
+    rooms = @hunting_zones.values_at(*zones.select { |name| @hunting_zones.include?(name) }).flatten.compact unless @escort_zones.include?(zones.first)
+    if rooms.empty? || rooms.nil?
+      escort_info = @escort_zones[zones.first]
+      unless escort_info
+        echo "FAILED TO FIND THE HUNTING ZONE(S) #{zones} IN BASE.YAML"
+        return false
+      end
+      walk_to(escort_info['base'])
+      wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
+      @exit = [escort_info['area'], 'exit']
+    else
       @exit = nil
       find_empty_room(rooms, @settings.safe_room,
                       lambda do
+                        return false if DRRoom.pcs.size > 2
                         return true if (DRRoom.pcs & UserVars.friends).any?
                         return false if (DRRoom.pcs - DRRoom.group_members).any?
                         # No visible friends in the room and no visible people
@@ -133,15 +184,6 @@ class HuntingBuddy
                       end,
                       @settings.hunting_room_min_mana,
                       @settings.hunting_room_strict_mana)
-    else
-      escort_info = @escort_zones[zone_name]
-      unless escort_info
-        echo "FAILED TO FIND HUNTING ZONE #{zone_name} IN BASE.YAML"
-        return false
-      end
-      walk_to(escort_info['base'])
-      wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
-      @exit = [escort_info['area'], 'exit']
     end
 
     true
@@ -152,10 +194,11 @@ class HuntingBuddy
   end
 
   def hunt(args, duration, stop_on_skills)
+    $COMBAT_TRAINER = nil
     echo("***STATUS*** beginning hunt '#{args}' for '#{duration}' minutes")
     verify_script('combat-trainer')
     start_script('combat-trainer', args)
-    pause 1 until $COMBAT_TRAINER.running
+    pause until $COMBAT_TRAINER.running
     counter = 0
     loop do
       clear
@@ -206,6 +249,7 @@ class HuntingBuddy
           info['stop_on'] = [info['stop_on']]
           info['before'] = info['before']
           info['after'] = info['after']
+          info['during'] = info['during']
         end
         hunting_info << info
       else
@@ -214,6 +258,7 @@ class HuntingBuddy
         hunting_info.last['stop_on'] << info['stop_on']
         hunting_info.last['before'] ||= info['before']
         hunting_info.last['after'] ||= info['after']
+        hunting_info.last['during'] ||= info['during']
       end
     end
     hunting_info

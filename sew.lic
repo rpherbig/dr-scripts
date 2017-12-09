@@ -17,21 +17,25 @@ class Sew
     @bag_items = settings.crafting_items_in_container
     @belt = settings.outfitting_belt
     @hometown = settings.hometown
+    @hometown_data = get_data('crafting')['tailoring'][@hometown]
 
     arg_definitions = [
       [
         { name: 'finish', options: %w[log stow trash], description: 'What to do with the finished item.' },
         { name: 'type', options: %w[knitting sewing leather], description: 'What tailoring type is this item.' },
         { name: 'chapter', regex: /\d+/i, variable: true, description: 'Chapter containing the item.' },
-        { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-]+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
+        { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-\']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
         { name: 'noun', regex: /\w+/i, variable: true },
-        { name: 'material', regex: /\w+/i, variable: true, optional: true, description: 'Type of material for leather recipes.' }
+        { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material to use.' }
       ],
       [
         { name: 'seal', regex: /seal/i }
       ],
       [
         { name: 'reinforce', regex: /reinforce/i }
+      ],
+      [
+        { name: 'lighten', regex: /lighten/i }
       ]
     ]
 
@@ -57,6 +61,8 @@ class Sew
       seal
     elsif args.reinforce
       reinforce
+    elsif args.lighten
+      lighten
     else
       echo('Sew does not yet support that form of tailoring.')
     end
@@ -70,14 +76,10 @@ class Sew
     @bag = "other #{@bag}" unless stow_crafting_item(name, @bag, @belt)
   end
 
-  def turn_to(section)
-    bput("turn my book to #{section}", 'You turn your', 'The book is already')
-  end
-
   def check_thread
     return if exists?('cotton thread')
     ensure_copper_on_hand(1000, @hometown)
-    order_item(16_667, 6)
+    order_item(@hometown_data['stock-room'], 6)
     stow_item('cotton thread')
   end
 
@@ -86,59 +88,59 @@ class Sew
     ensure_copper_on_hand(125, @hometown)
     item = left_hand
     stow_item(item)
-    order_item(16_668, 5)
+    order_item(@hometown_data['tool-room'], 5)
     stow_item('pin')
     get_item(item)
     Flags.reset('sew-pins')
   end
 
-  def leather
-    check_thread
+  def study_tailoring(chapter, recipe)
     get_item('tailoring book')
-    turn_to("page #{find_recipe(@chapter, @recipe_name)}")
+    bput("turn my book to page #{find_recipe(chapter, recipe)}", 'You turn your', 'The book is already')
     bput('study my book', 'Roundtime')
     stow_item('book')
+  end
+
+  def leather
+    check_thread
+    study_tailoring(@chapter, @recipe_name)
     get_item("#{@mat_type} leather")
     do_sew('cut my leather with my scissors', 'scissors')
   end
 
   def sew
     check_thread
-    get_item('tailoring book')
-    turn_to("page #{find_recipe(@chapter, @recipe_name)}")
-    bput('study my book', 'Roundtime')
-    stow_item('book')
-    get_item('cloth')
+    study_tailoring(@chapter, @recipe_name)
+    get_item("#{@mat_type} cloth")
     do_sew('cut my cloth with my scissors', 'scissors')
   end
 
   def knit
-    get_item('tailoring book')
-    turn_to("page #{find_recipe(@chapter, @recipe_name)}")
-    bput('study my book', 'Roundtime')
-    stow_item('book')
+    study_tailoring(@chapter, @recipe_name)
     get_item('knitting needle')
-    pause 0.5
+    pause 1
     fput('swap') unless right_hand =~ /needle/i
-    get_item('wool yarn')
+    get_item("#{@mat_type} yarn")
     do_knit('knit my yarn with my needles')
   end
 
   def seal
     Flags.add('sealing-done', 'shows improved signs of durability and wear resistance from the successful sealing process')
-    get_item('tailoring book')
-    turn_to("page #{find_recipe(1, ': tailored armor sealing')}")
-    bput('study my book', 'Roundtime')
-    stow_item('book')
+    study_tailoring(1, ': tailored armor sealing')
     do_seal(true)
+  end
+
+  def lighten
+    check_thread
+    study_tailoring(1, ': tailored armor lightening')
+    get_item('scissors')
+    @noun = GameObj.right_hand.noun
+    do_sew("cut my #{@noun} with my scissors", 'scissors', true)
   end
 
   def reinforce
     check_thread
-    get_item('tailoring book')
-    turn_to("page #{find_recipe(1, ': tailored armor reinforcing')}")
-    bput('study my book', 'Roundtime')
-    stow_item('book')
+    study_tailoring(1, ': tailored armor reinforcing')
     get_item('scissors')
     @noun = GameObj.right_hand.noun
     do_sew("cut my #{@noun} with my scissors", 'scissors')
@@ -174,7 +176,7 @@ class Sew
     do_seal !wax
   end
 
-  def do_sew(command, tool)
+  def do_sew(command, tool, lighten = false)
     waitrt?
     stow_item(left_hand) if checkleft
     if @last_command == 'cut my cloth with my scissors'
@@ -194,8 +196,9 @@ class Sew
               'deep crease develops along', 'wrinkles from all the handling and could use',
               'The needles need to have thread put on them before they can be used for sewing',
               'needs holes punched', 'requires some holes punched',
-              'You realize that cannot be repaired', 'not damaged enough to warrant repair',
+              'You realize that cannot be repaired', 'not damaged enough to warrant repair', 'You cannot figure out how to do that',
               'appears ready to be reinforced with some large cloth padding',
+              'New seams must now be sewn to properly fit the lightened material together',
               'Roundtime')
     when 'dimensions appear to have shifted and could benefit from some remeasuring'
       tool = 'yardstick'
@@ -218,9 +221,11 @@ class Sew
     when 'needs holes punched', 'requires some holes punched'
       tool = 'awl'
       next_command = "poke my #{@noun} with my awl"
-    when 'You realize that cannot be repaired', 'not damaged enough to warrant repair'
+    when 'You realize that cannot be repaired', 'not damaged enough to warrant repair', 'You cannot figure out how to do that'
       stow_item(left_hand)
       finish
+    when 'New seams must now be sewn to properly fit the lightened material together'
+      tool = 'sewing needles'
     when 'appears ready to be reinforced with some large cloth padding'
       stow_item(left_hand)
       get_item('large padding')
@@ -242,9 +247,14 @@ class Sew
         next_command = "cut my #{@noun} with my scissors"
       end
     when 'Roundtime'
-      tool = 'sewing needles'
+      if lighten
+        tool = 'scissors'
+        next_command = "cut my #{@noun} with my scissors"
+      else
+        tool = 'sewing needles'
+      end
     end
-    do_sew(next_command, tool)
+    do_sew(next_command, tool, lighten)
   end
 
   def do_knit(command)
@@ -307,22 +317,13 @@ class Sew
     end
     case @finish
     when /log/
-      logbook_item
+      logbook_item('outfitting', @noun, @bag)
     when /stow/
       stow_item(@noun)
     when /trash/
       dispose_trash(@noun)
     end
     exit
-  end
-
-  def logbook_item
-    get_item('outfitting logbook')
-    case bput("bundle my #{@noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality')
-    when 'This work order has expired', 'The work order requires items of a higher quality'
-      dispose_trash(@noun)
-    end
-    stow_item('outfitting logbook')
   end
 end
 

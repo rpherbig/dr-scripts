@@ -1,0 +1,190 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#stack-scrolls
+=end
+
+custom_require.call(%w[common common-items drinfomon])
+
+class ScrollStack
+  include DRC
+  include DRCI
+
+  def initialize
+    settings = get_settings
+    scroll_nouns = get_data('items').scroll_nouns
+    scroll_nouns += settings.custom_scrolls if settings.custom_scrolls
+    scroll_stackers = settings.scroll_stackers
+    @discard_scrolls = settings.discard_scrolls
+
+    arg_definitions =
+      [
+        [
+          { name: 'container', regex: /\w+/i, optional: true, description: 'The container to collect scrolls from' }
+        ],
+        [
+          { name: 'get', regex: /get/i, description: 'get one copy of a specific spell' },
+          { name: 'query', regex: /^[A-z\s\-\']+$/i, description: 'spell to search for, use quotes for multiple words' }
+        ]
+      ]
+
+    args = parse_args(arg_definitions)
+
+    unless args.container
+      if args.get
+        search_scrolls(args.query)
+      else
+        display_scrolls(scroll_stackers)
+      end
+      exit
+    end
+
+    stow_hands
+    populate_stackers(scroll_stackers)
+    search_container(args.container, scroll_nouns)
+  end
+
+  def display_scrolls(scroll_stackers)
+    unless UserVars.stackers
+      stow_hands
+      populate_stackers(scroll_stackers)
+    end
+    normalized_data = normalize_stacker_data
+
+    normalized_data.each do |data|
+      respond('  ' + "#{data.first} (#{data[1]})".ljust(30) + "#{data[2]} -".ljust(15) + " Page:#{data[3]}")
+    end
+    respond('  Free Slots Remaining: ' + UserVars.stackers.flat_map { |stacker| stacker['contents'] }.select(&:empty?).size.to_s)
+  end
+
+  def search_scrolls(query)
+    target = UserVars.stackers.find { |stacker| stacker['contents'].find { |data| data.first =~ /#{query}/i } }
+    unless target
+      echo("No scroll found matching: #{query}")
+      exit
+    end
+
+    bput("get my #{target['name']}", 'You get')
+    fput("flip my #{target['name']}")
+    fput("open my #{target['name']}")
+
+    slot = target['contents'].find_index { |data| data.first =~ /#{query}/i }
+
+    slot.times do
+      bput("turn my #{target['name']}", 'You turn to a new')
+    end
+
+    case bput("pull my #{target['name']}", 'This was the last copy', 'Carefully')
+    when /This was the last/i
+      target['contents'][slot] = []
+    when /Carefully/i
+      data = target['contents'][slot]
+      data[1] = data[1] - 1
+    end
+
+    bput("stow my #{target['name']}", 'You put')
+    fput('look my scroll')
+  end
+
+  def normalize_stacker_data
+    temp = []
+    UserVars.stackers.each do |stacker|
+      stacker['contents'].each_with_index { |data, index| temp << [data.first, data.last, stacker['name'], index + 1] }
+    end
+    temp.reject { |data| data.first.nil? }.sort_by(&:first)
+  end
+
+  def populate_stackers(stackers)
+    UserVars.stackers = []
+    stackers.each do |stacker|
+      new_stacker = { 'name' => stacker, 'contents' => [] }
+      bput("get my #{stacker}", 'You get')
+      fput("flip my #{stacker}")
+      pause
+      while line = get?
+        case line
+        when /The (.*) section has (\d+)/
+          new_stacker['contents'] << [Regexp.last_match(1), Regexp.last_match(2).to_i]
+        when /Section \d+/
+          new_stacker['contents'] << []
+        end
+      end
+      UserVars.stackers << new_stacker
+      fput("open my #{stacker}")
+      bput("stow my #{stacker}", 'You put')
+    end
+  end
+
+  def search_container(container, scroll_nouns)
+    @excess_scrolls = []
+    scroll_nouns.each do |scroll|
+      stack_scrolls(container, scroll)
+    end
+
+    return if @excess_scrolls.empty?
+    respond("  No room for: #{@excess_scrolls.join(', ')}")
+  end
+
+  private
+
+  def stack_scrolls(container, scroll)
+    $ORDINALS.each do |ordinal|
+      break if bput("get #{ordinal} #{scroll} from my #{container}", 'You get', 'What were') == 'What were'
+
+      case bput("look my #{scroll}", 'It is labeled ".*\."', '.* of the \w*\s*\w* spell.', 'three-dimensional shapes cover much of the', 'You see nothing unusual.', 'I could not find what you were referring to')
+      when 'three-dimensional shapes cover much of the'
+        /of the (.*) spell/ =~ bput("read my #{scroll}", 'The .* contains a complete description of the .* spell')
+        spell_name = Regexp.last_match(1)
+      when /It is labeled "(.*)\."/i
+        spell_name = Regexp.last_match(1)
+      end
+      waitrt?
+
+      if @discard_scrolls.find { |discard| spell_name =~ /#{discard}/i }
+        dispose_trash(scroll)
+      elsif target = UserVars.stackers.find { |stacker| stacker['contents'].find { |data| data.first == spell_name } }
+        stack_existing_scroll(target, scroll, spell_name)
+      elsif target = UserVars.stackers.find { |stacker| stacker['contents'].find(&:empty?) }
+        stack_new_scroll(target, scroll, spell_name)
+      end
+
+      if checkleft || checkright
+        fput("stow my #{scroll}")
+        @excess_scrolls << spell_name
+      else
+        redo
+      end
+    end
+  end
+
+  def stack_new_scroll(target, scroll, spell_name)
+    bput("get my #{target['name']}", 'You get')
+    case bput("push my #{target['name']} with my #{scroll}", 'Not finding a match', 'you realize there')
+    when /you realize/i
+      echo('Unexpected, please report error')
+      exit
+    when /not finding/i
+      slot = target['contents'].index([])
+      target['contents'][slot] = [spell_name, 1]
+      bput("stow my #{target['name']}", 'You put')
+    end
+  end
+
+  def stack_existing_scroll(target, scroll, spell_name)
+    bput("get my #{target['name']}", 'You get')
+    case bput("push my #{target['name']} with my #{scroll}", 'you find room', 'you realize there')
+    when /you realize/i
+      # todo
+    when /you find room/i
+      target['contents'].each_with_index do |data, index|
+        if data.first == spell_name
+          target['contents'][index] = [data.first, data.last + 1]
+          break
+        end
+      end
+    end
+
+    bput("stow my #{target['name']}", 'You put')
+  end
+end
+
+# Call this last to avoid the need for forward declarations
+ScrollStack.new

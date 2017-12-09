@@ -16,6 +16,7 @@ module DRCA
   module_function
 
   def infuse_om(harness, amount)
+    return unless DRSpells.active_spells['Osrel Meraud'] && DRSpells.active_spells['Osrel Meraud'] < 90
     return unless amount
 
     success = ['having reached its full capacity', 'a sense of fullness', 'Something in the area is interfering with your attempt to harness']
@@ -23,7 +24,7 @@ module DRCA
 
     loop do
       pause 5 while mana <= amount
-      harness_mana(amount) if harness
+      harness_mana([amount]) if harness
       break if success.include?(DRC.bput("infuse om #{amount}", success, failure))
       pause 0.5
       waitrt?
@@ -31,9 +32,12 @@ module DRCA
   end
 
   def harness_mana(amount)
-    DRC.bput("harness #{amount}", 'You tap into', 'Strain though you may')
-    pause 0.5
-    waitrt?
+    amount.each do |mana|
+      result = DRC.bput("harness #{mana}", 'You tap into', 'Strain though you may')
+      pause 0.5
+      waitrt?
+      break if result =~ /Strain though you may/
+    end
   end
 
   def activate_khri?(kneel, ability)
@@ -52,7 +56,8 @@ module DRCA
 
     DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
 
-    case DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    case match
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command)
@@ -61,32 +66,24 @@ module DRCA
       return false
     end
 
-    true
+    match
   end
 
-  def buff(spell, settings)
-    if spell['ritual']
-      ritual(spell)
-      return
-    end
-    prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
-    find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, spell['cambrinth'])
-    waitcastrt?
-    cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
-  end
-
-  def ritual(spell)
-    DRCT.retreat
+  def ritual(spell, ignored_npcs)
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
+    DRC.release_invisibility
     DRC.bput('stance set 100 0 80', 'Setting your')
 
-    prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
-    find_focus(spell['focus'], spell['worn_focus'])
+    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
+    find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
 
     invoke(spell['focus'], nil)
-    stow_focus(spell['focus'], spell['worn_focus'])
+    stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
 
     waitcastrt?
-    cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
+    return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
   end
 
   def cast?(cast_command = 'cast', symbiosis = false, before = [], after = [])
@@ -98,8 +95,6 @@ module DRCA
     case DRC.bput(cast_command || 'cast', get_data('spells').cast_messages)
     when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
       fput('release spell')
-    when /^At the ritual's peak, your prophetic connection blooms a thousand-fold/
-      Flags.add('rtr-expire', get_data('spells').spell_data['Read the Ripples']['expire'])
     end
     waitrt?
 
@@ -111,7 +106,7 @@ module DRCA
     after.each { |action| DRC.bput(action['message'], action['matches']) }
 
     if symbiosis && Flags['spell-fail']
-      bput('release symbiosis', 'You release', 'But you haven\'t prepared')
+      DRC.bput('release symbiosis', 'You release', 'But you haven\'t prepared')
     end
 
     !Flags['spell-fail']
@@ -125,23 +120,31 @@ module DRCA
     stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
   end
 
-  def find_focus(focus, worn)
+  def find_focus(focus, worn, tied)
     return unless focus
 
     if worn
       DRC.bput("remove my #{focus}", 'You remove', 'You slide', 'You sling', 'You take')
+    elsif tied
+      DRC.bput("untie my #{focus} from my #{tied}", 'You remove', '[Y|y]ou untie')
     else
       DRC.bput("get my #{focus}", 'You get')
     end
   end
 
-  def stow_focus(focus, worn)
+  def stow_focus(focus, worn, tied)
     return unless focus
 
     if worn
       DRC.bput("wear my #{focus}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place')
+    elsif tied
+      case DRC.bput("tie my #{focus} to my #{tied}", 'You attach', '[Y|y]ou tie', 'You are a little too busy to be worrying')
+      when 'You are a little too busy to be worrying'
+        DRCT.retreat
+        stow_focus(focus, worn, tied)
+      end
     else
-      DRC.bput("stow my #{focus}", 'You put')
+      DRC.bput("stow my #{focus}", 'You put', 'You easily strap your')
     end
   end
 
@@ -181,7 +184,7 @@ module DRCA
     result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages)
     pause
     waitrt?
-    result == 'absorbs all of the energy'
+    result =~ /absorbs? all of the energy/
   end
 
   def release_cyclics
@@ -230,5 +233,127 @@ module DRCA
       mana_msg = DRC.bput('perc', '^You reach out with your .* and (see|hear) \w+')
       return parse_mana_message(mana_msg)
     end
+  end
+
+  def cast_spells(spells, settings)
+    infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
+    spells.each do |name, data|
+      next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
+      while mana < 40
+        echo('Waiting on mana...')
+        pause 15
+      end
+
+      cast_spell(data, settings)
+    end
+  end
+
+  def update_astral_data(data)
+    if data['moon']
+      data = set_moon_data(data)
+    elsif data['stats']
+      data = set_planet_data(data)
+    end
+    data
+  end
+
+  def find_visible_planets(planets)
+    return if DRC.bput('get my telescope', 'You get', 'What were you', 'You are already') == 'What were you'
+
+    Flags.add('planet-not-visible', 'turns up fruitless')
+    observed_planets = []
+
+    planets.each do |planet|
+      DRC.bput("center telescope on #{planet}", 'You put your eye')
+      observed_planets << planet unless Flags['planet-not-visible']
+      Flags.reset('planet-not-visible')
+    end
+
+    Flags.delete('planet-not-visible')
+    DRC.bput('stow telescope', 'You put')
+    observed_planets
+  end
+
+  def set_planet_data(data)
+    return data unless data['stats']
+
+    planets = get_data('constellations')[:constellations].select { |planet| planet['stats'] }
+    planet_names = planets.map { |planet| planet['name'] }
+    visible_planets = find_visible_planets(planet_names)
+    data['stats'].each do |stat|
+      cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
+      next unless cast_on
+      data['cast'] = "cast #{cast_on}"
+      return data
+    end
+    echo 'Could not find any planets to cast on'
+    nil
+  end
+
+  def set_moon_data(data)
+    return data unless data['moon']
+
+    check_moonwatch
+    # Look for a moon that will be up for the next few minutes
+    moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
+    unless moon
+      echo "No moon available to cast #{data['abbrev']}"
+      return nil # Return nil to indicate that setting moon casting data failed
+    end
+    data['cast'] = "cast #{moon}"
+    data
+  end
+
+  def check_moonwatch
+    return if Script.running? 'moonwatch'
+
+    echo 'moonwatch is not running. Starting it now'
+    custom_require.call('moonwatch')
+    echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
+  end
+
+  def buff(spell, settings)
+    cast_spell(spell, settings)
+  end
+
+  def cast_spell(data, settings)
+    return unless data
+    return unless settings
+
+    data = update_astral_data(data)
+    return unless data # update_astral_data returns nil on failure
+
+    release_cyclics if data['cyclic']
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+
+    if data['ritual']
+      ritual(data, settings.ignored_npcs)
+      return
+    end
+
+    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'])
+    prepare_time = Time.now
+
+    if check_to_harness(settings.use_harness_when_arcana_locked)
+      harness_mana(data['cambrinth'])
+    else
+      find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, data['cambrinth'])
+    end
+
+    if data['prep_time']
+      pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
+    else
+      waitcastrt?
+    end
+
+    cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+  end
+
+  def check_to_harness(should_harness)
+    return false unless should_harness
+    return false if DRSkill.getxp('Attunement') >= DRSkill.getxp('Arcana')
+    return false if DRSkill.getxp('Attunement') >= 30
+
+    true
   end
 end

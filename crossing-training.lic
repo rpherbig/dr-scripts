@@ -17,6 +17,7 @@ class CrossingTraining
   attr_reader :running, :idling
 
   def stop
+    echo 'Received stop signal' if UserVars.crossing_trainer_debug
     @stop = true
   end
 
@@ -35,7 +36,7 @@ class CrossingTraining
     @climbing_target = get_data('athletics').practice_options[@settings.climbing_target]
     @swimming_target = get_data('athletics').swimming_options[@settings.swimming_target]
     @song_list = get_data('perform').perform_options
-
+    @junk_timer = Time.now
     @use_research = @settings.use_research
     @settings.storage_containers.each { |container| fput("open my #{container}") }
     @disciplines_to_skill = {
@@ -60,10 +61,18 @@ class CrossingTraining
     Flags.add('research-complete', '^Breakthrough!')
   end
 
+  def dump_junk
+    return unless @settings.dump_junk
+    return unless Time.now - @junk_timer > 300
+    return unless DRRoom.room_objs.size > @settings.dump_item_count
+
+    bput('dump junk', 'You should just kick', 'You have marked this room', 'You cannot summon', 'The janitor was recently summoned')
+    @junk_timer = Time.now
+  end
+
   def main
     walk_to(@training_room)
     if @settings.waggle_sets['town-training']
-      pause 10
       wait_for_script_to_complete('buff', ['town-training'])
     end
     loop do
@@ -89,6 +98,7 @@ class CrossingTraining
     if trash_nouns.any? { |noun| /\b#{noun}/i =~ GameObj.left_hand.noun } && !@equipment_manager.is_listed_item?(left_hand)
       dispose_trash(left_hand)
     end
+    dump_junk
   end
 
   def event_loop
@@ -142,9 +152,11 @@ class CrossingTraining
     case skill
     when 'Appraisal'
       train_appraisal
+    when 'Arcana'
+      train_arcana
     when 'Athletics'
       train_athletics
-    when 'Arcana', 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic'
+    when 'Life Magic', 'Holy Magic', 'Lunar Magic', 'Elemental Magic', 'Arcane Magic'
       do_research skill
     when 'Astrology'
       train_astrology
@@ -218,15 +230,17 @@ class CrossingTraining
 
   def check_tithe
     return unless @settings.tithe
+    return unless almsbox = @settings.tithe_almsbox || get_data('town')[@settings.hometown]['almsbox']['id']
     delta = Time.now - (UserVars.tithe_timer || Time.now - 14_400)
     return if (delta < 4 * 60 * 60 && DRStats.paladin?) || (delta < 60 * 10 && DRStats.cleric?)
+    currency = hometown_currency(@settings.hometown)
     return unless withdraw_exact_amount?('5 silver', @settings.hometown)
 
     wait_for_script_to_complete('pay-debt')
 
     UserVars.tithe_timer = Time.now
-    walk_to(741)
-    bput('put 5 silver kronar in almsbox', 'You drop', 'But you do not', 'attend to thy own woes')
+    walk_to(almsbox)
+    bput("put 5 silver #{currency} in almsbox", 'You drop', 'But you do not', 'attend to thy own woes')
   end
 
   def train_sorcery
@@ -254,7 +268,7 @@ class CrossingTraining
     end
 
     to_teach = @settings.classes_to_teach.first
-    DRRoom.pcs.each { |character| bput("teach #{to_teach} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching', 'You are already teaching', 'You cannot teach two different classes at the same time', 'is not paying attention to you') }
+    DRRoom.pcs.each { |character| bput("teach #{to_teach} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching', 'You are already teaching', 'You cannot teach two different classes at the same time', 'is not paying attention to you', 'You cannot listen to a teacher and teach', 'already trying to teach you something') }
   end
 
   def check_listening
@@ -268,7 +282,7 @@ class CrossingTraining
     @last_teacher = classes
                     .reject { |t, s| t.nil? || s.nil? }
                     .sort_by { |_t, s| [DRSkill.getxp(s), DRSkill.getrank(s)] }
-                    .find { |t, _s| listen?(t) }
+                    .find { |t, _s| listen?(t, @settings.listen_observe) }
                     .first
 
     @listen_timer = @last_teacher ? nil : Time.now
@@ -297,7 +311,7 @@ class CrossingTraining
   def train_theurgy
     wait_for_script_to_complete('theurgy')
     return unless @researching
-    return if 'not researching anything' != fput('research status', 'not researching anything', 'Fundamental', 'Augmentation', 'Stream', 'Sorcery', 'Utility', 'Warding')
+    return if fput('research status', 'not researching anything', 'Fundamental', 'Augmentation', 'Stream', 'Sorcery', 'Utility', 'Warding') != 'not researching anything'
 
     Flags.reset('research-partial')
     Flags.reset('research-complete')
@@ -371,25 +385,45 @@ class CrossingTraining
   def calculate_mana(min, more, discern_data, cyclic)
     total = min + more
     total = (total * @settings.prep_scaling_factor).floor
-    discern_data['mana'] = [(total / 4.0).ceil, min].max
+    discern_data['mana'] = [(total / 5.0).ceil, min].max
     remaining = total - discern_data['mana']
-    if remaining > @settings.cambrinth_cap
-      discern_data['mana'] = discern_data['mana'] + (remaining - @settings.cambrinth_cap)
+    unless @settings.cambrinth_items[0]['name']
+      @settings.cambrinth_items = [{
+        'name' => @settings.cambrinth,
+        'cap' => @settings.cambrinth_cap,
+        'stored' => @settings.stored_cambrinth
+      }]
+    end
+    total_cambrinth_cap = @settings.cambrinth_items.map { |x| x['cap'] }.inject(&:+)
+    charges_count_floor = 4
+    @settings.cambrinth_items.each do |item|
+      item['charges'] = ((item['cap'].to_f / total_cambrinth_cap) * charges_count_floor).ceil
+    end
+    total_cambrinth_charges = @settings.cambrinth_items.map { |x| x['charges'] }.inject(&:+)
+    if remaining > total_cambrinth_cap
+      discern_data['mana'] = discern_data['mana'] + (remaining - total_cambrinth_cap)
       remaining = total - discern_data['mana']
     end
     if cyclic
       discern_data['cambrinth'] = nil
       discern_data['mana'] = discern_data['mana'] + remaining
     elsif remaining > 0
-      discern_data['cambrinth'] = []
-      step_size = (remaining / 3.0).ceil
-      while remaining > 0
-        discern_data['cambrinth'] << [remaining, step_size].min
-        remaining -= step_size
+      total_cambrinth_mana = [remaining, total_cambrinth_cap].min
+      @settings.cambrinth_items.each_with_index do |item, index|
+        discern_data['cambrinth'] ||= []
+        charge_amount = (total_cambrinth_mana / total_cambrinth_charges) * item['charges']
+        discern_data['cambrinth'][index] = []
+        charge_amount.times do |i|
+          discern_data['cambrinth'][index][i % item['charges']] += 1
+        end
       end
     else
       discern_data['cambrinth'] = nil
     end
+  end
+
+  def map_cambrinth(settings)
+    [settings.cambrinth, settings.cambrinth_cap, settings.stored_cambrinth]
   end
 
   def check_discern(data)
@@ -431,7 +465,7 @@ class CrossingTraining
 
   def research
     refresh_cyclic
-    return if 'You cannot begin' != bput("research #{@researching} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin')
+    return if bput("research #{@researching} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin') != 'You cannot begin'
 
     fput('research cancel')
     fput('research cancel')
@@ -520,15 +554,26 @@ class CrossingTraining
 
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'])
 
-    find_charge_invoke_stow(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap, @settings.dedicated_camb_use, data['cambrinth'])
-
+    unless @settings.cambrinth_items[0]['name']
+      @settings.cambrinth_items = [{
+        'name' => @settings.cambrinth,
+        'cap' => @settings.cambrinth_cap,
+        'stored' => @settings.stored_cambrinth
+      }]
+    end
+    @settings.cambrinth_items.each_with_index do |item, index|
+      if data['cambrinth'][index][0]
+        find_charge_invoke_stow(item['name'], item['stored'], item['cap'], @settings.dedicated_camb_use, data['cambrinth'][index])
+      end
+    end
     waitcastrt?
 
     snapshot = DRSkill.getxp(skill) if data['symbiosis']
 
     success = cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
 
-    if !success && check_health.any? { |_k, v| v.include?('skin') }
+    wounds = check_health['wounds']
+    if !success && wounds.any? { |_k, v| v.include?('skin') }
       wait_for_script_to_complete('safe-room', ['force'])
     end
 
@@ -543,39 +588,6 @@ class CrossingTraining
     end
   end
 
-  def braid_to_fail(item)
-    return if left_hand || right_hand
-    return unless forage?(item)
-    loop do
-      waitrt?
-      check_research
-      case bput("braid my #{item}", 'You need to have more', 'Roundtime', 'You need both hands to do that', 'You can\'t braid the .* into your braided', 'is already as long as you can make it', 'You are in no condition')
-      when 'Roundtime'
-        rt = reget(10, 'Roundtime').last.scan(/\d+/).first.to_i
-        break if rt >= 8 || DRSkill.getxp('Mechanical Lore') >= 30
-      when 'is already as long as you can make it'
-        waitrt?
-        break
-      when 'You need both hands to do that', /into your braided/
-        waitrt?
-        empty_trash
-        return
-      when 'You are in no condition'
-        dispose_trash(item)
-        wait_for_script_to_complete('safe-room')
-        return
-      else
-        break unless forage?(item)
-      end
-    end
-    pause 1
-    waitrt?
-    bput("pull my #{item}", 'You tug and pull')
-    pause 1
-    waitrt?
-    empty_trash
-  end
-
   def train_performance
     return if play_song?(true)
 
@@ -584,15 +596,7 @@ class CrossingTraining
   end
 
   def train_outdoorsmanship
-    if DRSkill.getrank('Outdoorsmanship') < 20
-      forage?('rock')
-      dispose_trash 'rock'
-    else
-      item = @settings.forage_item
-      collect(item)
-      waitrt?
-      kick_pile? unless kick_pile?("#{item}s")
-    end
+    wait_for_script_to_complete('outdoorsmanship')
   end
 
   def train_first_aid
@@ -626,22 +630,9 @@ class CrossingTraining
   end
 
   def train_mechanical_lore
-    waitrt?
-    @equipment_manager.wear_equipment_set?('standard')
-    @equipment_manager.empty_hands
-    pause 1
-    fput "remove #{@settings.hand_armor}"
-    fput "stow #{@settings.hand_armor}"
-    pause 1
-    release_invisibility
-    if @settings.braid_item
-      braid_to_fail(@settings.braid_item)
-    else
-      braid_to_fail(DRSkill.getrank('Outdoorsmanship') < 110 ? 'grass' : 'vine')
-    end
-    @equipment_manager.empty_hands
-    fput "get my #{@settings.hand_armor}"
-    fput "wear my #{@settings.hand_armor}"
+    check_research
+    wait_for_script_to_complete('mech-lore')
+    dump_junk
   end
 
   def climb?(room, targets)
@@ -658,7 +649,10 @@ class CrossingTraining
   end
 
   def train_athletics
-    if @swimming_target
+    if @settings.have_climbing_rope
+      return if @researching
+      wait_for_script_to_complete('athletics')
+    elsif @swimming_target
       swim_loop(@swimming_target['rooms'])
     elsif @climbing_target
       return if @researching
@@ -725,7 +719,7 @@ class CrossingTraining
     check_research
     if DRSkill.getxp('Athletics') < 29
       walk_to(2245)
-      if UserVars.athletics < 550
+      if UserVars.athletics < 540
         climb_practice('branch', true)
       else
         walk_to(9607)
@@ -760,7 +754,7 @@ class CrossingTraining
     room_list.each do |room_id|
       walk_to(room_id)
       5.times do
-        break if 'You sense:' == bput('perceive health', 'You fail to sense', 'You sense:', 'You\'re not ready to do that again, yet')
+        break if bput('perceive health', 'You fail to sense', 'You sense:', 'You\'re not ready to do that again, yet') == 'You sense:'
         pause 1
         rt = waitrt?
         pause 5 if rt.nil? || rt.zero?
@@ -812,6 +806,15 @@ class CrossingTraining
     wait_for_script_to_complete('appraisal')
   end
 
+  def train_arcana
+    if @use_research && @settings.research_skills.include?('Arcana')
+      do_research('Arcana')
+      return
+    end
+
+    wait_for_script_to_complete('sanowret-crystal', ['run'])
+  end
+
   def train_astrology
     wait_for_script_to_complete('astrology')
   end
@@ -846,16 +849,53 @@ class CrossingTraining
   end
 
   def train_engineering
-    return unless money_for_training?(5000, 'Engineering')
-    wait_for_script_to_complete('workorders', ['Shaping'])
-    wait_for_script_to_complete('sell-loot')
-    walk_to(@training_room)
+    if @settings.train_workorders.include?('Shaping')
+      return unless money_for_training?(5000, 'Engineering')
+      wait_for_script_to_complete('workorders', ['Shaping'])
+      wait_for_script_to_complete('sell-loot')
+      walk_to(@training_room)
+      return
+    elsif @settings.train_workorders.include?('Carving')
+      return unless money_for_training?(5000, 'Engineering')
+      wait_for_script_to_complete('workorders', ['Carving'])
+      wait_for_script_to_complete('sell-loot')
+      walk_to(@training_room)
+      return
+    end
+
+    rank = DRSkill.getrank('Engineering')
+
+    if rank <= 25 # Tier 1  Extremely Easy
+      shape(7, 'wood band', 'band')
+    elsif rank <= 50 # Tier 2 Very Easy
+      shape(7, 'wood bracelet', 'bracelet')
+    elsif rank <= 100 # Tier 3  Easy
+      shape(7, 'wood cloak pin', 'cloak pin')
+    elsif rank <= 175 # Tier 4  Simple
+      shape(7, 'pair of wood earrings', 'earrings')
+    elsif rank <= 300 # Tier 5  Basic
+      shape(7, 'wood brooch', 'brooch')
+    elsif rank <= 425 # Tier 6  Somewhat Challenging
+      shape(7, 'wood armband', 'armband')
+    elsif rank <= 600 # Tier 7  Challenging
+      shape(7, 'wood choker', 'choker')
+    elsif rank <= 700 # Tier 8 - Complicated
+      shape(7, 'wood circlet', 'circlet')
+    elsif rank <= 850 # Tier 9 - Intricate
+      shape(7, 'wood crown', 'crown')
+    elsif rank <= 1175 # Tier 10 - Difficult
+      shape(7, 'wood comb', 'comb')
+    elsif rank <= 1400 # Tier 11 - Very Difficult
+      shape(7, 'wood haircomb', 'haircomb')
+    else # Tier 12  Extremely Difficult
+      echo('*** NOT YET IMPLEMENTED ***')
+    end
   end
 
   def train_trading
     disciplines = @settings.work_order_disciplines
 
-    if @settings.sell_pouches_for_trading && DRSkill.getxp('Trading') < 5 && 'You get a' == bput("get pouch from my #{@settings.sale_pouches_container}", 'You get a', 'What were you')
+    if @settings.sell_pouches_for_trading && DRSkill.getxp('Trading') < 5 && bput("get pouch from my #{@settings.sale_pouches_container}", 'You get a', 'What were you') == 'You get a'
       gemshop = get_data('town')[@settings.hometown]['gemshop']['id']
       unless gemshop
         echo('NO GEMSHOP DATA FOUND?')
@@ -955,6 +995,17 @@ class CrossingTraining
     end
   end
 
+  def shape(chapter, unique_name, item)
+    return unless buy_wood
+
+    find_shaping_room(@hometown, @training_room)
+
+    wait_for_script_to_complete('shape', ['trash', chapter, unique_name, 'balsa', item])
+
+    bput('get my lumber', 'You get some', 'You pick up')
+    dispose_trash('lumber')
+  end
+
   def sew(chapter, unique_name, item)
     return unless buy_yarn
 
@@ -962,7 +1013,7 @@ class CrossingTraining
     check_listening
     check_teaching
 
-    wait_for_script_to_complete('sew', ['trash', 'knitting', chapter, unique_name, item])
+    wait_for_script_to_complete('sew', ['trash', 'knitting', chapter, unique_name, item, 'wool'])
 
     fput('get my wool yarn')
     dispose_trash('yarn')
@@ -974,10 +1025,18 @@ class CrossingTraining
     dispose_trash(left_hand)
   end
 
+  def buy_wood
+    crafting_data = get_data('crafting')
+    return unless money_for_training?(700, 'Engineering')
+    order_item(crafting_data['shaping'][@settings.hometown]['stock-room'], 11)
+    bput('stow my lumber', 'You put your')
+  end
+
   def buy_yarn
+    crafting_data = get_data('crafting')
     return unless money_for_training?(700, 'Outfitting')
-    order_item(16_667, 13)
-    fput('stow my yarn')
+    order_item(crafting_data['tailoring'][@settings.hometown]['stock-room'], 13)
+    bput('stow my yarn', 'You put your')
   end
 
   def stop_play
@@ -1032,8 +1091,13 @@ class CrossingTraining
 
   def clean_zills
     cloth = @settings.cleaning_cloth
+
+    case bput("get my #{cloth}", 'You get', 'What were you')
+    when 'What were you'
+      return
+    end
+
     bput('remove my zills', 'You slide')
-    bput("get my #{cloth}", 'You get')
 
     loop do
       case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')

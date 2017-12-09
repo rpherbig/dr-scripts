@@ -20,6 +20,14 @@ $wound_map = {
   'useless' => 13
 }
 
+$all_parasites = [
+  /(?:small|large) (?:black|red) blood mite/,
+  /red sand leech/,
+  /albino forest leech/,
+  /(?:green|red) blood worm/,
+  /Retch maggot/
+]
+
 re_part = /(?<part>(?:left|right)?\s?(?:\w+))/
 $severity_to_text = {
   1 => [
@@ -95,6 +103,7 @@ $severity_to_text = {
     /a severely bloated and discolored #{re_part} with strange round lumps under the skin/,
     /(?<abdomen>a definite greenish pallor and emaciated look)/,
     /(?<skin>a painful,* inflamed body rash)/,
+    /(?<skin>a painful,* enflamed body rash)/,
     /some shriveled and oddly folded (?<part>skin)/,
     /(?<skin>partial paralysis of the entire body)/,
     /(?<skin>numbness in your arms and legs)/
@@ -161,13 +170,26 @@ module DRCH
   module_function
 
   def check_health
-    DRC.bput('health', 'You have')
-    data = reget(300).reverse
+    all_parasites_re = Regexp.union($all_parasites)
     wounds_line = nil
+    parasites_line = nil
+    diseased = false
+    poisoned = false
+
+    DRC.bput('health', 'You have')
+    pause 0.5
+    data = reget(300).reverse
     data.each do |line|
-      if line =~ /^You have/ && line !~ /^You have no significant injuries\./ && line !~ /^You have .* lodged .* into your/
+      case line
+      when /^You have (?!no significant injuries)(?!.* lodged into your)(?!.* infection)(?!.* poison(?:ed)?)(?!.* #{all_parasites_re})/
         wounds_line = line
         break
+      when /^You have a dormant infection/, /^Your wounds are infected/
+        diseased = true
+      when /^You have .* poison(?:ed)?/
+        poisoned = true
+      when /^You have a .* on your/, all_parasites_re
+        parasites_line = line
       end
     end
     wounds_line.gsub!($comma_detector, '') # Remove commas from individual wounds
@@ -181,7 +203,17 @@ module DRCH
         wounds[severity_level] << part
       end
     end
-    wounds
+
+    parasites = Hash.new { |h, k| h[k] = [] }
+    parasites_line.split(',').each do |parasite|
+      parasite =~ all_parasites_re
+      parasite_name = Regexp.last_match.to_s
+      parasite =~ /on your (?<part>(?:left|right)?\s?(?:\w+))/
+      location = Regexp.last_match[:part].to_s
+      parasites[parasite_name] << location
+    end
+
+    { 'wounds' => wounds, 'poisoned' => poisoned, 'diseased' => diseased, 'parasites' => parasites }
   end
 
   def check_perc_health
@@ -204,7 +236,7 @@ module DRCH
 
   def bind_wound(part, person = 'my')
     snap = [DRC.left_hand, DRC.right_hand]
-    if /You \w+ remove/ =~ DRC.bput("tend #{person} #{part}", 'You work carefully at tending', 'That area has already been tended to', 'That area is not bleeding', 'You fumble', 'Your \w+ too injured for you to do that', 'You \w+ remove')
+    if /You \w+ remove/ =~ DRC.bput("tend #{person} #{part}", 'You work carefully at tending', 'That area has already been tended to', 'That area is not bleeding', 'You fumble', 'too injured for you to do that', 'You \w+ remove')
       DRC.bput("drop my #{DRC.left_hand}", 'You drop', 'What were you') if DRC.left_hand != snap.first
       DRC.bput("drop my #{DRC.right_hand}", 'You drop', 'What were you') if DRC.right_hand != snap.last
       bind_wound(part, person)

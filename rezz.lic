@@ -1,0 +1,184 @@
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#rezz
+
+custom_require.call(%w[common common-arcana events drinfomon spellmonitor])
+
+# rezz waggle set with POM if you want
+
+class Rezz
+  include DRC
+  include DRCA
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'person', regex: /\w+/, description: 'Person to rezz' }
+      ]
+    ]
+
+    @rejuv_mana = 0
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    rezz_prep(args.person)
+  end
+
+  def rezz_prep(person)
+    # cast buffs if set
+    check_buffs
+
+    # perceive body & rejuv
+    rejuv(person) unless is_silver?(person)
+
+    # cast rezz
+    mana = cast_rezz
+
+    # infuse untill see spirit
+    find_soul(person, mana)
+
+    # snap cast soul bonding
+    cast_soulbonding(person)
+
+    # check for silver again. recast rejuv (or infuse again) if not
+    rejuv(person) unless is_silver?(person)
+
+    # gesture
+    bput("gest #{person}", 'As you intone a quiet prayer')
+  end
+
+  def find_soul(person, infuse_amt)
+    loop do
+      pause 5 while mana <= 40
+      harness_mana([infuse_amt]) unless skip_harness?
+      case bput("infuse rezz #{infuse_amt}", /You clearly sense the spirit of #{person} in the Void/i, 'You sense a spirit nearby, but you are unable to make it out clearly.', 'Your sense of sight has not fully transitioned to the spirit world', "You don't have enough harnessed mana to infuse that much.")
+      when 'You sense a spirit nearby, but you are unable to make it out clearly.'
+        next
+      when /You clearly sense the spirit of #{person} in the Void/i
+        break
+      when 'Your sense of sight has not fully transitioned to the spirit world'
+        pause 2
+        next
+      when "You don't have enough harnessed mana to infuse that much."
+        next
+      else
+        next
+      end
+    end
+  end
+
+  def is_silver?(person)
+    /As you concentrate, a thin (.*) nimbus/ =~ bput("perc #{person}", 'As you concentrate, a thin (.*) nimbus')
+    color = Regexp.last_match(1)
+    echo "Memories are #{color}"
+    waitrt?
+    return false unless color.eql? 'silver'
+    true
+  end
+
+  def rejuv(person)
+    data = { 'abbrev' => 'rejuv' }
+    if @rejuv_mana == 0
+      check_discern(data)
+      @rejuv_mana = data['mana']
+    end
+
+    loop do
+      cast_spell('rejuv', @rejuv_mana, person)
+      break if is_silver?(person)
+    end
+  end
+
+  def check_buffs
+    wait_for_script_to_complete('buff', ['rezz'])
+  end
+
+  def skip_harness?
+    attunement = DRSkill.getrank('Attunement')
+    if attunement < 541
+      return false
+    elsif attunement > 600
+      return true
+      elseif check_if_buff_active('Persistence of Mana', 6)
+      return true
+    else
+      false
+    end
+  end
+
+  def cast_rezz
+    data = { 'abbrev' => 'rezz' }
+    check_discern(data)
+    cast_spell('rezz', data['mana'], 'self')
+    data['mana']
+  end
+
+  def cast_soulbonding(person)
+    cast_spell('sb', 1, person, true)
+  end
+
+  def check_if_buff_active(spell, time)
+    DRSpells.active_spells[spell] && DRSpells.active_spells[spell] > time
+  end
+
+  # copied from crossing-trianing
+  def check_discern(data)
+    UserVars.discerns = {} unless UserVars.discerns
+    discern_data = UserVars.discerns[data['abbrev']] || {}
+    if data['symbiosis']
+      if discern_data.empty? || discern_data['min'].nil?
+        /requires at minimum (\d+) mana streams/ =~ bput("discern #{data['abbrev']}", 'requires at minimum \d+ mana streams')
+        discern_data['mana'] = Regexp.last_match(1).to_i
+        discern_data['cambrinth'] = nil
+        discern_data['min'] = Regexp.last_match(1).to_i
+        discern_data['more'] = 0
+      end
+      calculate_mana(discern_data['min'], discern_data['more'], discern_data, false)
+    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > 24 * 60 * 60 || !discern_data['more'].nil?
+      discern_data['time_stamp'] = Time.now
+      case discern = bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
+      when /you don't think you are able/i, 'You have no idea how to cast that spell'
+        discern_data['mana'] = 1
+        discern_data['cambrinth'] = nil
+      else
+        discern =~ /minimum (\d+) mana streams and you think you can reinforce it with (\d+) more/i
+        calculate_mana(Regexp.last_match(1).to_i, Regexp.last_match(2).to_i, discern_data, data['cyclic'])
+      end
+    end
+    pause 1
+    waitrt?
+    UserVars.discerns[data['abbrev']] = discern_data
+    data['mana'] = discern_data['mana']
+    data['cambrinth'] = discern_data['cambrinth']
+  end
+
+  def calculate_mana(min, more, discern_data, cyclic)
+    total = min + more
+    total = (total * @settings.prep_scaling_factor).floor
+    discern_data['mana'] = [(total / 4.0).ceil, min].max
+    remaining = total - discern_data['mana']
+    if remaining > @settings.cambrinth_cap
+      discern_data['mana'] = discern_data['mana'] + (remaining - @settings.cambrinth_cap)
+      remaining = total - discern_data['mana']
+    end
+    if cyclic
+      discern_data['cambrinth'] = nil
+      discern_data['mana'] = discern_data['mana'] + remaining
+    elsif remaining > 0
+      discern_data['cambrinth'] = []
+      step_size = (remaining / 3.0).ceil
+      while remaining > 0
+        discern_data['cambrinth'] << [remaining, step_size].min
+        remaining -= step_size
+      end
+    else
+      discern_data['cambrinth'] = nil
+    end
+  end
+
+  def cast_spell(spell, mana, target, snap = false)
+    prepare?(spell, mana, false)
+    snap ? pause(5) : waitcastrt?
+    pause 1
+    cast?("cast #{target}")
+  end
+end
+
+Rezz.new

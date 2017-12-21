@@ -1,8 +1,5 @@
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_repository#theurgy
-
-  Planned improvements:
-    - Support purchasing multiples of each item, especially stackables like oil/incense.
 =end
 
 custom_require.call(%w[common common-arcana common-crafting common-items common-money common-travel events drinfomon spellmonitor equipmanager])
@@ -22,6 +19,9 @@ class TheurgyActions
     @bankbot_enabled = settings.bankbot_enabled
     @bankbot_room_id = settings.bankbot_room_id
     @data = get_data('theurgy')[@hometown]
+    all_theurgy_data = get_data('theurgy')
+    @data = all_theurgy_data[@hometown]
+    @immortal_to_aspect = all_theurgy_data['immortal_to_aspect']
     @safe_room = @settings.safe_room
     @immortal_aspect = @settings.immortal_aspect
 
@@ -39,7 +39,7 @@ class TheurgyActions
     @rituals = get_rituals
     @communes = get_communes
 
-    annotate_item_presence(@rituals + @communes)
+    @item_info = collect_item_info(@rituals + @communes)
 
     @rituals.reject! do |r|
       r[:items].any? { |i| !i[:on_hand] && !i[:shop] }
@@ -136,17 +136,30 @@ class TheurgyActions
       rituals << {
         method: :incense,
         items: [
-          { name: 'incense', shop: @data['incense_shop'] },
-          { name: 'flint', shop: @data['flint_shop'] }
+          {
+            name: 'incense',
+            shop: @data['incense_shop'],
+            stackable: true,
+            parts: 10
+          }, {
+            name: 'flint',
+            shop: @data['flint_shop']
+          }
         ]
       }
       rituals << {
         method: :wine,
         items: [
-          { name: 'wine', shop: @data['wine_shop'] }
+          {
+            name: 'wine',
+            shop: @data['wine_shop']
+          }
         ]
       }
     end
+    rituals << {
+      method: :clean_anloral
+    }
     rituals << {
       method: :embarass_myself,
       items: [
@@ -195,7 +208,9 @@ class TheurgyActions
         items: [
           {
             name: 'oil',
-            shop: @data['oil_shop']
+            shop: @data['oil_shop'],
+            stackable: true,
+            parts: 5
           }
         ]
       }
@@ -211,28 +226,52 @@ class TheurgyActions
     end
   end
 
-  def annotate_item_presence(data)
+  def last_favor_aspect
+    favor_re = /Your most recent favor was granted by (.*)\./
+    match = bput('favor', 'You are not currently favored', favor_re)
+    return unless favor_re.match(match)
+
+    last_favor_god = Regexp.last_match[1]
+    @immortal_to_aspect[last_favor_god]
+  end
+
+  def collect_item_info(data)
     data.each { |datum| datum[:items] ||= [] }
     items = data.map { |d| d[:items] }.flatten.uniq { |i| i[:name] }
-    item_presence = {}
-    items.each { |i| item_presence[i[:name]] = on_hand?(i) }
-
-    data.each do |datum|
-      datum[:items].each { |i| i[:on_hand] = item_presence[i[:name]] }
+    item_info = {}
+    items.each do |i|
+      item_count = count(i)
+      supply_levels = @settings.theurgy_supply_levels[i[:name]] || {}
+      item_info[i[:name]] = {
+        name: i[:name],
+        shop: i[:shop],
+        stackable: i[:stackable],
+        parts: (i[:shop] && i[:shop]['parts']) || i[:parts] || 1,
+        count: item_count,
+        on_hand: item_count > 0,
+        restock: item_count < (supply_levels['min'] || 1),
+        target: supply_levels['target'] || 1
+      }
     end
+
+    item_info
   end
 
   def rituals_remain?
     !@rituals.empty?
   end
 
-  def on_hand?(item)
-    if item[:name] == 'oil'
-      inside_container?('holy oil') || inside_container?('some oil')
+  def count(item)
+    if item[:stackable]
+      if item[:any_container]
+        count_item_parts(item[:name])
+      else
+        count_item_parts("#{item[:name]} in my #{@theurgy_supply_container}")
+      end
     elsif item[:any_container]
-      exists?(item[:name])
+      count_items(item[:name])
     else
-      inside_container?(item[:name])
+      count_items_in_container(item[:name], @theurgy_supply_container)
     end
   end
 
@@ -255,9 +294,7 @@ class TheurgyActions
   end
 
   def buy_supplies
-    items_to_buy = (@rituals + @communes).map { |rc| rc[:items] }.flatten
-    items_to_buy.uniq! { |item| item[:name] }
-    items_to_buy.reject! { |item| item[:on_hand] }
+    items_to_buy = @item_info.values.select { |item| item[:restock] && item[:shop] }
     items_to_buy.sort_by! { |item| item[:shop]['id'] }
 
     total_cost = items_to_buy.map { |i| i[:shop]['price'] }.reduce(:+)
@@ -271,24 +308,49 @@ class TheurgyActions
         next
       end
 
+      if item[:name] == 'incense' && get_from_container('burnt incense')
+        # Otherwise this will mess up counting/stacking
+        dispose_trash('burnt incense')
+        item[:count] = 0
+      end
+
+      num_to_buy = ((item[:target] - item[:count]) / item[:parts].to_f).ceil
+
       safe_walk_to shop['id']
-
-      if shop['method']
-        send(shop['method'])
+      if item[:stackable]
+        num_to_buy.times do
+          buy_single_supply(item, shop)
+          get_from_container(item[:name])
+          bput("combine #{item[:name]} with #{item[:name]}",
+               'You combine', 'You can\'t combine', 'You must be holding')
+          # Put this back in the container so it doesn't interfere with bless.
+          put_in_container(item[:name])
+        end
       else
-        buy_item(shop['id'], item[:name])
+        (item[:target] - item[:count]).times do
+          buy_single_supply(item, shop)
+          put_in_container(item[:name])
+        end
       end
 
-      if shop['needs_bless'] && @known_spells.include?('Bless')
-        complete_or_interrupt_research
-        cast_spell({ 'abbrev' => 'bless',
-                     'mana' => 1,
-                     'prep_time' => 2,
-                     'cast' => "cast my #{item[:name]}" }, @settings)
-        continue_research
-      end
+      item[:count] += num_to_buy * item[:parts]
+    end
+  end
 
-      put_in_container(item[:name])
+  def buy_single_supply(item, shop)
+    if shop['method']
+      send(shop['method'], item)
+    else
+      buy_item(shop['id'], item[:name])
+    end
+
+    if shop['needs_bless'] && @known_spells.include?('Bless')
+      complete_or_interrupt_research
+      cast_spell({ 'abbrev' => 'bless',
+                   'mana' => 1,
+                   'prep_time' => 2,
+                   'cast' => "cast my #{item[:name]}" }, @settings)
+      continue_research
     end
   end
 
@@ -357,8 +419,8 @@ class TheurgyActions
 
   ### COMMUNES ###
   def perform_next_commune
-    return false unless can_commune?
     @communes.size.times do
+      return false unless can_commune?
       commune = @communes.first
       @communes.rotate!
       return true if commune_ready?(commune) && perform_commune(commune)
@@ -381,7 +443,7 @@ class TheurgyActions
   def perform_commune(commune)
     stow_hands
     # Recheck item presence since supplies may have been used up.
-    return false if commune[:items].any? { |i| !on_hand?(i) }
+    return false if commune[:items].any? { |i| count(i).zero? }
 
     send(commune[:method])
   end
@@ -743,7 +805,12 @@ class TheurgyActions
     walk_to_altar_or_prayer_mat
     bput("get #{@flint_lighter}",
          'You get', 'I could not find', 'What were you referring to')
-    get_from_container('incense')
+    if inside_container?('burnt incense')
+      # If we have multiple stacks, use the burnt stack first.
+      get_from_container('burnt incense')
+    else
+      get_from_container('incense')
+    end
 
     waitrt? while bput('light my incense with flint',
                        'nothing happens',
@@ -780,7 +847,7 @@ class TheurgyActions
   end
 
   def clean_altar
-    return false unless inside?('holy water', @water_holder)
+    return false unless holy_water?
     safe_walk_to @data['altar']['id']
     get_from_container(@water_holder)
     fput 'clean altar with holy water'
@@ -801,6 +868,25 @@ class TheurgyActions
     bput("kiss #{@prayer_mat || 'altar'}", 'You bend forward to kiss')
     fix_standing
     true
+  end
+
+  def clean_anloral
+    aspect = last_favor_aspect
+    return false unless aspect
+    description = "#{aspect} pin"
+    dirty_matches = ['A thin layer of dust', 'streaks of clumped dust',
+                     'thickly caked grime']
+    match = bput("look my #{description}",
+                 'It is clean', 'I could not find', *dirty_matches)
+    if dirty_matches.include?(match)
+      return false unless holy_water?
+      get_from_container(@water_holder)
+      bput("clean #{description} with holy water",
+           'You pour some holy water', 'You need to be holding',
+           'The immaculate anloral', 'That doesn\'t appear')
+      waitrt?
+      put_in_container(@water_holder)
+    end
   end
 
   def embarass_myself
@@ -860,7 +946,7 @@ class Theurgy
     @favor_god = settings.favor_god
     @theurgy_exp_threshold = settings.theurgy_exp_threshold
 
-    Flags.add('theurgy-commune', 'fully prepared to seek assistance from the Immortals once again', 'You will not be able to open another divine conduit yet', 'You grind some dirt in your fist', 'You feel warmth spread throughout your body', 'The power of Truffenyi has answered your prayer', 'The thick smell of ozone fills your nostrils')
+    Flags.add('theurgy-commune', 'fully prepared to seek assistance from the Immortals once again', 'You will not be able to open another divine conduit yet', 'You grind some dirt in your fist', 'You feel warmth spread throughout your body', 'The power of Truffenyi has answered your prayer', 'The thick smell of ozone fills your nostrils', 'You stop as you realize that you have attempted a commune too recently in the past.')
     Flags.add('theurgy-eluned', 'You grind some dirt in your fist', 'The waters of Eluned are still in your thoughts')
     Flags.add('theurgy-tamsine', 'You feel warmth spread throughout your body', 'You have been recently enlightened by Tamsine')
     Flags.add('theurgy-truffenyi', 'The power of Truffenyi has answered your prayer', 'You are still captivated by Truffenyi\'s favor')

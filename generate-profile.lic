@@ -1,0 +1,95 @@
+class ProfileGenerator
+  def initialize(debug)
+    @debug = debug
+    load_profilegen
+    resolve_includes
+    write_profiles
+  end
+
+  def load_profilegen
+    @profiles = {}
+    Dir['./scripts/profile-gen/*.yaml'].map { |item| File.path(item) }
+      .select { |path| path.include?("#{checkname}-") }.each do |path|
+      file = File.basename(path)
+      echo("Loading file #{file}") if @debug
+      unless match = /^(?:#{checkname}|ALL)-(.+?)(-include)?\.yaml$/.match(file)
+        raise ArgumentError, "Bad filename: #{file}"
+      end
+      name = match[1]
+      is_include = !!match[2]
+      body = File.readlines("./scripts/profile-gen/#{file}")
+      @profiles[name] = {
+        file: file,
+        name: name,
+        include: is_include,
+        src: body,
+      }
+    end
+  end
+
+  def resolve_includes
+    @profiles.each do |_name, profile|
+      profile[:deps] = []
+      profile[:subs] = {}
+      profile[:src].each_with_index do |line, line_num|
+        if match = /^%INCLUDE (.+?)\s*$/.match(line)
+          profile[:deps] << match[1]
+          profile[:subs][line_num] = match[1]
+        end
+      end
+
+      profile[:resolvable] = profile[:deps].all? do |dep|
+        @profiles[dep] && @profiles[dep][:include]
+      end
+    end
+
+    @profiles.each do |name, prof|
+      if !prof[:resolvable] && !prof[:include]
+        raise ArgumentError, "Profile #{name} contains non-resolvable includes."
+      end
+    end
+    
+    # Gather dependencies
+    to_process = @profiles.values.select { |profile| !profile[:include] }
+    
+    while next_file = to_process.pop
+      echo("Processing #{next_file[:file]}") if @debug
+
+      next_file[:seen] = true
+      if next_file[:visited]
+        next
+      end
+      deps_needed = next_file[:deps].map { |dep| @profiles[dep] }
+                    .select {|dep| !dep[:visited]}
+      if deps_needed.any? { |dep| dep[:seen] }
+        raise ArgumentError, "File contains circular dependency"
+      elsif deps_needed.empty?
+        resolve_file(next_file)
+        next_file[:visited] = true
+      else
+        to_process << next_file
+        to_process += deps_needed
+      end
+    end
+  end
+
+  def resolve_file(file)
+    file[:src] = file[:src].each_with_index.map do |line, index|
+      if file[:subs][index]
+        @profiles[file[:subs][index]][:src]
+      else
+        line
+      end
+    end.flatten
+  end
+
+  def write_profiles
+    @profiles.values.select { |profile| !profile[:include] }.each do |profile|
+      filename = "./scripts/profiles/#{profile[:file]}"
+      echo("Writing #{filename}") if @debug
+      File.open(filename, 'wb') { |f| f.puts(profile[:src]) }
+    end
+  end
+end
+
+ProfileGenerator.new(true)

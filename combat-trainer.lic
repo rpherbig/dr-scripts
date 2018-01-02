@@ -257,6 +257,8 @@ class LootProcess
   include DRCS
   include DRCH
 
+  attr_reader :current_box_count
+
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
     echo('New LootProcess') if $debug_mode_ct
@@ -345,6 +347,17 @@ class LootProcess
     echo("  @last_rites: #{@last_rites}") if $debug_mode_ct
     @last_rites_timer = Time.now - 600
 
+    if settings.box_loot_limit
+      @box_nouns = get_data('items').box_nouns
+      @box_loot_limit = settings.box_loot_limit
+      @current_box_count = get_boxes(settings.picking_box_source).size
+      if settings.picking_pet_box_source != settings.picking_box_source
+        @current_box_count += get_boxes(settings.picking_pet_box_source).size
+      end
+      echo("  @current_box_count: #{@current_box_count}")
+      echo("  @box_loot_limit: #{@box_loot_limit}")
+    end
+
     Flags.add('using-corpse', 'begins arranging', 'completes arranging', 'kneels down briefly and draws a knife', 'cruelly into the body and carving out a chunk', 'makes additional cuts, purposeful but seemingly at random')
     Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into', 'You\'d better tie it up before putting')
     Flags.add('container-full', 'There isn\'t any more room')
@@ -386,12 +399,18 @@ class LootProcess
       return
     end
 
-    if bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'There isn\'t any more room', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything') == 'already in your inventory'
+    case bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'There isn\'t any more room', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything') 
+    when 'already in your inventory'
       if @gem_nouns.include?(item)
         bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
       else
         bput("stow other #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
       end
+    when 'You pick up','You get'
+      if @box_loot_limit && @box_nouns.include?(item)
+        @current_box_count += 1
+      end
+    else
     end
     pause 0.25
     if Flags['container-full']
@@ -429,6 +448,7 @@ class LootProcess
     items_to_loot = []
     @lootables
       .select { |item| game_state.lootable?(item) }
+      .reject { |item| @box_nouns.include?(item) && @box_loot_limit && @current_box_count >= @box_loot_limit }
       .each do |item|
         item_reg = item.split.join('.*')
         matches = DRRoom.room_objs.grep(/\b#{item_reg}$/)
@@ -452,6 +472,7 @@ class LootProcess
       game_state.unlootable(GameObj.right_hand.noun.downcase)
       dispose_trash(right_hand)
     end
+
   end
 
   def should_perform_ritual?(game_state)
@@ -1417,7 +1438,7 @@ class AbilityProcess
     @barb_buffs.each do |name|
       ability_data = get_data('spells').barb_abilities[name]
       Flags.add("ap-#{name}-expired", ability_data['expired_message'])
-      Flags["ap-#{name}-expired"] = true
+      Flags["ap-#{name}-expired"] = true unless DRSpells.active_spells[name]
       echo "setup_barb_buff_flags:: adding #{Flags["ap-#{name}-expired"]} flag with an expiration message of: #{ability_data['expired_message']}" if $debug_mode_ct
     end
   end
@@ -1443,6 +1464,8 @@ class AbilityProcess
       .each do |name|
         Flags.reset("ap-#{name}-expired")
         start_barb_buff(name)
+        waitrt?
+        pause 6 if get_data('spells').barb_abilities[name]['type'].eql? 'meditation'
       end
   end
 
@@ -2178,6 +2201,20 @@ class CombatTrainer
       TrainerProcess.new(settings, @equipment_manager),
       AttackProcess.new(settings)
     ]
+  end
+
+  def get_process(process)
+    case process
+    when 'setup'; @combat_processes[0]
+    when 'spell'; @combat_processes[1]
+    when 'pet'; @combat_processes[2]
+    when 'ability'; @combat_processes[3]
+    when 'loot'; @combat_processes[4]
+    when 'manipulate'; @combat_processes[5]
+    when 'trainer'; @combat_processes[6]
+    when 'attack'; @combat_processes[7]
+    else nil
+    end  
   end
 
   def start_combat

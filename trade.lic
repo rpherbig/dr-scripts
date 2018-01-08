@@ -1,0 +1,262 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#trade
+=end
+custom_require.call(%w[common common-items common-money common-travel drinfomon equipmanager])
+
+class Trade
+  include DRC
+  include DRCT
+  include DRCI
+  include DRCM
+
+  def initialize
+    @town_data = get_data('town')
+    @equipment_manager = EquipmentManager.new
+    settings = get_settings
+    @contract_container = settings.trade_contract_container
+    @hometown = settings.hometown
+    bput("open my #{@contract_container}", 'You open', 'That is already')
+    @equipment_manager.empty_hands
+    @caravan = OpenStruct.new
+    recall_caravan
+  end
+
+  def run
+    unless exists?('contract')
+      nearest_minister = find_closest_id('trade_minister')
+      get_new_contract(nearest_minister)
+    end
+    contract = parse_contract
+    unless contract.presented
+      load_caravan(contract.origin_clerk)
+      recall_caravan
+      walk_to(contract.origin_outpost)
+    end
+    feed_caravan
+    take_caravan_to(contract.destination_outpost)
+    bput('get my contract', 'You get')
+    deliver_contract(contract.destination_clerk)
+    pay_dues(contract.destination_clerk)
+    walk_to(contract.destination_outpost)
+    deposit_coins(500, Room.current.id) if contract.destination_town == @hometown
+  end
+
+  def debugging?
+    UserVars.trade_debug
+  end
+
+  def deposit_coins(withdraw_amt, return_to_id)
+    return if wealth(@hometown) < withdraw_amt
+
+    walk_to(@town_data[@hometown]['deposit']['id'])
+    case bput('deposit all', 'you drop all your', 'You hand the clerk some coins', "You don't have any", 'There is no teller here', 'reached the maximum balance I can permit')
+    when 'There is no teller here'
+      walk_to(return_to_id)
+      return
+    end
+    minimize_coins(withdraw_amt).each { |amount| withdraw_exact_amount?(amount, @hometown) }
+    walk_to(return_to_id)
+  end
+
+  def find_closest_id(entity)
+    rooms = @town_data.to_h.values.select { |data| data[entity] }
+                      .map { |data| data[entity]['id'] }
+    echo "rooms: #{rooms}" if debugging?
+    sort_destinations(rooms).first
+  end
+
+  def parse_contract
+    destination_re = /^ The guild office at (?:The )?(?<destination>.*) requires .*/
+    payment_re = /^You estimate these goods are currently worth (.*) (Kronars|Dokoras|Lirums) on delivery\./
+    origin_re = /^ Trading Contract Issued by:  (?:The )?(?<origin>.*)/
+    contract = OpenStruct.new
+    contract.presented = true
+    contract.expired = false
+    fput('read my contract')
+    while line = get
+      echo line if debugging?
+      if line =~ destination_re
+        contract.destination_town = line.match(destination_re).captures.first
+        contract.destination_outpost = @town_data[contract.destination_town]['trader_outpost']['id']
+        contract.destination_clerk = @town_data[contract.destination_town]['shipment_clerk']['id']
+        contract.destination_minister = @town_data[contract.destination_town]['trade_minister']['id']
+      elsif line =~ payment_re
+        # This is the last line of the contract so break when finished
+        contract.payment, contract.currency = line.match(payment_re).captures
+        break
+      elsif line =~ origin_re
+        contract.origin_town = line.match(origin_re).captures.first
+        contract.origin_clerk = @town_data[contract.origin_town]['shipment_clerk']['id']
+        contract.origin_minister = @town_data[contract.origin_town]['trade_minister']['id']
+        contract.origin_outpost = @town_data[contract.origin_town]['trader_outpost']['id']
+      elsif line =~ /This contract has yet to be/
+        contract.presented = false
+      elsif line =~ /The contract is now useless since it has expired\./
+        contract.expired = true
+        break
+      end
+    end
+    if debugging?
+      echo "Contract origin: #{contract.origin_town}"
+      echo "Contract origin clerk room: #{contract.origin_clerk}"
+      echo "Contract origin minister room: #{contract.origin_minister}"
+      echo "Contract destination town: #{contract.destination_town}"
+      echo "Contracted presented to clerk? #{contract.presented}"
+    end
+    contract
+  end
+
+  def recall_caravan
+    recall_messages = [
+      /^You seem to recall that you left your (?<description>.*) (?<name>.*) right behind you/,
+      /^You recall that your (?<description>.*) (?<name>.*) should be located in/,
+      /^You don't recall where you left your caravan\./,
+      /^You don't recall having a caravan\./,
+      /^You seem to recall your (?<description>.*) (?<name>.*) should be somewhere to the/
+    ]
+    response = bput('recall caravan', recall_messages)
+    echo("Response: #{response}") if debugging?
+    case response
+    when /You don't recall where you left your caravan/, /You don't recall having a caravan/
+      echo('No caravan found') if debugging?
+    when /You seem to recall that you left your (?<description>.*) (?<name>.*) right behind you/
+      /You seem to recall that you left your (?<description>.*) (?<name>.*) right behind you/ =~ response
+      @caravan.noun = name
+      echo "@caravan.noun: #{@caravan.noun}" if debugging?
+      @caravan.adjective = description
+      echo "@caravan.adjective: #{@caravan.adjective}" if debugging?
+    when /You recall that your (?<description>.*) (?<name>.*) should be located in/
+      /You recall that your (?<description>.*) (?<name>.*) should be located in/ =~ response
+      @caravan.noun = name
+      echo "@caravan.noun: #{@caravan.noun}" if debugging?
+      @caravan.adjective = description
+      echo "@caravan.adjective #{@caravan.adjective}" if debugging?
+    end
+  end
+
+  def compute_path(destination)
+    previous, _shortest_paths = Map.dijkstra(Room.current.id, destination)
+    path = [destination]
+    path.push(previous[path[-1]]) until previous[path[-1]].nil?
+    path.reverse
+  end
+
+  def step(dir)
+    echo "step dir: #{dir}" if debugging?
+    case dir
+    when String
+      move(dir)
+    when Proc, StringProc
+      dir.call
+    end
+  end
+
+  def get_next_dir(path)
+    Room.current.wayto[path[path.index(Room.current.id) + 1].to_s]
+  end
+
+  def take_caravan_to(outpost_id)
+    command_caravan('follow')
+    path = compute_path(outpost_id)
+    echo "path: #{path}" if debugging?
+    echo "caravan_present?: #{caravan_present?}" if debugging?
+    until Room.current.id == outpost_id
+      dir = get_next_dir(path)
+      step(dir) if caravan_present?
+      waitfor 'following you'
+      echo 'Caravan arrival detected' if debugging?
+    end
+    command_caravan('wait')
+  end
+
+  def command_caravan(command)
+    case command
+    when 'follow'
+      follow_messages = [
+        'You grab hold of your .* harness and make it follow.',
+        'You pass on the order to follow to your driver, who makes sure your .* does your bidding.'
+      ]
+      bput("tell #{@caravan.noun} to follow", follow_messages)
+    when 'wait'
+      wait_messages = [
+        'You pass on the order to wait to your driver, who makes sure your .* does your bidding'
+      ]
+      bput("tell #{@caravan.noun} to wait", wait_messages)
+    end
+  end
+
+  def deliver_contract(clerk_id)
+    walk_to(clerk_id)
+    clerk_messages = [
+      '^The \w+ clerk finds everything in order with your merchandise'
+    ]
+    bput('give my contract to clerk', clerk_messages)
+  end
+
+  def pay_dues(clerk_id)
+    echo "Paying dues at clerk_room: #{clerk_id}" if debugging?
+    clerk_messages = [
+      /^You don't have any coins on you to pay dues\./,
+      /^You count out some coins, and the clerk notes that your dues are settled\./,
+      /^You count out some coins, and the clerk notes that your dues are now (.*)\./,
+      /^The clerk says, "You do not owe dues, .*!"/
+    ]
+    walk_to(clerk_id)
+    bput('pay clerk', clerk_messages)
+  end
+
+  def feed_caravan
+    feed_messages = [
+      'The driver takes the feedbag from you',
+      'You offer the .* feedbag to the caravan driver',
+      'The .* sniffs disinterestedly at your .* feedbag',
+      'The .* sticks its nose into your feedbag and munches away happily'
+    ]
+    @equipment_manager.empty_hands
+    bput('remove feedbag', 'You remove')
+    bput("give #{@caravan.noun}", feed_messages)
+    bput('wear feedbag', 'You attach')
+  end
+
+  def load_caravan(clerk_id)
+    echo "Presenting contract to clerk in room: #{clerk_id}" if debugging?
+    walk_to(clerk_id)
+    give_clerk(clerk_id)
+  end
+
+  def get_new_contract(minister_id)
+    echo "Getting a new contract from room #{minister_id}" if debugging?
+    walk_to(minister_id)
+    minister_messages = [
+      'The minister plucks a contract from the hands',
+      'The minister reminds you that you still owe .*'
+    ]
+    response = bput('ask minister for contract', minister_messages)
+    case response
+    when /The minister reminds you/
+      /The minister reminds you that you still owe (?<dues_amt>.*) (?<dues_currency>Kronars|Lirums|Dokoras) in dues to (?:The )?(?<outpost>.*) and asks that you pay the clerk before s?he issues you a new contract\./ =~ response
+      echo "Need to pay #{dues_amt} #{dues_currency} to #{outpost}" if debugging?
+      ensure_copper_on_hand(dues_amt.to_i, @hometown)
+      pay_dues(@town_data[outpost]['shipment_clerk']['id'])
+      get_new_contract(minister_id)
+    end
+  end
+
+  def caravan_present?
+    return unless @caravan.adjective
+    return unless @caravan.noun
+    DRRoom.room_objs.find { |obj| obj =~ /#{@caravan.adjective} #{@caravan.noun}/ }
+  end
+
+  def give_clerk(clerk_id)
+    walk_to(clerk_id)
+    bput('get my contract', 'You get', 'You are already holding that')
+    Flags.add('caravan-upgrade', /Unfortunately, this load would kill/)
+    bput('give my contract to clerk', /The .* clerk accepts your contract and peruses it\./)
+    recall_caravan if Flags['caravan-upgrade']
+    bput("put my contract in my #{@contract_container}", 'You put')
+    Flags.delete('caravan-upgrade')
+  end
+end
+
+Trade.new.run

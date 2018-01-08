@@ -1,5 +1,7 @@
 =begin
-This script takes partial YAML from profile-gen/ and resolves all %INCLUDE
+This script must be trusted in order to run (;trust generate-profile).
+
+This script takes partial YAMLs from profile-gen/ and resolves all %INCLUDE
 directives to produce new YAML files in profiles/ .
 
 Main yaml files must be named like
@@ -21,13 +23,13 @@ See Risima-* in profile-gen for an example usage.
 class ProfileGenerator
   def initialize(debug)
     @debug = debug
-    load_profilegen
-    resolve_includes
-    write_profiles
+    profiles = load_profilegen
+    resolve_includes!(profiles)
+    write_profiles(profiles)
   end
 
   def load_profilegen
-    @profiles = {}
+    profiles = {}
     paths = Dir['./scripts/profile-gen/*.yaml'].map { |item| File.path(item) }
     paths.select! { |p| p.include?("#{checkname}-") || p.include?("ALL-") }
     
@@ -43,34 +45,29 @@ class ProfileGenerator
         raise ArgumentError, 'Files starting in ALL- must be includes.'
       end
       body = File.readlines("./scripts/profile-gen/#{file}")
-      @profiles[name] = {
+      profiles[name] = {
         file: file,
         name: name,
         include: is_include,
         src: body,
       }
     end
+    profiles
   end
 
-  def resolve_includes
-    @profiles.each do |_name, profile|
+  def resolve_includes!(profiles)
+    profiles.each do |name, profile|
       profile[:deps] = []
       profile[:subs] = {}
       profile[:src].each_with_index do |line, line_num|
         if match = /^%INCLUDE (.+?)\s*$/.match(line)
-          profile[:deps] << match[1]
-          profile[:subs][line_num] = match[1]
+          dep = match[1]
+          profile[:deps] << dep
+          profile[:subs][line_num] = dep
+          unless profiles[dep] && profiles[dep][:include]
+            raise ArgumentError, "(#{name}, #{line_num}): include \"#{dep}\" not found."
+          end
         end
-      end
-
-      profile[:resolvable] = profile[:deps].all? do |dep|
-        @profiles[dep] && @profiles[dep][:include]
-      end
-    end
-
-    @profiles.each do |name, prof|
-      if !prof[:resolvable] && !prof[:include]
-        raise ArgumentError, "Profile #{name} contains non-resolvable includes."
       end
     end
     
@@ -84,12 +81,12 @@ class ProfileGenerator
       if next_file[:visited]
         next
       end
-      deps_needed = next_file[:deps].map { |dep| @profiles[dep] }
+      deps_needed = next_file[:deps].map { |dep| profiles[dep] }
                     .select {|dep| !dep[:visited]}
       if deps_needed.any? { |dep| dep[:seen] }
         raise ArgumentError, "File contains circular dependency"
       elsif deps_needed.empty?
-        resolve_file(next_file)
+        resolve_file!(next_file, profiles)
         next_file[:visited] = true
       else
         to_process << next_file
@@ -98,18 +95,18 @@ class ProfileGenerator
     end
   end
 
-  def resolve_file(file)
+  def resolve_file!(file, profiles)
     file[:src] = file[:src].each_with_index.map do |line, index|
       if file[:subs][index]
-        @profiles[file[:subs][index]][:src]
+        profiles[file[:subs][index]][:src]
       else
         line
       end
     end.flatten
   end
 
-  def write_profiles
-    @profiles.values.select { |profile| !profile[:include] }.each do |profile|
+  def write_profiles(profiles)
+    profiles.values.select { |profile| !profile[:include] }.each do |profile|
       filename = "./scripts/profiles/#{profile[:file]}"
       echo("Writing #{filename}") if @debug
       File.open(filename, 'wb') { |f| f.puts(profile[:src]) }

@@ -1,0 +1,122 @@
+=begin
+This script must be trusted in order to run (;trust generate-profile).
+
+This script takes partial YAMLs from profile-gen/ and resolves all %INCLUDE
+directives to produce new YAML files in profiles/ .
+
+Main yaml files must be named like
+Mychar-foo.yaml (where Mychar is your character name).
+The output files will have the same names as the these input files.
+
+Included yamls must either be named as:
+
+Mychar-foo-include.yaml (where Mychar is your character name), or
+ALL-foo-include.yaml
+
+In both cases these would be included into another YAML via:
+
+%INCLUDE foo
+
+See Risima-* in profile-gen for an example usage.
+=end
+
+class ProfileGenerator
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'debug', regex: /debug/, optional: true, description: 'Emit debug messages.' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    @debug = args.debug
+    profiles = load_profilegen
+    resolve_includes!(profiles)
+    write_profiles(profiles)
+  end
+
+  def load_profilegen
+    profiles = {}
+    paths = Dir['./scripts/profile-gen/*.yaml'].map { |item| File.path(item) }
+    paths.select! { |p| p.include?("#{checkname}-") || p.include?('ALL-') }
+
+    paths.each do |path|
+      file = File.basename(path)
+      echo("Loading file #{file}") if @debug
+      unless match = /^(#{checkname}|ALL)-(.+?)(-include)?\.yaml$/.match(file)
+        raise ArgumentError, "Bad filename: #{file}"
+      end
+      name = match[2]
+      is_include = !!match[3]
+      if match[1] == 'ALL' && !is_include
+        raise ArgumentError, 'Files starting in ALL- must be includes.'
+      end
+      body = File.readlines("./scripts/profile-gen/#{file}")
+      profiles[name] = {
+        file: file,
+        name: name,
+        include: is_include,
+        src: body
+      }
+    end
+    profiles
+  end
+
+  def resolve_includes!(profiles)
+    profiles.each do |name, profile|
+      profile[:deps] = []
+      profile[:subs] = {}
+      profile[:src].each_with_index do |line, line_num|
+        next unless match = /^%INCLUDE (.+?)\s*$/.match(line)
+        dep = match[1]
+        profile[:deps] << dep
+        profile[:subs][line_num] = dep
+        unless profiles[dep] && profiles[dep][:include]
+          raise ArgumentError, "(#{name}, #{line_num}): include \"#{dep}\" not found."
+        end
+      end
+    end
+
+    # Gather dependencies
+    to_process = profiles.values.reject { |profile| profile[:include] }
+
+    while next_file = to_process.pop
+      echo("Processing #{next_file[:file]}") if @debug
+
+      next_file[:seen] = true
+      next if next_file[:visited]
+      deps_needed = next_file[:deps].map { |dep| profiles[dep] }
+                                    .reject { |dep| dep[:visited] }
+      if deps_needed.any? { |dep| dep[:seen] }
+        raise ArgumentError, 'File contains circular dependency'
+      elsif deps_needed.empty?
+        resolve_file!(next_file, profiles)
+        next_file[:visited] = true
+      else
+        to_process << next_file
+        to_process += deps_needed
+      end
+    end
+  end
+
+  def resolve_file!(file, profiles)
+    file[:src] = file[:src].each_with_index.map do |line, index|
+      if file[:subs][index]
+        profiles[file[:subs][index]][:src]
+      else
+        line
+      end
+    end.flatten
+  end
+
+  def write_profiles(profiles)
+    profiles.values.reject { |profile| profile[:include] }.each do |profile|
+      filename = "./scripts/profiles/#{profile[:file]}"
+      echo("Writing #{filename}") if @debug
+      File.open(filename, 'wb') { |f| f.puts(profile[:src]) }
+    end
+  end
+end
+
+ProfileGenerator.new

@@ -1,7 +1,6 @@
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_repository#combat-trainer
 =end
-
 custom_require.call(%w[common common-arcana common-healing common-items common-summoning common-travel drinfomon equipmanager events spellmonitor])
 
 class SetupProcess
@@ -776,6 +775,8 @@ class SpellProcess
     @equipment_manager = equipment_manager
     echo('New SpellProcess') if $debug_mode_ct
 
+    @settings = settings
+
     @buff_spells = settings.buff_spells
     echo("  @buff_spells: #{@buff_spells}") if $debug_mode_ct
 
@@ -846,6 +847,9 @@ class SpellProcess
     echo("  @buff_force_cambrinth: #{@buff_force_cambrinth}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
+
+    @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
+    echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}")
 
     Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
@@ -1045,11 +1049,22 @@ class SpellProcess
 
     hide?(@hide_type) if XMLData.prepared_spell == 'Vivisection' && game_state.use_stealth_attack?
 
-    cast?(@custom_cast, @symbiosis, @before, @after)
+    snapshot = DRSkill.getxp(@skill)
+    success = cast?(@custom_cast, @symbiosis, @before, @after)
+    if @symbiosis && @use_auto_mana
+      if !success
+        UserVars.discerns[@abbrev]['more'] = [UserVars.discerns[@abbrev]['more'] - 1, 0].max
+      elsif DRSkill.getxp(@skill) - snapshot < @symbiosis_learning_threshold
+        UserVars.discerns[@abbrev]['more'] = UserVars.discerns[@abbrev]['more'] + 1
+      end
+    end
     @custom_cast = nil
     @symbiosis = nil
     @before = nil
     @after = nil
+    @skill = nil
+    @abbrev = nil
+    @use_auto_mana = nil
 
     game_state.casting = false
     game_state.cast_timer = nil
@@ -1253,6 +1268,7 @@ class SpellProcess
 
   def prepare_spell(data, game_state, force_cambrinth = false)
     return unless data
+    data = check_discern(data, @settings) if data['use_auto_mana']
     game_state.cast_timer = Time.now
     @prep_time = data['prep_time']
     echo("prepare spell: #{data}") if $debug_mode_ct
@@ -1320,6 +1336,8 @@ class SpellProcess
     @reset_expire = data['expire'] ? data['abbrev'] : nil
     Flags.reset('ct-spellcast')
     @before = data['before']
+    @abbrev = data['abbrev']
+    @use_auto_mana = data['use_auto_mana']
     game_state.action_taken if (@skill == 'Targeted Magic' || @prep == 'target') && game_state.weapon_skill == 'Targeted Magic'
   end
 end
@@ -2792,7 +2810,13 @@ class GameState
     @dance_queue.shift
   end
 
-  def cambrinth_charges(cambrinth)
+  def cambrinth_charges(charges)
+    cambrinth = case charges.first
+                when Array
+                  charges.first
+                else
+                  charges
+                end
     @charges = cambrinth.nil? || cambrinth.empty? ? nil : cambrinth.dup
   end
 
@@ -2826,7 +2850,7 @@ class GameState
       return
     end
 
-    harness_mana(@charges)
+    harness_mana(@charges.flatten)
 
     @charges = []
   end

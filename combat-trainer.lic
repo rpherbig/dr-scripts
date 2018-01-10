@@ -1411,6 +1411,7 @@ end
 class AbilityProcess
   include DRC
   include DRCA
+  include DRCT
 
   def initialize(settings)
     echo('New AbilityProcess') if $debug_mode_ct
@@ -1426,15 +1427,100 @@ class AbilityProcess
 
     @barb_buffs = @buffs.delete('barb_buffs') || []
     echo("  @barb_buffs: #{@barb_buffs}") if $debug_mode_ct
+
     setup_barb_buff_flags
+
+    @paladin_use_badge = settings.paladin_use_badge
+    echo("  @paladin_use_badge: #{@paladin_use_badge}") if $debug_mode_ct
+
+    @paladin_glyphs = settings.paladin['Glyphs']
+    echo("  @paladin_glyphs: #{@paladin_glyphs}") if $debug_mode_ct
+
+    setup_glyph_flags unless @paladin_glyphs.empty?
+
+    return unless @paladin_use_badge
+
+    if DRCI.wearing?('pilgrim badge')
+      @paladin_badge_get_verb = 'remove'
+      @paladin_badge_store_verb = 'wear'
+    else
+      @paladin_badge_get_verb = 'get'
+      @paladin_badge_store_verb = 'stow'
+    end
+
+    UserVars.paladin_last_badge_use ||= Time.now
+    @badge_reuse_cooldown = 1860 # 31 minutes
   end
 
   def execute(game_state)
+    check_paladin_skills(game_state)
     check_nonspell_buffs(game_state)
     false
   end
 
   private
+
+  def check_paladin_skills(game_state)
+    return unless DRStats.paladin? 
+
+    pray_badge
+    check_glyphs
+  end
+
+  def setup_glyph_flags
+    @paladin_glyphs
+      .select { |name|
+        unless get_data('spells').paladin_abilities[name]['type'].eql? 'glyph'
+          echo "***THE #{name} GLYPH IS NOT SUPPORTED AT THIS TIME***"
+          next false
+        end
+        true }
+      .each do |name|
+        ability_data = get_data('spells').paladin_abilities[name]
+        Flags.add("glyph-#{name}-expired", ability_data['expired_message'])
+        Flags["glyph-#{name}-expired"] = true
+        echo "setup_glyph_flags:: adding #{Flags["glyph-#{name}-expired"]} flag with an expiration message of: #{ability_data['expired_message']}" if $debug_mode_ct 
+      end
+  end
+
+  def pray_badge
+    return unless @paladin_use_badge
+    return unless Time.now - UserVars.paladin_last_badge_use > @badge_reuse_cooldown
+
+    case bput("#{@paladin_badge_get_verb} my pilgrim badge", 'You take off', 'You get', 'You remove', 'What were you referring to', 'You need a free hand', 'Remove what')
+    when 'You get', 'You remove', 'You take off'
+      retreat
+      bput('pray my pilgrim badge', 'You think upon the immortals')
+      UserVars.paladin_last_badge_use = Time.now
+      waitrt?
+      bput("#{@paladin_badge_store_verb} my pilgrim badge", 'You put', 'You attach')
+    when 'What were you referring to'
+      echo '***PILGRIM BADGE NOT FOUND! REMOVING FROM HUNT.***'
+      @paladin_use_badge = false
+      return
+    end
+  end
+
+  def check_glyphs
+    return if @paladin_glyphs.empty?
+    
+    unknown_glyphs = []
+    @paladin_glyphs
+      .select { |name| Flags["glyph-#{name}-expired"] }
+      .each do |name|
+        if use_glyph?(name)
+          Flags.reset("glyph-#{name}-expired")
+          echo "Used glyph #{name}!" if $debug_mode_ct
+          waitrt?
+          return
+        else
+          echo "***YOU DO NOT KNOW THE GLYPH #{name}. REMOVING FROM HUNT***"
+          unknown_glyphs.push(name)
+        end
+      end
+
+    @paladin_glyphs - unknown_glyphs
+  end
 
   def setup_barb_buff_flags
     @barb_buffs.each do |name|

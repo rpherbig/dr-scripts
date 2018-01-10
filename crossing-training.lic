@@ -31,12 +31,15 @@ class CrossingTraining
     args = parse_args(arg_definitions, true)
 
     @settings = get_settings(args.flex)
+    @hometown = @settings.hometown
     @training_room = (@settings.training_rooms || [@settings.safe_room]).sample
     @athletics_options = get_data('athletics').athletics_options
     @climbing_target = get_data('athletics').practice_options[@settings.climbing_target]
     @swimming_target = get_data('athletics').swimming_options[@settings.swimming_target]
     @song_list = get_data('perform').perform_options
     @junk_timer = Time.now
+    @pray_to_chadatru = @settings.pray_to_chadatru
+    @chadatru_prayer_cooldown = 3600
     @use_research = @settings.use_research
     @settings.storage_containers.each { |container| fput("open my #{container}") }
     @disciplines_to_skill = {
@@ -53,6 +56,7 @@ class CrossingTraining
     @equipment_manager = EquipmentManager.new(@settings)
 
     UserVars.crossing_timers ||= {}
+    UserVars.chadatru_prayer_last ||= Time.now - @chadatru_prayer_cooldown
 
     release_cyclics
 
@@ -113,6 +117,7 @@ class CrossingTraining
                      .min_by { |s| DRSkill.getxp(s) }
 
     check_tithe
+    check_chadatru
 
     unless @skills_requiring_movement.include?(skill)
       walk_to(@training_room)
@@ -230,17 +235,40 @@ class CrossingTraining
 
   def check_tithe
     return unless @settings.tithe
-    return unless almsbox = @settings.tithe_almsbox || get_data('town')[@settings.hometown]['almsbox']['id']
+    return unless almsbox = @settings.tithe_almsbox || get_data('town')[@hometown]['almsbox']['id']
     delta = Time.now - (UserVars.tithe_timer || Time.now - 14_400)
     return if (delta < 4 * 60 * 60 && DRStats.paladin?) || (delta < 60 * 10 && DRStats.cleric?)
-    currency = hometown_currency(@settings.hometown)
-    return unless withdraw_exact_amount?('5 silver', @settings.hometown)
+
+    currency = hometown_currency(@hometown)
+    return unless withdraw_exact_amount?('5 silver', @settings)
 
     wait_for_script_to_complete('pay-debt')
 
     UserVars.tithe_timer = Time.now
     walk_to(almsbox)
     bput("put 5 silver #{currency} in almsbox", 'You drop', 'But you do not', 'attend to thy own woes')
+  end
+
+  def check_chadatru
+    return unless DRStats.paladin? && @pray_to_chadatru
+    return unless Time.now - UserVars.chadatru_prayer_last > @chadatru_prayer_cooldown
+
+    altar_loc = get_data('theurgy')[@hometown]['chadatru_altar']['id']
+    if altar_loc.nil?
+      echo "***CHADATRU PRAYER SUPPORT NOT YET IMPLEMENTED IN #{@hometown}, REMOVING CHADATRU PRAYER***"
+      @pray_to_chadatru = false
+      return
+    end
+
+    walk_to(altar_loc)
+
+    bput('kneel', 'You kneel', 'You are already', 'You rise')
+    case bput('pray chadatru', 'As you kneel', 'decide it would be inappropriate')
+    when 'As you kneel'
+      waitfor('soothing sensation washes over your soul')
+    end
+
+    UserVars.chadatru_prayer_last = Time.now
   end
 
   def train_sorcery
@@ -457,27 +485,15 @@ class CrossingTraining
 
     if data['moon']
       # Look for a moon that will be up for the next few minutes
-      unless Script.running? 'moonwatch'
-        echo 'moonwatch is not running. Starting it now'
-        UserVars.moons = {}
-        custom_require.call('moonwatch')
-        echo "Run `;e autostart('moonwatch')` to avoid this in the future"
-        pause 0.5 while UserVars.moons.empty?
-      end
-      unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
-        echo "No moon available to cast #{data['abbrev']}"
-
+      check_moonwatch
+      unless set_moon_data(data)
         weather = bput('weather', 'inside', 'You glance up at the sky.')
         walk_to @settings.outdoor_room if weather =~ /inside/
         fput('perceive moons')
-
         # Look for a moon that will be up for the next few minutes
-        unless moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
-          echo "Couldn't find any moons to cast #{data['abbrev']} with"
-          return
-        end
+        return unless set_moon_data(data)
       end
-      data['cast'] = "cast #{moon}"
+      data = set_moon_data(data)
     end
 
     release_cyclics if data['cyclic']
@@ -505,6 +521,7 @@ class CrossingTraining
     wounds = check_health['wounds']
     if !success && wounds.any? { |_k, v| v.include?('skin') }
       wait_for_script_to_complete('safe-room', ['force'])
+      walk_to(@training_room)
     end
 
     return unless data['symbiosis']
@@ -538,7 +555,7 @@ class CrossingTraining
   def train_scholarship
     play_song?
 
-    if @settings.hometown == 'Crossing' && !DRStats.necromancer?
+    if @hometown == 'Crossing' && !DRStats.necromancer?
       wait_for_script_to_complete('study-art', ['scholarship'])
       return
     end
@@ -680,7 +697,7 @@ class CrossingTraining
       return
     end
 
-    room_list = get_data('town')[@settings.hometown]['perceive_health_rooms']
+    room_list = get_data('town')[@hometown]['perceive_health_rooms']
     room_list.each do |room_id|
       walk_to(room_id)
       5.times do
@@ -826,7 +843,7 @@ class CrossingTraining
     disciplines = @settings.work_order_disciplines
 
     if @settings.sell_pouches_for_trading && DRSkill.getxp('Trading') < 5 && bput("get pouch from my #{@settings.sale_pouches_container}", 'You get a', 'What were you') == 'You get a'
-      gemshop = get_data('town')[@settings.hometown]['gemshop']['id']
+      gemshop = get_data('town')[@hometown]['gemshop']['id']
       unless gemshop
         echo('NO GEMSHOP DATA FOUND?')
         fput('stow pouch')
@@ -916,7 +933,8 @@ class CrossingTraining
   end
 
   def money_for_training?(amount, skill)
-    if ensure_copper_on_hand(amount, @settings.hometown)
+    if ensure_copper_on_hand(amount, @settings)
+
       true
     else
       echo("Low on funds, removing #{skill} from training")
@@ -958,14 +976,14 @@ class CrossingTraining
   def buy_wood
     crafting_data = get_data('crafting')
     return unless money_for_training?(700, 'Engineering')
-    order_item(crafting_data['shaping'][@settings.hometown]['stock-room'], 11)
+    order_item(crafting_data['shaping'][@hometown]['stock-room'], 11)
     bput('stow my lumber', 'You put your')
   end
 
   def buy_yarn
     crafting_data = get_data('crafting')
     return unless money_for_training?(700, 'Outfitting')
-    order_item(crafting_data['tailoring'][@settings.hometown]['stock-room'], 13)
+    order_item(crafting_data['tailoring'][@hometown]['stock-room'], 13)
     bput('stow my yarn', 'You put your')
   end
 

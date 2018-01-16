@@ -22,7 +22,17 @@ class HuntingBuddy
     hunting_info = []
     if @settings.hunting_file_list || args.flex.any?
       (args.flex.any? ? args.flex : @settings.hunting_file_list).each do |file|
-        hunting_info += file == 'setup' ? get_settings.hunting_info : get_settings([file]).hunting_info
+        if file == 'setup'
+          hunting_info += get_settings.hunting_info
+        else
+          # Hunting info from extra config needs the config name passed on in args.
+          infos = get_settings([file]).hunting_info
+          infos.each do |info|
+            info['args'] = info['args'] || []
+            (info['args'] << file) unless info['args'].include? file
+          end
+          hunting_info += infos
+        end
       end
     else
       hunting_info = @settings.hunting_info
@@ -31,8 +41,14 @@ class HuntingBuddy
     @hunting_info = format_hunting_info(hunting_info)
   end
 
+  def need_boxes?
+    return false unless @settings.box_loot_limit
+    count_boxes(@settings) < @settings.box_loot_limit
+  end
+
   def main
     check_bundling_rope
+    wait_for_script_to_complete('restock')
 
     @hunting_info.each do |info|
       if @stop_hunting
@@ -49,13 +65,21 @@ class HuntingBuddy
       args = info['args']
       before_actions = info['before']
       after_actions = info['after']
+      during_actions = info['during']
       duration = info[:duration]
       stop_on_skills = info['stop_on']
+      stop_on_boxes = info['boxes']
 
       # Execute scripts to run before the hunt
       execute_actions(before_actions)
 
+      if stop_on_boxes && !need_boxes?
+        echo('***STATUS*** Skipping hunt because of box limit')
+        next
+      end
+
       if all_skills_at_cap?(stop_on_skills)
+        stop_actions(during_actions)
         # Execute scripts to run after the hunt
         execute_actions(after_actions)
         next
@@ -71,8 +95,11 @@ class HuntingBuddy
           stop_script('tendme') if Script.running?('tendme')
           break
         end
-        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil)
+        execute_nonblocking_actions(during_actions)
+        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil, stop_on_boxes ? stop_on_boxes[index] : nil)
       end
+
+      stop_actions(during_actions)
 
       wait_for_script_to_complete('bescort', @exit) if @exit
       release_cyclics
@@ -90,6 +117,21 @@ class HuntingBuddy
       action_parts = action.split(' ')
       script_name = action_parts.shift
       wait_for_script_to_complete(script_name, action_parts)
+    end
+  end
+
+  def execute_nonblocking_actions(actions)
+    actions.each do |action|
+      echo "***STATUS*** EXECUTE #{action}"
+      action_parts = action.split(' ')
+      script_name = action_parts.shift
+      start_script(script_name, action_parts)
+    end
+  end
+
+  def stop_actions(actions)
+    actions.each do |script_name|
+      stop_script(script_name) if Script.running?(script_name)
     end
   end
 
@@ -162,7 +204,11 @@ class HuntingBuddy
     stop_on_skills && stop_on_skills.flatten.all? { |skill| DRSkill.getxp(skill) >= 32 }
   end
 
-  def hunt(args, duration, stop_on_skills)
+  def over_box_limit?
+    $COMBAT_TRAINER.get_process('loot').at_box_limit?
+  end
+
+  def hunt(args, duration, stop_on_skills, stop_on_boxes)
     $COMBAT_TRAINER = nil
     echo("***STATUS*** beginning hunt '#{args}' for '#{duration}' minutes")
     verify_script('combat-trainer')
@@ -174,6 +220,10 @@ class HuntingBuddy
       if @settings.stop_hunting_if_bleeding && bleeding?
         echo('***STATUS*** stopping due to bleeding')
         @stopped_for_bleeding = true
+        break
+      end
+      if stop_on_boxes && over_box_limit?
+        echo('***STATUS*** stopping due to boxes')
         break
       end
       if all_skills_at_cap?(stop_on_skills)
@@ -218,6 +268,8 @@ class HuntingBuddy
           info['stop_on'] = [info['stop_on']]
           info['before'] = info['before']
           info['after'] = info['after']
+          info['during'] = info['during']
+          info['boxes'] = info['boxes']
         end
         hunting_info << info
       else
@@ -226,6 +278,8 @@ class HuntingBuddy
         hunting_info.last['stop_on'] << info['stop_on']
         hunting_info.last['before'] ||= info['before']
         hunting_info.last['after'] ||= info['after']
+        hunting_info.last['during'] ||= info['during']
+        hunting_info.last['boxes'] ||= info['boxes']
       end
     end
     hunting_info

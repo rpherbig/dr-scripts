@@ -24,7 +24,7 @@ module DRCA
 
     loop do
       pause 5 while mana <= amount
-      harness_mana(amount) if harness
+      harness_mana([amount]) if harness
       break if success.include?(DRC.bput("infuse om #{amount}", success, failure))
       pause 0.5
       waitrt?
@@ -32,9 +32,20 @@ module DRCA
   end
 
   def harness_mana(amount)
-    DRC.bput("harness #{amount}", 'You tap into', 'Strain though you may')
-    pause 0.5
-    waitrt?
+    amount.each do |mana|
+      result = DRC.bput("harness #{mana}", 'You tap into', 'Strain though you may')
+      pause 0.5
+      waitrt?
+      break if result =~ /Strain though you may/
+    end
+  end
+
+  def start_khris(khris, settings)
+    khris
+      .map { |name| "Khri #{name}" }
+      .each do |name|
+        activate_khri?(settings.kneel_khri, name)
+      end
   end
 
   def activate_khri?(kneel, ability)
@@ -48,12 +59,43 @@ module DRCA
     ['Your body is willing', 'You have not recovered'].include?(result)
   end
 
+  def start_barb_abilities(skills, _settings)
+    skills
+      .reject { |name| DRSpells.active_spells[name] }
+      .each do |name|
+        activate_barb_buff(name)
+        waitrt?
+        pause 6 if get_data('spells').barb_abilities[name]['type'].eql? 'meditation'
+      end
+  end
+
+  def activate_barb_buff(name)
+    ability_data = get_data('spells').barb_abilities[name]
+    case DRC.bput(ability_data['start_command'], ability_data['activated_message'], 'But you are already', 'Your inner fire lacks', 'find yourself lacking the inner fire', 'You should stand', 'You must be sitting')
+    when 'You must be sitting'
+      DRCT.retreat
+      DRC.bput('sit', 'You sit', 'You are already', 'You rise')
+      activate_barb_buff(name)
+    when 'You should stand'
+      fix_standing
+      activate_barb_buff(name)
+    end
+    fix_standing
+  end
+
+  def use_glyph?(name)
+    ability_data = get_data('spells').paladin_abilities[name]
+    result = DRC.bput(ability_data[name]['use_command'], ability_data[name]['activated_message'], 'only to look foolish', 'this glyph is already in effect here')
+    result =~ /only to look foolish/
+  end
+
   def prepare?(abbrev, mana, symbiosis = false, command = 'prepare')
     return false unless abbrev
 
     DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
 
-    case DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    case match
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command)
@@ -62,11 +104,11 @@ module DRCA
       return false
     end
 
-    true
+    match
   end
 
-  def ritual(spell)
-    DRCT.retreat
+  def ritual(spell, ignored_npcs)
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
     DRC.release_invisibility
     DRC.bput('stance set 100 0 80', 'Setting your')
 
@@ -75,10 +117,11 @@ module DRCA
 
     invoke(spell['focus'], nil)
     stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
-    DRCT.retreat
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
+
     waitcastrt?
     return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
-    DRCT.retreat
+    DRCT.retreat(ignored_npcs) unless spell['skip_retreat']
   end
 
   def cast?(cast_command = 'cast', symbiosis = false, before = [], after = [])
@@ -89,9 +132,8 @@ module DRCA
 
     case DRC.bput(cast_command || 'cast', get_data('spells').cast_messages)
     when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
-      fput('release spell')
-    when /^At the ritual's peak, your prophetic connection blooms a thousand-fold/
-      Flags.add('rtr-expire', get_data('spells').spell_data['Read the Ripples']['expire'])
+      DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+      DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
     waitrt?
 
@@ -103,7 +145,7 @@ module DRCA
     after.each { |action| DRC.bput(action['message'], action['matches']) }
 
     if symbiosis && Flags['spell-fail']
-      bput('release symbiosis', 'You release', 'But you haven\'t prepared')
+      DRC.bput('release symbiosis', 'You release', 'But you haven\'t prepared')
     end
 
     !Flags['spell-fail']
@@ -232,7 +274,7 @@ module DRCA
     end
   end
 
-  def cast_spells(spells, settings)
+  def cast_spells(spells, settings, force_cambrinth = false)
     infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
     spells.each do |name, data|
       next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
@@ -241,7 +283,7 @@ module DRCA
         pause 15
       end
 
-      cast_spell(data, settings)
+      cast_spell(data, settings, force_cambrinth)
     end
   end
 
@@ -305,15 +347,14 @@ module DRCA
     return if Script.running? 'moonwatch'
 
     echo 'moonwatch is not running. Starting it now'
+    UserVars.moons = {}
     custom_require.call('moonwatch')
     echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
+    pause 0.5 while UserVars.moons.empty?
   end
 
-  def buff(spell, settings)
-    cast_spell(spell, settings)
-  end
 
-  def cast_spell(data, settings)
+  def cast_spell(data, settings, force_cambrinth = false)
     return unless data
     return unless settings
 
@@ -322,16 +363,35 @@ module DRCA
 
     release_cyclics if data['cyclic']
     DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
 
     if data['ritual']
-      ritual(data)
+      ritual(data, settings.ignored_npcs)
       return
     end
 
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'])
     prepare_time = Time.now
 
-    find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, data['cambrinth'])
+    unless settings.cambrinth_items[0]['name']
+      settings.cambrinth_items = [{
+        'name' => settings.cambrinth,
+        'cap' => settings.cambrinth_cap,
+        'stored' => settings.stored_cambrinth
+      }]
+    end
+    if check_to_harness(settings.use_harness_when_arcana_locked) && !force_cambrinth
+      harness_mana(data['cambrinth'].flatten)
+    else
+      settings.cambrinth_items.each_with_index do |item, index|
+        case data['cambrinth'].first
+        when Array
+          find_charge_invoke_stow(item['name'], item['stored'], item['cap'], settings.dedicated_camb_use, data['cambrinth'][index])
+        when Fixnum, Integer
+          find_charge_invoke_stow(item['name'], item['stored'], item['cap'], settings.dedicated_camb_use, data['cambrinth'])
+        end
+      end
+    end
 
     if data['prep_time']
       pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
@@ -340,5 +400,86 @@ module DRCA
     end
 
     cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+  end
+
+  def check_discern(data, settings)
+    UserVars.discerns = {} unless UserVars.discerns
+    discern_data = UserVars.discerns[data['abbrev']] || {}
+    if data['symbiosis']
+      if discern_data.empty? || discern_data['min'].nil?
+        DRCT.retreat
+        /requires at minimum (\d+) mana streams/ =~ DRC.bput("discern #{data['abbrev']}", 'requires at minimum \d+ mana streams')
+        discern_data['mana'] = Regexp.last_match(1).to_i
+        discern_data['cambrinth'] = nil
+        discern_data['min'] = Regexp.last_match(1).to_i
+        discern_data['more'] = 0
+      end
+      calculate_mana(discern_data['min'], discern_data['more'], discern_data, false, settings)
+    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > 24 * 60 * 60 || !discern_data['more'].nil?
+      discern_data['time_stamp'] = Time.now
+      DRCT.retreat
+      case discern = DRC.bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
+      when /you don't think you are able/i, 'You have no idea how to cast that spell'
+        discern_data['mana'] = 1
+        discern_data['cambrinth'] = nil
+      else
+        discern =~ /minimum (\d+) mana streams and you think you can reinforce it with (\d+) more/i
+        calculate_mana(Regexp.last_match(1).to_i, Regexp.last_match(2).to_i, discern_data, data['cyclic'], settings)
+      end
+    end
+    pause 1
+    waitrt?
+    UserVars.discerns[data['abbrev']] = discern_data
+    data['mana'] = discern_data['mana']
+    data['cambrinth'] = discern_data['cambrinth']
+    data
+  end
+
+  def calculate_mana(min, more, discern_data, cyclic, settings)
+    total = min + more
+    total = (total * settings.prep_scaling_factor).floor
+    discern_data['mana'] = [(total / 5.0).ceil, min].max
+    remaining = total - discern_data['mana']
+    unless settings.cambrinth_items[0]['name']
+      settings.cambrinth_items = [{
+        'name' => settings.cambrinth,
+        'cap' => settings.cambrinth_cap,
+        'stored' => settings.stored_cambrinth
+      }]
+    end
+    total_cambrinth_cap = settings.cambrinth_items.map { |x| x['cap'] }.inject(&:+)
+    charges_count_floor = 4
+    settings.cambrinth_items.each do |item|
+      item['charges'] = ((item['cap'].to_f / total_cambrinth_cap) * charges_count_floor).ceil
+    end
+    total_cambrinth_charges = settings.cambrinth_items.map { |x| x['charges'] }.inject(&:+)
+    if remaining > total_cambrinth_cap
+      discern_data['mana'] = discern_data['mana'] + (remaining - total_cambrinth_cap)
+      remaining = total - discern_data['mana']
+    end
+    if cyclic
+      discern_data['cambrinth'] = nil
+      discern_data['mana'] = discern_data['mana'] + remaining
+    elsif remaining > 0
+      total_cambrinth_mana = [remaining, total_cambrinth_cap].min
+      settings.cambrinth_items.each_with_index do |item, index|
+        discern_data['cambrinth'] ||= []
+        charge_amount = (total_cambrinth_mana / total_cambrinth_charges) * item['charges']
+        discern_data['cambrinth'][index] = []
+        charge_amount.times do |i|
+          discern_data['cambrinth'][index][i % item['charges']] += 1
+        end
+      end
+    else
+      discern_data['cambrinth'] = nil
+    end
+  end
+
+  def check_to_harness(should_harness)
+    return false unless should_harness
+    return false if DRSkill.getxp('Attunement') >= DRSkill.getxp('Arcana')
+    return false if DRSkill.getxp('Attunement') >= 30
+
+    true
   end
 end

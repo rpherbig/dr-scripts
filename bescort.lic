@@ -1,6 +1,6 @@
 #   Documentation: https://elanthipedia.play.net/Lich_script_repository#bescort
 
-custom_require.call(%w[common common-arcana common-items common-travel common-money drinfomon events skill-recorder])
+custom_require.call(%w[common common-arcana common-items common-travel common-money drinfomon equipmanager events skill-recorder])
 
 $turns_since_bad = 0
 
@@ -164,8 +164,17 @@ class Bescort
         { name: 'mode', options: %w[leth crossing], description: 'Which town are you going to?' }
       ],
       [
-        { name: 'ferry1', regex: /ferry/i, description: 'Ferry between Hibarnhvidar and the Ain Ghazal' },
+        { name: 'ferry1', regex: /ferry1/i, description: 'Ferry between Hibarnhvidar and the Ain Ghazal' },
         { name: 'mode', options: %w[hibarnhvidar ainghazal], description: 'Which town are you going to?' }
+      ],
+      [
+        { name: 'lang_barge', regex: /lang/, description: 'Barge between Langenfirth and Riverhaven' }
+      ],
+      [
+        { name: 'shard_gates', regex: /shard/i, description: 'Use the Shard gates' }
+      ],
+      [
+        { name: 'abyss', regex: /abyss/i, description: 'Use the Cleric entrance to the Abyss; requires Rezz' }
       ]
     ]
 
@@ -207,6 +216,12 @@ class Bescort
       take_xing_ferry(args.mode)
     elsif args.ferry1
       take_ain_ghazal_ferry(args.mode)
+    elsif args.abyss
+      abyss_enter
+    elsif args.lang_barge
+      take_rh_lang_barge
+    elsif args.shard_gates
+      use_shard_gates
     end
   end
 
@@ -352,9 +367,11 @@ class Bescort
 
     case bput('go barge', 'What were you referring to', "One of the barge's crew members watching", "You can't do that right now")
     when /What were you referring to/, /You can't do that right now/
+      hide?
       waitfor 'A sand barge pulls'
       take_sandbarge(start_location, end_location)
     when /One of the barge's crew members watching/
+      hide?
       waitfor port_call
       fput("go #{port_type}")
     end
@@ -384,7 +401,12 @@ class Bescort
       move 'go trail'
       find_room_maze
     when /elder/
-      echo 'Not implemented'
+      desert_enter
+      move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+      move 'go trail'
+      move_direction?(priority_directions) until DRRoom.room_objs.include?('faint path leading to some nearby dunes')
+      move 'go path'
+      find_room_maze
       exit
     when /exit/
       if XMLData.room_title.include?('Sand Valley') # Adult Area
@@ -392,8 +414,14 @@ class Bescort
         move 'go trail'
         desert(mode)
       end
-      if XMLData.room_title.include?('High Dunes') # Juvie Area
-        move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+      if XMLData.room_title.include?('High Dunes') # Juvie Area or Elder
+        move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley') || DRRoom.room_objs.include?('faint path that stretches towards a sand-filled valley')
+        if DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+        else
+          move 'go path'
+          desert(mode)
+          exit
+        end
         move 'south'
         move 'northeast'
         walk_to(6760)
@@ -509,7 +537,7 @@ class Bescort
     path = mode == 'shard' ? $ICE_PATH_SHARD : $ICE_PATH_HIB
 
     if exists?('skates')
-      stow_hands
+      EquipmentManager.new.empty_hands
       footwear = get_settings.footwear
       fput("remove #{footwear}") if footwear
       bput("stow my #{footwear}", 'You put') if footwear
@@ -584,10 +612,12 @@ class Bescort
     end
     case bput('join crawling plague', "You join the ship's captain", 'What were you referring to?')
     when /You join the ship's captain/
+      hide?
       board_time = Time.now if UserVars.bescort_debug
       pause 1 until XMLData.room_title != '[[The Crawling Plague, Deck]]'
       echo "Trip time: #{Time.now - board_time} seconds" if UserVars.bescort_debug
     when /What were you referring to/
+      hide?
       waitfor 'JOIN CRAWLING PLAGUE before it leaves if you would like to go'
       take_crawling_plague(mode)
     end
@@ -597,12 +627,12 @@ class Bescort
     case mode
     when 'aesry'
       manual_go2(12_862)
-      if wealth('Shard') < 5000
+      if wealth('Shard') < 10_000
         echo('Get money you slob!')
         return
       end
     when 'shard'
-      if wealth('Aesry') < 5000
+      if wealth('Aesry') < 10_000
         echo('Get money you slob!')
         return
       end
@@ -631,9 +661,11 @@ class Bescort
     end
     case bput('go ferry', 'You .* climb aboard', 'Come back when you can afford the fare', 'not here', 'I could not find what you were referring to', 'stuck here until the next one arrives')
     when /not here/, /I could not find what you were referring to/i, /stuck here until the next one arrives/
+      hide?
       waitfor 'pulls into the dock', 'pulls up to the dock'
       take_rh_ferry(north)
     when /climb aboard/
+      hide?
       waitfor 'reaches the dock and its crew ties the ferry off'
       fput('go dock')
     end
@@ -726,7 +758,7 @@ class Bescort
       end
     else
       loop do
-        if bput('look reed', 'You see nothing unusual', 'could not find') == 'You see nothing unusual'
+        if bput('study reed', 'Study what?', 'You see nothing unusual', 'could not find', 'but see nothing special.') == 'but see nothing special.'
           move('go reed')
           break
         end
@@ -798,10 +830,26 @@ class Bescort
     exit
   end
 
+  def abyss_enter
+    unless Room.current.id == 8142
+      echo('Abyss entrance script must be started from 8142')
+      exit
+    end
+    release_cyclics
+    unless cast_spell({ 'abbrev' => 'rezz',
+                        'mana' => 5,
+                        'cyclic' => true }, get_settings)
+      echo('Failed to cast Resurrection! Try again or use the puzzle to enter.')
+      exit
+    end
+    move('go spirits')
+    release_cyclics
+  end
+
   def power_walk(pattern)
     fput 'exit' if dead? || Flags['ap-danger']
     if Flags['harness-check']
-      harness_mana(20) unless Flags['harness-check'].include?('effortlessly')
+      harness_mana([20]) unless Flags['harness-check'].include?('effortlessly')
       Flags.reset('harness-check')
     end
     result = bput('pow', pattern)
@@ -837,7 +885,7 @@ class Bescort
     end
     if entering_ap
       focus_shard(shard) if DRStats.circle < 100
-      3.times { harness_mana(20) }
+      harness_mana([20, 20, 20])
       waitcastrt?
       if DRStats.circle > 99
         unless cast?('cast grazhir')
@@ -874,7 +922,8 @@ class Bescort
       5050 => 'Erekinzil',
       6867 => 'Auilusi',
       8302 => 'Vellano',
-      3777 => "Dor'na'torna"
+      3777 => "Dor'na'torna",
+      287 => 'Tabelrem'
     }
 
     mode_to_shard = {
@@ -961,10 +1010,12 @@ class Bescort
       return
     end
 
+    hide?
     pause 1 until DRRoom.room_objs.find { |x| x =~ /the ferry/ }
 
     case bput('go ferry', 'The Captain gives you a little nod', 'You hand him', 'The ferry has just pulled away from the dock', 'There is no ferry here to go aboard', 'Come back when you can afford the fare')
     when 'You hand him', 'The Captain gives you a little nod'
+      hide?
       waitfor 'reaches the dock and its crew ties the ferry off'
       move 'go dock'
     when 'The ferry has just pulled away from the dock', 'There is no ferry here to go aboard'
@@ -977,7 +1028,7 @@ class Bescort
   end
 
   def take_ain_ghazal_ferry(mode)
-    unless [3986, 11027].include?(Room.current.id)
+    unless [3986, 11_027].include?(Room.current.id)
       echo 'You are not at the ferry docks'
       return
     end
@@ -987,11 +1038,13 @@ class Bescort
       return
     end
 
+    hide?
     echo(DRRoom.room_objs) if UserVars.bescort_debug
-    pause 1 until DRRoom.room_objs.find { |x| x =~ /Damaris. Kiss|Evening Star/}
+    pause 1 until DRRoom.room_objs.find { |x| x =~ /Damaris. Kiss|Evening Star/ }
 
     case bput('go ferry', 'You hand him', 'The ferry has just pulled away from the dock', 'is steadily approaching', 'Come back when you can afford the fare', 'Sorry, but we cannot take any more passengers', 'You see that the')
     when 'You hand him'
+      hide?
       waitfor 'You come to a very soft stop'
       move 'go dock'
     when 'is steadily approaching', 'You see that the', 'The ferry has just pulled away from the dock', 'Sorry, but we cannot take any more passengers'
@@ -1000,6 +1053,51 @@ class Bescort
     when 'Come back when you can afford the fare'
       echo('Your fare has mysteriously disappeared!')
       return
+    end
+  end
+
+  def take_rh_lang_barge
+    unless [466, 50_948, 3434].include?(Room.current.id)
+      echo 'You are not at the ferry docks'
+      return
+    end
+
+    if wealth('Riverhaven') < 300
+      echo('Get money you slob!')
+      return
+    end
+
+    hide?
+    pause 1 until DRRoom.room_objs.find { |x| x =~ /the barge/ }
+
+    case bput('go barge', "One of the barge's crew members stops you and requests a transportation fee of 65 lirums as you board the craft", 'You hand him', "The barge .* isn't docked, so you're stuck here until the next one arrives", 'The barge .* has just pulled away from the dock', 'There is no ferry here to go aboard', 'Come back when you can afford the fare')
+    when 'You hand him', "One of the barge's crew members stops you and requests a transportation fee of 65 lirums as you board the craft"
+      hide?
+      waitfor 'reaches its dock and its crew ties the barge off'
+      if DRRoom.room_objs.find { |x| x =~ /Langenfirth wharf/ }
+        move 'go wharf'
+      else
+        move 'go pier'
+      end
+    when /The barge .* has just pulled away from the dock/, /The barge .* isn't docked, so you're stuck here until the next one arrives/
+      pause 1 while DRRoom.room_objs.find { |x| x =~ /the barge/ }
+      take_rh_lang_barge
+    when 'Come back when you can afford the fare'
+      echo('Your fare has mysteriously disappeared!')
+      return
+    end
+  end
+
+  def use_shard_gates
+    unless [2640, 2658, 2807, 2525, 6452, 2516].include?(Room.current.id)
+      echo 'You are not at the Shard gates'
+      return
+    end
+
+    case bput('go gate', 'You pass', 'KNOCK', 'errant shadow')
+    when 'KNOCK'
+      release_invisibility
+      bput('knock gate', 'You knock')
     end
   end
 end

@@ -1,0 +1,119 @@
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#rezz
+
+custom_require.call(%w[common common-arcana events drinfomon spellmonitor])
+
+# rezz waggle set with POM if you want
+
+class Rezz
+  include DRC
+  include DRCA
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'person', regex: /\w+/, description: 'Person to rezz' }
+      ]
+    ]
+
+    @rejuv_mana = 0
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    rezz_prep(args.person)
+  end
+
+  def rezz_prep(person)
+    # cast buffs if set
+    check_buffs
+
+    # perceive body & rejuv
+    rejuv(person)
+
+    # cast rezz
+    mana = cast_rezz
+
+    # infuse untill see spirit
+    find_soul(person, mana)
+
+    # snap cast soul bonding
+    cast_soulbonding(person)
+
+    # check for silver again. recast rejuv (or infuse again) if not
+    rejuv(person)
+
+    # gesture
+    bput("gest #{person}", 'As you intone a quiet prayer')
+  end
+
+  def find_soul(person, infuse_amt)
+    loop do
+      pause 5 while mana <= 40
+      harness_mana([infuse_amt]) unless skip_harness?
+      case bput("infuse rezz #{infuse_amt}", /You clearly sense the spirit of #{person} in the Void/i, 'You sense a spirit nearby, but you are unable to make it out clearly.', 'Your sense of sight has not fully transitioned to the spirit world', "You don't have enough harnessed mana to infuse that much.")
+      when 'You sense a spirit nearby, but you are unable to make it out clearly.'
+        next
+      when /You clearly sense the spirit of #{person} in the Void/i
+        break
+      when 'Your sense of sight has not fully transitioned to the spirit world'
+        pause 2
+        next
+      when "You don't have enough harnessed mana to infuse that much."
+        next
+      else
+        next
+      end
+    end
+  end
+
+  def is_silver?(person)
+    /As you concentrate, a thin (.*) nimbus/ =~ bput("perc #{person}", 'As you concentrate, a thin (.*) nimbus')
+    color = Regexp.last_match(1)
+    echo "Memories are #{color}"
+    waitrt?
+    color.eql? 'silver'
+  end
+
+  def rejuv(person)
+    return if is_silver?(person)
+    data = get_data('spells').spell_data['Rejuvenation']
+    data['cast'] = "cast #{person}"
+    if @rejuv_mana.zero?
+      data = check_discern(data, @settings)
+      @rejuv_mana = data['mana']
+    end
+
+    loop do
+      cast_spell(data, @settings)
+      break if is_silver?(person)
+    end
+  end
+
+  def check_buffs
+    wait_for_script_to_complete('buff', ['rezz'])
+  end
+
+  def skip_harness?
+    attunement = DRSkill.getrank('Attunement')
+    return false if attunement < 541
+    return true if attunement > 600
+    return true if check_if_buff_active('Persistence of Mana', 6)
+    false
+  end
+
+  def cast_rezz
+    data = get_data('spells').spell_data['Resurrection']
+    data = check_discern(data, @settings)
+    cast_spell(data, @settings)
+    data['mana']
+  end
+
+  def cast_soulbonding(person)
+    data = { 'abbrev' => 'SB', 'prep_time' => 5, 'cast' => "cast #{person}", 'mana' => 1 }
+    cast_spell(data, @settings)
+  end
+
+  def check_if_buff_active(spell, time)
+    DRSpells.active_spells[spell] && DRSpells.active_spells[spell] > time
+  end
+end
+
+Rezz.new

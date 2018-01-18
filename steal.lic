@@ -20,7 +20,14 @@ class Steal
 
     @stealing_options = get_data('stealing').stealing_options.reject { |target| settings.dont_steal_list.include?(target['id'].to_i) }
     @stealing_bag = settings.stealing_bag
+    hometown_data = get_data('town')[settings.hometown]
+    @bin_id = hometown_data['thief_bin'] && hometown_data['thief_bin']['id']
+    @stealing_towns = settings.stealing_towns
     @bin_stolen = settings.bin_stolen
+    if @bin_stolen && !@bin_id
+      echo("*** Binning is not yet supported in #{settings.hometown}")
+      @bin_stolen = false
+    end
     @hide_to_steal = settings.hide_to_steal
     @stealing_low_acceptable_count = settings.stealing_low_acceptable_count
     @stealing_high_acceptable_count = settings.stealing_high_acceptable_count
@@ -113,10 +120,7 @@ class Steal
 
   def bin_items
     return if @bin_items.empty?
-
-    walk_to 6017
-    move('tap knocker')
-    move('north')
+    return unless walk_to_bin?
 
     stow_hands
     @bin_items.each do |item|
@@ -129,9 +133,10 @@ class Steal
       end
       pause 0.25
     end
+  end
 
-    move('south')
-    move('go door')
+  def walk_to_bin?
+    @bin_id && walk_to(@bin_id)
   end
 
   def find_targets(item, container)
@@ -144,24 +149,45 @@ class Steal
 
   def build_target_data(item, container)
     tracked_items_in_shop = @stealing_options.select { |x| x['room'] == Room.current.id }
-    return build_new(item, container) if tracked_items_in_shop.empty?
-
     data = tracked_items_in_shop.find { |x| x['item'] == item && x['item_in'] =~ /#{container}/ }
 
     data || build_new(item, container)
   end
 
   def build_new(item, container)
-    echo('This appears to be a new item, ;send yes  if this is correct, or no to cancel')
-
-    loop do
-      line = get
-      return nil if line =~ /^no/i
-      break if line =~ /^yes/i
+    town = nil
+    if @stealing_towns.empty?
+      echo('*** You have no stealing_towns set; cannot add a new item.')
+    elsif @stealing_towns.size == 1
+      town = @stealing_towns.first
+      echo('***This appears to be a new item.')
+      echo("Note: the stealing town is set to '#{town}'.")
+      echo(';send yes  if this is a new item and this town is correct, or ;send no  to cancel')
+      loop do
+        line = get
+        exit if line =~ /^no/i
+        break if line =~ /^yes/i
+      end
+    else
+      echo('***This appears to be a new item.')
+      echo(';send the number of the town in the list below (e.g. ;send 1 ) if this is correct, or ;send no  to cancel.')
+      @stealing_towns.each_with_index { |town, i| echo("  #{i + 1} :  #{town}") }
+      echo('If the desired town does not appear in this list, add it to your stealing_towns and try again.')
+      loop do
+        line = get
+        exit if line =~ /^no/i
+        next unless line =~ /^\d+$/
+        index = line.to_i
+        exit unless index > 0
+        town = @stealing_towns[index - 1]
+        break
+      end
     end
 
+    exit if town.nil?
+
     {
-      'new' => true, 'room' => Room.current.id, 'province' => 'zoluren',
+      'new' => true, 'room' => Room.current.id, 'town' => town,
       'item' => item, 'item_in' => container, 'pawnable' => false,
       'id' => @stealing_options.map { |x| x['id'].to_i }.max + 1
     }
@@ -174,6 +200,7 @@ class Steal
 
     @stealing_options
       .select { |data| data['guilds'].nil? || data['guilds'].include?(DRStats.guild) }
+      .select { |data| @stealing_towns.include?(data['town']) }
       .select { |data| ready_to_steal?(data['room']) }
       .each { |data| thievery_is_appropriate(data, thievery_skill, targets) }
 
@@ -200,9 +227,7 @@ class Steal
       return
     end
 
-    if data['trivial_min'] && data['trivial_min'] <= skill && data['trivial_max'] >= skill
-      return
-    end
+    return if data['trivial_min'] && data['trivial_min'] <= skill
 
     upper_keys
       .reverse
@@ -335,22 +360,22 @@ class Steal
               'you decide to wait a while before trying again',
               'Roundtime')
     when /this trivial theft/
-      update_target(target, 'trivial')
+      update_target(target, 'trivial') if count == 1
       bin_item
     when /nearly trivial theft/
-      update_target(target, 'nearly')
+      update_target(target, 'nearly') if count == 1
       bin_item
       steal(target, count) if count < 4
     when /very poorly/
-      update_target(target, 'vpoorly')
+      update_target(target, 'vpoorly') if count == 1
       bin_item
       steal(target, count) if count < 3
     when /somewhat poorly/
-      update_target(target, 'poorly')
+      update_target(target, 'poorly') if count == 1
       bin_item
       steal(target, count) if count < 3
     when /learned acceptably/
-      update_target(target, 'acceptable')
+      update_target(target, 'acceptable') if count == 1
       bin_item
       if (target['acceptable_max'] + target['acceptable_min']) / 2 <= DRSkill.getrank('Thievery')
         steal(target, count) if count < @stealing_low_acceptable_count
@@ -358,13 +383,13 @@ class Steal
         steal(target, count)
       end
     when /learned rather well/
-      update_target(target, 'rather')
+      update_target(target, 'rather') if count == 1
       bin_item
     when /learned very well/
-      update_target(target, 'very')
+      update_target(target, 'very') if count == 1
       bin_item
     when /learned exceptionally/
-      update_target(target, 'exceptionally')
+      update_target(target, 'exceptionally') if count == 1
       bin_item
     when /but decide you have too many outstanding fines as is/
       beep

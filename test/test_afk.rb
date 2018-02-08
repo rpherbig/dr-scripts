@@ -54,11 +54,15 @@ class TestAfk < Minitest::Test
   end
 
   def test_exits_if_low_health
-    skip "Afk has changed and this test needs to be updated to modify health while its running"
     setup_settings({})
+    $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
     expected_messages = ['health', 'avoid all', 'exit']
-    self.health = 20
+    self.health = 100
+
     run_script('afk')
+
+    next until $history.empty?
+    self.health = 20
 
     Timecop.return
 

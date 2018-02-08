@@ -1,7 +1,7 @@
 module Harness
   class Script
     def gets?
-      ''
+      get?
     end
   end
 
@@ -76,6 +76,10 @@ module Harness
 
   def health=(health)
     $health = health
+  end
+
+  def spirit=(spirit)
+    $spirit = spirit
   end
 
   def dead=(dead)

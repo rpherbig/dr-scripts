@@ -20,8 +20,10 @@ end
 
 class TestAfk < Minitest::Test
   def setup
+    $history.clear
     self.dead = false
     self.health = 100
+    self.spirit = 100
     sent_messages.clear
   end
 
@@ -57,12 +59,27 @@ class TestAfk < Minitest::Test
     setup_settings({})
     $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
     expected_messages = ['health', 'avoid all', 'exit']
-    self.health = 100
 
     run_script('afk')
 
     next until $history.empty?
     self.health = 20
+
+    Timecop.return
+
+    assert_sends_messages expected_messages
+  end
+
+  def test_exits_if_low_spirit
+    setup_settings({})
+    $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
+    expected_messages = ['health', 'avoid all', 'exit']
+    self.spirit = 100
+
+    run_script('afk')
+
+    next until $history.empty?
+    self.spirit = 20
 
     Timecop.return
 

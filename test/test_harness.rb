@@ -21,7 +21,7 @@ module Harness
     args
   end
 
-  def get_settings(dummy)
+  def get_settings(dummy=nil)
     $settings_called_with = dummy
     $test_settings
   end
@@ -58,6 +58,10 @@ module Harness
     $health || 100
   end
 
+  def spirit
+    $spirit || 100
+  end
+
   def fput(message)
     sent_messages << message
   end
@@ -85,6 +89,12 @@ module Harness
   end
 
   def no_pause_all; end
+
+  def no_kill_all; end
+
+  def register_slackbot(username); end
+
+  def send_slackbot_message(message); end
 
   def get
     get?

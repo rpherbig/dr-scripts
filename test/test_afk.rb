@@ -1,4 +1,7 @@
 require 'minitest/autorun'
+require 'timecop'
+require 'yaml'
+require 'ostruct'
 load 'test/test_harness.rb'
 
 include Harness
@@ -22,7 +25,24 @@ class TestAfk < Minitest::Test
     sent_messages.clear
   end
 
-  def test_departs_if_dead
+  def setup_settings(settings)
+    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
+  end
+
+  def test_exits_if_dead_with_default_settings
+    setup_settings({})
+    expected_messages = ['exit']
+    self.dead = true
+
+    run_script('afk')
+
+    Timecop.return
+
+    assert_sends_messages(expected_messages)
+  end
+
+  def test_departs_if_dead_with_depart_on_death_enabled
+    setup_settings({'depart_on_death'=>'true'})
     expected_messages = ['depart item', 'exit']
     self.dead = true
 
@@ -34,10 +54,13 @@ class TestAfk < Minitest::Test
   end
 
   def test_exits_if_low_health
+    setup_settings({})
     expected_messages = ['health', 'avoid all', 'exit']
-    self.health = 20
 
     run_script('afk')
+    sleep 0.4
+    self.health = 15
+    Timecop.return
 
     assert_sends_messages expected_messages
   end

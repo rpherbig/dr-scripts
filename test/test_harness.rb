@@ -84,6 +84,30 @@ module Harness
     $history ? $history.shift : nil
   end
 
+  def reget(*lines)
+    lines.flatten!
+    history = $server_buffer.dup.join("\n")
+    history.gsub!(/<pushStream id=["'](?:spellfront|inv|bounty|society)["'][^>]*\/>.*?<popStream[^>]*>/m, '')
+    history.gsub!(/<stream id="Spells">.*?<\/stream>/m, '')
+    history.gsub!(/<(compDef|inv|component|right|left|spell|prompt)[^>]*>.*?<\/\1>/m, '')
+    history.gsub!(/<[^>]+>/, '')
+    history.gsub!('&gt;', '>')
+    history.gsub!('&lt;', '<')
+    history = history.split("\n").delete_if { |line| line.nil? or line.empty? or line =~ /^[\r\n\s\t]*$/ }
+    if lines.first.kind_of?(Numeric) or lines.first.to_i.nonzero?
+      history = history[-([lines.shift.to_i,history.length].min)..-1]
+    end
+    unless lines.empty? or lines.nil?
+      regex = /#{lines.join('|')}/i
+      history = history.find_all { |line| line =~ regex }
+    end
+    if history.empty?
+      nil
+    else
+      history
+    end
+  end
+
   def no_pause_all; end
 
   def get

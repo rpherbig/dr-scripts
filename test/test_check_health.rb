@@ -52,31 +52,41 @@ class TestCheckHealth < Minitest::Test
     DRCH.check_health
   end
 
+  def test_that_wounded_person_is_wounded
+    messages = [
+      'Your body feels at full strength.',
+      'Your spirit feels full of life.',
+      'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
+      'You have no significant injuries.'
+    ]
+    assert_wounded(check_health_with_buffer(messages))
+  end
+
   def test_that_healthy_person_is_healthy
     messages = [
-        'Your body feels at full strength.',
-        'Your spirit feels full of life.',
-        'You have no significant injuries.'
+      'Your body feels at full strength.',
+      'Your spirit feels full of life.',
+      'You have no significant injuries.'
     ]
     assert_healthy(check_health_with_buffer(messages))
   end
 
   def test_that_fatigue_line_does_not_interfere
     messages = [
-        'Your body feels at full strength.',
-        'You are slightly fatigued.',
-        'Your spirit feels full of life.',
-        'You have no significant injuries.'
+      'Your body feels at full strength.',
+      'You are slightly fatigued.',
+      'Your spirit feels full of life.',
+      'You have no significant injuries.'
     ]
     assert_healthy(check_health_with_buffer(messages))
   end
 
   def test_that_poisoned_person_is_poisoned
     messages = [
-        'Your body feels at full strength.',
-        'Your spirit feels full of life.',
-        'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
-        'You have a mildly poisoned right leg.'
+      'Your body feels at full strength.',
+      'Your spirit feels full of life.',
+      'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
+      'You have a mildly poisoned right leg.'
     ]
     health = check_health_with_buffer(messages)
     assert_no_parasites(health)
@@ -87,36 +97,36 @@ class TestCheckHealth < Minitest::Test
 
   def test_that_wounded_person_is_healthy_after_healing
     messages = [
-        'Your body feels at full strength.',
-        'Your spirit feels full of life.',
-        'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
-        'You have no significant injuries.',
-        'Empath touches you.',
-        'You feel a warmth radiate from Empath\'s touch.',
-        'You have a brief sensation that leaves your wounds tingling.',
-        'Your external left leg and chest wounds feel fully healed.',
-        'Your internal left leg and chest wounds feel fully healed.',
-        'Your external left leg and chest scars feel fully healed.',
-        'Your internal left leg and chest scars feel fully healed.',
-        'Empath whispers, "Done!"',
-        'Your body feels at full strength.',
-        'Your spirit feels full of life.',
-        'You have no significant injuries.'
+      'Your body feels at full strength.',
+      'Your spirit feels full of life.',
+      'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
+      'You have no significant injuries.',
+      'Empath touches you.',
+      'You feel a warmth radiate from Empath\'s touch.',
+      'You have a brief sensation that leaves your wounds tingling.',
+      'Your external left leg and chest wounds feel fully healed.',
+      'Your internal left leg and chest wounds feel fully healed.',
+      'Your external left leg and chest scars feel fully healed.',
+      'Your internal left leg and chest scars feel fully healed.',
+      'Empath whispers, "Done!"',
+      'Your body feels at full strength.',
+      'Your spirit feels full of life.',
+      'You have no significant injuries.'
     ]
     assert_healthy(check_health_with_buffer(messages))
   end
 
   def test_that_diseased_person_is_diseased
     messages = [
-        'Your body feels beat up.',
-        'Your spirit feels full of life.',
-        'You have some minor abrasions to the right arm, a broken right hand with gaping holes, deep slashes across the chest area.',
-        'Bleeding',
-        '            Area       Rate',
-        '-----------------------------------------',
-        '      right hand       moderate',
-        '           chest       moderate',
-        'Your body is covered in open oozing sores.'
+      'Your body feels beat up.',
+      'Your spirit feels full of life.',
+      'You have some minor abrasions to the right arm, a broken right hand with gaping holes, deep slashes across the chest area.',
+      'Bleeding',
+      '            Area       Rate',
+      '-----------------------------------------',
+      '      right hand       moderate',
+      '           chest       moderate',
+      'Your body is covered in open oozing sores.'
     ]
     health = check_health_with_buffer(messages)
     assert_diseased(health)
@@ -124,16 +134,29 @@ class TestCheckHealth < Minitest::Test
   end
 
   def test_that_the_last_health_lines_are_used
-    # Same as test_that_wounded_person_is_healthy_after_healing but with the Empath interaction lines removed
-    messages = [
-      'Your body feels at full strength.',
-      'Your spirit feels full of life.',
-      'You have some minor abrasions to the left arm, some minor abrasions to the right leg, some minor abrasions to the left leg, some minor abrasions to the chest, some minor abrasions to the abdomen, some minor abrasions to the back, some minor abrasions to the right eye.',
-      'You have no significant injuries.',
-      'Your body feels at full strength.',
-      'Your spirit feels full of life.',
-      'You have no significant injuries.'
-    ]
-    assert_not_wounded(check_health_with_buffer(messages))
+    # Same as test_that_wounded_person_is_healthy_after_healing but with the Empath interaction lines removed and
+    # all known vitality lines/messages checked against.
+    ['Your body feels at full strength.',
+     'Your body feels slightly battered.',
+     'Your body feels battered.',
+     'Your body feels beat up.',
+     'Your body feels very beat up.',
+     'Your body feels extremely beat up.',
+     'Your body feels in bad shape.',
+     'Your body feels in very bad shape!',
+     'Your body feels in extremely bad shape!',
+     'Your body feels at death\'s door!'].each do |vit_line|
+
+      messages = [
+          vit_line,
+          'Your spirit feels full of life.',
+          'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
+          'You have no significant injuries.',
+          vit_line,
+          'Your spirit feels full of life.',
+          'You have no significant injuries.'
+      ]
+      assert_healthy(check_health_with_buffer(messages))
+    end
   end
 end

@@ -2,19 +2,21 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#safe-room
 =end
 
-custom_require.call(%w[common common-healing common-money common-travel drinfomon events])
+custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel drinfomon events])
 
 class SafeRoom
   include DRC
   include DRCH
+  include DRCI
   include DRCM
   include DRCT
+  include DRCA
 
   def initialize
     arg_definitions = [
-      [
-        { name: 'force', regex: /force/i, optional: true, description: 'Run healing logic even if there are no visible wounds' }
-      ]
+      [ { name: 'force', regex: /force/i, description: 'Run healing logic even if there are no visible wounds.' } ],
+      [ { name: 'skip', regex: /(s|skip)/i, description: 'Skip running to the safe room, useful for Empaths and Necros.' } ],
+      []
     ]
 
     args = parse_args(arg_definitions)
@@ -24,22 +26,29 @@ class SafeRoom
     return unless args.force || need_healing?
 
     if use_pc_empath?(settings.safe_room_id, settings.safe_room_empath)
-      ensure_copper_on_hand(settings.safe_room_tip_threshold || 0, settings.hometown)
+      ensure_copper_on_hand(settings.safe_room_tip_threshold || 0, settings)
       tip(settings.safe_room_tip_threshold, settings.safe_room_tip_amount, settings.safe_room_empath)
     elsif DRStats.empath?
-      walk_to(settings.safe_room)
+      walk_to(settings.safe_room) unless args.skip
       wait_for_script_to_complete('healme')
     elsif !DRStats.necromancer? || settings.necro_force_safe_room
-      ensure_copper_on_hand(4_000, settings.hometown)
+      ensure_copper_on_hand(4_000, settings)
+
       Flags.add('npc-idle', '^Dokt glances around the room')
       Flags.add('healthy', 'Dokt waves a large hand at you', 'Dokt gives you a quick glance', 'go have yourself a birthday party', 'you are well', 'have other patients', 'you look fine and healthy', 'A little rest and exercise', 'There is nothing I can do for you', 'Up and out')
       Flags.add('moved', 'grabs you and drags you', 'grabs your arm and drags you .* with')
       Flags.add('idle', 'you have been idle too long')
 
       town_data = get_data('town')
-      hometown = town_data[settings.hometown]
+      if settings.force_healer_town
+        hometown = town_data[settings.force_healer_town]
+      else
+        hometown = town_data[settings.hometown]
+      end
       wait_at_empath(hometown['npc_empath']['id'])
       fix_standing
+    elsif settings.necro_safe_room_use_devour
+      devour_healing(settings, args.skip)
     end
 
     give_and_take(settings.safe_room_id, settings.safe_room_give, settings.safe_room_take)
@@ -61,6 +70,33 @@ class SafeRoom
     echo "***STATUS*** Current health score is #{score}, threshold is #{@health_threshold}"
 
     score > @health_threshold
+  end
+
+  def devour_healing(settings, skip = false)
+    return unless settings.necromancer_healing['Devour']
+    return unless settings.thanatology['harvest_container']
+
+    walk_to(settings.safe_room) unless skip
+    release_invisibility
+    devours = count_items_in_container('material', settings.thanatology['harvest_container'])
+    return if devours.zero?
+
+    stow_hands
+    return if right_hand
+
+    while need_healing? && devours > 0
+      while mana < 40
+        echo('Waiting on mana...')
+        pause 10
+      end
+
+      result = bput("get material in my #{settings.thanatology['harvest_container']}", 'You get', 'You are already', 'What were you') unless right_hand
+      break if result =~ /^What were you/
+      cast_spell(settings.necromancer_healing['Devour'], settings)
+      devours -= 1 unless right_hand
+    end
+
+    bput("put my material in my #{settings.thanatology['harvest_container']}", 'You put', 'What were') if right_hand
   end
 
   def check_idle
@@ -144,7 +180,7 @@ class SafeRoom
 
     fput("whisper #{empath} heal")
     fput("listen to #{empath}")
-    Flags.add('doneheal', '"Done!"')
+    Flags.add('doneheal', '"Done!"', 'All set', 'not even injured')
     24.times do
       pause 5
       break if Flags['doneheal']

@@ -21,7 +21,7 @@ module Harness
     args
   end
 
-  def get_settings(dummy=nil)
+  def get_settings(dummy = nil)
     $settings_called_with = dummy
     $test_settings
   end
@@ -101,11 +101,11 @@ module Harness
     history.gsub!(/<[^>]+>/, '')
     history.gsub!('&gt;', '>')
     history.gsub!('&lt;', '<')
-    history = history.split("\n").delete_if { |line| line.nil? or line.empty? or line =~ /^[\r\n\s\t]*$/ }
-    if lines.first.kind_of?(Numeric) or lines.first.to_i.nonzero?
-      history = history[-([lines.shift.to_i,history.length].min)..-1]
+    history = history.split("\n").delete_if { |line| line.nil? || line.empty? || line =~ /^[\r\n\s\t]*$/ }
+    if lines.first.is_a?(Numeric) || lines.first.to_i.nonzero?
+      history = history[-[lines.shift.to_i, history.length].min..-1]
     end
-    unless lines.empty? or lines.nil?
+    unless lines.empty? || lines.nil?
       regex = /#{lines.join('|')}/i
       history = history.find_all { |line| line =~ regex }
     end

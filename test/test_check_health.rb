@@ -148,13 +148,13 @@ class TestCheckHealth < Minitest::Test
      'Your body feels at death\'s door!'].each do |vit_line|
 
       messages = [
-          vit_line,
-          'Your spirit feels full of life.',
-          'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
-          'You have no significant injuries.',
-          vit_line,
-          'Your spirit feels full of life.',
-          'You have no significant injuries.'
+        vit_line,
+        'Your spirit feels full of life.',
+        'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
+        'You have no significant injuries.',
+        vit_line,
+        'Your spirit feels full of life.',
+        'You have no significant injuries.'
       ]
       assert_healthy(check_health_with_buffer(messages))
     end

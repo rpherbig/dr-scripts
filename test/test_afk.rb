@@ -44,7 +44,7 @@ class TestAfk < Minitest::Test
   end
 
   def test_departs_if_dead_with_depart_on_death_enabled
-    setup_settings({'depart_on_death'=>'true'})
+    setup_settings('depart_on_death' => 'true')
     expected_messages = ['depart item', 'exit']
     self.dead = true
 

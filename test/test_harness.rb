@@ -1,7 +1,7 @@
 module Harness
   class Script
     def gets?
-      ''
+      get?
     end
   end
 
@@ -21,7 +21,7 @@ module Harness
     args
   end
 
-  def get_settings(dummy)
+  def get_settings(dummy = nil)
     $settings_called_with = dummy
     $test_settings
   end
@@ -58,6 +58,10 @@ module Harness
     $health || 100
   end
 
+  def spirit
+    $spirit || 100
+  end
+
   def fput(message)
     sent_messages << message
   end
@@ -74,6 +78,10 @@ module Harness
     $health = health
   end
 
+  def spirit=(spirit)
+    $spirit = spirit
+  end
+
   def dead=(dead)
     $dead = dead
   end
@@ -84,7 +92,37 @@ module Harness
     $history ? $history.shift : nil
   end
 
+  def reget(*lines)
+    lines.flatten!
+    history = $server_buffer.dup.join("\n")
+    history.gsub!(/<pushStream id=["'](?:spellfront|inv|bounty|society)["'][^>]*\/>.*?<popStream[^>]*>/m, '')
+    history.gsub!(/<stream id="Spells">.*?<\/stream>/m, '')
+    history.gsub!(/<(compDef|inv|component|right|left|spell|prompt)[^>]*>.*?<\/\1>/m, '')
+    history.gsub!(/<[^>]+>/, '')
+    history.gsub!('&gt;', '>')
+    history.gsub!('&lt;', '<')
+    history = history.split("\n").delete_if { |line| line.nil? || line.empty? || line =~ /^[\r\n\s\t]*$/ }
+    if lines.first.is_a?(Numeric) || lines.first.to_i.nonzero?
+      history = history[-[lines.shift.to_i, history.length].min..-1]
+    end
+    unless lines.empty? || lines.nil?
+      regex = /#{lines.join('|')}/i
+      history = history.find_all { |line| line =~ regex }
+    end
+    if history.empty?
+      nil
+    else
+      history
+    end
+  end
+
   def no_pause_all; end
+
+  def no_kill_all; end
+
+  def register_slackbot(username); end
+
+  def send_slackbot_message(message); end
 
   def get
     get?

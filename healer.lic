@@ -1,0 +1,138 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_development#healer
+=end
+no_pause_all
+custom_require.call %w[common common-arcana common-healing common-items]
+
+class Healer
+  include DRC
+  include DRCH
+  include DRCI
+  include DRCA
+
+  def empty_hands
+    echo 'Emptying hands' if debug?
+    @left = checkleft
+    echo "@left: #{@left}" if debug?
+    @right = checkright
+    echo "@right: #{@right}" if debug?
+    stow_hands
+  end
+
+  def stop_training
+    Script.running.find_all { |s| !s.paused? && !s.no_pause_all && s.name != 'healme' }.each(&:pause)
+  end
+
+  def start_training
+    return if running?('healme')
+
+    fput("get my #{@right}") if @right
+    fput("get my #{@left}") if @left
+    @left = nil
+    @right = nil
+    Script.running.find_all { |s| s.paused? && !s.no_pause_all && s.name != 'healme' }.each(&:unpause)
+  end
+
+  def ready_for_patient
+    # return false if Script.running?('healme')
+    return false if @last_heal_check && Time.now - @last_heal_check < 10
+    health = check_health
+    @last_heal_check = Time.now
+    return false if health['diseased']
+    return false if health['poisoned']
+    return false if checkhealth < 70
+    return false unless health['wounds'].empty?
+    true
+  end
+
+  def heal_self
+    return if Script.running?('healme')
+    start_script('healme')
+  end
+
+  def heal_person
+    name = @queue.first
+    echo "Healing #{name}" if debug?
+    @patient = name
+    return if @touched && @touched >= Time.now
+
+    unless @touched
+      @touched = Time.now + 12
+      pause 1
+      waitrt?
+      fput("touch #{name}")
+      put("transfer #{name} vit quick")
+      put("transfer #{name} vit quick")
+      put("transfer #{name} vit quick")
+      pause
+      fput("transfer #{name} quick poison")
+      fput("transfer #{name} quick disease")
+      fput("transfer #{name} quick all")
+      heal_self
+    end
+
+    case bput("touch #{name}", 'no injuries to speak of', 'leech on \w+ (right|left)?\s*\w+', 'vitality', 'Touch what')
+    when /injuries/
+      @queue.shift
+      @touched = false
+      @patient = false
+      fput("whisper #{name} Done!")
+      heal_self
+    when /leech on \w+ ((right|left)?\s*\w+)/
+      fput("tend #{name} #{Regexp.last_match(1)}")
+      pause
+    when /touch what/i
+      @queue.shift
+      @touched = false
+      @patient = false
+    else
+      @touched = Time.now + 12
+    end
+  end
+
+  def debug?
+    UserVars.healer_debug
+  end
+
+  def initialize
+    @right = nil
+    echo "@right: #{@right}" if debug?
+    @left = nil
+    echo "@left: #{@left}" if debug?
+    @queue = []
+  end
+
+  def run(line)
+    fix_standing
+
+    unless line
+      pause 0.5
+      return
+    end
+
+    if @queue.first && ready_for_patient
+      heal_person
+    elsif @patient
+      heal_person
+    elsif (@patient || @queue.first) && !ready_for_patient
+      heal_self
+    elsif @queue.empty? && !Script.running?('healme')
+      start_training
+    end
+
+    if line =~ /^(\w+) whispers, "heal"$/
+      if @temp == Regexp.last_match(1)
+        @queue << Regexp.last_match(1)
+        @temp = nil
+      else
+        @temp = Regexp.last_match(1)
+      end
+    end
+  end
+end
+
+healer = Healer.new
+
+loop do
+  healer.run(script.gets?)
+end

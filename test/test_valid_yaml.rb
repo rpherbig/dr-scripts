@@ -18,7 +18,7 @@ class TestValidYaml < Minitest::Test
     # Profiles using non-repo settings
     custom_profiles = %w[Chuno Crannach Melborne Paeriluno Valkiss Ssarek Qetu Ugsy Dartellum]
 
-    nonbase = Dir.glob('profiles/*.yaml')
+    nonbase = Dir.glob('./profiles/*.yaml')
                  .reject { |item| item == '.' }
                  .reject { |item| item == '..' }
                  .reject { |item| item.include?('base') }

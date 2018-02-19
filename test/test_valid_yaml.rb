@@ -13,11 +13,16 @@ class TestValidYaml < Minitest::Test
 
   def test_all_settings_in_base_yaml
     base = YAML.load_file('./profiles/base.yaml').keys
+    base += YAML.load_file('./profiles/base-empty.yaml')['empty_values'].keys
+
+    # Profiles using non-repo settings
+    custom_profiles = %w[Chuno Crannach Melborne Paeriluno Valkiss Ssarek Qetu Ugsy Dartellum]
 
     nonbase = Dir.glob('./profiles/*.yaml')
                  .reject { |item| item == '.' }
                  .reject { |item| item == '..' }
                  .reject { |item| item.include?('base') }
+                 .reject { |item| custom_profiles.any? { |prof| item.include?(prof) } }
                  .map { |item| YAML.load_file(item) }
                  .each_with_object({}) { |item, obj| obj.merge!(item) }
                  .keys

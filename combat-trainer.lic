@@ -276,6 +276,9 @@ class LootProcess
     @cycle_rituals = @ritual_type == 'cycle'
     echo("  @cycle_rituals: #{@cycle_rituals}") if $debug_mode_ct
 
+    @dissect_and_butcher = settings.dissect_and_butcher
+    echo("  @dissect_and_butcher: #{@dissect_and_butcher}") if $debug_mode_ct
+
     @rituals = get_data('spells').rituals
     echo("  @rituals: #{@rituals}") if $debug_mode_ct
 
@@ -293,7 +296,7 @@ class LootProcess
 
     @current_harvest_count = rummage('C material', @necro_container).size if DRStats.necromancer?
     echo("  @current_harvest_count: #{@current_harvest_count}") if $debug_mode_ct
-    
+
     @necro_count = thanatology['harvest_count']
     echo("  @necro_count: #{@necro_count}") if $debug_mode_ct
 
@@ -468,6 +471,7 @@ class LootProcess
     return false unless @ritual_type
     return false if game_state.necro_casting?
     return true if @ritual_type == 'cycle'
+    return true if @ritual_type == 'butcher'
     return true if @ritual_type == 'dissect' && DRSkill.getxp('First Aid') < 32
     return true if @ritual_type == 'harvest' && DRSkill.getxp('Skinning') < 32
     return true if DRSkill.getxp('Thanatology') < 32
@@ -478,11 +482,19 @@ class LootProcess
     return unless @cycle_rituals
 
     next_ritual = if DRSkill.getxp('Skinning') > 31 && DRSkill.getxp('First Aid') > 31 && DRSkill.getxp('Thanatology') > 31
-                    'preserve'
+                    if @dissect_and_butcher
+                      'butcher'
+                    else
+                      'dissect'
+                    end
                   elsif DRSkill.getxp('Skinning') < DRSkill.getxp('First Aid')
                     'harvest'
                   else
-                    'dissect'
+                    if @dissect_and_butcher
+                      'butcher'
+                    else
+                      'dissect'
+                    end
                   end
     next_ritual
   end
@@ -513,7 +525,11 @@ class LootProcess
       ritual = if @cycle_rituals
                  determine_next_ritual
                else
-                 @ritual_type
+                 if @ritual_type.eql?('dissect') && @dissect_and_butcher
+                   'butcher'
+                 else
+                   @ritual_type
+                 end
                end
       do_necro_ritual(mob_noun, ritual, game_state) if should_perform_ritual?(game_state)
     end
@@ -527,6 +543,15 @@ class LootProcess
     return if game_state.construct?(mob_noun)
 
     echo "Attempting necromancer ritual #{ritual} on #{mob_noun}" if $debug_mode_ct
+
+    if ritual.eql?('butcher')
+      butcher_corpse(mob_noun, ritual, game_state)
+
+      @last_ritual = ritual
+      echo "Last ritual performed: #{@last_ritual}" if $debug_mode_ct
+      return
+    end
+
     do_necro_ritual(mob_noun, 'preserve', game_state) if %w[consume harvest arise].include?(ritual)
     perform_message = "perform #{ritual} on #{mob_noun}"
     result = bput(perform_message, @rituals['arise'], @rituals['preserve'], @rituals['dissect'], @rituals['harvest'], @rituals['consume'], @rituals['construct'], @rituals['failures'])
@@ -555,6 +580,25 @@ class LootProcess
       echo 'Failure detected' if $debug_mode_ct
     end
     echo "Last ritual performed: #{@last_ritual}" if $debug_mode_ct
+  end
+
+  def butcher_corpse(mob_noun, ritual, game_state)
+    return unless ritual.eql?('butcher')
+    echo "Butchering the #{mob_noun}'s corpse!" if $debug_mode_ct
+    echo ' Only butchering it once!' if $debug_mode_ct && @dissect_and_butcher && !@ritual_type.eql?('butcher')
+
+    do_necro_ritual(mob_noun, 'preserve', game_state)
+    @equipment_manager.stow_weapon(game_state.weapon_name)
+
+    loop do
+      result = bput("perform #{ritual} on #{mob_noun}", @rituals['butcher'], @rituals['failures'])
+      break if result.empty? || @rituals['failures'].any? { |msg| result.include?(msg) }
+      bput("drop my #{right_hand}", 'You drop', 'You discard', 'Please rephrase')
+      break if @dissect_and_butcher && !@ritual_type.eql?('butcher')
+    end
+
+    do_necro_ritual(mob_noun, 'dissect', game_state) if @dissect_and_butcher && !@ritual_type.eql?('butcher')
+    @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
   end
 
   def necro_harvest_check
@@ -951,7 +995,7 @@ class SpellProcess
     return if DRSpells.slivers
     return if UserVars.moons['visible'].empty?
 
-    fput('pre moonblade')
+    fput('prep moonblade')
     if DRSkill.getrank('Lunar Magic') < 300
       pause 3
     elsif DRSkill.getrank('Lunar Magic') < 400
@@ -1284,7 +1328,7 @@ class SpellProcess
       fput("face #{data['target_enemy']}")
     end
     release_cyclics if data['cyclic']
-    command = 'pre'
+    command = 'prep'
     command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
 
@@ -1740,7 +1784,8 @@ class TrainerProcess
       end
     when 'Stealth'
       if hide?(@hide_type) && !@dont_stalk && !game_state.npcs.empty? && @hide_type == 'hide'
-        stalked = bput('stalk', 'Try being out of sight',
+        stalked = bput('stalk', 'Stalk what',
+                       'Try being out of sight',
                        'You move into position',
                        'already stalking',
                        'discovers you, ruining your hiding place') == ('You move into position' || 'already stalking')

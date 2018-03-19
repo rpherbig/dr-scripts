@@ -11,6 +11,7 @@ stealing_data[:stealing_options].compact.each do |data|
   data['id'] = data['id'].to_s
   update = stealing.find { |key, _val| key == data['id'] }
   next unless update
+  update.last['id'] = update.last['id'].to_s if update.last['id']
   data.merge!(update.last)
   stealing.delete(update.first)
 end

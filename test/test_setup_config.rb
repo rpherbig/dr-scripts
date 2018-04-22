@@ -29,6 +29,6 @@ class TestSetupConfig < Minitest::Test
     $history = ['quit']
     SetupConfig.new
 
-    assert_equal(nil, $save_character_profile)
+    assert_nil($save_character_profile)
   end
 end

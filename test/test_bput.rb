@@ -57,16 +57,14 @@ class TestCommon < Minitest::Test
     $history = [nil, 'not the correct string', '']
 
     @test = run_script_with_proc('common', proc do
-      start = Time.now
-      assert_equal '', DRC.bput('a test message', 'result')
-      Thread.current.thread_variable_set('runtime', Time.now - start)
+      assert_equal 'result', DRC.bput('a test message', 'result')
     end)
 
-    sleep 1
-    $history << '...wait 9 seconds'
-    Timecop.scale(30)
-    sleep 0.5
-    Timecop.return
-    assert_in_delta 16, @test.thread_variable_get('runtime'), 0.25
+    $history << '...wait 9'
+    $history << 'result'
+
+    sleep 0.25
+
+    assert_equal 9, $pause
   end
 end

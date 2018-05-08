@@ -13,7 +13,9 @@ module Harness
     proc { |_args| }
   end
 
-  def pause(*); end
+  def pause(duration = 1)
+    $pause = duration
+  end
 
   def parse_args(_dummy, _dumber)
     args = OpenStruct.new

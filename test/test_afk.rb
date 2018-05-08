@@ -1,5 +1,4 @@
 require 'minitest/autorun'
-require 'timecop'
 require 'yaml'
 require 'ostruct'
 load 'test/test_harness.rb'
@@ -38,8 +37,6 @@ class TestAfk < Minitest::Test
 
     run_script('afk')
 
-    Timecop.return
-
     assert_sends_messages(expected_messages)
   end
 
@@ -50,8 +47,6 @@ class TestAfk < Minitest::Test
 
     run_script('afk')
 
-    Timecop.return
-
     assert_sends_messages expected_messages
   end
 
@@ -61,27 +56,23 @@ class TestAfk < Minitest::Test
     expected_messages = ['health', 'avoid all', 'exit']
 
     run_script('afk')
-
-    next until $history.empty?
+    sleep 0.2
     self.health = 20
-
-    Timecop.return
+    $history << 'another message'
 
     assert_sends_messages expected_messages
   end
 
   def test_exits_if_low_spirit
     setup_settings({})
-    $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
+
     expected_messages = ['health', 'avoid all', 'exit']
-    self.spirit = 100
+    $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
 
     run_script('afk')
-
-    next until $history.empty?
+    sleep 0.2
     self.spirit = 20
-
-    Timecop.return
+    $history << 'another message'
 
     assert_sends_messages expected_messages
   end

@@ -27,8 +27,13 @@ module Harness
   end
 
   def get_data(dummy)
-    $data_called_with = dummy
-    $test_data
+    $data_called_with << dummy
+    $test_data[dummy.to_sym]
+  end
+
+  def reset_data
+    $data_called_with = []
+    $test_data = {}
   end
 
   def echo(message)

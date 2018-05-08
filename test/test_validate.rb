@@ -8,7 +8,12 @@ class TestValidate < Minitest::Test
 
   def setup
     $test_settings = nil
-    $test_data = OpenStruct.new(mining_buddy_rooms: [])
+    reset_data
+    $test_data = {
+      mining: OpenStruct.new( mining_buddy_rooms: []),
+      town: OpenStruct.new( Crossing:'dummy'),
+      hunting: OpenStruct.new( hunting_zones:[], escort_zones:[]),
+      }
     $warn_msgs = []
     $error_msgs = []
   end
@@ -28,7 +33,7 @@ class TestValidate < Minitest::Test
     setup_settings({})
     load('validate.lic')
 
-    assert_equal 5, $warn_msgs.size, 'Expected one warning per root key'
+    assert_equal 5, $warn_msgs.size, 'Expected one warning per root key, received:' + $warn_msgs.join(',')
   end
 
   def test_gear_set_item_existence

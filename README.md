@@ -1,4 +1,4 @@
-[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](http://www.paypal.me/rcuhljr)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](http://www.paypal.me/rcuhljr) | [![Build Status](https://travis-ci.com/rpherbig/dr-scripts.svg?branch=master)](https://travis-ci.com/rpherbig/dr-scripts)
 
 # dr-scripts
 A series of Lich (https://lichproject.org/) scripts for use in DragonRealms (http://www.play.net/dr/).

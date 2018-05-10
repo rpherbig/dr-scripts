@@ -36,6 +36,11 @@ class DownstreamHook
 end
 
 class TestDrinfomon < Minitest::Test
+  def setup
+    $history.clear
+    sent_messages.clear
+  end
+
   def test_sends_info_on_startup_when_alive
     self.dead = false
     run_script('drinfomon.lic')

@@ -3,6 +3,8 @@ module Harness
     def gets?
       get?
     end
+
+    def Script.at_exit(&_block);end
   end
 
   def script
@@ -126,6 +128,8 @@ module Harness
   def no_pause_all; end
 
   def no_kill_all; end
+
+  def setpriority(*); end
 
   def register_slackbot(username); end
 

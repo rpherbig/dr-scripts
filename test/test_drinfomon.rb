@@ -68,7 +68,10 @@ class TestDrinfomon < Minitest::Test
 
   def test_sends_exp_all_after_exp_conversion
     self.dead = false
-    $history = ["Log-on system converted 100% of your character's field experience into earned rank."]
+    $history = ["Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader",
+                'Gender: Male   Age: 31   Circle: 57',
+                'Wealth: 0',
+                "Log-on system converted 100% of your character's field experience into earned rank."]
     run_script('drinfomon')
     sleep(0.1)
     assert_sends_messages(['exp all', 'info', 'exp all'])

@@ -4,6 +4,10 @@ module Harness
       get?
     end
 
+    def gets
+      get?
+    end
+
     def Script.at_exit(&_block);end
   end
 
@@ -100,6 +104,8 @@ module Harness
   def get?
     $history ? $history.shift : nil
   end
+
+  alias_method('get', 'get?')
 
   def reget(*lines)
     lines.flatten!

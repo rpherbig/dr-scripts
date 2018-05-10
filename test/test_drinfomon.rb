@@ -44,12 +44,14 @@ class TestDrinfomon < Minitest::Test
   def test_sends_info_on_startup_when_alive
     self.dead = false
     run_script('drinfomon.lic')
+    sleep(0.1)
     assert_sends_messages(['exp all', 'info'])
   end
 
   def test_skips_info_on_startup_when_dead
     self.dead = true
     run_script('drinfomon.lic')
+    sleep(0.1)
     assert_sends_messages(['exp all'])
   end
 
@@ -68,6 +70,7 @@ class TestDrinfomon < Minitest::Test
     self.dead = false
     $history = ["Log-on system converted 100% of your character's field experience into earned rank."]
     run_script('drinfomon')
+    sleep(0.1)
     assert_sends_messages(['exp all', 'info', 'exp all'])
   end
 end

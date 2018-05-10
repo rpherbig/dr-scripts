@@ -63,4 +63,11 @@ class TestDrinfomon < Minitest::Test
     Timecop.return()
     assert_sends_messages(['info'])
   end
+
+  def test_sends_exp_all_after_exp_conversion
+    self.dead = false
+    $history = ["Log-on system converted 100% of your character's field experience into earned rank."]
+    run_script('drinfomon')
+    assert_sends_messages(['exp all', 'info', 'exp all'])
+  end
 end

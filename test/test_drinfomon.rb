@@ -47,15 +47,12 @@ class TestDrinfomon < Minitest::Test
                 'Gender: Male   Age: 31   Circle: 57',
                 'Wealth: 0']
     run_script('drinfomon.lic')
-    sleep(0.1)
     assert_sends_messages(['exp all', 'info'])
   end
 
   def test_skips_info_on_startup_when_dead
     self.dead = true
-    $history = ['You are dead']
     run_script('drinfomon.lic')
-    sleep(0.1)
     assert_sends_messages(['exp all'])
   end
 
@@ -89,7 +86,6 @@ class TestDrinfomon < Minitest::Test
     ]
     self.dead = false
     load 'drinfomon.lic'
-    sleep(0.1)
     assert_equal('Trader', DRStats.guild)
     assert_equal('Elothean', DRStats.race)
     assert_equal('Male', DRStats.gender)
@@ -116,7 +112,6 @@ class TestDrinfomon < Minitest::Test
                 'Wealth: 0',
                 "Log-on system converted 100% of your character's field experience into earned rank."]
     run_script('drinfomon')
-    sleep(0.1)
     assert_sends_messages(['exp all', 'info', 'exp all'])
   end
 end

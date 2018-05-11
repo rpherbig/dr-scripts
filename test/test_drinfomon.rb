@@ -66,6 +66,45 @@ class TestDrinfomon < Minitest::Test
     assert_sends_messages(['info'])
   end
 
+  def test_drstats_parses_info_correctly
+    $history = [
+        'Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader',
+        'Gender: Male   Age: 31   Circle: 57',
+        'You were born on the 13th day of the 5th month of Uthmor the Giant in the year of the Amber Phoenix, 395 years after the victory of Lanival the Redeemer.',
+        'Your birthday is more than 2 months away.',
+        '     Strength :  36              Reflex :  33',
+        '      Agility :  30 +2         Charisma :  33 +2 ',
+        '   Discipline :  32              Wisdom :  32',
+        ' Intelligence :  32             Stamina :  36',
+        'Concentration : 390    Max : 390',
+        '       Favors : 31',
+        '         TDPs : 147',
+        '  Encumbrance : None',
+        '         Luck : Average',
+        'Wealth:'
+    ]
+    self.dead = false
+    load 'drinfomon.lic'
+    sleep(0.1)
+    assert_equal('Trader', DRStats.guild)
+    assert_equal('Elothean', DRStats.race)
+    assert_equal('Male', DRStats.gender)
+    assert_equal(31, DRStats.age)
+    assert_equal(57, DRStats.circle)
+    assert_equal(36, DRStats.strength)
+    assert_equal(33, DRStats.reflex)
+    assert_equal(30, DRStats.agility)
+    assert_equal(33, DRStats.charisma)
+    assert_equal(32, DRStats.discipline)
+    assert_equal(32, DRStats.wisdom)
+    assert_equal(32, DRStats.intelligence)
+    assert_equal(36, DRStats.stamina)
+    assert_equal(390, DRStats.concentration)
+    assert_equal(31, DRStats.favors)
+    assert_equal(147, DRStats.tdps)
+    assert_equal('None', DRStats.encumbrance)
+  end
+
   def test_sends_exp_all_after_exp_conversion
     self.dead = false
     $history = ["Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader",

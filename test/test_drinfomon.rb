@@ -43,6 +43,9 @@ class TestDrinfomon < Minitest::Test
 
   def test_sends_info_on_startup_when_alive
     self.dead = false
+    $history = ["Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader",
+                'Gender: Male   Age: 31   Circle: 57',
+                'Wealth: 0']
     run_script('drinfomon.lic')
     sleep(0.1)
     assert_sends_messages(['exp all', 'info'])
@@ -50,6 +53,7 @@ class TestDrinfomon < Minitest::Test
 
   def test_skips_info_on_startup_when_dead
     self.dead = true
+    $history = ['You are dead']
     run_script('drinfomon.lic')
     sleep(0.1)
     assert_sends_messages(['exp all'])
@@ -61,7 +65,7 @@ class TestDrinfomon < Minitest::Test
     sent_messages.clear
     Timecop.scale(60)
     self.dead = false
-    sleep(0.1)
+    sleep(0.3)
     Timecop.return()
     assert_sends_messages(['info'])
   end

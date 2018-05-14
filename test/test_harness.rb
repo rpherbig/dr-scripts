@@ -185,7 +185,7 @@ module Harness
         message = sent_messages.pop
         if $debug_message_assert
           puts message
-          puts "#{expected_messages}"
+          puts expected_messages.to_s
         end
         expected_messages.delete_at(expected_messages.index(message) || expected_messages.length)
         break if expected_messages.empty?
@@ -200,6 +200,6 @@ module Harness
     $threads.last.kill
 
     $debug_message_assert = false
-    assert_empty expected_messages, "Expected script to send messages"
+    assert_empty expected_messages, 'Expected script to send messages'
   end
 end

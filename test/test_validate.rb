@@ -10,10 +10,10 @@ class TestValidate < Minitest::Test
     $test_settings = nil
     reset_data
     $test_data = {
-      mining: OpenStruct.new( mining_buddy_rooms: []),
-      town: OpenStruct.new( Crossing:'dummy'),
-      hunting: OpenStruct.new( hunting_zones:[], escort_zones:[]),
-      }
+      mining: OpenStruct.new(mining_buddy_rooms: []),
+      town: OpenStruct.new(Crossing: 'dummy'),
+      hunting: OpenStruct.new(hunting_zones: [], escort_zones: [])
+    }
     $warn_msgs = []
     $error_msgs = []
   end

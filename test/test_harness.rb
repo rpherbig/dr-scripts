@@ -11,6 +11,20 @@ module Harness
     def Script.at_exit(&_block);end
   end
 
+  class UpstreamHook
+    def self.add(*);end
+    def self.remove(*);end
+  end
+
+  class DownstreamHook
+    def self.add(*);end
+    def self.remove(*);end
+  end
+
+  def before_dying(&code)
+    Script.at_exit(&code)
+  end
+
   def script
     Script.new
   end

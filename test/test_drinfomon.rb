@@ -4,9 +4,7 @@ load 'test/test_harness.rb'
 
 include Harness
 
-def before_dying(&code)
-  Script.at_exit(&code)
-end
+
 
 class Char
   def self.name
@@ -23,16 +21,6 @@ class XMLData
   def self.game
     'DR'
   end
-end
-
-class UpstreamHook
-  def self.add(*);end
-  def self.remove(*);end
-end
-
-class DownstreamHook
-  def self.add(*);end
-  def self.remove(*);end
 end
 
 class TestDrinfomon < Minitest::Test

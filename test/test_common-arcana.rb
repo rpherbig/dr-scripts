@@ -1,5 +1,6 @@
 require 'minitest/autorun'
 require 'yaml'
+require 'ostruct'
 load 'test/test_harness.rb'
 
 include Harness
@@ -39,7 +40,7 @@ class TestDRCA < Minitest::Test
       'Roundtime: 1 sec.'
     ]
     run_script_with_proc('common-arcana', DRCA.invoke('armband', nil, 32))
-    assert_sends_messages(['invoke my armband 32 '])
+    assert_sends_messages(['invoke my armband 32'])
   end
 
   def test_ritual_with_skip_retreat
@@ -55,7 +56,8 @@ class TestDRCA < Minitest::Test
       'after' => [],
       'cast_command' => 'cast',
       'focus' => 'staff',
-      'worn_focus' => true
+      'worn_focus' => true,
+      'ritual' => true
     }
     $history = [
       'Setting your Evasion stance to 100%, your Parry stance to 0%, and your Shield stance to 80%.  You have 12 stance points left.',

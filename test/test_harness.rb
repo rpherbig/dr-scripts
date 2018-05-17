@@ -114,6 +114,7 @@ module Harness
   end
 
   def waitrt?; end
+  def waitcastrt?; end
 
   def get?
     $history ? $history.shift : nil

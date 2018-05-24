@@ -1,118 +1,131 @@
-#   Documentation: https://elanthipedia.play.net/Lich_script_repository#rezz
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#rezz
+  
+  Define a waggle sets for rezz and rejuv if you don't want to use the default values in base-spells.yaml
+  
+  EXAMPLE
+  waggle_sets:
+    rezz:
+      Resurrection:
+        mana: 17
+    rejuv:
+      Rejuvenation:
+        mana: 10
+        cambrinth:
+        - 15
+
+  In order to infuse directly from your mana pool add the following to your yaml:
+  osrel_no_harness: true
+  
+=end
 
 custom_require.call(%w[common common-arcana events drinfomon spellmonitor])
-
-# rezz waggle set with POM if you want
 
 class Rezz
   include DRC
   include DRCA
-
+  
   def initialize
+    DRStats.cleric? ? nil : begin echo '*** Nice try, heathen! ***'; exit end
+	
     arg_definitions = [
       [
         { name: 'person', regex: /\w+/, description: 'Person to rezz' }
       ]
     ]
-
-    @rejuv_mana = 0
+	
     args = parse_args(arg_definitions)
     @settings = get_settings
-    rezz_prep(args.person)
+    
+    @person = args.person.capitalize
+	/the body of (#{@person}.*) who/ =~ bput('look people', /the body of (#{@person}.*) who/)
+	@person = Regexp.last_match(1)
+    
+    @rezz = if @settings.waggle_sets['rezz']
+               @settings.waggle_sets['rezz'].values.first
+           else
+	         get_data('spells').spell_data['Resurrection']
+	       end
+    	   
+    @rejuv = if @settings.waggle_sets['rejuv']
+               @settings.waggle_sets['rejuv'].values.first
+           else
+	         get_data('spells').spell_data['Rejuvenation']
+	       end
+
+    @rejuv['cast'] = "cast #{@person}"
+	
+	check_favor
+    rejuv
+    cast_rezz
+    find_soul
+    soul_bond
+    rejuv(true)
+    gesture
   end
-
-  def rezz_prep(person)
-    # cast buffs if set
-    check_buffs
-
-    # perceive body & rejuv
-    rejuv(person)
-
-    # cast rezz
-    mana = cast_rezz
-
-    # infuse untill see spirit
-    find_soul(person, mana)
-
-    # snap cast soul bonding
-    cast_soulbonding(person)
-
-    # check for silver again. recast rejuv (or infuse again) if not
-    rejuv(person)
-
-    # gesture
-    bput("gest #{person}", 'Roundtime')
+  
+  def check_favor
+    Flags.add('no-favor', /(#{@person}.*) has no favor with (.*) god/)
+    bput("perc #{@person}", /#{@person} has (.*) favors with (his|her) god/)
+    Flags['no-favor'] ? begin echo "*** #{@person} has no favors! ***"; exit end : nil
   end
-
-  def find_soul(person, infuse_amt)
-    loop do
-      pause 5 while mana <= 40
-      harness_mana([infuse_amt]) unless skip_harness?
-      case bput("infuse rezz #{infuse_amt}", /You clearly sense the spirit of #{person} in the Void/i, 'You sense a spirit nearby, but you are unable to make it out clearly.', 'Your sense of sight has not fully transitioned to the spirit world', "You don't have enough harnessed mana to infuse that much.")
-      when 'You sense a spirit nearby, but you are unable to make it out clearly.'
-        next
-      when /You clearly sense the spirit of #{person} in the Void/i
-        break
-      when 'Your sense of sight has not fully transitioned to the spirit world'
-        pause 2
-        next
-      when "You don't have enough harnessed mana to infuse that much."
-        next
-      else
-        next
-      end
+  
+  def rejuv(quick = false)
+    quick ? begin @rejuv['cambrinth'] = []; @rejuv['prep_time'] = 5; @rejuv['mana'] = 5 end : nil
+    Flags.add('wrong-name', "You can't cast that at yourself")
+    Flags.add('silver', 'A thin silver nimbus surrounds')
+    Flags.add('alive', 'Nothing happens')
+    until Flags['silver'] || Flags['alive'] || Flags['wrong-name']
+	  pause 1 while DRStats.mana < 50
+      cast_spell(@rejuv, @settings)
+  	  pause 0.5
     end
+    Flags['alive'] ? begin echo "*** #{@person} is already alive, dumbass! ***"; exit end : nil
+    Flags['wrong-name'] ? begin echo "*** Name spelled incorrectly. ***"; exit end : nil
+    Flags.reset('rejuv-silver')
   end
-
-  def is_silver?(person)
-    /As you concentrate, a thin (.*) nimbus/ =~ bput("perc #{person}", 'As you concentrate, a thin (.*) nimbus')
-    color = Regexp.last_match(1)
-    echo "Memories are #{color}"
-    waitrt?
-    color.eql? 'silver'
-  end
-
-  def rejuv(person)
-    return if is_silver?(person)
-    data = get_data('spells').spell_data['Rejuvenation']
-    data['cast'] = "cast #{person}"
-    if @rejuv_mana.zero?
-      data = check_discern(data, @settings)
-      @rejuv_mana = data['mana']
-    end
-
-    loop do
-      cast_spell(data, @settings)
-      break if is_silver?(person)
-    end
-  end
-
-  def check_buffs
-    wait_for_script_to_complete('buff', ['rezz'])
-  end
-
-  def skip_harness?
-    attunement = DRSkill.getrank('Attunement')
-    return false if attunement < 541
-    return true if attunement > 600
-    return true if check_if_buff_active('Persistence of Mana', 6)
-    false
-  end
-
+    
   def cast_rezz
-    data = get_data('spells').spell_data['Resurrection']
-    data = check_discern(data, @settings)
-    cast_spell(data, @settings)
-    data['mana']
+    Flags.add('rezz-ready', 'You prepare to look for the lost spirits of the dead')
+    Flags.add('rezz-not-prepped', 'This pattern may only be cast with full preparation')
+    cast_spell(@rezz, @settings)
+    if Flags['rezz-not-prepped']
+      while Flags['rezz-not-prepped'] 
+	    Flags.reset('rezz-not-prepped')
+        pause 1
+	    bput('cast', get_data('spells').cast_messages, )
+	  end
+    end
+    while !Flags['rezz-ready']
+      pause 0.5
+    end
   end
-
-  def cast_soulbonding(person)
-    data = { 'abbrev' => 'SB', 'prep_time' => 5, 'cast' => "cast #{person}", 'mana' => 1 }
+  
+  def find_soul
+    Flags.add('soul-found', /sense the spirit of #{@person} in the Void/i)
+    while !Flags['soul-found']
+      pause 1 while DRStats.mana < 50
+      @settings.osrel_no_harness ? nil : harness_mana([@rezz['mana']])
+      bput("infuse rezz #{@rezz['mana']}", /sense the spirit of #{@person} in the Void/i, 'You sense a spirit nearby, but you are unable to make it out clearly.')
+    end
+  end
+  
+  def soul_bond
+    data = { 'abbrev' => 'SB', 'prep_time' => 8, 'cast' => "cast #{@person}", 'mana' => 5 }
     cast_spell(data, @settings)
   end
-
-  def check_if_buff_active(spell, time)
-    DRSpells.active_spells[spell] && DRSpells.active_spells[spell] > time
+  
+  def gesture
+    case bput("gesture #{@person}", /#{@person} spirit lets out a frustrated lament/, /You have not yet found #{@person} spirit in the Void/, 'Roundtime')
+    when /#{@person} spirit lets out a frustrated lament/
+      soul_bond
+  	  rejuv(true)
+	  gesture
+    when /You have not yet found #{@person} spirit in the Void/
+      find_soul
+  	  rejuv(true)
+	  gesture
+    end
   end
 end
 

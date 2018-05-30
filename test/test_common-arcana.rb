@@ -73,7 +73,7 @@ class TestDRCA < Minitest::Test
       'The mental strain of this pattern is considerably eased by your ritual focus.',
       "At the ritual's peak, your prophetic connection blooms a thousand-fold.  You are alone.  An infinitesimal speck in space and time adrift in an infinite sea of possibility.  The course of your past, present and future are dictated by ceaseless currents beyond any mortal control."
     ]
-    run_script_with_proc('common-arcana', proc {DRCA.ritual(spell_data, [])})
+    run_script_with_proc('common-arcana', proc { DRCA.ritual(spell_data, []) })
     assert_sends_messages(['stance set 100 0 80', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
   end
 end

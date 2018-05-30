@@ -8,17 +8,19 @@ module Harness
       get?
     end
 
-    def Script.at_exit(&_block);end
+    def self.at_exit(&_block); end
   end
 
   class UpstreamHook
-    def self.add(*);end
-    def self.remove(*);end
+    def self.add(*); end
+
+    def self.remove(*); end
   end
 
   class DownstreamHook
-    def self.add(*);end
-    def self.remove(*);end
+    def self.add(*); end
+
+    def self.remove(*); end
   end
 
   def before_dying(&code)
@@ -114,6 +116,7 @@ module Harness
   end
 
   def waitrt?; end
+
   def waitcastrt?; end
 
   def get?

@@ -4,8 +4,6 @@ load 'test/test_harness.rb'
 
 include Harness
 
-
-
 class Char
   def self.name
     'McTesterson'
@@ -14,7 +12,8 @@ end
 
 class CharSettings
   def self.[](_name); end
-  def self.[]=(_name, _value);end
+
+  def self.[]=(_name, _value); end
 end
 
 class XMLData
@@ -37,20 +36,20 @@ class TestDrinfomon < Minitest::Test
 
   def test_drstats_parses_info_correctly
     $history = [
-        'Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader',
-        'Gender: Male   Age: 31   Circle: 57',
-        'You were born on the 13th day of the 5th month of Uthmor the Giant in the year of the Amber Phoenix, 395 years after the victory of Lanival the Redeemer.',
-        'Your birthday is more than 2 months away.',
-        '     Strength :  36              Reflex :  33',
-        '      Agility :  30 +2         Charisma :  33 +2 ',
-        '   Discipline :  32              Wisdom :  32',
-        ' Intelligence :  32             Stamina :  36',
-        'Concentration : 390    Max : 390',
-        '       Favors : 31',
-        '         TDPs : 147',
-        '  Encumbrance : None',
-        '         Luck : Average',
-        'Wealth:'
+      'Name: Navigator Dijkstra Bellman-Ford of Elanthia   Race: Elothean   Guild: Trader',
+      'Gender: Male   Age: 31   Circle: 57',
+      'You were born on the 13th day of the 5th month of Uthmor the Giant in the year of the Amber Phoenix, 395 years after the victory of Lanival the Redeemer.',
+      'Your birthday is more than 2 months away.',
+      '     Strength :  36              Reflex :  33',
+      '      Agility :  30 +2         Charisma :  33 +2 ',
+      '   Discipline :  32              Wisdom :  32',
+      ' Intelligence :  32             Stamina :  36',
+      'Concentration : 390    Max : 390',
+      '       Favors : 31',
+      '         TDPs : 147',
+      '  Encumbrance : None',
+      '         Luck : Average',
+      'Wealth:'
     ]
     self.dead = false
     load 'drinfomon.lic'
@@ -72,5 +71,4 @@ class TestDrinfomon < Minitest::Test
     assert_equal(147, DRStats.tdps)
     assert_equal('None', DRStats.encumbrance)
   end
-
 end

@@ -835,6 +835,9 @@ class SpellProcess
     @training_spells = settings.combat_spell_training
     echo("  @training_spells: #{@training_spells}") if $debug_mode_ct
 
+    @training_spells_max_threshold = settings.combat_spell_training_max_threshold
+    echo("  @training_spells_max_threshold: #{@training_spells_max_threshold}") if $debug_mode_ct
+
     @offensive_spell_cycle = settings.offensive_spell_cycle
     echo("  @offensive_spell_cycle: #{@offensive_spell_cycle}") if $debug_mode_ct
 
@@ -1103,6 +1106,10 @@ class SpellProcess
 
     hide?(@hide_type) if XMLData.prepared_spell == 'Vivisection' && game_state.use_stealth_attack?
 
+    if game_state.casting_sorcery
+      @equipment_manager.stow_weapon(game_state.weapon_name)
+    end
+
     snapshot = DRSkill.getxp(@skill)
     success = cast?(@custom_cast, @symbiosis, @before, @after)
     if @symbiosis && @use_auto_mana
@@ -1126,6 +1133,10 @@ class SpellProcess
     game_state.casting_weapon_buff = false
     game_state.casting_consume = false
     game_state.casting_cfb = false
+    if game_state.casting_sorcery
+      game_state.casting_sorcery = false
+      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    end
 
     if game_state.casting_moonblade
       if left_hand =~ /moon/ || game_state.brawling? || game_state.offhand?
@@ -1160,12 +1171,15 @@ class SpellProcess
   def check_training(game_state)
     return if game_state.casting
     return unless @training_spells
+    return if @training_spells_max_threshold && game_state.npcs.length > @training_spells_max_threshold
     return if mana < @training_spell_mana_threshold
 
-    needs_training = %w[Warding Utility Augmentation]
+    needs_training = %w[Warding Utility Augmentation Sorcery]
                      .select { |skill| @training_spells[skill] }
                      .select { |skill| DRSkill.getxp(skill) < 31 }
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
+                     .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
+                     .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
                      .sort_by { |skill| DRSkill.getxp(skill) }.first
     return unless needs_training
 
@@ -1175,6 +1189,11 @@ class SpellProcess
       @training_cyclic_timer = Time.now + 325
     elsif @training_cyclic_timer < @training_cast_timer
       @training_cyclic_timer = @training_cast_timer
+    end
+
+    if needs_training == 'Sorcery'
+      echo 'Preparing a sorcery spell, held items will be stowed to prevent item loss' if $debug_mode_ct
+      game_state.casting_sorcery = true
     end
     prepare_spell(data, game_state)
   end
@@ -2428,7 +2447,7 @@ class GameState
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -2446,6 +2465,7 @@ class GameState
     @selected_maneuver = nil
     @cast_timer = nil
     @casting_moonblade = false
+    @casting_sorcery = false
     @casting_weapon_buff = false
     @casting_consume = false
     @prepare_consume = false

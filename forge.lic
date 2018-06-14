@@ -2,12 +2,13 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#forge
 =end
 
-custom_require.call(%w[common common-crafting common-travel events])
+custom_require.call(%w[common common-arcana common-crafting common-travel events])
 
 class Forge
   include DRC
   include DRCC
   include DRCT
+  include DRCA
 
   def initialize
     arg_definitions = [
@@ -49,18 +50,20 @@ class Forge
 
     args = parse_args(arg_definitions)
 
-    settings = get_settings
-    @hometown = settings.hometown
-    @stamp = settings.mark_crafted_goods
-    @bag = settings.crafting_container
-    @bag_items = settings.crafting_items_in_container
-    @belt = settings.forging_belt
-    @hammer = settings.forging_tools.find { |item| /hammer|mallet/ =~ item }
+    @settings = get_settings
+    @hometown = @settings.hometown
+    @stamp = @settings.mark_crafted_goods
+    @bag = @settings.crafting_container
+    @bag_items = @settings.crafting_items_in_container
+    @belt = @settings.forging_belt
+    @hammer = @settings.forging_tools.find { |item| /hammer|mallet/ =~ item }
+    @training_spells = @settings.crafting_training_spells
 
     @item = args.noun
 
     Flags.add('forge-assembly', 'another finished \S+ shield (handle)', 'another finished wooden (hilt|haft)', 'another finished (long|short|small|large) leather (cord|backing)', 'another finished (small|large) cloth (padding)', 'another finished (long|short) wooden (pole)', 'ready to be woven into and around the material')
     Flags.add('hone-done', 'the metal now needs protection by pouring oil on it')
+    Flags.add('magic-ready', 'You feel fully prepared to cast your spell.')
     if args.temper
       temper
     elsif args.hone
@@ -94,6 +97,7 @@ class Forge
     unless section
       echo('Failed to find recipe in book, buy a better book?')
       stow_item('book')
+      magic_cleanup
       exit
     end
     bput("turn my book to #{section}", 'You turn your', 'The book is already')
@@ -102,14 +106,17 @@ class Forge
   def temper
     unless left_hand =~ /#{@item}/i || right_hand =~ /#{@item}/i
       echo('***Please hold the item to temper.***')
+      magic_cleanup
       exit
     end
+    magic_routine
     bput("put my #{@item} on the forge", 'Put your item onto the forge')
     temper_turn(true)
   end
 
   def hone
     find_grindstone(@hometown)
+    magic_routine
     get_item('weaponsmithing book')
     turn_to("page #{find_recipe(10, 'metal weapon honing')}")
     bput('study my book', 'Roundtime')
@@ -120,6 +127,7 @@ class Forge
 
   def balance
     find_grindstone(@hometown)
+    magic_routine
     get_item('weaponsmithing book')
     turn_to("page #{find_recipe(10, 'metal weapon balancing')}")
     bput('study my book', 'Roundtime')
@@ -130,6 +138,7 @@ class Forge
 
   def lighten
     find_grindstone(@hometown)
+    magic_routine
     get_item('armorsmithing book')
     turn_to("page #{find_recipe(5, 'lightening')}")
     bput('study my book', 'Roundtime')
@@ -156,6 +165,7 @@ class Forge
 
   def do_hone
     spin_grindstone
+    magic_routine
     case bput("push grind with #{@item}", 'The grinding has left many nicks and burs in the metal that should be cleaned away', 'roundtime')
     when /nicks and burs/
       get_item('wire brush')
@@ -167,12 +177,14 @@ class Forge
     if Flags['hone-done']
       pour_oil
     else
+      magic_routine
       do_hone
     end
   end
 
   def do_lighten
     spin_grindstone
+    magic_routine
     case bput("push grind with #{@item}", 'With the grinding complete', 'roundtime')
     when 'With the grinding complete'
       bput("put #{@item} on anvil", 'You put')
@@ -187,12 +199,14 @@ class Forge
       stow_item('plier')
       pour_oil
     else
+      magic_routine
       do_lighten
     end
   end
 
   def temper_turn(first = false)
     waitrt?
+    magic_routine
     command = first ? "put my #{@item} on the forge" : "turn #{@item} on forge with my tong"
 
     case bput(command,
@@ -219,12 +233,14 @@ class Forge
   end
 
   def temper_finish
+    magic_routine
     stow_item('tong')
     fput("get #{@item} from forge")
     pour_oil
   end
 
   def smith
+    magic_routine
     if @chapter
       get_item("#{@book_type} book")
       turn_to("page #{find_recipe(@chapter, @recipe_name)}")
@@ -246,6 +262,7 @@ class Forge
 
   def pound(item = @item)
     waitrt?
+    magic_routine
     case bput("pound #{item} on anvil with my #{@hammer}",
               'You must be holding',
               'needs more fuel', 'need some more fuel',
@@ -282,12 +299,14 @@ class Forge
       analyze_item
     when 'You need a larger volume of metal'
       echo '***You need a larger ingot to forge this item.***'
+      magic_cleanup
       exit
     when 'I could not find what you were referring to'
       echo '*** ERROR TRYING TO CRAFT, EXITING ***'
       stow_item(right_hand)
       exit
     else
+      magic_routine
       pound
     end
   end
@@ -322,6 +341,7 @@ class Forge
 
   def turn_item
     waitrt?
+    magic_routine
     case bput("turn #{@item} on anvil with my tongs",
               'ready for cooling in the slack tub', 'ready for a quench hardening in the slack tub',
               'Roundtime',
@@ -399,6 +419,7 @@ class Forge
 
   def pour_oil
     ords = %w[second third fourth fifth sixth]
+    magic_routine
     get_item('oil')
     while ords.any?
       case bput("pour my oil on my #{@item}", 'Roundtime', 'Applying the final touches', "You can't pour", 'You pour all of')
@@ -424,10 +445,12 @@ class Forge
     pause
     waitrt?
     stow_item('stamp')
+    magic_cleanup
   end
 
   def analyze_item
     waitrt?
+    magic_routine
     stow_item(left_hand) # store contents of both hands, reacquire hammer and tongs
     stow_item(right_hand)
     get_item(@hammer)
@@ -456,6 +479,35 @@ class Forge
       stow_item('plier')
       analyze_item
     end
+  end
+
+  def magic_routine
+    return unless @training_spells
+
+    needs_training = %w[Warding Utility Augmentation]
+                     .select { |skill| @training_spells[skill] }
+                     .select { |skill| DRSkill.getxp(skill) < 31 }
+                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    return unless needs_training
+
+    data = @training_spells[needs_training]
+
+    if Flags['magic-ready'].include?('You feel fully prepared to cast your spell.') && mana > 40
+      crafting_cast_spell(data, @settings)
+      Flags.reset('magic-ready')
+      @preparing = false
+    end
+    unless @preparing
+      crafting_prepare_spell(data, @settings)
+      @preparing = true
+    end
+  end
+
+  def magic_cleanup
+    return unless @training_spells
+
+    bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+    bput('release mana', 'You release all', "You aren't harnessing any mana")
   end
 end
 

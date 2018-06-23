@@ -1782,7 +1782,7 @@ class TrainerProcess
     when 'App Careful'
       appraise(game_state, 'careful')
     when 'Tactics'
-      bput(%w[weave bob circle].sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
+      bput($tactics_actions.sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
     when 'Analyze'
       analyze(game_state, 0)
     when 'Hunt'
@@ -2107,6 +2107,7 @@ class AttackProcess
     @stow_actions = %w[stow sheath put]
     echo("  @stow_actions: #{@stow_actions}") if $debug_mode_ct
 
+    Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
     Flags.add('ct-face-what', 'Face what')
   end
@@ -2249,6 +2250,7 @@ class AttackProcess
     game_state.selected_maneuver = charged_maneuver unless game_state.loaded
     game_state.loaded = false if game_state.mob_died && !(game_state.casting_consume || game_state.prepare_consume)
     game_state.clear_aim_queue if Flags['ct-ranged-ready']
+    game_state.loaded = false if Flags['ct-aim-failed']
 
     if game_state.loaded && game_state.done_aiming?
       if game_state.selected_maneuver
@@ -2264,13 +2266,37 @@ class AttackProcess
       end
       game_state.loaded = false
       waitrt?
+    elsif game_state.loaded && game_state.aiming_trainables
+      skill = game_state.determine_aiming_skill
+      weapon_name = game_state.wield_offhand_weapon(skill)
+
+      if skill.include?('Thrown')
+        actions = %w[lob lob lob]
+      elsif skill.eql?('Brawling')
+        actions = %w[gouge gouge gouge]
+      elsif skill.eql?('Tactics')
+        actions = $tactics_actions
+      else
+        if game_state.use_weak_attacks?
+          actions = %w[jab jab jab]
+        else
+          actions = %w[jab feint draw]
+        end
+      end 
+
+      actions.each do |action|
+        break unless execute_aiming_action?(action, game_state)
+        bput("get my #{weapon_name}", 'You pick up') if action.eql?('lob')
+      end
+
+      game_state.sheath_offhand_weapon(skill)
     elsif game_state.loaded
       actions = game_state.next_aim_action.split(';')
       actions.each do |action|
         first_word = action.split(' ')[0].downcase
         matches = [/^You /]
         matches = ['You get', 'You draw out', 'You pick up', "You're already holding that"] if @get_actions.include?(first_word)
-        matches = ['Roundtime',"You aren't close enough to attack"] if @rt_actions.include?(first_word)
+        matches = ['Roundtime', "You aren't close enough to attack"] if @rt_actions.include?(first_word)
         matches = ['You put', 'You sheathe'] if @stow_actions.include?(first_word)
         bput(action.strip, matches)
         pause 0.25
@@ -2292,8 +2318,21 @@ class AttackProcess
         game_state.set_aim_queue
         aim(game_state)
         Flags.reset('ct-ranged-ready')
+        Flags.reset('ct-aim-failed')
       end
     end
+  end
+
+  def execute_aiming_action?(action, game_state)
+    case bput("#{action} left", 'Roundtime', 'close enough', 'What are you', 'There is nothing')
+    when 'close enough'
+      return false if game_state.retreating?
+      fput('engage')
+      pause 2.5
+    when 'What are you', 'There is nothing'
+      return false
+    end
+    true
   end
 
   def aim(game_state)
@@ -2348,7 +2387,7 @@ class AttackProcess
 
   def use_charged_maneuver(action, game_state)
     game_state.cooldown_timers[action] = Time.now
-    attempt = bput("maneuver #{action}", 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet', 'You crouch down', 'You step to the side')
+    attempt = bput("maneuver #{action}", 'You raise your', 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet', 'You crouch down', 'You step to the side')
     return if attempt == 'rest a bit longer'
 
     # Maneuvers have extra non-RT delays
@@ -2483,6 +2522,7 @@ class GameState
 
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $aim_skills = %w[Bow Slings Crossbow]
+  $tactics_actions = %w[bob weave circle]
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
@@ -2643,6 +2683,9 @@ class GameState
     @attack_overrides = settings.attack_overrides
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
 
+    @aiming_trainables = settings.aiming_trainables
+    echo("  @aiming_trainables: #{@aiming_trainables}") if $debug_mode_ct
+
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
 
@@ -2743,6 +2786,21 @@ class GameState
   def sheath_whirlwind_offhand
     return unless currently_whirlwinding
     @equipment_manager.stow_weapon(whirlwind_offhand_name)
+  end
+
+  def sheath_offhand_weapon(skill)
+    return if skill.eql?'Brawling'
+    return if skill.eql?'Tactics'
+
+    @equipment_manager.stow_weapon(weapon_training[skill])
+  end
+
+  def wield_offhand_weapon(skill)
+    return if skill.eql?'Brawling'
+    return if skill.eql?'Tactics'
+
+    @equipment_manager.wield_weapon_offhand(weapon_training[skill])
+    weapon_training[skill]
   end
 
   def necro_casting?
@@ -3029,6 +3087,10 @@ class GameState
     !npcs.empty? && !aimed_skill?
   end
 
+  def use_weak_attacks?
+    @use_weak_attacks
+  end
+
   def stop_weak_attacks
     @use_weak_attacks = false
   end
@@ -3084,6 +3146,17 @@ class GameState
 
   def construct_mode?
     @construct_mode
+  end
+
+  def determine_aiming_skill
+    held_types = ['Small Edged','Large Edged', 'Small Blunt','Large Blunt', 'Staves', 'Polearms']
+    options = @aiming_trainables
+    options -= held_types if weapon_skill.eql?'Bow' or weapon_skill.eql?'Crossbow'
+    options.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+  end
+
+  def aiming_trainables
+    @aiming_trainables
   end
 
   private

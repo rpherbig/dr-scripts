@@ -19,9 +19,8 @@ class TestValidate < Minitest::Test
   end
 
   def setup_settings(settings)
-    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(YAML.load_file('profiles/base-empty.yaml')).merge(settings))
-#    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
-#    $test_settings += YAML.load_file('./profiles/base-empty.yaml')['empty_values'].keys
+    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
+    $test_settings += OpenStruct.new(YAML.load_file('./profiles/base-empty.yaml')['base-empty.yaml'][:empty_values].each { |name, value| s[name] ||= value }
   end
 
   def test_parse_args

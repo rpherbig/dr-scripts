@@ -1764,6 +1764,10 @@ class TrainerProcess
 
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
+  
+    if @skill_map.include? 'Locks'
+      @pet_count = get_boxes(@pet_box_source).count
+    end
   end
 
   def execute(game_state)
@@ -2000,32 +2004,35 @@ class TrainerProcess
   end
 
   def pickbox(game_state)
-    return if game_state.loaded
-    return if left_hand
-    return unless @pet_box_source
-    boxes = get_boxes(@pet_box_source)
-    return if boxes.empty?
-    box = boxes.first
-    # Check what's in the right hand so we can get it back
-    rhitem = @equipment_manager.item_by_desc(right_hand) if right_hand
-    @equipment_manager.stow_weapon("#{rhitem.adjective} #{rhitem.name}") if rhitem
-    return if right_hand # Couldn't empty right hand for some reason (typically a summoned weapon).  No picking allowed
+    return unless @pet_box_source && @pet_count > 0
+    return if game_state.loaded || game_state.weapon_is_summoned? || game_state.offhand?
+    return if left_hand && !game_state.currently_whirlwinding
+
+    box = get_boxes(@pet_box_source).first
+    return unless box
+
+    @equipment_manager.stow_weapon(game_state.weapon_name)
+    @equipment_manager.sheath_whirlwind_offhand if game_state.currently_whirlwinding
+   
     bput("get #{box} from my #{@pet_box_source}", 'You get', 'What were')
     retreat
-    response =  bput("pick my #{box} blind", 'not even locked', 'Roundtime', 'Find a more appropriate tool', 'You realize that would be next to impossible')
-    if response == 'not even locked'
-      # Dump the box so that combat-trainer lootprocess can take over
+    case bput("pick my #{box} blind", 'not even locked', 'Roundtime', 'Find a more appropriate tool', 'You realize that would be next to impossible')
+    when 'not even locked'
+      # Dump the box so that combat-trainer's lootprocess can take over
       bput("open my #{box}", 'You open', 'That is already open')
       2.times do
         bput("dismantle my #{box}", 'You can not dismantle', 'You dump the contents', 'You move your hands', 'You must be holding the object', 'Unable to locate')
       end
       waitrt?
+      @pet_count -= 1
     else
       waitrt?
       bput("put my #{box} in my  #{@pet_box_source}", 'You put')
     end
 
-    @equipment_manager.get_item?(rhitem) if rhitem
+    @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+    @equipment_manager.wield_whirlwind_offhand if game_state.currently_whirlwinding
+
     fput('engage') if !DRRoom.npcs.empty? && !game_state.retreating?
   end
 
@@ -2899,6 +2906,10 @@ class GameState
 
   def summoned_info(weapon_skill)
     @summoned_weapons.find { |summoned_skill| summoned_skill['name'] == weapon_skill }
+  end
+
+  def weapon_is_summoned?
+    @summoned_weapons.include? weapon_skill
   end
 
   def update_target_weapon_skill

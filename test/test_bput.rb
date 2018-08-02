@@ -50,7 +50,7 @@ class TestCommon < Minitest::Test
     Timecop.scale(30)
     sleep 0.1 until @test.thread_variable_get('runtime')
     Timecop.return
-    assert_in_delta 15, @test.thread_variable_get('runtime'), 1.0
+    assert_in_delta 5, @test.thread_variable_get('runtime'), 1.0
   end
 
   def test_bput_delays_timeout_for_wait
@@ -65,6 +65,6 @@ class TestCommon < Minitest::Test
 
     sleep 0.25
 
-    assert_equal 9, $pause
+    assert_equal 8.1, $pause
   end
 end

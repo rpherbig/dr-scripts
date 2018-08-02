@@ -22,6 +22,8 @@ class SetupProcess
     echo("  @cycle_armors: #{@cycle_armors}") if $debug_mode_ct
     @cycle_armors_time = settings.cycle_armors_time
     echo("  @cycle_armors_time: #{@cycle_armors_time}") if $debug_mode_ct
+    @armor_hysteresis = settings.cycle_armors_hysteresis
+    echo("  @armor_hysteresis: #{@armor_hysteresis}") if $debug_mode_ct
     @last_cycle_time = Time.now - @cycle_armors_time
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
@@ -105,7 +107,21 @@ class SetupProcess
     game_state.wield_whirlwind_offhand
   end
 
+  def armor_hysteresis?
+    return false unless @armor_hysteresis
+    return false if @cycle_armors.keys.any? { |skill| DRSkill.getxp(skill) < 25 }
+    if @cycle_armors.keys.all? { |skill| DRSkill.getxp(skill) > 32 }
+      if @last_worn_type != @default_armor
+        @equipment_manager.worn_items(@all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
+        @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[@default_armor]))
+        @last_worn_type = @default_armor
+      end
+    end
+    true
+  end
+
   def check_armor_swap(game_state)
+    return if armor_hysteresis?
     return if Time.now - @last_cycle_time < @cycle_armors_time
     return if game_state.loaded
     armor_types = @cycle_armors.map { |skill, _| skill }
@@ -1711,7 +1727,7 @@ class TrainerProcess
     @skill_map = { 'Hunt' => 'Perception', 'Pray' => 'Theurgy', 'PercMana' => 'Attunement',
                    'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal', 'PrayerMat' => 'Theurgy',
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics', 'Analyze' => 'Tactics',
-                   'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation',
+                   'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation', 'Teach' => 'Scholarship',
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Ambush Choke' => 'Debilitation',
                    'Favor Orb' => 'Anything', 'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
                    'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
@@ -1767,9 +1783,12 @@ class TrainerProcess
     @analyze_retry_count = settings.combat_analyze_retry_count
     echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
 
+    @combat_teaching_skill = settings.combat_teaching_skill
+    echo("  @combat_teaching_skill: #{@combat_teaching_skill}") if $debug_mode_ct
+
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
-  
+
     @pet_count = @skill_map.include?('Locks') ? get_boxes(@pet_box_source).count : 0
     echo("  @pet_count: #{@pet_count}") if $debug_mode_ct
   end
@@ -1800,6 +1819,10 @@ class TrainerProcess
       pickbox(game_state)
     when 'Hunt'
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
+    when 'Teach'
+      UserVars.friends.select { |c| DRRoom.pcs.include?(c) }.each do |character|
+        bput("teach #{@combat_teaching_skill} to #{character}", 'You begin to', 'is already listening to you', 'is listening to someone else', 'I could not find who you were referring to', 'You have already offered', 'That person is too busy teaching', 'You are already teaching', 'You cannot teach two different classes at the same time', 'is not paying attention to you', 'You cannot listen to a teacher and teach', 'already trying to teach you something')
+      end
     when 'Pray'
       bput('pray meraud', 'You glance')
     when 'Scream'
@@ -2017,20 +2040,20 @@ class TrainerProcess
 
     if right_hand
       if game_state.weapon_is_summoned?
-        echo ("combat-trainer::pickbox: weapon summoned") if $debug_mode_ct
+        echo 'combat-trainer::pickbox: weapon summoned' if $debug_mode_ct
         if DRStats.warrior_mage?
-          bput("lower my #{game_state.weapon_name} to ground", 'You lower')
+          bput("lower #{game_state.weapon_name} to ground", 'You lower')
         else
           bput("wear my #{game_state.weapon_name}", 'telekinetic force')
         end
       else
-        echo ("combat-trainer::pickbox: weapon NOT summoned") if $debug_mode_ct
+        echo 'combat-trainer::pickbox: weapon NOT summoned' if $debug_mode_ct
         @equipment_manager.stow_weapon(game_state.weapon_name)
       end
       had_weapon = true
     end
     game_state.sheath_whirlwind_offhand if game_state.currently_whirlwinding
-   
+
     bput("get #{box} from my #{@pet_box_source}", 'You get', 'What were')
     retreat
     case bput("pick my #{box} blind", 'not even locked', 'Roundtime', 'Find a more appropriate tool', 'You realize that would be next to impossible')
@@ -2059,7 +2082,7 @@ class TrainerProcess
       end
       game_state.wield_whirlwind_offhand if game_state.currently_whirlwinding
     end
-    
+
     fput('engage') if !DRRoom.npcs.empty? && !game_state.retreating?
   end
 
@@ -2409,6 +2432,8 @@ class AttackProcess
 
   def aim(game_state)
     case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow')
+    when 'You are already'
+      game_state.loaded = true
     when 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your riot crossbow'
       case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow')
       when 'A rapid series of clicks'
@@ -3297,6 +3322,22 @@ end
 
 before_dying do
   DRCA.release_cyclics
+  Flags.delete('using-corpse')
+  Flags.delete('pouch-full')
+  Flags.delete('container-full')
+  Flags.delete('ct-lodged')
+  Flags.delete('ct-engaged')
+  Flags.delete('ct-spelllost')
+  Flags.delete('need-tkt-ammo')
+  Flags.delete('ct-spellcast')
+  Flags.delete('glyph-mana-expired')
+  Flags.delete('ct-face-what')
+  Flags.delete('ct-aim-failed')
+  Flags.delete('ct-ranged-ready')
+  Flags.delete('ct-accuracy-ready')
+  Flags.delete('ct-damage-ready')
+  Flags.delete('ct-need-bless')
+  Flags.delete('last-stance')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

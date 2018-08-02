@@ -2,11 +2,12 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#outdoorsmanship
 =end
 
-custom_require.call(%w[common common-items drinfomon])
+custom_require.call(%w[common common-items drinfomon common-arcana events])
 
 class Outdoorsmanship
   include DRC
   include DRCI
+  include DRCA
 
   def initialize
     arg_definitions = [
@@ -17,19 +18,21 @@ class Outdoorsmanship
     ]
     args = parse_args(arg_definitions)
 
-    settings = get_settings
+    @settings = get_settings
 
-    @targetxp = 3
+    @training_spells = @settings.crafting_training_spells
+    @targetxp = 4
     @targetxp = args.mindstates.to_i if args.mindstates
 
     @forage_item = if args.collect_item
                      args.collect_item
                    else
-                     settings.forage_item
+                     @settings.forage_item
                    end
 
     start_exp = DRSkill.getxp('Outdoorsmanship')
     @end_exp = [start_exp + @targetxp, 29].min
+    Flags.add('outdoors-magic-ready', 'You feel fully prepared to cast your spell.')
 
     train_outdoorsmanship
   end
@@ -38,17 +41,54 @@ class Outdoorsmanship
     attempt = 0 # Failsafe counter to prevent an infinite loop if item isn't collectable in the room
     while (DRSkill.getxp('Outdoorsmanship') < @end_exp) && (attempt < @targetxp)
       if DRSkill.getrank('Outdoorsmanship') < 20
+        magic_routine
         forage?('rock')
         dispose_trash 'rock'
       else
         item = @forage_item
+        magic_routine
         collect(item)
         waitrt?
         kick_pile? unless kick_pile?("#{item}s")
       end
       attempt += 1
     end
+    magic_cleanup
   end
+
+  def magic_routine
+    return unless @training_spells
+
+    needs_training = %w[Warding Utility Augmentation]
+                     .select { |skill| @training_spells[skill] }
+                     .select { |skill| DRSkill.getxp(skill) < 31 }
+                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    return unless needs_training
+
+    data = @training_spells[needs_training]
+
+    if Flags['outdoors-magic-ready'] && mana > 40
+      crafting_cast_spell(data, @settings)
+      Flags.reset('outdoors-magic-ready')
+      @preparing = false
+    end
+
+    return if @preparing
+    crafting_prepare_spell(data, @settings)
+    @preparing = true
+  end
+
+  def magic_cleanup
+    return unless @training_spells
+
+    bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+    bput('release mana', 'You release all', "You aren't harnessing any mana")
+    bput('release symb', "But you haven't", 'You release', 'Repeat this command')
+  end
+end
+
+before_dying do
+  Flags.delete('outdoors-magic-ready')
 end
 
 # Call this last to avoid the need for forward declarations

@@ -927,7 +927,7 @@ class SpellProcess
     echo("  @buff_force_cambrinth: #{@buff_force_cambrinth}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
-
+   
     @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
     echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}") if $debug_mode_ct
 
@@ -1791,7 +1791,35 @@ class TrainerProcess
 
     @pet_count = @skill_map.include?('Locks') ? get_boxes(@pet_box_source).count : 0
     echo("  @pet_count: #{@pet_count}") if $debug_mode_ct
+	
+	@constellations = get_data('constellations').constellations
+	
+    @have_divination_bones = DRC.get_settings.have_divination_bones
+    
+	@divination_bones_container = DRC.get_settings.divination_bones_storage['container']
+    
+	@divination_bones_tied = DRC.get_settings.divination_bones_storage['tied']
+    
+	@have_telescope = DRC.get_settings.have_telescope
+    
+	@ap_source = DRC.get_settings.astral_plane_training['train_source']
+    
+	@ap_destination = DRC.get_settings.astral_plane_training['train_destination']
+   
+    @prediction_pool_target = DRC.get_settings.astrology_use_full_pools ? 10 : DRC.get_settings.astrology_pool_target
+    
+	@rtr_data = nil
+    
+	@astrology_prediction_skills_magic = DRC.get_settings.astrology_prediction_skills['magic']
+    @astrology_prediction_skills_lore = DRC.get_settings.astrology_prediction_skills['lore']
+    @astrology_prediction_skills_offense = DRC.get_settings.astrology_prediction_skills['offense']
+    @astrology_prediction_skills_defense = DRC.get_settings.astrology_prediction_skills['defense']
+    @astrology_prediction_skills_survival = DRC.get_settings.astrology_prediction_skills['survival']
+	Flags.add('astro_true', 'You feel you have sufficiently pondered your latest observation')
+    echo " Flags['rtr-expire'].nil? #{Flags['rtr-expire'].nil?}" if UserVars.astrology_debug
+    echo " Flags['rtr-expire'] = #{Flags['rtr-expire']}" if UserVars.astrology_debug
   end
+  
 
   def execute(game_state)
     return if game_state.danger
@@ -1883,7 +1911,7 @@ class TrainerProcess
   end
 
   private
-
+  
   def smite(game_state)
     return if game_state.npcs.empty?
     return if game_state.brawling? || game_state.offhand? || game_state.aimed_skill?
@@ -1997,7 +2025,186 @@ class TrainerProcess
     end
     DRRoom.dead_npcs.size > dead_count
   end
+  def visible_bodies
+    result = []
+    all_bodies = @constellations
+    case DRC.bput('observe sky', 'The following heavenly bodies are visible:', "That's a bit hard to do while inside")
+    when "That's a bit hard to do while inside"
+      echo('Must be outdoors to observe sky')
+      exit
+    end
+    until (line = get?) =~ /^Roundtime/i
+      result << all_bodies.find { |body| /\b#{body['name']}\b/i =~ line && line !~ /below the horizon/ }
+    end
+    result.compact.select { |data| data['circle'] <= DRStats.circle }
+  end
+  
+  def check_pools
+    pools = {
+      'lore' => 0,
+      'magic' => 0,
+      'survival' => 0,
+      'offensive combat' => 0,
+      'defensive combat' => 0,
+      'future events' => 0
+    }
+    pools_to_size = {
+      /You have no understanding of the celestial influences over/ => 0,
+      /You have a feeble understanding of the celestial influences over/ => 1,
+      /You have a weak understanding of the celestial influences over/ => 2,
+      /You have a fledgling understanding of the celestial influences over/ => 3,
+      /You have a modest understanding of the celestial influences over/ => 4,
+      /You have a decent understanding of the celestial influences over/ => 5,
+      /You have a significant understanding of the celestial influences over/ => 6,
+      /You have a potent understanding of the celestial influences over/ => 7,
+      /You have an insightful understanding of the celestial influences over/ => 8,
+      /You have a powerful understanding of the celestial influences over/ => 9,
+      /You have a complete understanding of the celestial influences over/ => 10
+    }
+    waitrt?
+    pause 1
+    fput("retreat")
+    fput("retreat")
+    DRC.bput('predict state all', 'roundtime')
+    lines = reget(50).reverse
+    lines.select! { |line| line =~ /celestial influences/ }
+    pools.select! { |name, _level| pools[name] = lines.find { |line| line =~ /#{name}/ } }
+    pools.each { |name, text| pools_to_size.each { |match_text, value| pools[name] = value if match_text =~ text } }
+    echo " pools: #{pools}" if UserVars.astrology_debug
+    waitrt?
+    pools
+  end 
+  
+  def predict_all(pools)
+    skillset_to_pool = {
+      'offensive combat' => @astrology_prediction_skills_offense,
+      'defensive combat' => @astrology_prediction_skills_defense,
+      'magic' => @astrology_prediction_skills_magic,
+      'survival' => @astrology_prediction_skills_survival,
+      'lore' => @astrology_prediction_skills_lore,
+      'future events' => 'future events'
+    }
 
+    pools.reject { |_skill, size| (size < @prediction_pool_target) }
+         .each_key do |skill|
+      break if DRSkill.getxp('Astrology') > 30
+      align(skillset_to_pool[skill])
+    end
+  end 
+
+  def check_heavens
+    @equipment_manager.empty_hands
+    vis_bodies = visible_bodies
+    night = vis_bodies.find { |body| body['constellation'] }
+    best_eye_data = vis_bodies
+                    .select { |data| @have_telescope || !data['telescope'] }
+                    .max_by { |data| [data['pools'].values.compact.size, data['circle']] }
+    echo(" best_eye_data = #{best_eye_data}") if UserVars.astrology_debug
+    waitrt?
+    if @have_telescope
+      things_to_try = @constellations.select do |data|
+        data['telescope'] &&
+          data['circle'] <= DRStats.circle &&
+          data['circle'] > best_eye_data['circle'] &&
+          (night || !data['constellation']) &&
+          data['pools'].values.compact.size > best_eye_data['pools'].values.compact.size
+      end
+      things_to_try << best_eye_data
+      things_to_try.sort! { |data| data['circle'] }.reverse!
+      echo(" things_to_try = #{things_to_try}") if UserVars.astrology_debug
+      things_to_try.find do |data|
+        result = nil
+        until ['Roundtime', 'You peer aimlessly through your telescope'].include?(result)
+          return check_heavens if Flags['bad-search'] == 'is foiled by the daylight'
+          next if Flags['bad-search'] == 'turns up fruitless'
+          result = observe(data['name'])
+        end
+        result == 'Roundtime'
+      end
+    else
+      until observe(best_eye_data['name'])
+        if Flags['bad-search']
+          check_heavens
+          return
+        end
+      end
+    end
+    pause 2
+    waitrt?
+  end  
+  
+  def observe(body)
+    Flags.add('bad-search', 'is foiled by the (daylight|darkness)', 'turns up fruitless')
+    if @have_telescope
+      DRC.bput('get telescope', 'you get', 'You are already', "That can't be picked up")
+      case DRC.bput("center telescope on #{body}", 'You put your eye', 'open it to make any use of it', 'The pain is too much')
+      when /open it/
+        DRC.bput('open my telescope', 'extend your telescope')
+        return observe(body)
+      when /The pain is too much/
+        get_healed
+        return observe(body)
+      end
+      waitrt?
+      pause 1
+      fput("retreat")
+      fput("retreat")
+      result = DRC.bput('peer telescope', 'You peer aimlessly through your telescope', 'open it to make any use of it', 'You see nothing regarding the future', 'The pain is too much', 'Roundtime')
+      case result
+      when /The pain is too much/
+        get_healed
+        return observe(body)
+      when /open it/
+        DRC.bput('open my telescope', 'extend your telescope')
+        return observe(body)
+      end
+      @equipment_manager.empty_hands
+      waitrt?
+      pause 1   
+      predict_all(check_pools)
+      result
+    else
+      ['Roundtime', 'Clouds obscure'].include? DRC.bput("observe #{body} in sky", 'Your search for', 'You see nothing regarding the future', 'Clouds obscure', 'Roundtime')
+    end
+  end 
+
+  def align(skill)
+    if skill == 'future events'
+      DRC.bput('predict event', 'You focus inwardly')
+      return
+    end
+    DRC.bput("align #{skill}", 'You focus internally')
+    waitrt?
+    if @have_divination_bones
+      roll_bones
+    else
+      waitrt?
+      pause 1
+      fput("retreat")
+      fput("retreat")  
+      DRC.bput('predict future', 'roundtime')
+    end
+    waitrt?
+    pause
+    pause 0.5 while stunned?
+  end  
+  
+  def roll_bones
+    fput("retreat")
+    fput("retreat")  
+    if @divination_bones_tied
+      bput("untie bones from my #{@divination_bones_container}", 'divination bones')
+    else
+      bput("get bones from my #{@divination_bones_container}", 'divination bones', 'you get')
+    end
+    bput('roll my bones', 'roundtime')
+    waitrt?
+    if @divination_bones_tied
+      bput("tie bones to my #{@divination_bones_container}", 'divination bones')
+    else
+      bput("put bones in my #{@divination_bones_container}", 'divination bones', 'you put')
+    end
+  end
   def ambush_choke(game_state)
     return unless game_state.can_ambush_stun?
     return unless @dirt_stacker
@@ -2130,11 +2337,11 @@ class TrainerProcess
 
   def astrology(game_state)
     return if game_state.retreating?
-
     retreat
-    bput('predict weather', 'You predict that', 'You are far too', 'you lack the skill to grasp them fully')
-    waitrt?
-    fput('engage')
+	check_heavens
+	  
+	bput("wield #{game_state.weapon_name}", 'You wield', 'You draw')
+    put('engage')
   end
 
   def reset_ability(game_state, ability_name, offset = 0)
@@ -2168,7 +2375,7 @@ class AttackProcess
 
   def initialize(settings)
     echo('New AttackProcess') if $debug_mode_ct
-
+    
     @fatigue_regen_action = settings.fatigue_regen_action
     echo("  @fatigue_regen_action: #{@fatigue_regen_action}") if $debug_mode_ct
 
@@ -3279,6 +3486,9 @@ class GameState
     item && item.bound
   end
 
+  
+  
+  
   def perform_analyze?(combo_type, expertise_requirement)
     return false if combo_type != 'flame' && !Flags["ct-#{combo_type}-ready"]
     return false if DRSkill.getrank('Expertise') < expertise_requirement
@@ -3300,7 +3510,7 @@ class GameState
 
     true
   end
-
+  
   def update_analyze_array(only_accuracy)
     return perform_analyze?('accuracy', 50) if only_accuracy
     { 'accuracy' => 50, 'damage' => 125, 'balance' => 600, 'flame' => 0 }.each do |type, expertise|

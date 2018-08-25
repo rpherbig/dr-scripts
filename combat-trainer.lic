@@ -27,11 +27,23 @@ class SetupProcess
     @last_cycle_time = Time.now - @cycle_armors_time
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
-
+    @cycle_regalia = settings.cycle_armors_regalia
+    echo("  @cycle_regalia: #{@cycle_regalia}") if $debug_mode_ct
+    @default_armor = settings.default_armor_type
+    echo("  @default_armor: #{@default_armor}") if $debug_mode_ct
     @warhorn = settings.warhorn
     echo("  @warhorn: #{@warhorn}") if $debug_mode_ct
     @last_warhorn = Time.now - 305
 
+    if @cycle_regalia && @cycle_armors
+      echo "ERROR - Regalia cycling and armorswap cycling at the same time not currently supported!  Removing Regalia from combat-training!"
+      @cycle_regalia = nil
+    end
+    if @cycle_regalia && settings.gear_sets['regalia'].empty?
+      echo "ERROR - Regalia cycling requires a gear_set named 'regalia' that will be worn immediately before casting. Removing Regalia from combat-training!"
+      @cycle_regalia = nil
+    end
+    
     return unless @warhorn
 
     if DRCI.wearing?(@warhorn)
@@ -107,10 +119,16 @@ class SetupProcess
     game_state.wield_whirlwind_offhand
   end
 
-  def armor_hysteresis?
+  def armor_hysteresis?(game_state)
     return false unless @armor_hysteresis
     return false if @cycle_armors.keys.any? { |skill| DRSkill.getxp(skill) < 25 }
-    if @cycle_armors.keys.all? { |skill| DRSkill.getxp(skill) > 32 }
+    return false if @cycle_regalia.keys.any? { |skill| DRSkill.getxp(skill) < 22 } || game_state.last_regalia_type.nil? || Flags['ct-regalia-expired']
+    if @cycle_regalia
+      if @cycle_regalia.keys.all? { |skill| DRSkill.getxp(skill) > 24 } && game_state.last_regalia_type != @default_armor  # Different swap threshold because Regalia costs resources, and starlight will run out if used too often.
+        return false if Time.now - @last_cycle_time < @cycle_armors_time
+        game_state.swap_regalia_type = @default_armor ? @default_armor : @cycle_regalia.max_by { |skill| DRSkill.getrank(skill) } # If no default type declared, go by the highest rank.
+      end
+    elsif @cycle_armors.keys.all? { |skill| DRSkill.getxp(skill) > 32 }
       if @last_worn_type != @default_armor
         @equipment_manager.worn_items(@all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
         @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[@default_armor]))
@@ -121,19 +139,23 @@ class SetupProcess
   end
 
   def check_armor_swap(game_state)
-    return if armor_hysteresis?
-    return if Time.now - @last_cycle_time < @cycle_armors_time
+    return if armor_hysteresis?(game_state)
+    return if Time.now - @last_cycle_time < @cycle_armors_time && !Flags['ct-regalia-expired']
     return if game_state.loaded
-    armor_types = @cycle_armors.map { |skill, _| skill }
+    
+    armor_types = @cycle_regalia ? @cycle_regalia.map { |skill, _| skill } : @cycle_armors.map { |skill, _| skill }
     next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
-    return if next_armor_type == @last_worn_type
+    return if next_armor_type == @last_worn_type unless Flags['ct-regalia-expired']
     return if DRSkill.getxp(next_armor_type) >= @combat_training_abilities_target
 
     @last_cycle_time = Time.now
 
     game_state.sheath_whirlwind_offhand
 
-    if @last_worn_type
+    if @cycle_regalia
+      game_state.swap_regalia_type = next_armor_type # Mark for SpellProcess casting
+      return
+    elsif @last_worn_type
       @equipment_manager.desc_to_items(@cycle_armors[@last_worn_type]).each { |item| @equipment_manager.remove_item(item) }
     else
       all_swap_pieces = @cycle_armors.map { |_, pieces| pieces }.flatten
@@ -926,13 +948,21 @@ class SpellProcess
     @buff_force_cambrinth = settings.combat_trainer_buffs_force_cambrinth
     echo("  @buff_force_cambrinth: #{@buff_force_cambrinth}") if $debug_mode_ct
 
+    @regalia_array = settings.cycle_armors_regalia
+    echo("  @regalia_array: #{@regalia_array}") if $debug_mode_ct
+
+    @regalia_spell = settings.waggle_sets['regalia']['Regalia']
+    echo("  @regalia_spell: #{@regalia_spell}") if $debug_mode_ct
+    
     @perc_health_timer = Time.now
 
     @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
     echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}") if $debug_mode_ct
 
-    Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
+    Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target', 'Your concentration lapses')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
+    Flags.add('ct-starlight-depleted', 'enough starlight') if DRStats.trader?
+    Flags.add('ct-regalia-expired', 'Your .* glimmers weakly') if DRStats.trader?
 
     @offensive_spells
       .select { |spell| spell['expire'] }
@@ -987,6 +1017,7 @@ class SpellProcess
       drop_tkt_ammo
     end
     check_slivers(game_state)
+    check_regalia(game_state)
     check_consume(game_state)
     check_cfb(game_state)
     check_bless(game_state)
@@ -1009,6 +1040,11 @@ class SpellProcess
         waitrt?
         pause
         fput("stow #{@tk_ammo}")
+      end
+      if game_state.last_regalia_type
+        @regalia_array[game_state.last_regalia_type].each do |item| 
+          bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
+        end
       end
       return true
     end
@@ -1055,6 +1091,37 @@ class SpellProcess
     game_state.casting = false
   end
 
+  def check_regalia(game_state)
+    game_state.swap_regalia_type = nil if game_state.swap_regalia_type == game_state.last_regalia_type
+    return if game_state.casting
+    return unless game_state.swap_regalia_type
+        
+    if @regalia_spell.nil?
+      echo "Couldn't find a regalia waggle.  Using default values for the spell."
+      @regalia_spell = get_data('spells').spell_data['Regalia']
+    end
+    
+    case game_state.swap_regalia_type
+    when 'Light Armor'
+      armor_word = 'light'
+    when 'Chain Armor'
+      armor_word = 'chain'
+    when 'Brigandine'
+      armor_word = 'brigandine'
+    when 'Plate Armor'
+      armor_word = 'plate'
+    end
+    @regalia_spell['cast'] = "cast #{armor_word} all"
+    prepare_spell(@regalia_spell, game_state)
+    if game_state.last_regalia_type.nil? 
+      @equipment_manager.wear_equipment_set?('regalia')
+    else
+      @regalia_array[game_state.last_regalia_type].each do |item| 
+        bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
+      end
+    end
+	end
+  
   def check_bless(game_state)
     return if game_state.casting
     return unless @buff_spells['Bless']
@@ -1172,8 +1239,10 @@ class SpellProcess
       game_state.casting_moonblade = false
     end
 
-    Flags.reset("ct-#{@reset_expire}") if @reset_expire
+    check_trader_magic(game_state)
 
+    Flags.reset("ct-#{@reset_expire}") if @reset_expire
+    Flags.reset('ct-starlight-depleted') if DRStats.trader?
     return unless @command
     pause 0.5 until DRRoom.npcs.include?('warrior')
     fput("command #{@command}")
@@ -1287,6 +1356,24 @@ class SpellProcess
     end
   end
 
+  def check_trader_magic(game_state)
+    return unless DRStats.trader?
+    if Flags['ct-starlight-depleted'] then
+      echo "----OUT OF STARLIGHT - DELETING STARLIGHT MAGIC----"
+      @buff_spells.delete_if { |spell| @buff_spells[spell]['starlight'] }
+      @offensive_spells.delete_if do |spell|
+        if spell['ct-starlight-depleted'] then true end
+      end
+    end
+    if game_state.casting_regalia
+      @equipment_manager.wear_equipment_set('standard') if Flags['ct-starlight-depleted']
+      Flags['ct-starlight-depleted'] ? game_state.last_regalia_type = nil : game_state.last_regalia_type = game_state.swap_regalia_type
+      Flags.reset('ct-regalia-expired')
+      @swap_regalia_type = nil
+      game_state.casting_regalia = false
+    end
+  end
+  
   def check_cfb(game_state)
     return unless DRStats.necromancer?
     return unless @necromancer_zombie['Call from Beyond']
@@ -1425,6 +1512,9 @@ class SpellProcess
         data['cast'] = "cast #{moon}"
       end
     end
+    
+    game_state.casting_regalia = true if data['abbrev'] == 'REGAL'
+    
     prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
@@ -2623,7 +2713,7 @@ class GameState
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_regalia, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :starlight, :last_regalia_type, :swap_regalia_type
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -2643,6 +2733,9 @@ class GameState
     @casting_moonblade = false
     @casting_sorcery = false
     @hide_on_cast = false
+    @casting_regalia = false
+    @last_regalia_type = nil
+    @swap_regalia_type = nil
     @casting_weapon_buff = false
     @casting_consume = false
     @prepare_consume = false
@@ -3317,7 +3410,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos, :balance_regen_thresholdend
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos, :balance_regen_threshold
 end
 
 before_dying do
@@ -3338,6 +3431,8 @@ before_dying do
   Flags.delete('ct-damage-ready')
   Flags.delete('ct-need-bless')
   Flags.delete('last-stance')
+  Flags.delete('ct-regalia-expired')
+  Flags.delete('ct-starlight-depleted')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

@@ -65,6 +65,6 @@ class TestCommon < Minitest::Test
 
     sleep 0.25
 
-    assert_equal 9, $pause
+    assert_equal 8.1, $pause
   end
 end

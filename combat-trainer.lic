@@ -39,7 +39,7 @@ class SetupProcess
       echo "ERROR - Regalia cycling and armorswap cycling at the same time not currently supported!  Removing Regalia from combat-training!"
       @cycle_regalia = nil
     end
-    if @cycle_regalia && settings.gear_sets['regalia'].empty?
+    if @cycle_regalia && (settings.gear_sets['regalia'].empty? || settings.gear_sets['regalia'].nil?)
       echo "ERROR - Regalia cycling requires a gear_set named 'regalia' that will be worn immediately before casting. Removing Regalia from combat-training!"
       @cycle_regalia = nil
     end
@@ -142,9 +142,10 @@ class SetupProcess
     return if armor_hysteresis?(game_state)
     return if Time.now - @last_cycle_time < @cycle_armors_time && !Flags['ct-regalia-expired']
     return if game_state.loaded
-    
-    @cycle_regalia = nil if Flags['ct-cancel-regalia']
-    
+    if game_state.regalia_cancel
+      regalia_shutdown(game_state) if Flags['ct-regalia-expired']
+      return
+    end
     armor_types = @cycle_regalia ? @cycle_regalia.map { |skill, _| skill } : @cycle_armors.map { |skill, _| skill }
     next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
     return if next_armor_type == @last_worn_type unless Flags['ct-regalia-expired']
@@ -282,6 +283,22 @@ class SetupProcess
     offhand_skill = temp_array.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
     game_state.update_whirlwind_weapon_info(offhand_skill)
     game_state.wield_whirlwind_offhand
+  end
+  
+  def regalia_shutdown(game_state)
+    bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing') if Flags['ct-engaged']
+    bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing') if Flags['ct-engaged']
+    if game_state.last_regalia_type
+      @cycle_regalia[game_state.last_regalia_type].each do |item| 
+        bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
+      end
+      game_state.last_regalia_type = nil
+      game_state.swap_regalia_type = nil
+      game_state.regalia_cancel = nil
+      @cycle_regalia = nil
+      Flags.reset('ct-regalia-expired')
+    end
+    @equipment_manager.wear_equipment_set?('standard')
   end
 end
 
@@ -965,7 +982,6 @@ class SpellProcess
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
     Flags.add('ct-starlight-depleted', 'enough starlight') if DRStats.trader?
     Flags.add('ct-regalia-expired', 'Your .* glimmers weakly') if DRStats.trader?
-    Flags.add('ct-cancel-regalia')
 
     @offensive_spells
       .select { |spell| spell['expire'] }
@@ -985,6 +1001,8 @@ class SpellProcess
     @tk_spell = @offensive_spells.find { |spell| spell['abbrev'] =~ /tkt|tks/i }
     drop_tkt_ammo
     Flags.add('need-tkt-ammo', 'There is nothing here that can be thrown')
+    
+    @regalia_spell = get_data('spells').spell_data['Regalia'] if (@regalia_array && @regalia_spell.nil?)
   end
 
   def drop_tkt_ammo
@@ -1098,10 +1116,6 @@ class SpellProcess
     game_state.swap_regalia_type = nil if game_state.swap_regalia_type == game_state.last_regalia_type
     return if game_state.casting
     return unless game_state.swap_regalia_type
-    if @regalia_spell.nil?
-      echo "Couldn't find a regalia waggle.  Using default values for the spell."
-      @regalia_spell = get_data('spells').spell_data['Regalia']
-    end
     
     case game_state.swap_regalia_type
     when 'Light Armor'
@@ -1115,13 +1129,6 @@ class SpellProcess
     end
     @regalia_spell['cast'] = "cast #{armor_word} all"
     prepare_spell(@regalia_spell, game_state)
-    if game_state.last_regalia_type.nil? 
-      @equipment_manager.wear_equipment_set?('regalia')
-    else
-      @regalia_array[game_state.last_regalia_type].each do |item| 
-        bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
-      end
-    end
   end
   
   def check_bless(game_state)
@@ -1203,7 +1210,19 @@ class SpellProcess
     if game_state.casting_sorcery
       @equipment_manager.stow_weapon(game_state.weapon_name)
     end
-
+    
+    if game_state.casting_regalia
+      bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing')
+      bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing')
+      if game_state.last_regalia_type.nil? 
+        @equipment_manager.wear_equipment_set?('regalia')
+      else
+        @regalia_array[game_state.last_regalia_type].each do |item| 
+          bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
+        end
+      end
+    end
+    
     snapshot = DRSkill.getxp(@skill)
     success = cast?(@custom_cast, @symbiosis, @before, @after)
     if @symbiosis && @use_auto_mana
@@ -1360,22 +1379,22 @@ class SpellProcess
 
   def check_trader_magic(game_state)
     return unless DRStats.trader?
-    if Flags['ct-starlight-depleted'] then
+    if Flags['ct-starlight-depleted']
       echo "----OUT OF STARLIGHT - DELETING STARLIGHT MAGIC----"
-      @buff_spells.delete_if { |spell| @buff_spells[spell]['starlight'] }
-      @offensive_spells.delete_if do |spell|
-        if spell['starlight'] then true end
-      end
-      Flags['ct-cancel-regalia'] = true
+      @buff_spells.reject! { |spell| @buff_spells[spell]['starlight'] }
+      @offensive_spells.reject! { |spell| spell['starlight'] }
+      game_state.regalia_cancel = true
     end
     if game_state.casting_regalia
       if Flags['ct-starlight-depleted']  # In some conditions, regalia can run out of starlight partway through creation.
+        bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing')
+        bput('retreat', 'You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat', 'retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing')
         @regalia_array[game_state.swap_regalia_type].each do |item| 
           bput("remove my #{item}", "into motes of silvery", "Remove what?", "You .*#{item}", 'The leather gauntlets slide')
         end
         @equipment_manager.wear_equipment_set?('standard')
       end
-      Flags['ct-starlight-depleted'] ? game_state.last_regalia_type = nil : game_state.last_regalia_type = game_state.swap_regalia_type
+      game_state.last_regalia_type = Flags['ct-starlight-depleted'] ? nil : game_state.swap_regalia_type
       Flags.reset('ct-regalia-expired')
       game_state.swap_regalia_type = nil
       game_state.casting_regalia = false
@@ -1521,7 +1540,7 @@ class SpellProcess
       end
     end
     
-    game_state.casting_regalia = true if data['abbrev'] == 'REGAL'
+    game_state.casting_regalia = data['abbrev'] == 'REGAL'
     
     prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
     game_state.casting = true
@@ -2721,7 +2740,7 @@ class GameState
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_regalia, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :starlight, :last_regalia_type, :swap_regalia_type
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_regalia, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -2742,6 +2761,7 @@ class GameState
     @casting_sorcery = false
     @hide_on_cast = false
     @casting_regalia = false
+    @regalia_cancel = false
     @last_regalia_type = nil
     @swap_regalia_type = nil
     @casting_weapon_buff = false
@@ -3441,7 +3461,6 @@ before_dying do
   Flags.delete('last-stance')
   Flags.delete('ct-regalia-expired')
   Flags.delete('ct-starlight-depleted')
-  Flags.delete('ct-cancel-regalia')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

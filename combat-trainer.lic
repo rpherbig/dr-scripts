@@ -121,10 +121,10 @@ class SetupProcess
     if @cycle_regalia
       if @cycle_regalia.keys.all? { |skill| DRSkill.getxp(skill) > 24 } && game_state.last_regalia_type != @default_armor  # Different swap threshold because Regalia costs resources, and starlight will run out if used too often.
         return false if Time.now - @last_cycle_time < @cycle_armors_time
-        game_state.swap_regalia_type = @default_armor ? @default_armor : @cycle_regalia.max_by { |skill| DRSkill.getrank(skill) } # If no default type declared, go by the highest rank.
+        game_state.swap_regalia_type = @cycle_regalia.member?(@default_armor) ? @default_armor : @cycle_regalia.max_by { |skill| DRSkill.getrank(skill) } # If no default type declared, go by the highest rank.
       end
     elsif @cycle_armors.keys.all? { |skill| DRSkill.getxp(skill) > 32 }
-      if @last_worn_type != @default_armor
+      if @last_worn_type != @default_armor && @cycle_armors.member?(@default_armor)
         @equipment_manager.worn_items(@all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
         @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[@default_armor]))
         @last_worn_type = @default_armor
@@ -144,8 +144,8 @@ class SetupProcess
     armor_types = @cycle_regalia ? @cycle_regalia.map { |skill, _| skill } : @cycle_armors.map { |skill, _| skill }
     next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
     return if next_armor_type == @last_worn_type unless Flags['ct-regalia-expired']
-    return if DRSkill.getxp(next_armor_type) >= @combat_training_abilities_target
-
+    return if DRSkill.getxp(next_armor_type) >= @combat_training_abilities_target unless (Flags['ct-regalia-expired'] || (game_state.last_regalia_type.nil? && @cycle_regalia))
+    
     @last_cycle_time = Time.now
 
     game_state.sheath_whirlwind_offhand
@@ -282,7 +282,6 @@ class SetupProcess
   
   def validate_regalia(settings)
     return unless @cycle_regalia
-   
     if @cycle_armors
       echo "ERROR - Regalia cycling and armorswap cycling at the same time not currently supported!  Removing Regalia from combat-training!"
       @cycle_regalia = nil
@@ -988,6 +987,7 @@ class SpellProcess
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
     Flags.add('ct-starlight-depleted', 'enough starlight') if DRStats.trader?
     Flags.add('ct-regalia-expired', 'Your .* glimmers weakly') if DRStats.trader?
+    Flags.add('ct-regalia-succeeded', 'You cup your palms skyward to bask in') if DRStats.trader?
 
     @offensive_spells
       .select { |spell| spell['expire'] }
@@ -1118,7 +1118,8 @@ class SpellProcess
   end
 
   def check_regalia(game_state)
-    game_state.swap_regalia_type = nil if game_state.swap_regalia_type == game_state.last_regalia_type
+    return unless @regalia_array
+    game_state.swap_regalia_type = nil if (game_state.swap_regalia_type == game_state.last_regalia_type && !Flags['ct-regalia-expired'])
     return if game_state.casting
     return if game_state.loaded
     return unless game_state.swap_regalia_type
@@ -1269,7 +1270,7 @@ class SpellProcess
     check_trader_magic(game_state)
 
     Flags.reset("ct-#{@reset_expire}") if @reset_expire
-    Flags.reset('ct-starlight-depleted') if DRStats.trader?
+
     return unless @command
     pause 0.5 until DRRoom.npcs.include?('warrior')
     fput("command #{@command}")
@@ -1390,6 +1391,7 @@ class SpellProcess
       @buff_spells.reject! { |spell| @buff_spells[spell]['starlight'] }
       @offensive_spells.reject! { |spell| spell['starlight'] }
       game_state.regalia_cancel = true
+      Flags.reset('ct-starlight-depleted')
     end
     if game_state.casting_regalia
       if Flags['ct-starlight-depleted']  # In some conditions, regalia can run out of starlight partway through creation.
@@ -1397,11 +1399,15 @@ class SpellProcess
         @equipment_manager.wear_equipment_set?('standard')
         @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
       end
-      game_state.last_regalia_type = Flags['ct-starlight-depleted'] ? nil : game_state.swap_regalia_type
-      Flags.reset('ct-regalia-expired')
-      game_state.swap_regalia_type = nil
-      game_state.casting_regalia = false
+      if Flags['ct-regalia-succeeded']
+        game_state.last_regalia_type = Flags['ct-starlight-depleted'] ? nil : game_state.swap_regalia_type
+        Flags.reset('ct-regalia-expired')
+        game_state.swap_regalia_type = nil
+        Flags.reset('ct-regalia-succeeded')
+      end
     end
+    game_state.casting_regalia = false
+    Flags.reset('ct-regalia-succeeded')
   end
   
   def check_cfb(game_state)
@@ -3470,6 +3476,7 @@ before_dying do
   Flags.delete('last-stance')
   Flags.delete('ct-regalia-expired')
   Flags.delete('ct-starlight-depleted')
+  Flags.delete('ct-regalia-succeeded')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

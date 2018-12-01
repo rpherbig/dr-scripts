@@ -1,0 +1,128 @@
+custom_require.call(%w(events common-travel common-arcana common common-healing))
+ 
+ 
+class Healbot
+  include DRC
+  include DRCA
+  include DRCT
+  include DRCH
+ 
+  def initialize
+    settings = get_settings  
+    no_pause_all
+    start_script('regen') unless Script.running?('regen')
+   
+    Flags.add('password', 'heal')
+    Flags.add('broken_link', 'break completely')
+    Flags.add('no_injuries', 'no injuries to speak of')
+    @list = settings.whitelist
+    @queue=Array.new
+ 
+    start_script('hbot-training') unless Script.running?('hbot-training')
+    wait_for_patient
+  end
+ 
+  def wait_for_patient
+    fix_standing
+    #reset_vars
+    echo "WAITING FOR PATIENT"
+    #check_queue
+ 
+    while line = get
+     
+      if line =~ /(.*) whispers/ and line.include? 'heal'
+        target = Regexp.last_match(1)
+        if @list.include?("#{target}") #&& (DRRoom.pcs - @list).count == 0
+          echo "Adding #{target} to queue. Size: ".concat(@queue.size)
+          @queue.push(target)
+        end
+      end
+      if line =~ /(.*) whispers/ and line.include? 'reset'
+        target = Regexp.last_match(1)
+        if @list.include?("#{target}") #&& (DRRoom.pcs - @list).count == 0
+          echo "RESET IN PROGRESS"
+          @queue=Array.new
+          stop_script('healperson') if Script.running?('healperson')
+        end
+      end
+      if @queue.size>0
+        echo @queue.size
+        current_patient=@queue.pop
+        pause_scripts
+        fput('stop play')
+        score = get_score
+        count = 0
+        while score > 250
+          if count==1
+            whisper "#{patient} I'm a little too injured for that right now.  Give me a moment to heal up and I'll get right to you"
+          end
+          pause 30
+          count = count+1
+          score = get_score
+        end
+        wait_for_script_to_complete('healperson',[current_patient])
+       
+        #pause 10
+        #heal_done(target)
+        unpause_scripts
+ 
+#        start_script('hbot-training') unless Script.running?('hbot-training')
+      end
+    end  
+  end
+ 
+  def pause_scripts
+    Script.running.find_all { |s| not s.paused? and not s.no_pause_all }.each { |s| s.pause; did_something  = true }
+    stop_script('hbot-training') if Script.running?('hbot-training')
+    stop_script('athletics') if Script.running?('athletics')
+    stop_script('appraisal') if Script.running?('appraisal')
+    stop_script('mech-lore') if Script.running?('mech-lore')
+    stop_script('performance') if Script.running?('performance')
+  end    
+ 
+  def unpause_scripts
+    Script.running.find_all { |s| s.paused? and not s.no_pause_all }.each { |s| s.unpause; did_something = true }
+  end
+ 
+  def get_score
+    echo "Checking Score"
+    health_hash = check_health
+ 
+    unless health_hash.any?
+      echo '***STATUS*** No wounds, skipping healing'
+      return false
+    end
+ 
+    score = health_hash.map { |k, v| (k**2) * v.count }.reduce(:+)
+    echo "***STATUS*** Current health score is #{score}, threshold is #{@health_threshold}"
+ 
+    return score
+  end
+ 
+  def check_health
+    DRC.bput('health', 'Your body')
+    data = reget(300).reverse
+    wounds_line = nil
+    data.each do |line|
+      if line =~ /^You have/ && !(line =~ /^You have no significant injuries\./) && !(line =~ /^You have .* lodged .* into your/)
+        wounds_line = line
+        break
+      end
+    end
+    wounds = Hash.new { |h, k| h[k] = [] }
+    part = nil
+    wounds_line.split(',').each do |wound|
+      $severity_to_text.each do |severity_level, match_text|
+        next unless wound =~ Regexp.union(match_text)
+        part = Regexp.last_match.names.find { |x| Regexp.last_match[x.to_sym] }
+        part = Regexp.last_match[:part] if part == 'part'
+        wounds[severity_level] << part
+      end
+    end
+    wounds
+  end
+ 
+ 
+end
+ 
+Healbot.new

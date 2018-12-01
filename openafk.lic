@@ -1,0 +1,286 @@
+
+custom_require.call(%w[drinfomon common common-travel equipmanager])
+
+no_pause_all
+no_kill_all
+
+while dead?
+  pause 10
+end
+
+fput('avoid !dragging')
+fput('avoid !holding')
+fput('avoid !joining')
+
+start_script('deadman') if not Script.running?('deadman')
+
+settings = get_settings
+health_threshold = 0
+depart_on_death = settings.depart_on_death
+justice_threshold = settings.afk_justice_threshold
+warning_threshold = (100 + health_threshold) / 2
+warned = false
+
+register_slackbot(settings.slack_username)
+
+justice_message_count = 0
+
+@targets = settings.run || []
+@npctargets = settings.npcrun || []
+@rooms = settings.bail_rooms
+
+
+echo "Watching for #{@targets} and #{@npctargets}"
+
+def exit_game(message)
+  output = "#{message}\nCurrent room: #{Room.current.id}\nExiting at #{Time.now}"
+  echo output
+  send_slackbot_message(output)
+  pause 2
+  fput('exit')
+end
+
+def cleanfeet
+  DRC.bput('inv combat','.*')
+  lines = reget(20)
+  lines.each do | line |
+    if line =~ /Lying at your feet is (.*)/
+      match = Regexp.last_match(1)
+      match = match.sub(".","")
+      item = match.split(" ").last
+      DRC.bput("stow my #{item}","You put")
+    end
+  end
+end
+
+def stopscripts
+  stop_script('hunting-buddya') if Script.running?('hunting-buddy')
+  stop_script('hb') if Script.running?('hb')
+  stop_script('training-managera') if Script.running?('training-manager')
+  stop_script('t2') if Script.running?('t2')
+  stop_script('appraisal') if Script.running?('appraisal')
+  stop_script('combat-trainer') if Script.running?('combat-trainer')
+  stop_script('ct') if Script.running?('ct')
+  stop_script('mechlore') if Script.running?('mechlore')
+  stop_script('outdoorsmanship') if Script.running?('outdoorsmanship')
+  stop_script('study-art') if Script.running?('study-art')
+  stop_script('safepick') if Script.running?('safepick')
+  stop_script('pick') if Script.running?('pick')
+  stop_script('pickmaster') if Script.running?('pick')
+  stop_script('checkboxes') if Script.running?('checkboxes')
+  stop_script('athletics') if Script.running?('athletics')
+  stop_script('athletics2') if Script.running?('athletics2')
+  stop_script('first-aid') if Script.running?('first-aid')
+  stop_script('theurgy') if Script.running?('theurgy')
+  stop_script('checksteal') if Script.running?('checksteal')
+  stop_script('thievery') if Script.running?('thievery')
+  stop_script('buff') if Script.running?('buff')
+  stop_script('bescort') if Script.running?('bescort')
+  stop_script('safe-room2') if Script.running?('safe-room2')
+  stop_script('safe-room') if Script.running?('safe-room')
+  stop_script('astrology') if Script.running?('astrology')
+  stop_script('nathunt') if Script.running?('nathunt')
+  stop_script('leuhunt') if Script.running?('leuhunt')
+  stop_script('performance') if Script.running?('performance')
+  stop_script('play') if Script.running?('performance')
+  stop_script('performance2') if Script.running?('performance2')
+  pause_script('crossing-repair-town') if Script.running?('crossing-repair-town')
+  pause_script('crossing-repair') if Script.running?('crossing-repair')
+  stop_script('go2') if Script.running?('go2')
+end
+
+def bailout
+  if not dead?
+    cleanfeet
+    
+    fput('release cyclic')
+    if bleeding?
+      DRC.wait_for_script_to_complete('safe-room')
+    end
+    
+    stop_script('bailroom') if Script.running?('bailroom')
+    DRC.wait_for_script_to_complete('bailroom')
+    
+    equipment_manager = EquipmentManager.new
+    equipment_manager.empty_hands
+    fput('release cyclic')
+    
+    DRC.hide? if not hidden?
+    
+    # while health < 95
+      # pause 30
+    # end
+    # DRC.wait_for_script_to_complete('safe-room')
+    
+    start_script('kickofft2')
+    if Script.paused?('crossing-repair-town') or Script.paused?('crossing-repair')
+      echo "Crossing Repair running.  Can't deal with this"
+      DRCT.walk_to(14248)
+      
+      send_slackbot_message("Bailout called during crossing-repair.  You're probably running around with no gear")
+    end
+    
+  end
+end
+
+def underattack(line)
+  message = "Someone is attacking you in room: #{Room.current.id}. People in the room: #{DRRoom.pcs} Bailing"
+  
+  echo message
+  echo line
+  send_slackbot_message(message)
+  stopscripts
+end
+
+critters = ['moth','intercessor','drake','cabalist','rebel','guardian','goblin','orc','Xala','wyvern','gryphon','hound','reaver','madman','Dragon Priest','hog','snowbeast','cougar','yvhh','gargoyle','cougar','wolf','bear','shalswar','leucro','archon','wyvern', 'boar','lout','arzumos','ogre','youngling']
+
+loop do
+  line = script.gets?
+  
+  pcs = DRRoom.pcs
+  npcs = DRRoom.npcs
+  #echo @targets
+  pcs.each do | pc |
+    if @targets.include? pc
+      next if Script.running?('go2')
+      pause 2
+      if DRRoom.pcs.include? pc
+        unless Script.running?('bescort')
+          message = "Open afk activated by #{pc}"
+          send_slackbot_message(message)
+          echo message
+          stopscripts
+          bailout
+        end
+      end
+    end
+  end
+  
+  npcs.each do | npc |
+    if @npctargets.include? npc
+      pause 2
+      if DRRoom.npcs.include? npc
+        message = "Open afk activated by #{npc}"
+        send_slackbot_message(message)
+        echo message
+        stopscripts
+        bailout
+      end
+    end
+  end
+
+  iscritter = false
+  critters = DRRoom.npcs - ['reaper','construct','zombie']
+  critters.each do | critter |
+    if line.include?(critter)
+      iscritter = true
+    end
+  end
+  next if iscritter
+  
+  if line.include? "You get an odd feeling"
+    send_slackbot_message("Moonie locate detected.  Bailing")
+    stopscripts
+    bailout
+  end
+  
+  if (line.include? "begins to focus intently on you" or line.include? "turns to face you" or line.include? "closes to pole weapon range on you" or line.include? "Your uncanny confidence crumbles beneath the onslaught")
+    echo "Someone is attacking you.  People in the room: #{DRRoom.pcs} Bailing"
+    send_slackbot_message("Someone is attacking you.  People in the room: #{DRRoom.pcs} Bailing")
+    stopscripts
+    bailout
+  end
+  
+  if line =~ /is still a distance away from you and is closing steadily/ or line =~ /begins to advance on you/ or line =~ /You notice .* attempting to stealthily advance upon you/
+    underattack(line)
+    bailout
+  end
+  
+  if line =~ /(lobs|throws|hurls) (.*) at you/
+    underattack(line)
+    bailout
+  end
+  
+  pcs.each do | pc |
+    if line.include?(pc) and line.include?('at you.  You')
+	  underattack(line)
+      bailout
+	end
+  end
+  
+  if line =~ /until you collapse to the ground as a mere mutilated husk/
+    message = "You blew a deadly box"
+    echo message
+    send_slackbot_message(message)
+    fput('exit')
+  end
+  # if line =~ /sphere drifts in with a hiss/
+    # echo "Someone is attacking you.  People in the room: #{DRRoom.pcs} Bailing"
+    # send_slackbot_message("Someone is attacking you.  People in the room: #{DRRoom.pcs} Bailing")
+    # stopscripts
+    # bailout
+  # end
+  
+  if line =~ /sphere begins to move ominously toward you/
+    underattack(line)
+    bailout
+  end
+  
+  if line =~ /leaps from hiding and ambushes you/
+    underattack(line)
+    bailout
+  end
+  
+  if line =~ /snipes a .* at you/ or line =~ /appears to be aiming at you with/
+    underattack(line)
+    bailout
+  end
+  
+  fput(%w[tdp time age].sample) if line =~ /you have been idle too long/i
+
+  justice_message_count += 1 if line =~ /You hear the cries echo around you as everyone in the vicinity immediately gives/
+  justice_message_count += 1 if line =~ /authorities will try to bring you in for endangering the public/
+
+  if justice_message_count > justice_threshold
+    exit_game("It looks like you've run into trouble with the law too many times")
+  end
+
+  if Room.current.id == 9610
+    DRC.fix_standing
+    move('out')
+  end
+  
+  if not dead? and health <=80
+    output = "Health dropped below 80.  People in the room: #{DRRoom.pcs}"
+    echo output
+    stopscripts
+    bailout
+  end
+  
+  if not dead? and health <= 70
+    output = "Health dropped below 70.  People in the room: #{DRRoom.pcs}"
+    echo output
+    send_slackbot_message(output)
+    stopscripts
+    bailout
+  end
+  
+  pause 0.1
+end
+
+
+def pause_scripts
+  echo 'Pause'
+  #Script.running.find_all { |s| not s.paused? and not s.no_pause_all }.each { |s| s.pause; did_something  = true }
+  Script.running.find_all do |script|
+    echo script
+  end
+  stop_script('appraisal') if Script.running?('appraisal')
+  stop_script('mechlore') if Script.running?('mechlore')
+  stop_script('performance') if Script.running?('performance')
+  stop_script('athletics2') if Script.running?('athletics2')
+end    
+
+def unpause_scripts
+  Script.running.find_all { |s| s.paused? and not s.no_pause_all }.each { |s| s.unpause; did_something = true }
+end

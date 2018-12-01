@@ -1,0 +1,750 @@
+################################### INSTALLATION ###############################################
+#                                                                                              #
+#  1) Get a personal Slack token: https://api.slack.com/custom-integrations/legacy-tokens      #
+#       Steps 2-5 need to be done for each character you'd like to control from slack          #
+#  2) Set the rshell UserVar with the result:    ;e UserVars.rshell_token="<slack_token>"      #
+#  3) Create a new private slack channel <charname>_shell.  For example, leustyin_shell        #
+#  4) ;trust rshell                                                                            #
+#  5) Start up ;rshell and enter a command in your <charname>_shell to validate                #
+#                                                                                              #
+################################################################################################
+
+
+###################################### USAGE ###################################################
+#                                                                                              #
+#  In-game commands should be typed as normal                                                  #
+#  Example:  look                                                                              #
+#            Will execute 'look' in the game                                                   #
+#                                                                                              #
+#  Lich scripts can be started as normal                                                       #
+#  Example: ;training-manager                                                                  #
+#           Will start the training-manager script.                                            #
+#           NOTE: Spelling must be EXACT                                                       #
+#                                                                                              #
+#  Other options                                                                               #
+#    ;reget <X>       Will print the last <X> lines of game buffer                             #
+#    ;chat            Lnet commands work as normal                                             #
+#    ;chat to                                                                                  #
+#    ;reply                                                                                    #
+#    ;pa              pause all                                                                #
+#    ;ua              unpause all                                                              #
+#    ;pause <X>       pause script <X>                                                         #
+#    ;unpause <X>     unpause script <X>                                                       #
+#    ;kill <X>        terminate script <X>                                                     #
+#                                                                                              #
+################################################################################################
+
+################################ KNOWN LIMITATIONS #############################################
+#                                                                                              #
+#  Currently not able to retreive output from lich scripts.                                    #
+#    For example, ;learned will not print results to slack                                     #
+#                                                                                              #
+################################################################################################
+
+
+require 'net/https'
+
+custom_require.call(%w[lnet drinfomon])
+script.want_script_output = true
+
+class Rshell
+  
+  def initialize
+    @api_url = 'https://slack.com/api/'
+    no_pause_all
+    want_script_output = true
+    @lnet = (Script.running + Script.hidden).find { |val| val.name == 'lnet' }
+    find_token unless authed?(UserVars.rshell_token)
+
+    
+    @debug=false
+    if variable[1] == 'debug'
+      @debug = true
+    end
+
+    @channelType="channels.history"
+    @slack_shell = get_shell
+    @slack_user_id = get_user_id
+    @startFrom = Time.now.to_i - 5
+    @lastMessage = Time.now.to_i - 60
+    @last_command_timestamp = Time.now.to_i - 61
+    
+    if @debug
+      echo "Rshell starting in debug mode for user '#{@slack_user_id}' on shell '#{@slack_shell}'"
+    end
+    
+    @rshell_settings = get_settings(['rshell'])
+    
+    @repoll_interval = @rshell_settings.repoll_interval || 2
+    
+    mainloop
+  end
+  
+  def mainloop
+    while true
+      begin
+        commands = get_commands
+        commands.each do | command |
+          echo command
+          result = []
+          if command.start_with?(";chat") or command.start_with?(";reply")
+            command[0] = '' 
+            lnet(command)
+            postMessage("```Message Sent```")
+            next
+          elsif command == ";pa"
+            pause_scripts
+            postMessage("```Action complete```")
+            next
+          elsif command == ";ua"
+            unpause_scripts
+            postMessage("```Action complete```")
+            next
+          elsif command == ";help"
+            result << "```In-game commands should be typed as normal
+Example:  look                                                                             
+          Will execute 'look' in the game                                                   
+                                                                                            
+Lich scripts can be started as normal                                                       
+Example: ;training-manager                                                                  
+         Will start the training-manager script.                                            
+         NOTE: Spelling must be EXACT                                                       
+                                                                                            
+Other options                                                                               
+  ;reget <X>       Will print the last <X> lines of game buffer                             
+  ;chat            Lnet commands work as normal                                             
+  ;chat to                                                                                  
+  ;reply                                                                                    
+  ;pa              pause all                                                                
+  ;ua              unpause all                                                              
+  ;pause <X>       pause script <X>                                                         
+  ;unpause <X>     unpause script <X>                                                       
+  ;kill <X>        terminate script <X>```"
+            postMessage(result)
+            next
+          elsif command.start_with?(";kill")
+            script_name = command.split(' ')[1]
+            if Script.running?(script_name)
+              stop_script("#{script_name}")
+              postMessage("```Action complete```")
+              next
+            else
+              postMessage("```Could not find script #{script_name}```")
+              next
+            end
+            next
+          elsif command.start_with?(";list")
+            current_scripts = Script.running + Script.hidden
+            current_scripts = current_scripts.collect { |s| s.paused? ? "#{s.name} (paused)" : s.name }
+            echo current_scripts
+            postMessage("```#{current_scripts}```")
+            next
+          elsif command.start_with?(";pause")
+            script_name = command.split(' ')[1]
+            if Script.running?(script_name)
+              Script.pause(script_name)
+              postMessage("```Action complete```")
+              next
+            else
+              postMessage("```Could not find script #{script_name}```")
+              next
+            end
+            next
+          elsif command.start_with?(";unpause")
+            script_name = command.split(' ')[1]
+            if Script.running?(script_name)
+              Script.unpause(script_name)
+              postMessage("```Action complete```")
+              next
+            else
+              postMessage("```Could not find script #{script_name}```")
+              next
+            end
+            next
+          elsif command.start_with?(";reget")
+            numlines = command.split(' ')[1]
+            if numlines.nil? or numlines.to_i > 30
+              numlines = 30
+            end
+            lines = reget(numlines)
+            lines.each do | line |
+              result << line
+            end
+          elsif command.start_with?(";")
+            runscript(command)
+          else
+            fput(command)
+          end
+        
+          buffer_window = @rshell_settings.buffer_window || 1
+          buffer_end = Time.now.to_i + buffer_window
+          while line = get? or Time.now.to_i <= buffer_end
+            if line
+              result << line
+            end
+          end
+
+          output = ""
+          count = 0
+          result.each do | line | 
+            output << line << "\r\n"
+            count = count + 1
+            if count > 100
+              break
+            end
+          end
+          postMessage("```"+output+"```")
+        end
+
+        pause @repoll_interval
+      rescue
+      end
+    end
+  end
+  
+  def postMessage(message)
+    params = { 'token' => UserVars.rshell_token, 'channel' => @slack_shell, 'text' => message, 'as_user' => true }
+    post('chat.postMessage',params)
+  end
+
+  def authed?(token)
+    params = { 'token' => token }
+    res = post('auth.test', params)
+    body = JSON.parse(res.body)
+    body['ok']
+  end
+
+  def get_commands()
+    commands = []
+    begin
+      params = { 'token' => UserVars.rshell_token, 'count'=>1, 'channel' => @slack_shell, 'oldest' => @lastMessage}
+      response = post(@channelType, params)
+      
+      latestAttempt = Time.now.to_f - (5 * 60)
+      
+      if @lastMessage < latestAttempt
+        @lastMessage = latestAttempt
+      end
+      
+      if @debug
+        echo "Attempting to get all commands since #{@lastMessage}}"
+      end
+    
+      return commands if response.nil?
+    
+      messages = JSON.parse(response.body)
+      if messages["messages"].size >0
+        message = messages["messages"][-1]
+      
+        if @lastMessage==0
+          @lastMessage = message["ts"].to_i + 1
+          return commands
+        end
+      
+        @lastMessage = message["ts"].to_i + 1
+        # echo message["user"] if @debug
+        # echo message.user if @debug 
+		
+		# if message["user"] != @slack_user_id
+		  # postMessage("```Unauthorized```")
+		  # return commands
+		# end
+      
+        if not message["text"].start_with?("```")
+          @last_command_timestamp = message["ts"]
+          @startFrom = message["ts"].to_f + 0.01
+          command = clean_message(message["text"])
+          if command.length < 300
+            if @debug
+              echo "Received valid command: #{command}"
+            end
+            commands << command
+          end
+        end
+      end
+    rescue
+    end
+
+    return commands
+  end
+  
+  def post(method, params)
+    begin
+      uri = URI.parse("#{@api_url}#{method}")
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = true
+      http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+      req = Net::HTTP::Post.new(uri.path)
+      req.set_form_data(params)
+      return http.request(req)
+    end
+  end
+
+  def direct_message(username, message)
+    dm_channel = get_dm_channel(username)
+
+    params = { 'token' => UserVars.rshell_token, 'channel' => dm_channel, 'text' => "#{checkname}: #{message}", 'as_user' => true }
+    post('chat.postMessage', params)
+  end
+
+  def get_dm_channel(username)
+    user = @users_list['members'].find { |u| u['name'] == username }
+    user['id']
+  end
+  
+  ##Get the shell to use for the character.  Must have channel already created: <username>_shell
+  def get_shell()
+    shell = checkname.downcase + "_shell"
+    if @debug==true
+      echo "Attempting to find internal shell id for #{shell}"
+    end
+    params = { 'token' => UserVars.rshell_token}
+    response = post('groups.list', params)
+    return if response.nil?
+    JSON.parse(response.body)['groups'].each do | channel |
+      if channel["name"] == shell
+        @channelType="groups.history"
+        if @debug
+          echo "Found shell #{channel["id"]} for channel #{shell}"
+        end
+        return channel["id"]
+      end
+    end
+    response = post('channels.list', params)
+    return if response.nil?
+    JSON.parse(response.body)['channels'].each do | channel |
+      if channel["name"] == shell
+        if @debug
+          echo "Found shell #{channel["id"]} for channel #{shell}"
+        end
+        return channel["id"]
+      end
+    end
+    echo "ERROR: Failed to find shell for #{shell}"
+    return nil
+  end
+  
+  ##Get the internal slack id of the slack user to prevent
+  def get_user_id()
+    username = get_settings.slack_username
+    if @debug
+      echo "Attempting to find internal slack id for slack user #{username}"
+    end
+    params = { 'token' => UserVars.rshell_token}
+    response = post('users.list', params)
+    return if response.nil?
+    JSON.parse(response.body)['members'].each do | member |
+      if member["name"] == username
+        if @debug
+          echo "Found slack id #{member["id"]} for user #{username}"
+        end
+        return member["id"]
+      end
+    end
+    echo "ERROR: Failed to find internal slack id for #{username}"
+    return nil
+  end
+  
+  def runscript(command) 
+    command = command.sub(';','')
+    command_parts = command.split(' ')
+    script_name = command_parts.shift
+    start_script(script_name,command_parts)
+  end
+  
+  def clean_message(message)
+    if message.start_with?("&gt;")
+      message[0]=""
+      message[0]=""
+      message[0]=""
+      message[0]=""
+    end
+    if message.start_with?(",")
+      message[0]=""
+    end
+    
+    message = message.strip
+    return message
+  end
+
+  def lnet(msg)
+    if msg =~ /^chat\s+\:\:(.+?) (.*)/i or msg =~ /^chat\s+to\s+(.+?) (.*)/i
+      LNet.send_message(attr={'type'=>'private', 'to'=>$1}, $2)
+    elsif msg =~ /^chat\s+\:([^\:].*?) (.*)/i or msg =~ /^chat\s+on\s+(.+?) (.*)/i
+      LNet.send_message(attr={'type'=>'channel', 'channel'=>$1}, $2)
+    elsif msg =~ /^chat\s+(?!:\:|to |on |ot )(.*)/i
+      message = $1.sub(/^\.(to|on) /i, '\\1 ')
+      LNet.send_message(attr={'type'=>'channel'}, message)
+    elsif msg =~/reply\s(.+)/i
+      if LNet.last_priv
+        LNet.send_message(attr={'type'=>'private', 'to'=>LNet.last_priv}, $1)
+      else
+        echo "No private message to reply to."
+      end
+    elsif msg =~ /^who$/i
+      LNet.send_query(attr={'type'=>'connected'})
+    elsif msg =~ /^stats$/i
+      LNet.send_query(attr={'type'=>'server stats'})
+    elsif msg =~ /^who\s+([A-z\:]+)$/i
+      LNet.send_query(attr={'type'=>'connected', 'name'=>$1})
+    elsif msg =~ /^channels?\s*(full|all)?/i
+      if $1
+        LNet.send_query(attr={'type'=>'channels'})
+      else
+        LNet.send_query(attr={'type'=>'channels', 'num'=>'15'})
+      end
+    elsif msg =~ /^tune\s+([A-z]+)$/i
+      LNet.tune_channel($1)
+    elsif msg =~ /^untune\s+([A-z]+)$/i
+      LNet.untune_channel($1)
+    elsif msg =~ /^(spells|skills|info|locate|health|bounty)\s+([A-z\:]+)$/i
+      type = $1.downcase
+      name = $2
+      if LNet.ignored?(name)
+        echo "There's no point in sending a request to someone you're ignoring."
+      else
+        LNet.send_request(attr={'type'=>type, 'to'=>name})
+      end
+    elsif msg =~ /^add\s?alias\s+([^\s]+)\s+(.+)$/i
+      real_name = $1
+      aliased_name = $2
+      old_alias = LNet.alias[real_name]
+      LNet.alias[real_name] = aliased_name
+      echo "chats from #{real_name} will now appear as #{aliased_name}"
+      if real_name !~ /^[A-Z][A-z]+:[A-Z][a-z]+$/
+        echo "The name should be entered exactly as it appears in the thought window, for example:   ;lnet add alias GSIV:Jeril StrangerDanger"
+        echo "If #{real_name} is incorrect, you can remove it using:   ;lnet remove alias #{aliased_name}"
+      end
+    elsif msg =~ /^(?:del|rem|delete|remove)\s?alias\s+(.+)$/i
+      aliased_name = $1
+      if LNet.alias.values.any? { |v| v == aliased_name }
+        LNet.alias.delete_if { |k,v| v == aliased_name }
+        echo "alias deleted"
+      else
+        echo "couldn't find an alias by that name"
+      end
+    elsif msg =~ /^aliases$/i
+      if LNet.alias.empty?
+        echo 'You have no aliases.'
+      else
+        output = "\n"
+        max_k = 0; max_v = 0; LNet.alias.each_pair { |k,v| max_k = [max_k,k.length].max; max_v = [max_v,v.length].max }
+        LNet.alias.each_pair { |k,v|
+          output.concat "   #{k.ljust(max_k)} => #{v.ljust(max_v)}\n"
+        }
+        output.concat "\n"
+        respond output
+      end
+    elsif msg =~ /^add\s?friends?\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['friends'].include?(name)
+        echo "#{name} is already on your friend list."
+      else
+        LNet.options['friends'].push(name)
+        echo "#{name} was added to your friend list."
+      end
+    elsif msg =~ /^(?:del|rem|delete|remove)\s?friends?\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['friends'].delete(name)
+        echo "#{name} was removed from your friend list."
+      else
+        echo "#{name} was not found on your friend list."
+      end
+    elsif msg =~ /^add\s?en[ie]m(?:y|ies)\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['enemies'].include?(name)
+        echo "#{name} is already on your enemy list."
+      else
+        LNet.options['enemies'].push(name)
+        echo "#{name} was added to your enemy list."
+      end
+    elsif msg =~ /^(?:del|rem|delete|remove)\s?en[ie]m(?:y|ies)\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['enemies'].delete(name)
+        echo "#{name} was removed from your enemy list."
+      else
+        echo "#{name} was not found on your enemy list."
+      end
+    elsif msg =~ /^friends?$/i
+      if LNet.options['friends'].empty?
+        echo 'You have no friends.'
+      else
+        echo "friends: #{LNet.options['friends'].join(', ')}"
+      end
+    elsif msg =~ /^enem(?:y|ies)$/i
+      if LNet.options['enemies'].empty?
+        echo 'You have no enemies.'
+      else
+        echo "enemies: #{LNet.options['enemies'].join(', ')}"
+      end
+    elsif msg =~ /^allow$/i
+      fix_type = { 'all' => 'everyone', 'friends' => 'only your friends', 'enemies' => 'everyone except your enemies', 'none' => 'no one', nil => 'no one' }
+      fix_action = { 'locate' => 'locate you', 'spells' => 'view your active spells', 'skills' => "view your #{if rand(100)==0; 'mad '; end}skills", 'info' => 'view your stats', 'health' => 'view your health', 'bounty' => 'view your bounties' }
+      [ 'locate', 'spells', 'skills', 'info', 'health', 'bounty' ].each { |action|
+        respond "You are allowing #{fix_type[LNet.options['permission'][action]]} to #{fix_action[action]}."
+      }
+    elsif msg =~ /^allow\s+(locate|spells|skills|info|health|bounty|all)\s+(all|friend|friends|non\-enemies|nonenemies|enemies|enemy|none)$/i
+      action, group = $1, $2
+      fix_action = { 'locate' => 'locate you', 'spells' => 'view your active spells', 'skills' => "view your #{if rand(100)==0; 'mad '; end}skills", 'info' => 'view your stats', 'health' => 'view your health', 'bounty' => 'view your bounties' }
+      if action =~ /^all$/i
+        for action in [ 'locate', 'spells', 'skills', 'info', 'health', 'bounty' ]
+            if group =~ /^all$/i
+              LNet.options['permission'][action] = 'all'
+              echo "You are now allowing everyone to #{fix_action[action]}."
+            elsif group =~ /^friends?$/i
+              LNet.options['permission'][action] = 'friends'
+              echo "You are now allowing only your friends to #{fix_action[action]}."
+            elsif group =~ /enem/i
+              LNet.options['permission'][action] = 'enemies'
+              echo "You are now allowing everyone except your enemies to #{fix_action[action]}."
+            elsif group =~ /^none$/i
+              LNet.options['permission'][action] = 'none'
+              echo "You are now allowing no one to #{fix_action[action]}."
+            end
+        end
+      elsif group =~ /^all$/i
+        LNet.options['permission'][action] = 'all'
+        echo "You are now allowing everyone to #{fix_action[action]}."
+      elsif group =~ /^friends?$/i
+        LNet.options['permission'][action] = 'friends'
+        echo "You are now allowing only your friends to #{fix_action[action]}."
+      elsif group =~ /enem/i
+        LNet.options['permission'][action] = 'enemies'
+        echo "You are now allowing everyone except your enemies to #{fix_action[action]}."
+      elsif group =~ /^none$/i
+        LNet.options['permission'][action] = 'none'
+        echo "You are now allowing no one to #{fix_action[action]}."
+      end
+    elsif msg =~ /^ignore$/i
+      if LNet.options['ignore'].empty?
+        echo 'You are not ignoring anyone.'
+      else
+        echo "You are ignoring the following people: #{LNet.options['ignore'].join(', ')}"
+      end
+    elsif msg =~ /^ignore\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['ignore'].include?(name)
+        echo "You were already ignoring #{name}."
+      else
+        LNet.options['ignore'].push(name)
+        echo "You are now ignoring #{name}."
+      end
+    elsif msg =~ /^unignore\s+([A-z]+\:)?([A-z]+)$/i
+      fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+      name = $2.capitalize
+      if game = $1.sub(/\:$/, '')
+        game = fix_game[game.downcase] if fix_game[game.downcase]
+        name = "#{game}:#{name}"
+      end
+      if LNet.options['ignore'].delete(name)
+        echo "You are no longer ignoring #{name}."
+      else
+        echo "#{name} wasn't being ignored."
+      end
+    elsif msg =~ /^timestamps?=(on|off)$/i
+      if $1 == 'on'
+        LNet.options['timestamps'] = true
+        echo 'timestamps will be shown'
+      else
+        LNet.options['timestamps'] = false
+        echo 'timestamps will not be shown'
+      end
+    elsif msg =~ /^famwindow=(on|off)$/i
+      if $1 == 'on'
+        LNet.options['fam_window'] = true
+        echo 'chats will be sent to the familiar window'
+      else
+        LNet.options['fam_window'] = false
+        echo 'chats will be sent to the thought window'
+      end
+    elsif msg =~ /^greeting=(on|off)$/i
+      if $1 == 'on'
+        LNet.options['greeting'] = true
+        echo 'greeting will be shown at login'
+      else
+        LNet.options['greeting'] = false
+        echo 'getting will not be shown'
+      end
+    elsif msg =~ /^password=([^\s]+)$/i
+      LNet.send_data(attr={'type'=>'newpassword'}, $1)
+      if $1 == 'nil'
+        LNet.secret = nil
+        echo 'Password cleared.'
+      else
+        LNet.secret = $1
+        echo 'Password saved locally.'
+      end
+    elsif msg =~ /^email=([^\s]+)$/i
+      LNet.send_data(attr={'type'=>'newemail'}, $1)
+    elsif msg =~ /^(ban|gag|mod|banip)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)$/i
+      LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3})
+    elsif msg =~ /^(ban|gag|banip)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)\s+for\s+([0-9]+)\s*(seconds?|minutes?|hours?|days?|years?|s|m|h|d|y)$/i
+      multiplier = { nil => 1, 's' => 1, 'second' => 1, 'seconds' => 1, 'm' => 60, 'minute' => 60, 'minutes' => 60, 'h' => 3600, 'hour' => 3600, 'hours' => 3600, 'd' => 86400, 'day' => 86400, 'days' => 86400, 'y' => 31536000, 'year' => 31536000, 'years' => 31536000 }
+      LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3, 'length'=>($4.to_i * multiplier[$5]).to_s})
+    elsif msg =~ /^(unban|ungag|unmod)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)$/i
+      LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3})
+    elsif msg =~ /^create\s+(hidden)?\s*(private)?\s*channel\s+([A-z]+)\s+(.+?)$/i
+      attr = attr={ 'action'=>'create channel', 'name'=>$3, 'description'=>$4.strip }
+      if $1
+        attr['hidden'] = 'yes'
+      else
+        attr['hidden'] = 'no'
+      end
+      if $2
+        attr['private'] = 'yes'
+      else
+        attr['private'] = 'no'
+      end
+      LNet.admin(attr)
+    elsif msg =~ /^create\s+poll\s+/i
+      if msg =~ /\-\-question\s+(.+?)\s*(?:\-\-|$)/
+        question = $1[0,512].strip
+      else
+        question = nil
+      end
+      if msg =~ /\-\-vote\-time\s+([0-9]+)\s*(seconds?|minutes?|hours?|days?|years?|s|m|h|d|y)(?:\-\-|$)/
+        multiplier = { nil => 1, 's' => 1, 'second' => 1, 'seconds' => 1, 'm' => 60, 'minute' => 60, 'minutes' => 60, 'h' => 3600, 'hour' => 3600, 'hours' => 3600, 'd' => 86400, 'day' => 86400, 'days' => 86400, 'y' => 31536000, 'year' => 31536000, 'years' => 31536000 }
+        vote_time = $1.to_i * multiplier[$2]
+      else
+        vote_time = nil
+      end
+      num = 1
+      option = Hash.new
+      while msg =~ /\-\-option\-#{num}\s+(.+?)\s*(?:\-\-|$)/
+        option[num] = $1[0,64].strip
+        num += 1
+      end
+      if question and (option.length > 1)
+        attr = { 'action'=>'create poll', 'question'=>question }
+        option.each_pair { |num,opt| attr["option #{num}"] = opt }
+        if vote_time
+            attr['length'] = vote_time
+        end
+        # fixme: confirm
+        LNet.admin(attr)
+      else
+        echo "You're doing it wrong.  Type #{$clean_lich_char}#{script.name} help"
+      end
+    elsif msg =~ /^delete\s+channel\s+([A-z]+)$/i
+      LNet.admin(attr={'action'=>'delete channel', 'name'=>$1})
+    elsif msg =~ /^eval (.+)$/
+      LNet.send_data(attr={'type'=>'eval'}, $1)
+    elsif msg =~ /^help$/i
+      output = String.new
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}chat <message>                     send a message to your default channel\n"
+      output.concat "#{$clean_lich_char},<message>                         ''\n"
+      output.concat "#{$clean_lich_char}chat on <channel name> <message>   send a message to the given channel\n"
+      output.concat "#{$clean_lich_char}chat :<channel name> <message>     ''\n"
+      output.concat "#{$clean_lich_char}chat to <name> <message>           send a private message\n"
+      output.concat "#{$clean_lich_char}chat ::<name> <message>            ''\n"
+      output.concat "#{$clean_lich_char}<name>:<message>                   ''\n"
+      output.concat "#{$clean_lich_char}who                                list who's connected\n"
+      output.concat "#{$clean_lich_char}who <channel>                      list who's tuned into the given channel\n"
+      output.concat "#{$clean_lich_char}who <name>                         tells if a user is connected\n"
+      output.concat "#{$clean_lich_char}channels                           list the 15 most populated channels\n"
+      output.concat "#{$clean_lich_char}channels full                      list all available channels\n"
+      output.concat "#{$clean_lich_char}tune <channel name>                listen to the given channel, or set as default if already tuned\n"
+      output.concat "#{$clean_lich_char}untune <channel name>              stop listening to the given channel\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}locate <name>                      show someone's current room\n"
+      output.concat "#{$clean_lich_char}spells <name>                      show someone's active spells and time remaining\n"
+      output.concat "#{$clean_lich_char}skills <name>                      show someone's skills\n"
+      output.concat "#{$clean_lich_char}info <name>                        show someone's stats\n"
+      output.concat "#{$clean_lich_char}health <name>                      show someone's health, spirit, stamina and injuries\n"
+      output.concat "#{$clean_lich_char}bounty <name>                      show someone's current adventurer's guild task\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} stats                         unhelpful information\n"
+      output.concat "#{$clean_lich_char}#{script.name} timestamps=<on/off>           turn on/off all chats having a timestamp\n"
+      output.concat "#{$clean_lich_char}#{script.name} famwindow=<on/off>            turn on/off sending chats to your familiar window\n"
+      output.concat "#{$clean_lich_char}#{script.name} greeting=<on/off>             turn on/off showing a server greeting at logon\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} friends                       list friends\n"
+      output.concat "#{$clean_lich_char}#{script.name} add friend <name>             add a name to your friend list\n"
+      output.concat "#{$clean_lich_char}#{script.name} del friend <name>             delete a name from your friend list\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} enemies                       list enemies\n"
+      output.concat "#{$clean_lich_char}#{script.name} add enemy <name>              add a name to your enemy list\n"
+      output.concat "#{$clean_lich_char}#{script.name} del enemy <name>              delete a name from your enemy list\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} allow                         list your current permissions\n"
+      output.concat "#{$clean_lich_char}#{script.name} allow <action> <group>        set permissions\n"
+      output.concat "      <action> can be one of: locate, spells, skills, info, health, bounty, all\n"
+      output.concat "      <group> can be one of: all, friends, non-enemies, none\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} aliases                       list aliases\n"
+      output.concat "#{$clean_lich_char}#{script.name} add alias <name> <new_name>   causes chats from name to appear as new_name\n"
+      output.concat "#{$clean_lich_char}#{script.name} del alias <new_name>          delete an alias\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} ignore                        list names currently being ignored\n"
+      output.concat "#{$clean_lich_char}#{script.name} ignore <name>                 ignore chats/private chats/data requests from a person\n"
+      output.concat "#{$clean_lich_char}#{script.name} unignore <name>               unignore a person\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} password=<password>           protect your character name on the server with a password\n"
+      output.concat "#{$clean_lich_char}#{script.name} password=nil                  remove password protection\n"
+#      output.concat "#{$clean_lich_char}#{script.name} email=<email>                 save your email address on the server for password recovery\n"
+#      output.concat "#{$clean_lich_char}#{script.name} email=nil                     delete your email address from the server\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} create [hidden] [private] channel <name> <description>\n"
+      output.concat "      hidden channels don't show up in the channel list\n"
+      output.concat "      private channels ban everyone by default, and the owner (or moderator) must unban anyone he wants to allow in\n"
+#      output.concat "#{$clean_lich_char}#{script.name} modify channel <name> <new description>\n"
+      output.concat "#{$clean_lich_char}#{script.name} delete channel <name>\n"
+      output.concat "\n"
+      output.concat "#{$clean_lich_char}#{script.name} ban <character> on <channel> for <time>\n"
+      output.concat "#{$clean_lich_char}#{script.name} unban <character> on <channel>\n"
+      output.concat "#{$clean_lich_char}#{script.name} gag <character> on <channel> for <time>\n"
+      output.concat "#{$clean_lich_char}#{script.name} ungag <character> on <channel>\n"
+      output.concat "#{$clean_lich_char}#{script.name} mod <character> on <channel>\n"
+      output.concat "#{$clean_lich_char}#{script.name} unmod <character> on <channel>\n"
+      output.concat "      <time> should be a number followed by one of: seconds, minutes, hours, days, or years (may be abbreviated to one letter)\n"
+      output.concat "\n"
+      respond output
+    else
+      echo "You're doing it wrong.  Type #{$clean_lich_char}#{script.name} help"
+    end
+  end
+  
+  
+  def pause_scripts
+    Script.running.find_all { |s| not s.paused? and not s.no_pause_all }.each { |s| s.pause; did_something  = true }
+  end    
+
+  def unpause_scripts
+    Script.running.find_all { |s| s.paused? and not s.no_pause_all }.each { |s| s.unpause; did_something = true }
+  end
+  
+  def setStartFrom
+    now = Time.now.to_f - 5
+    if @startFrom.nil? or now > @startFrom
+      @startFrom = now
+    end
+  end
+end
+
+Rshell.new

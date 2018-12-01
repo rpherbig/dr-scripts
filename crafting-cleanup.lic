@@ -1,0 +1,250 @@
+=begin
+	Script that discards trash crafting components left over from a crafting session as well as moving your crafting tools to the appropriate containers and belts.
+
+  Must have crafting_container, crafting_items_in_container, or any crafting belts you used defined in your setup yaml to use the sorting feature.
+
+	author: NBSL
+	game: dr
+  version: 0.4 (2017-06-07)
+
+  changelog:
+    0.4 (2017-06-07)
+      * Modified script structure. Following showxml.lic by LostRanger's layout.
+      * Added help arguement.
+      * Added yaml arguement. Outputs yaml settings with descriptions as well as examples.
+      * Cleaned up header. Moved help and yaml output to their own commands.
+      * Added checks for empty yaml configuration settings.
+    0.3 (2017-06-05)
+      * Added a passive mode. Run crafting-cleanup with no args.
+      * Changed how it searches for items. Now checks belts and crafting bag before tapping everything.
+    0.2 (2017-05-29)
+      * Renamed from trash.lic to crafting-cleanup.lic
+      * Added arguements. trash and sort
+      * Added the ability to sort through crafting items and return them to their containers based on crafting yaml settings.
+      * Added new yaml setting: trash_clear. Setting will call dump junk after dropping trash.
+    0.1 (2017-05-27)
+     * Initial Release
+=end
+
+custom_require.call(%w[common common-travel common-items common-crafting])
+
+unless defined?(script.want_script_output)
+	echo 'Your version of Lich is too old for this script.'
+	exit
+end
+
+class CraftingCleanup
+  include DRC
+  include DRCC
+  include DRCI
+  include DRCT
+
+  VERSION = '0.4 (2017-06-07)'
+
+	def initialize(script)
+		script.want_script_output = true
+
+		@script = script
+
+    arg_definitions = [
+      [
+        { name: 'trash', regex: /trash/i, description: 'Trash items', optional: true },
+        { name: 'sort', regex: /sort/i, description: 'Sort through your inventory, placing items back into the correct areas', optional: true },
+        { name: 'help', regex: /help/i, description: 'Display help message', optional: true },
+        { name: 'yaml', regex: /yaml/i, description: 'Display yaml settings', optional: true }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    @running = false
+    settings = get_settings
+    @belts = []
+    @trash_room = settings.trash_room || nil
+    @trash_containers = settings.trash_containers
+    @trash_clear = settings.trash_clear || false
+    @trash_items = settings.trash_items
+    @bag = settings.crafting_container
+    @bag_items = settings.crafting_items_in_container
+    @belts += [settings.forging_belt] if settings.forging_belt
+    @belts += [settings.alchemy_belt] if settings.alchemy_belt
+    @belts += [settings.engineering_belt] if settings.engineering_belt
+    @belts += [settings.outfitting_belt] if settings.outfitting_belt
+
+
+    echo "#{args.trash.nil?} #{args.sort.nil?}"
+    help_command if args.help
+    yaml_command if args.yaml
+    find_trash if args.trash
+    sort_items if args.sort
+    passive if args.trash.nil? && args.sort.nil? && args.yaml.nil? && args.help.nil?
+	end
+
+  def running?
+    return @running
+  end
+
+	def help_command
+		script = "#{$lich_char}#{@script.name}"
+		spacer = ''.ljust(script.length, ' ')
+		respond "#{script} version #{VERSION}"
+		respond "Usage:"
+		respond
+		respond "   #{script} HELP                Shows this help text."
+		respond
+    respond "   #{script} YAML                Outputs yaml settings used by this script"
+		respond
+		respond "   #{script} [<options...>]      Begins trashing and sorting items. Run without arguments to enter passive mode, which watches the stream for the remedy script to start. Once found, will wait for workorders to stop, then run trash and sort arguments to clean up. If crossing-training is running, will pause it first"
+		respond
+		respond 'Options:'
+		respond '   It is not neccessary to specify all (or any!) options'
+		respond
+		respond '   trash       Searches your inventory, disposing of any trash listed in your yaml'
+		respond
+		respond '   sort        Goes through your inventory, moving your items back to their defined locations defined by your crafting belt settings and crafting_items_in_container setting in your yaml'
+	end
+
+  def yaml_command
+    echo "Yaml Settings:"
+		respond "Usage:"
+		respond
+		respond "   trash_room:                Room to trash items in. Leave blank to drop items in current room."
+		respond
+    respond "   trash_container:          Container that holds the items you want to trash."
+		respond
+		respond "   trash_items:              Array of items to trash."
+		respond
+    respond '   trash_clear:              true or false. Runs dump junk if true.'
+    respond
+		respond 'Example:'
+		respond '   trash_room: 1901 #Bank Lobby #Optional'
+		respond
+		respond '   trash_container:'
+    respond '     - haversack'
+		respond
+		respond '   trash_items:'
+    respond '     - blister cream'
+    respond '     - dried nemoih'
+    respond '     - red flowers'
+    respond '     - coal nugget'
+    respond '     - water'
+    respond
+    respond '   trash_clear: false # Set to true to call dump junk'
+  end
+
+  def passive
+    echo "Starting in passive mode..."
+    while true do
+      line = @script.gets?
+      if (line =~ /^--- Lich: (?:remedy) active\.$/i || line =~ /^\[(?:remedy)/i) && !running?
+        echo "Remedy Started. Waiting for workorders to finish"
+        @running = true
+      end
+      if running?
+        if !Script.running?('workorders')
+          pause_script('crossing-training') if Script.running?('crossing-training')
+          find_trash
+          sort_items
+          @running = false
+          unpause('crossing-training') if Script.running?('crossing-training')
+        end
+      end
+      #You hand Lanshado your logbook and bundled items, and are given 2,232 Kronars in return.
+      pause 0.5 unless line
+    end
+  end
+
+  def find_trash
+    fput('stow left') if left_hand
+    fput('stow') if right_hand
+    echo "Trash Room: #{@trash_room}" if UserVars.trash_debug && !@trash_room.nil?
+    walk_to(@trash_room) if !@trash_room.nil?
+    @trash_containers.each do |container|
+      echo "Container: #{container}"
+      @trash_items.each do |item|
+        result = bput("get my #{item} from my #{container}", 'You get', 'What were you referring to?')
+        if result == "You get"
+          echo "Found trash #{item} in #{container}" if UserVars.trash_debug
+          dispose_trash(item)
+          redo
+        else
+          next
+        end
+      end
+    end
+    fput("dump junk") if @trash_clear
+  end
+
+  def sort_items
+    # You tap a black marble mortar engraved with coiling vipers atop your alchemist's belt.
+    # You tap a green pouch inside your rucksack.
+    fput('stow left') if left_hand
+    fput('stow') if right_hand
+    @belts.take_while {!@belts.empty?}.each do |belt|
+      attached_to_belt = DRC.bput("look on my #{belt['name']}", /On the #{belt['name']} you see (.*)/, "I could not find what you were referring to.")
+      case attached_to_belt
+      when /On the #{belt['name']} you see (.*)/
+        echo "#{belt['name']}"
+        belt['items'].each do |item|
+          item_arr = item.split()
+          match = attached_to_belt.match(/(?:a|an)\s.*#{item}/i)
+          if match
+            echo "Found #{item} on #{belt['name']}" if UserVars.trash_debug
+            next
+          else
+            echo "#{item}"
+            find_item(item, belt['name'], belt)
+          end
+        end
+      else
+
+      end
+    end
+    if !@bag.nil?
+      in_container = bput("look in my #{@bag}", /In the .* you see .*/, "I could not find what you were referring to.")
+
+      case in_container
+      when /In the .* you see .*/
+        @bag_items.each do |item|
+          item_arr = item.split()
+          match = in_container.match(/(?:a|an)\s.*#{item}/i)
+          if match
+            echo "Found #{item} in #{@bag}" if UserVars.trash_debug
+            next
+          else
+            find_item(item, @bag, false)
+          end
+        end
+      else
+        echo
+        echo "Could not find container with the name #{@bag}."
+      end
+    end
+  end
+
+  def find_item(item, container, belt)
+    success = "inside your #{container}."
+    missing = "You seem to be missing: #{item} from your #{container}"
+    if (belt)
+      success = "atop your #{container}."
+    end
+    result = bput("tap my #{item}", success, "You tap .* your (.*).", "I could not find what you were referring to.")
+    case result
+    when success
+      return
+    when "I could not find what you were referring to."
+      echo(missing)
+    else
+      container_new = result[/^You tap .* your (.*)\.$/, 1]
+      fput("get my #{item} from my #{container_new}")
+      stow_crafting_item(item, @bag, belt)
+    end
+  end
+end
+
+before_dying{
+  echo "Exiting."
+  unpause('crossing-training') if Script.running?('crossing-training')
+}
+
+CraftingCleanup.new(script)

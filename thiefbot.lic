@@ -1,0 +1,463 @@
+# want_script_output
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#bankbot
+=end
+
+custom_require.call(%w[common common-validation drinfomon events])
+
+class thiefbot
+  include DRC
+
+  def initialize
+    Flags.add('tip-accepted', '.* accepts your tip and slips it away with a smile')
+    Flags.add('tip-declined', '.* declines your tip offer')
+    Flags.add('tip-expired', 'Your tip offer to .* has expired', 'Your tip offer has expired')
+    # This provides a default balance of 0 for all currencies
+    @ledger = Hash.new { |hash, key| hash[key] = Hash.new { |h, k| h[k] = 0 } }
+    # Convert symbols to strings
+    load_bankbot_ledger.each { |k, v| @ledger[k.to_s] = v }
+    echo("Initialized ledger: #{@ledger}")
+
+    fput('avoid !all')
+    fput('avoid whispering')
+  end
+
+  def help(character)
+    help_content.each { |line| fput "whisper #{character} #{line}" }
+  end
+
+  # TODO: Do not prefix reader method names with get_.
+  def help_content
+    [
+      'I accept coins via TIPs to hold for you.',
+      'Supported commands are:',
+      '  (help) - this list',
+      '  (bal|balance) - view your current balance',
+      '  (with|withdraw) [amount] [currency] - withdraw [amount] [currency] from your bankbot balance.',
+      '  (with|withdraw) all [currency] - withdraw all [currency] from your bankbot balance.',
+      '  (transfer) [amount] [currency] [destination] - transfer [amount] [currency] from your bankbot balance to the [destination] account (case-sensitive). Destination character must already have a bankbot account.',
+      '  (transfer) all [currency] [destination] - transfer all [currency] from your bankbot balance to the [destination] account.',
+      # "  (proxy) set [character name] - all deposits you make will now be directed to the account of [character name]. This overwrites any previous proxy. [Character name] must already have an account with bankbot.",
+      # "  (proxy) (list|clear) - list or clear your deposit proxy.",
+      '  (where|room|location) - view the current location of bankbot',
+      "Help, balance, transfer, and location can be done via LNet private message: ';chat to #{checkname} [command]'."
+    ]
+  end
+
+  def report_balance(character)
+    pretty_print = get_balance(character)
+    fput "whisper #{character} Your balance is: #{pretty_print}."
+  end
+
+  def get_balance(character)
+    $CURRENCIES.map { |currency| "#{@ledger[character][currency]} #{currency}" }.join(', ')
+  end
+
+  def deposit(character, amount, currency)
+    unless currency
+      log(character, 'deposit', amount, currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{currency}'."
+      return
+    end
+
+    case bput('accept tip', 'But you have no tip offers outstanding', "You accept #{character}'s tip and slip it away", "But #{character} isn't here")
+    when 'But you have no tip offers outstanding', /But .* isn't here/i
+      log(character, 'deposit', amount, currency, 'character not found')
+      return
+    when /You accept .*'s tip and slip it away/i
+      @ledger[character][currency] += amount
+      log(character, 'deposit', amount, currency, 'succeeded')
+    end
+  end
+
+  def withdraw_all(character, currency)
+    amount = @ledger[character][currency]
+
+    if amount < 1
+      log(character, 'withdrawal all', amount, currency, 'no balance to withdrawal all')
+      fput "whisper #{character} You do not have any #{currency} to withdraw."
+      return
+    end
+
+    log(character, 'withdrawal all', 'all', currency, 'withdrawal all attempted')
+    withdraw(character, amount, currency)
+  end
+
+  def withdraw(character, amount, currency)
+    unless currency
+      log(character, 'withdrawal', amount, currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{currency}'."
+      return
+    end
+
+    if amount < 1
+      log(character, 'withdrawal', amount, currency, 'invalid withdrawal amount')
+      fput "whisper #{character} That is an invalid amount to withdraw."
+      return
+    end
+
+    if @ledger[character][currency] < amount
+      log(character, 'withdrawal', amount, currency, 'insufficient funds')
+      fput "whisper #{character} You don't have that much money."
+      return
+    end
+
+    Flags.reset('tip-accepted')
+    Flags.reset('tip-expired')
+    Flags.reset('tip-declined')
+    case bput("tip #{character} #{amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding')
+    when "I don't know who"
+      log(character, 'withdrawal', amount, currency, 'character not found')
+      return
+    when 'You already have a tip offer outstanding'
+      fput "whisper #{character} Sorry, someone else is in the middle of a withdrawal. Please try again in a moment."
+      log(character, 'withdrawal', amount, currency, 'withdrawal already pending')
+      return
+    when 'you really should keep every bronze you can get your hands on'
+      echo '***ERROR*** UNABLE TO TIP DUE TO LOW CIRCLE, EXITING'
+      # TODO: Report error to person attempting a withdrawal
+      exit
+    end
+
+    pause 0.5 until Flags['tip-accepted'] || Flags['tip-expired'] || Flags['tip-declined']
+
+    if Flags['tip-expired']
+      log(character, 'withdrawal', amount, currency, 'expired')
+    end
+
+    if Flags['tip-declined']
+      log(character, 'withdrawal', amount, currency, 'declined')
+    end
+
+    return unless Flags['tip-accepted']
+    @ledger[character][currency] -= amount
+    log(character, 'withdrawal', amount, currency, 'succeeded')
+  end
+
+  def transfer(character, amount, currency, destination)
+    # TODO: Send success/failure message over LNet if necessary
+    unless currency
+      log(character, 'transfer', amount, currency, 'currency not recognized')
+      fput "whisper #{character} I'm sorry, I don't recognize the currency '#{currency}'."
+      return
+    end
+
+    if amount < 1
+      log(character, 'transfer', amount, currency, 'invalid transfer amount')
+      fput "whisper #{character} That is an invalid amount to transfer."
+      return
+    end
+
+    if @ledger[character][currency] < amount
+      log(character, 'transfer', amount, currency, 'insufficient funds')
+      fput "whisper #{character} You don't have that much money."
+      return
+    end
+
+    # TODO: Make case-insensitive
+    # TODO: Validate against lnet and retry
+    unless @ledger.key?(destination)
+      log(character, 'transfer', amount, currency, "destination does not exist: #{destination}")
+      fput "whisper #{character} The destination character does not have a bankbot account."
+      return
+    end
+
+    @ledger[character][currency] -= amount
+    @ledger[destination][currency] += amount
+    log(character, 'transfer', amount, currency, "succeeded to: #{destination}")
+    fput "whisper #{character} Transfer succeeded!"
+    # TODO: Send balance to recipient
+  end
+
+  def transfer_all(character, currency, destination)
+    amount = @ledger[character][currency]
+
+    if amount < 1
+      log(character, 'transfer all', amount, currency, 'no balance to transfer all')
+      fput "whisper #{character} You do not have any #{currency} to transfer."
+      return
+    end
+
+    log(character, 'transfer all', 'all', currency, 'transfer all attempted')
+    transfer(character, amount, currency, destination)
+  end
+
+  private
+
+  def log(character, action, amount, currency, message)
+    save_bankbot_transaction("#{character}, #{action}, #{amount}, #{currency}, #{message}", @ledger)
+    echo("Logging: #{character}, #{action}, #{amount}, #{currency}, #{message}")
+    echo("Ledger: #{@ledger}")
+  end
+
+  def determine_currency(input)
+    $CURRENCIES.find { |s| s.downcase.include?(input.downcase) }
+  end
+end
+
+class BankbotInputSanitizer
+  attr_reader :bankbot
+
+  def initialize
+    @bankbot = Bankbot.new
+  end
+
+  def help(character)
+    @bankbot.help(character)
+  end
+
+  def deposit(character, amount, currency)
+    sanitized_amount = amount.to_i
+    sanitized_currency = determine_currency(currency)
+    @bankbot.deposit(character, sanitized_amount, sanitized_currency)
+  end
+
+  def withdraw(character, amount, currency)
+    sanitized_amount = amount.to_i
+    sanitized_currency = determine_currency(currency)
+    @bankbot.withdraw(character, sanitized_amount, sanitized_currency)
+  end
+
+  def withdraw_all(character, currency)
+    sanitized_currency = determine_currency(currency)
+    @bankbot.withdraw_all(character, sanitized_currency)
+  end
+
+  def report_balance(character)
+    @bankbot.report_balance(character)
+  end
+
+  def transfer(character, amount, currency, destination)
+    sanitized_amount = amount.to_i
+    sanitized_currency = determine_currency(currency)
+    @bankbot.transfer(character, sanitized_amount, sanitized_currency, destination)
+  end
+
+  def transfer_all(character, currency, destination)
+    sanitized_currency = determine_currency(currency)
+    @bankbot.transfer_all(character, sanitized_currency, destination)
+  end
+
+  def get_balance(character)
+    @bankbot.get_balance(character)
+  end
+
+  def help_content
+    @bankbot.help_content
+  end
+
+  private
+
+  def determine_currency(input)
+    $CURRENCIES.find { |s| s.downcase.include?(input.downcase) }
+  end
+end
+
+class BankbotController
+  attr_reader :validator, :sanitizer
+
+  def initialize(validator)
+    @validator = validator
+    @sanitizer = BankbotInputSanitizer.new
+  end
+
+  def whisper_help(character)
+    @sanitizer.help(character)
+  end
+
+  def accept_tip(character, amount, currency)
+    if @validator.valid?(character)
+      @sanitizer.deposit(character, amount, currency)
+      whisper_balance(character)
+    else
+      fput('decline tip')
+    end
+  end
+
+  def withdraw(character, amount, currency)
+    @sanitizer.withdraw(character, amount, currency)
+    whisper_balance(character)
+  end
+
+  def withdraw_all(character, currency)
+    @sanitizer.withdraw_all(character, currency)
+    whisper_balance(character)
+  end
+
+  def whisper_balance(character)
+    @sanitizer.report_balance(character)
+  end
+
+  def whisper_transfer(character, amount, currency, destination)
+    @sanitizer.transfer(character, amount, currency, destination)
+    whisper_balance(character)
+  end
+
+  def whisper_transfer_all(character, currency, destination)
+    @sanitizer.transfer_all(character, currency, destination)
+    whisper_balance(character)
+  end
+
+  def whisper_unknown_command(character)
+    fput "whisper #{character} I'm sorry, I did not understand that command"
+    @sanitizer.help(character)
+  end
+
+  def send_slack_token(character)
+    @validator.send_slack_token(character)
+  end
+
+  def lnet_balance(character)
+    @validator.send_bankbot_balance(character, @sanitizer.get_balance(character))
+  end
+
+  def lnet_help(character)
+    @validator.send_bankbot_help(character, @sanitizer.help_content)
+  end
+
+  def lnet_transfer(character, amount, currency, destination)
+    @sanitizer.transfer(character, amount, currency, destination)
+    lnet_balance(character)
+  end
+
+  def lnet_transfer_all(character, currency, destination)
+    @sanitizer.transfer_all(character, currency, destination)
+    lnet_balance(character)
+  end
+
+  def lnet_send_location(character)
+    @validator.send_bankbot_location(character)
+  end
+end
+
+class BankbotParser
+  attr_reader :validator, :controller
+
+  def initialize(announce, greet)
+    @validator = CharacterValidator.new(announce, false, greet, 'Bankbot')
+    @controller = BankbotController.new(@validator)
+  end
+
+  def handle_new_character_seen(character)
+    @validator.validate(character)
+  end
+
+  def handle_whisper(character, message)
+    return unless @validator.valid?(character)
+
+    case message
+    when /^(help)$/i
+      @controller.whisper_help(character)
+    when /^(with|withdraw) (\d+) (K.*|L.*|D.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      @controller.withdraw(character, amount, currency)
+    when /^(with|withdraw) all (K.*|L.*|D.*)$/i
+      currency = Regexp.last_match(2)
+      @controller.withdraw_all(character, currency)
+    when /^(bal|balance)$/i
+      @controller.whisper_balance(character)
+    when /^(transfer) (\d+) (K.*|L.*|D.*) (.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      destination = Regexp.last_match(4)
+      @controller.whisper_transfer(character, amount, currency, destination)
+    when /(transfer) all (K.*|L.*|D.*) (.*)$/i
+      currency = Regexp.last_match(2)
+      destination = Regexp.last_match(3)
+      @controller.whisper_transfer_all(character, currency, destination)
+    else
+      @controller.whisper_unknown_command(character)
+    end
+  end
+
+  def handle_lnet_player_message(character, message)
+    @validator.confirm(character)
+
+    # TODO: Handle the 'else' case
+    case message
+    when /^RequestSlackToken/
+      @controller.send_slack_token(character)
+    when /^(bal|balance)$/i
+      @controller.lnet_balance(character)
+    when /^(help)$/i
+      @controller.lnet_help(character)
+    when /^(transfer) (\d+) (K.*|L.*|D.*) (.*)$/i
+      amount = Regexp.last_match(2)
+      currency = Regexp.last_match(3)
+      destination = Regexp.last_match(4)
+      @controller.lnet_transfer(character, amount, currency, destination)
+    when /^(transfer) all (K.*|L.*|D.*) (.*)$/i
+      currency = Regexp.last_match(2)
+      destination = Regexp.last_match(3)
+      @controller.lnet_transfer_all(character, currency, destination)
+    when /^(where|room|location)$/i
+      @controller.lnet_send_location(character)
+    end
+  end
+
+  def handle_lnet_server_message(message)
+    case message
+    when /^(.*) is tuned to the following channels.*$/
+      character = Regexp.last_match(1)
+      @validator.confirm(character)
+    when /^(.*) is connected but not tuned to any channels.*$/
+      character = Regexp.last_match(1)
+      @validator.confirm(character)
+    end
+  end
+
+  def handle_tip(character, message)
+    case message
+    when /^(\d+) (\w+)$/
+      amount = Regexp.last_match(1)
+      currency = Regexp.last_match(2)
+      @controller.accept_tip(character, amount, currency)
+    end
+  end
+end
+
+arg_definitions = [
+  [
+    { name: 'start', regex: /start/i, description: 'Required: prevents accidentally starting up bankbot' },
+    { name: 'announce', regex: /announce/i, optional: true, description: 'If arg is present, bankbot will announce its presence in LNet' },
+    { name: 'greet', regex: /greet/i, optional: true, description: 'If arg is present, bankbot will greet characters after validating (but only once)' }
+  ]
+]
+
+args = parse_args(arg_definitions)
+
+parser = BankbotParser.new(args.announce, args.greet)
+
+@last_room_list = []
+loop do
+  line = script.gets?
+  pause 0.05 unless line
+
+  if DRRoom.pcs != @last_room_list
+    (DRRoom.pcs - @last_room_list).each { |character| parser.handle_new_character_seen(character) }
+    @last_room_list = DRRoom.pcs
+  end
+
+  case line
+  when /^You catch (.*) making a grab for your pockets!$/
+    thief = Regexp.last_match(1)
+    echo "***EXITING, CAUGHT #{thief} TRYING TO STEAL***"
+    fput('exit')
+  when /^(.*) whispers, "(.*)"$/i
+    character = Regexp.last_match(1)
+    message = Regexp.last_match(2)
+    parser.handle_whisper(character, message)
+  when /^(.*) offers you a tip of (.*)\.  Type ACCEPT TIP, to accept it or DECLINE TIP to refuse it\.$/
+    character = Regexp.last_match(1)
+    message = Regexp.last_match(2)
+    parser.handle_tip(character, message)
+  when /^\[server\]: "DR:(.*)"\s*(?:\(\d{1,2}:\d{1,2}:\d{1,2}\))?$/
+    message = Regexp.last_match(1)
+    parser.handle_lnet_server_message(message)
+  when /^\[Private\]-.*:(.*): "(.*)"/
+    character = Regexp.last_match(1)
+    message = Regexp.last_match(2)
+    parser.handle_lnet_player_message(character, message)
+  end
+end

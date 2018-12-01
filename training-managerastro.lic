@@ -1,0 +1,167 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#training-manager
+=end
+
+custom_require.call(%w[common drinfomon common-travel])
+
+class TrainingManager
+  include DRC
+  include DRCT
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Skip first round of harvesting/mining' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+
+    @settings = get_settings
+    town_data = get_data('town')
+    @hometown = town_data[@settings.hometown]
+    @skip_repair = @settings.skip_repair
+    @repair_timer = @settings.repair_timer
+    UserVars.repair_timer_snap ||= Time.now
+    @repair_every = @settings.repair_every
+    @use_favor_altars = @settings.use_favor_altars
+    UserVars.repair_every_counter ||= 0
+
+    if @settings.training_manager_hunting_priority
+      combat_loop(args.skip)
+    else
+      town_loop
+    end
+  end
+
+  def combat_loop(skip)
+    check_favors
+    hunting_combo if priority_skills_low?
+    loop do
+      @settings = get_settings
+      clear
+
+      check_favors
+
+      wait_for_script_to_complete('sell-loot')
+      wait_for_script_to_complete('mining-buddy') if @settings.mine_while_training && !skip
+      wait_for_script_to_complete('forestry-buddy') if @settings.lumber_while_training && !skip
+      skip = false
+
+      start_script('crossing-training')
+      start_time = Time.now
+      pause 5
+      pause 1 until priority_skills_low? || timer_expired?(start_time)
+      $CROSSING_TRAINER.stop
+      pause 1 while $CROSSING_TRAINER.running
+
+      hunting_combo
+    end
+  end
+
+  def timer_expired?(start_time)
+    return unless @settings.training_manager_town_duration
+
+    Time.now - start_time >= @settings.training_manager_town_duration * 60
+  end
+
+  def priority_skills_low?
+    @settings.training_manager_priority_skills.any? { |skill| DRSkill.getxp(skill) <= @settings.priority_skills_lower_limit }
+  end
+
+  def town_loop
+    loop do
+      @settings = get_settings
+      clear
+
+      check_favors
+
+      wait_for_script_to_complete('sell-loot')
+
+      wait_for_script_to_complete('mining-buddy') if @settings.mine_while_training
+
+      $CROSSING_TRAINER = nil
+      start_script('crossing-training')
+      start_time = Time.now
+      pause 5
+      pause 1 until $CROSSING_TRAINER.idling || timer_expired?(start_time)
+      $CROSSING_TRAINER.stop
+      pause 1 while $CROSSING_TRAINER.running
+
+      hunting_combo
+    end
+  end
+
+  def check_repair
+    return false if @skip_repair
+    return false unless should_repair_by_count || should_repair_by_time
+
+    UserVars.repair_every_counter = 0
+    UserVars.repair_timer_snap = Time.now
+    true
+  end
+
+  def should_repair_by_time
+    return false if @repair_timer.nil?
+    return false if Time.now - UserVars.repair_timer_snap < @repair_timer
+    true
+  end
+
+  def should_repair_by_count
+    return false if @repair_every.nil?
+    return false if (UserVars.repair_every_counter += 1) < @repair_every
+    true
+  end
+
+  def hunting_combo
+    wait_for_script_to_complete('hunting-buddyastro')
+    wait_for_script_to_complete('safe-room')
+    wait_for_script_to_complete('crossing-repair') if check_repair
+  end
+
+  def check_favors
+    return unless @settings.favor_goal
+    /(\d+)/ =~ bput('favor', 'You currently have \d+', 'You are not currently')
+    favor_count = Regexp.last_match(1).to_i
+    return if favor_count >= @settings.favor_goal
+
+    if /could not/ =~ bput("tap my #{@settings.favor_god} orb", 'The orb is delicate', 'I could not find')
+      run_favors
+      fput('stow my orb')
+    elsif rub_orb?
+      walk_to(@hometown['favor_altar']['id'])
+      fput("get my #{@settings.favor_god} orb")
+      fput('put my orb on altar')
+      if favor_count + 1 < @settings.favor_goal
+        run_favors
+        fput('stow my orb')
+      end
+    end
+  end
+
+  def run_favors
+    if @use_favor_altars
+      wait_for_script_to_complete('favor', [@settings.favor_god])
+    else
+      wait_for_script_to_complete('favor')
+    end
+  end
+
+  def rub_orb?
+    case bput("rub my #{@settings.favor_god} orb", 'not yet fully prepared', 'lacking in the type of sacrifice the orb requires', 'your sacrifice is properly prepared')
+    when 'not yet fully prepared'
+      false
+    when 'lacking in the type of sacrifice the orb requires'
+      false
+    when 'your sacrifice is properly prepared'
+      true
+    end
+  end
+end
+
+before_dying do
+  ['hunting-buddyastro'].each do |script_name|
+    stop_script(script_name) if Script.running?(script_name)
+  end
+end
+
+TrainingManager.new

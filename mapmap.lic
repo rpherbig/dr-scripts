@@ -1,0 +1,954 @@
+=begin
+
+	This make map good.
+
+	;mapmap help
+
+	  author: Tillmen (tillmen@lichproject.org)
+	    game: Gemstone
+	    tags: core
+	 version: 0.3
+	required: Lich >= 4.2.0
+
+	changelog:
+		0.3 (2015-5-13):
+			fix objects setting
+			add messages to mapmap_move method
+			give a warning when setting boundaries while the lazy setting is off
+		0.2 (2014-10-14):
+			fix settings for Lich 4.6
+
+=end
+
+cmd             = Array.new
+opt_lazy        = GameSettings['lazy']
+opt_objects     = GameSettings['objects']
+opt_objects     = true if opt_objects.nil?
+opt_look        = GameSettings['look']
+opt_save_map    = GameSettings['save_map']
+map_done        = GameSettings['map_done']
+map_pending     = GameSettings['map_pending']
+fix_done        = GameSettings['fix_done']
+fix_pending     = GameSettings['fix_pending']
+neighborhoods   = /^\[Liabo Circle|^\[Tiger Court|^\[Cothinar Gardens|^\[North Shore|^\[Golvern Street|^\[Rock Garden|^\[Riverbank|^\[Pebble Court|^\[Hedgerow|^\[Pig Puddle Lane|^\[Meadowlands|^\[Ravenswood|^\[Cobblestone Court|^\[Orc's Nest Road|^\[Tiger Court Lane|^\[Shanty Town|^\[Bay's Watch|^\[West Bank|^\[Dragonsclaw Arms|^\[Coastal Cliffs, Gnarled Trees|^\[Coastal Cliffs, Ledges|^\[Coastal Cliffs, Rocky Slope|^\[Marble Springs|^\[Curlew Brook|^\[Highpark|^\[Windmill Burrow|^\[Dabbings Mews|^\[Spitfire Alley|^\[Magical Burrow|^\[Pinefar Preserve|^\[Coastal Cliffs, (?:Waterfront|Fenvaok's Roost|Overhang)|^\[Carousel Court|^\[Port Valley|^\[Khan'Kel Bazaar|^\[Lough Ne'halin|^\[Cavernfast|^\[Noralgar Hollow|^\[Hummingbird Pond|^\[Boreas Meadows|^\[Boreas Hills|^\[Boreas Ridge|^\[Tyramia Hollow|^\[Glarstim Cavern|^\[Royal Court|^\[Ebondrift|^\[Cypress Walk|^\[Kwagmire Kourt|^\[Market Bend|^\[Behlayr/
+ignore_name_re  = /[A-Z][a-z]+ disk$/
+ignore_noun_re  = /^moat$/
+no_more_options = false
+
+for var in script.vars[1..-1]
+	if no_more_options
+		cmd.push(var)
+	elsif var == '--'
+		no_more_options = true
+	elsif var =~ /^--/
+		if var =~ /^--lazy/i
+			if var =~ /^--lazy\s*=\s*(true|yes|on)/i
+				opt_lazy = true
+			elsif var =~ /^--lazy\s*=\s*(false|no|off)/i
+				opt_lazy = false
+			else
+				echo 'error: --lazy option not complete; e.g. --lazy=yes'
+				exit
+			end
+		elsif var =~ /^--objects/i
+			if var =~ /^--objects\s*=\s*(true|yes|on)/i
+				opt_objects = true
+			elsif var =~ /^--objects\s*=\s*(false|no|off)/i
+				opt_objects = false
+			else
+				echo 'error: --objects option not complete; e.g. --objects=yes'
+				exit
+			end
+		elsif var =~ /^--look/i
+			if var =~ /^--look\s*=\s*(true|yes|on)/i
+				opt_look = true
+			elsif var =~ /^--look\s*=\s*(false|no|off)/i
+				opt_look = false
+			else
+				echo 'error: --look option not complete; e.g. --look=yes'
+				exit
+			end
+		elsif var =~ /^--save-?map/i
+			if var =~ /^--save-?map\s*=\s*(true|yes|on)/i
+				opt_save_map = true
+			elsif var =~ /^--save-?map\s*=\s*(false|no|off)/i
+				opt_save_map = false
+			else
+				echo 'error: --save-map option not complete; e.g. --save-map=yes'
+				exit
+			end
+		else
+			echo "error: unknown option: #{var}"
+			exit
+		end
+	else
+		cmd.push(var)
+	end
+end
+
+find_dupe_paths = proc { |room|
+	find_dupes = Hash.new
+	room.wayto.values.each { |way|
+		if way.class == String
+			find_dupes[way] = find_dupes[way].to_i + 1
+		end
+	}
+	find_dupes.each_pair { |way,count|
+		if count > 1
+			echo "#{room.id}: duplicate paths in this room (#{way})"
+			Script.log "#{room.id}: duplicate paths in this room (#{way})"
+		end
+	}
+}
+
+def mapmap_move(dir)
+	timeout = 8
+	end_time = Time.now.to_i + timeout
+	tried_open = false
+	room_count = XMLData.room_count
+	loop {
+		clear
+		put dir
+		begin
+			sleep 0.01
+			if XMLData.room_count > room_count
+				return true
+			end
+			if Time.now.to_i >= end_time
+				return nil
+			end
+			redo_move = false
+			for line in clear
+				if line =~ /can't go there|^Where are you trying to go|^What were you referring to\?|^I could not find what you were referring to\.$|^You can't climb that\.$|^How do you plan to do that here\?$|^You take a few steps towards|^You're going to have to climb that\.$|^You cannot do that\.$|^You settle yourself on|^You shouldn't annoy|^You can't|^That's probably not a very good idea|^Maybe you should look at the [\w\s]+ and work with one at a time\.$|^You are already|^You (?:walk|step) over to|^Sorry, you aren't allowed to enter here\.$|^The [\w\s]+ is too far away|^You may not pass\.$|becomes? impassable\.$|prevents you from entering\.$|Please leave promptly\.$|^That looks like someplace only performers should go\.$|is too far above you to attempt that\.$|^Uh, yeah\.  Right\.$|^Definitely NOT a good idea\.$|^You will have to climb that\.$|^Your attempt fails|^You'll have to wait|^A thunderous voice resounds within your mind: "DO NOT BRING YOUR FOUL SOUL IN HERE!"$|^Rushing heedlessly .*, your feet slip on a patch of ice, sending you reeling|^You will have to swim|^I don't think that is such a good idea|^You sit down|^I could not find what you were refering to\.|^A thick wall of bramble blocks further travel in that direction\.|^You gingerly place your weight on the porch swing|^You pick out a comfortable-looking pillow|^You take a few steps toward|^Pulling .*? you (?:sit down|lower yourself)|^You settle yourself down|^You ease .*? and settle yourself/
+					return false
+				elsif line =~ /^An unseen force prevents you\.$|^As you climb, your grip gives way and you fall down|^Rushing heedlessly up the slope, your feet slip on a patch of ice, sending you reeling\.  Spinning, your legs give way and you fall to the ground, sliding down the mountain!$/
+					return nil
+				elsif line =~ /(?:appears|seems) to be closed\.$/
+					return false if tried_open
+					fput dir.sub(/go|climb/, 'open')
+					redo_move = true
+					tried_open = true
+					break
+				elsif line =~ /^(\.\.\.w|W)ait ([0-9]+) sec(onds)?\.$/
+					if $2.to_i > 1
+						sleep ($2.to_i - 0.2)
+					else
+						sleep 0.3
+					end
+					end_time = Time.now.to_i + timeout
+					redo_move = true
+					break
+				elsif line =~ /will have to stand up first|must be standing first|You'll have to get up first\.|But you're already sitting!|Shouldn't you be standing first|^You need to stand/
+					fput 'stand'
+					waitrt?
+					redo_move = true
+					break
+				elsif line =~ /^Sorry, you may only type ahead/
+					sleep 1
+					end_time = Time.now.to_i + timeout
+					redo_move = true
+					break
+				elsif line == 'You are still stunned.'
+					wait_while { stunned? }
+					end_time = Time.now.to_i + timeout
+					redo_move = true
+					break
+				elsif line =~ /^Running heedlessly/
+					waitrt?
+					fput 'stand' unless standing?
+					waitrt?
+					put dir
+					next
+				end
+			end
+		end until redo_move
+	}
+end
+
+combine_rooms = proc { |this_room, that_room|
+	first_room = Room[[this_room.to_i, that_room.to_i].min]
+	second_room = Room[[this_room.to_i, that_room.to_i].max]
+	second_room.title.each { |title| first_room.title.push(title) unless first_room.title.include?(title) }
+	second_room.description.each { |desc| first_room.description.push(desc) unless first_room.description.include?(desc) }
+	second_room.paths.each { |paths| first_room.paths.push(paths) unless first_room.paths.include?(paths) }
+	if first_room.location.nil?
+		first_room.location = second_room.location
+	end
+	second_room.wayto.each_pair { |adj_room,way|
+		unless first_room.wayto.keys.include?(adj_room)
+			first_room.wayto[adj_room] = way
+			first_room.timeto[adj_room] = second_room.timeto[adj_room]
+		end
+	}
+	map_done.delete(second_room.id)
+	map_pending.delete(second_room.id.to_s)
+	fix_done.delete(second_room.id)
+	fix_pending.delete(second_room.id.to_s)
+	key = second_room.id.to_s
+	Map.list[second_room.id] = nil
+	Map.list.each { |room|
+		if room.wayto.keys.include?(key)
+			room.wayto[first_room.id.to_s] = room.wayto[key]
+			room.timeto[first_room.id.to_s] = room.timeto[key]
+			room.wayto.delete(key)
+			room.timeto.delete(key)
+		end
+	}
+	Map.list.each { |room|
+		room.wayto.each_pair { |rm,way|
+			if (way.class == Proc) and way._dump =~ /#{second_room.id.to_s}/
+				respond
+				respond "#{room.id} => #{rm}"
+				respond way._dump
+				respond
+				clear
+				echo 'this path refrences the deleted room number'
+				echo "replace #{second_room.id} with #{first_room.id}? (send yes/no)"
+				respond
+				line = nil
+				line = get until line =~ /^yes$|^no$/i
+				if line =~ /^yes$/i
+					room.wayto[rm] = StringProc.new(way._dump.gsub(second_room.id.to_s, first_room.id.to_s))
+				end
+			end
+		}
+	}
+}
+
+
+
+if cmd[0] =~ /^(?:new|clear)$/i
+	GameSettings['map_done']    = Array.new
+	GameSettings['map_pending'] = Hash.new
+	GameSettings['fix_done']    = Array.new
+	GameSettings['fix_pending'] = Hash.new
+	echo 'mapping session cleared'
+	exit
+
+
+elsif cmd[0] =~ /boundary/i
+	if cmd[1] =~ /^[0-9]+$/
+		unless room = Room[cmd[1]]
+			echo 'error: invalid room number'
+			exit
+		end
+	else
+		unless room = Room.current
+			echo 'error: current room is not in the map database'
+			exit
+		end
+	end
+	GameSettings['map_done'].push(room.id)
+	GameSettings['fix_done'].push(room.id)
+	GameSettings['map_pending'].delete(room.id.to_s)
+	GameSettings['fix_pending'].delete(room.id.to_s)
+	echo 'boundary set'
+	unless opt_lazy
+		echo "warning: the lazy setting is off, which means your boundaries won't work"
+	end
+	exit
+
+
+elsif cmd[0] =~ /location/i
+	Map.list.each { |room|
+		if room.location
+			GameSettings['map_done'].push(room.id)
+			GameSettings['fix_done'].push(room.id)
+			GameSettings['map_pending'].delete(room.id.to_s)
+			GameSettings['fix_pending'].delete(room.id.to_s)
+		end
+	}
+	echo 'all rooms with location info set as boundaries'
+	exit
+
+
+elsif cmd[0] == 'info'
+	add_commas = proc { |num| num.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse }
+	empty_count = desc_count = simple_count = mini_count = narost_count = location_count = total_tags = 0
+	unique_tags = Hash.new
+	Map.list.each { |room| 
+		empty_count += 1    if room.nil?
+		desc_count += 1     if room.description.length > 1
+		narost_count += 1   if room.image
+		location_count += 1 if room.location
+		total_tags += room.tags.length.to_i
+		room.wayto.values.each { |way| 
+			simple_count += 1 if way.class == String
+			mini_count += 1 if way.class == Proc
+		}
+		room.tags.each { |tag| unique_tags[tag] = true }
+	}
+	unique_tags = unique_tags.length
+
+	respond
+	respond "                        map size: #{add_commas.call(Map.list.length).rjust(7)}"
+	respond "                            nils: #{add_commas.call(empty_count).rjust(7)}"
+	respond "rooms with multiple descriptions: #{add_commas.call(desc_count).rjust(7)}"
+	respond "          rooms with narost info: #{add_commas.call(narost_count).rjust(7)}"
+	respond "        rooms with location info: #{add_commas.call(location_count).rjust(7)}"
+	respond "                     total rooms: #{add_commas.call(Map.list.length - empty_count).rjust(7)}"
+	respond
+	respond "               simple directions: #{add_commas.call(simple_count).rjust(7)}"
+	respond "          mini-script directions: #{add_commas.call(mini_count).rjust(7)}"
+	respond "                total directions: #{add_commas.call(simple_count + mini_count).rjust(7)}"
+	respond
+	respond "                     unique tags: #{add_commas.call(unique_tags).rjust(7)}"
+	respond "                      total tags: #{add_commas.call(total_tags).rjust(7)}"
+	respond
+	exit
+
+
+elsif cmd[0] == 'check'
+	echo 'looking for invalid wayto keys...'
+	total = 0
+	count = 0
+	Map.list.each { |room| room.wayto.keys.each { |key| total += 1 if key.class != String } }
+	if total > 0
+		Map.list.each { |room| 
+			room.wayto.keys.each { |key| 
+				if key.class != String
+					echo "#{count+=1} of #{total}"
+					respond room
+					respond room.wayto.inspect
+					respond room.timeto.inspect
+					clear
+					echo "delete path #{room.id} => #{key} (#{key.class})?"
+					echo 'send yes/no'
+					respond
+					response = nil
+					response = get until response =~ /^yes$|^no$/
+					if response == 'yes'
+						room.wayto.delete(key)
+						room.timeto.delete(key)
+					end
+	
+				end
+			}
+		}
+	else
+		echo '...found none'
+	end	
+
+	echo 'looking for invalid timeto keys...'
+	total = 0
+	count = 0
+	Map.list.each { |room| room.timeto.keys.each { |key| total += 1 if key.class != String } }
+	if total > 0
+		Map.list.each { |room| 
+			room.timeto.keys.each { |key| 
+				if key.class != String
+					echo "#{count+=1} of #{total}"
+					respond room
+					respond room.wayto.inspect
+					respond room.timeto.inspect
+					clear
+					echo "delete path #{room.id} => #{key} (#{key.class})?"
+					echo 'send yes/no'
+					respond
+					response = nil
+					response = get until response =~ /^yes$|^no$/
+					if response == 'yes'
+						room.wayto.delete(key)
+						room.timeto.delete(key)
+					end
+	
+				end
+			}
+		}
+	else
+		echo '...found none'
+	end	
+
+	echo 'looking for loner wayto keys...'
+	total = 0
+	count = 0
+	Map.list.each { |room| room.wayto.keys.each { |key| total += 1 unless room.timeto[key] or room.title.first == '[Elemental Confluence]' } }
+	if total > 0
+		Map.list.each { |room| 
+			room.wayto.keys.each { |key| 
+				unless room.timeto[key] or room.title.first == '[Elemental Confluence]'
+					echo "#{count+=1} of #{total}"
+					respond room
+					respond room.wayto.inspect
+					respond room.timeto.inspect
+					clear
+					echo "set default timeto (0.2) for #{room.id} => #{key} ?"
+					echo 'send yes/no'
+					respond
+					response = nil
+					response = get until response =~ /^yes$|^no$/
+					if response == 'yes'
+						room.timeto[key] = 0.2
+					end
+	
+				end
+			}
+		}
+	else
+		echo '...found none'
+	end	
+
+	echo 'looking for loner timeto keys...'
+	total = 0
+	count = 0
+	Map.list.each { |room| room.timeto.keys.each { |key| total += 1 unless room.wayto[key] } }
+	if total > 0
+		Map.list.each { |room| 
+			room.timeto.keys.each { |key| 
+				unless room.wayto[key]
+					echo "#{count+=1} of #{total}"
+					respond room
+					respond room.wayto.inspect
+					respond room.timeto.inspect
+					clear
+					echo "delete path #{room.id} => #{key} (#{key.class})?"
+					echo 'send yes/no'
+					respond
+					response = nil
+					response = get until response =~ /^yes$|^no$/
+					if response == 'yes'
+						room.wayto.delete(key)
+						room.timeto.delete(key)
+					end
+	
+				end
+			}
+		}
+	else
+		echo '...found none'
+	end	
+	
+	echo 'looking for rooms with a path to itself...'
+	total = 0
+	count = 0
+	Map.list.each { |room| total += 1 unless room.nil? or room.wayto[room.id.to_s].nil? or room.title.first == '[Elemental Confluence]' }
+	if total > 0
+		Map.list.each { |room|
+			next if room.nil?
+			unless room.wayto[room.id.to_s].nil? or room.title.first == '[Elemental Confluence]'
+				echo "#{count+=1} of #{total}"
+				respond room
+				respond room.wayto.inspect
+				respond
+				clear
+				echo "delete path #{room.id} => #{room.wayto[room.id.to_s]} => #{room.id}?"
+				echo 'send yes/no'
+				respond
+				response = nil
+				response = get until response =~ /^yes$|^no$/
+				if response == 'yes'
+					room.wayto.delete(room.id.to_s)
+				end
+			end
+		}
+	else
+		echo '...found none'
+	end
+
+	echo 'looking for identical paths with different destinations...'
+	da_rooms = Array.new
+	Map.list.each { |room|
+		room.wayto.each { |first_room_id,first_path|
+			room.wayto.each { |second_room_id,second_path|
+				if (first_path == second_path) and (first_room_id != second_room_id)
+					respond "#{room.id} => #{first_room_id}: #{first_path}"
+					da_rooms.push(room.id) unless da_rooms.include?(room.id)
+				end
+			}
+		}
+	}
+	if da_rooms.empty?
+		echo '...found none'
+	else
+		echo "closest: #{Room.current.find_nearest(da_rooms)}"
+	end
+
+	no_location = Map.list.find_all { |room| !room.nil? and room.location.nil? }.collect { |room| room.id }
+	unless no_location.empty?
+		echo "nearest room without location info: #{Room.current.find_nearest(no_location)}"
+	end
+
+	if XMLData.game == 'GSIV'
+
+		town_list = {
+			"Ta'Illistim"   =>   188,
+			"Wehnimer's"    =>   228,
+			"Solhaven"      =>  1438,
+			"Icemule Trace" =>  2300,
+			"Teras Isle"    =>  1932,
+			"River's Rest"  => 10861,
+			"Zul Logoth"    =>  1005,
+			"Ta'Vaalor"     =>  3519,
+		}
+		normal_travel_time = {
+			"Ta'Illistim" => {
+				"Wehnimer's"    => 1353,
+				'Solhaven'      => 1381,
+				'Icemule Trace' => 1364,
+				'Teras Isle'    =>    0,
+				"River's Rest"  => 1981,
+				'Zul Logoth'    =>  283,
+				"Ta'Vaalor"     =>  329,
+			},
+			"Wehnimer's" => {
+				"Ta'Illistim"   => 1348,
+				'Solhaven'      =>   36,
+				'Icemule Trace' =>   28,
+				'Teras Isle'    =>    0,
+				"River's Rest"  =>  636,
+				'Zul Logoth'    => 1068,
+				"Ta'Vaalor"     => 1666,
+			},
+			'Solhaven' => {
+				"Ta'Illistim"   => 1378,
+				"Wehnimer's"    =>   38,
+				'Icemule Trace' =>   59,
+				'Teras Isle'    =>    0,
+				"River's Rest"  =>  605,
+				'Zul Logoth'    => 1098,
+				"Ta'Vaalor"     => 1697,
+			},
+			'Icemule Trace' => {
+				"Ta'Illistim"  => 1361,
+				"Wehnimer's"   =>   30,
+				'Solhaven'     =>   58,
+				'Teras Isle'   =>    0,
+				"River's Rest" =>  658,
+				'Zul Logoth'   => 1081,
+				"Ta'Vaalor"    => 1679,
+			},
+			'Teras Isle' => {
+				"Ta'Illistim"   => 0,
+				"Wehnimer's"    => 0,
+				'Solhaven'      => 0,
+				'Icemule Trace' => 0,
+				"River's Rest"  => 0,
+				'Zul Logoth'    => 0,
+				"Ta'Vaalor"     => 0,
+			},
+			"River's Rest" => {
+				"Ta'Illistim"   => 1975,
+				"Wehnimer's"    =>  635,
+				'Solhaven'      =>  602,
+				'Icemule Trace' =>  656,
+				'Teras Isle'    =>    0,
+				'Zul Logoth'    => 1695,
+				"Ta'Vaalor"     => 2294,
+			},
+			'Zul Logoth' => {
+				"Ta'Illistim"   =>  280,
+				"Wehnimer's"    => 1069,
+				'Solhaven'      => 1097,
+				'Icemule Trace' => 1081,
+				'Teras Isle'    =>    0,
+				"River's Rest"  => 1697,
+				"Ta'Vaalor"     =>  598,
+			},
+			"Ta'Vaalor" => {
+				"Ta'Illistim"   =>  320,
+				"Wehnimer's"    => 1663,
+				'Solhaven'      => 1690,
+				'Icemule Trace' => 1674,
+				'Teras Isle'    =>    0,
+				"River's Rest"  => 2290,
+				'Zul Logoth'    =>  593,
+			},
+		}
+		echo 'checking travel times between towns...'
+		changed = false
+		town_list.each_pair { |start_town_name,start_town_id|
+			previous, shortest_distances = Map.dijkstra(start_town_id)
+			town_list.each_pair { |end_town_name,end_town_id|
+				next if start_town_id == end_town_id
+				est_time = shortest_distances[end_town_id]
+				unless normal_travel_time[start_town_name][end_town_name] == est_time.to_i
+					echo "#{start_town_name} => #{end_town_name}: changed from #{normal_travel_time[start_town_name][end_town_name]} to #{est_time.to_i}"
+					changed = true
+				end
+			}
+		}
+	end
+
+	echo '...done'
+
+	exit
+
+
+elsif cmd[0] == 'map'
+	if opt_save_map
+		before_dying { Map.save }
+	end
+	loop {
+		room = Room.current_or_new
+		if map_done.include?(room.id)
+			next_room   = room.wayto.keys.find { |id| map_pending.keys.include?(id) }
+			next_room ||= room.find_nearest(map_pending.keys)
+			unless next_room or opt_lazy
+				all_room_ids = Map.list.collect { |rm| rm.id unless rm.nil? } - map_done
+				next_room = room.find_nearest(all_room_ids)
+			end
+			unless next_room
+				if map_pending.empty?
+					echo "Done.  #{map_done.length} rooms checked."
+					Script.log "Done.  #{map_done.length} rooms checked."
+				else
+					if checkpaths.include?('out')
+						move 'out'
+						next
+					end
+					echo "Stuck.  #{map_done.length} rooms checked."
+					Script.log "Stuck.  #{map_done.length} rooms checked."
+				end
+				exit
+			end
+			start_script 'go2', [ next_room.to_s, '--disable-confirm', '--typeahead=0' ]
+			wait_while { running? 'go2' }
+		else
+			unless map_pending.keys.include?(room.id.to_s)
+				map_pending[room.id.to_s] = XMLData.room_exits.to_a
+				if opt_objects
+					map_pending[room.id.to_s].concat(GameObj.loot.to_a.find_all { |obj| (obj.name !~ ignore_name_re) and (obj.noun !~ ignore_noun_re) })
+					GameObj.room_desc.to_a.each { |obj| map_pending[room.id.to_s].push(obj) unless (obj.name =~ ignore_name_re) or (obj.noun =~ ignore_noun_re) or map_pending[room.id.to_s].any? { |o| (o.class == GameObj) and (o.id == obj.id) } }
+					if opt_look
+						for obj in map_pending[room.id.to_s]
+							next unless obj.class == GameObj
+							crap = Array.new
+							status_tags
+							clear
+							put "look ##{obj.id}"
+							end_time = Time.now + 1
+							while Time.now < end_time
+								sleep 0.1
+								while line = get?
+									crap.concat(line.scan(/<a exist="[^"]+" noun="[^"]+">.*?<\/a>/))
+									if line =~ /#{obj.noun}|You see nothing unusual\./
+										end_time -= 1
+										break
+									end
+								end
+							end
+							status_tags
+							for xml_obj in crap
+								xml_obj =~ /<a exist="([^"]+)" noun="([^"]+)">(.*?)<\/a>/
+								new_obj = GameObj.new($1, $2, $3)
+								unless GameObj.pcs.any? { |pc| pc.id == new_obj.id } or map_pending[room.id.to_s].any? { |o| (o.class == GameObj) and (o.id == new_obj.id) }
+									map_pending[room.id.to_s].push(new_obj)
+								end
+							end
+						end
+					end
+				end
+				if XMLData.room_title =~ neighborhoods
+					map_pending[room.id.to_s].delete_if { |obj| (obj.class == GameObj) and (obj.noun !~ /path|gate|trail|footbridge|winery|bridge|stair|step/) }
+				end
+			end
+			path = map_pending[room.id.to_s].pop
+			if map_pending[room.id.to_s].empty?
+				map_done.push(room.id)
+				map_pending.delete(room.id.to_s)
+				find_dupe_paths.call(room)
+			end
+			if path.nil?
+				next
+			elsif path.class == String
+				path_options = [ path, "swim #{path}" ]
+			elsif path.class == GameObj
+				if (GameObj.loot.to_a + GameObj.room_desc.to_a).find { |obj| (obj.noun =~ /^#{path.noun}/) and (obj.id != path.id) }
+					path_words = path.name.split
+					if path.noun.split.length == 2
+						path_options = [ "go #{path.noun.downcase}", "climb #{path.noun.downcase}" ]
+					elsif path_words.length == 1
+						if path_words.first == path.noun
+							path_options = [ "go #{path.noun.downcase}", "climb #{path.noun.downcase}" ]
+						else
+							path_options = [ "go #{path.name.downcase} #{path.noun.downcase}", "climb #{path.name.downcase} #{path.noun.downcase}" ]
+						end
+					elsif (path_words == 2) and (path_words.last == path.noun)
+						path_options = [ "go #{path.name.downcase}", "climb #{path.name.downcase}" ]
+					else
+						path_words.delete_if { |word| word =~ /^#{path.noun}$|^of$|^some$|^an?$|^the$|^to$|^into$|^in$|^on$|^at$|^through$|^with$/i }
+						path_options = Array.new
+						path_words.reverse.each { |word|
+							path_options.push "go #{word.downcase} #{path.noun.downcase}"
+							path_options.push "climb #{word.downcase} #{path.noun.downcase}"
+						}
+					end
+				else
+					path_options = [ "go #{path.noun.downcase}", "climb #{path.noun.downcase}" ]
+				end
+			else
+				echo "#{room.id}: What the hell?"
+				Script.log "#{room.id}: What the hell?"
+			end
+			path_options.each { |option|
+				sleep 0.05
+				if mapmap_move(option)
+					adj_room = Room.current_or_new
+					if room == adj_room
+						echo "#{room.id}: move appeared to succeed, but not really."
+						Script.log "#{room.id}: move appeared to succeed, but not really."
+						break
+					elsif room.tags.include?('no-auto-map') or adj_room.tags.include?('no-auto-map')
+						echo "#{room.id} => #{adj_room.id}: marked as error room; not saving move."
+						Script.log "#{room.id} => #{adj_room.id}: marked as error room; not saving move."
+						break
+					end
+					if room.wayto[adj_room.id.to_s].class == Proc
+						echo "#{room.id} => #{adj_room.id}: not overwriting proc. "
+						Script.log "#{room.id} => #{adj_room.id}: not overwriting proc. "
+					elsif room.timeto[adj_room.id.to_s].class == Proc
+						echo "#{room.id} => #{adj_room.id}: not overwriting proc. "
+						Script.log "#{room.id} => #{adj_room.id}: not overwriting proc. "
+					elsif room.wayto[adj_room.id.to_s] != option
+						echo "#{room.id} => #{adj_room.id}: #{room.wayto[adj_room.id.to_s] || 'nil'} => #{option} "
+						Script.log("#{room.id} => #{adj_room.id}: #{room.wayto[adj_room.id.to_s] || 'nil'} => #{option} ")
+						room.wayto[adj_room.id.to_s] = option
+						room.timeto[adj_room.id.to_s] = 0.2
+					end
+					break
+				end
+				unless standing?
+					waitrt?
+					dothistimeout 'stand', 0.5, /^You stand/
+					waitrt?
+				end
+			}
+		end
+	}
+
+
+elsif cmd[0] == 'fix'
+	if opt_save_map
+		before_dying { Map.save }
+	end
+	loop {
+		room = Room.current_or_new
+		if room.nil?
+			echo 'error: out of cheese'
+			exit
+		end
+		if fix_done.include?(room.id)
+			next_room = nil
+			room.wayto.keys.each { |adj_room|
+				if fix_pending.keys.include?(adj_room)
+					next_room = adj_room
+					break
+				end
+			}
+			unless next_room
+				next_room = room.find_nearest(fix_pending.keys)
+			end
+			unless next_room or opt_lazy
+				all_room_ids = Map.list.collect { |rm| rm.id unless rm.nil? } - fix_done
+				next_room = room.find_nearest(all_room_ids)
+			end
+			unless next_room
+				if fix_pending.empty?
+					echo "Done.  #{fix_done.length} rooms checked."
+					Script.log "Done.  #{fix_done.length} rooms checked."
+				else
+					if checkpaths.include?('out')
+						move 'out'
+						next
+					end
+					echo "Stuck.  #{fix_done.length} rooms checked."
+					Script.log "Stuck.  #{fix_done.length} rooms checked."
+				end
+				exit
+			end
+			start_script 'go2', [ next_room.to_s, '--disable-confirm', '--typeahead=0' ]
+			wait_while { running? 'go2' }
+		else
+			unless fix_pending.keys.include?(room.id.to_s)
+				fix_pending[room.id.to_s] = Array.new
+				room.wayto.each_pair { |rm,way| fix_pending[room.id.to_s].push(rm) if (way.class == String) and (way !~ /^go .*?table$/) }
+				# excluding the barrier is helpful when mapping the Scatter
+				# room.wayto.each_pair { |rm,way| fix_pending[room.id.to_s].push(rm) if (way.class == String) and (way !~ /^go .*?table$|^go barrier$/) }
+				fix_pending[room.id.to_s].delete_if { |rm| (room.timeto[rm].class == Proc) and room.timeto[rm].call.nil? }
+			end
+			if fix_pending[room.id.to_s].empty?
+				fix_done.push(room.id)
+				fix_pending.delete(room.id.to_s)
+				next
+			end
+			adj_room = fix_pending[room.id.to_s].pop
+			if fix_pending[room.id.to_s].empty?
+				fix_done.push(room.id)
+				fix_pending.delete(room.id.to_s)
+			end
+			path = room.wayto[adj_room]
+			next unless path
+			result = move(path)
+			if result
+				real_adj_room = Room.current_or_new
+				unless adj_room == real_adj_room.id.to_s
+					adj_room_obj = Room[adj_room]
+					if adj_room_obj.location and real_adj_room.location and (adj_room_obj.location != real_adj_room.location)
+						line = 'no'
+					elsif adj_room_obj.title.first =~ /^\[([A-z]+)'s? (?:Magic Shoppe|Outfitting|Weaponry|General Store|Combat Gear|Armory|Lockpicks)\]$/
+						player_shop_owner = $1
+						if real_adj_room.title.first =~ /^\[#{player_shop_owner}'s? (?:Magic Shoppe|Outfitting|Weaponry|General Store|Combat Gear|Armory)\]$/
+							line = 'yes'
+						else
+							line = 'no'
+						end
+					else
+						respond
+						respond Room[adj_room.to_i]
+						respond Room[adj_room.to_i].wayto.inspect
+						respond "location: #{Room[adj_room.to_i].location.inspect}"
+						respond
+						respond real_adj_room
+						respond real_adj_room.wayto.inspect
+						respond "location: #{real_adj_room.location.inspect}"
+						respond
+						clear
+						echo 'Are these the same room? (send yes/no/ignore)'
+						respond
+						line = nil
+						line = get until line =~ /^yes$|^no$|^ignore$/i
+					end
+					if line =~ /^yes$/i
+						combine_rooms.call(adj_room.to_i, real_adj_room.id)
+					elsif line =~ /^no$/i
+						if room.tags.include?('no-auto-map') or real_adj_room.tags.include?('no-auto-map')
+							echo "marked as error room; not adding path"
+							Script.log "marked as error room; not adding path"
+						else
+							echo "adding: #{room.id} => #{real_adj_room.id}: #{room.wayto[adj_room]}"
+							Script.log "adding: #{room.id} => #{real_adj_room.id}: #{room.wayto[adj_room]}"
+							room.wayto[real_adj_room.id.to_s] = room.wayto[adj_room]
+							room.timeto[real_adj_room.id.to_s] = 0.2
+						end
+						echo "deleting: #{room.id} => #{adj_room}: #{room.wayto[adj_room]}"
+						Script.log "deleting: #{room.id} => #{adj_room}: #{room.wayto[adj_room]}"
+						room.wayto.delete(adj_room)
+						room.timeto.delete(adj_room)
+					end
+				end
+			elsif result == false
+				echo "deleting: #{room.id} => #{adj_room}: #{room.wayto[adj_room]}"
+				Script.log "deleting: #{room.id} => #{adj_room}: #{room.wayto[adj_room]}"
+				room.wayto.delete(adj_room)
+				room.timeto.delete(adj_room)
+			elsif result.nil?
+				nil
+				# temporary error, ignore
+			end
+		end
+	}
+
+
+elsif cmd[0] == 'combine'
+	unless cmd[1] and cmd[2]
+		echo "You're doing it wrong."
+		exit
+	end
+	combine_rooms.call(cmd[1].to_i, cmd[2].to_i)
+
+
+elsif cmd[0] == 'set'
+	if cmd[1] =~ /^lazy/i
+		if cmd[2] =~ /^(?:true|yes|on)$/i
+			GameSettings['lazy'] = true
+			echo 'setting saved'
+		elsif cmd[2] =~ /^(?:false|no|off)$/i
+			GameSettings['lazy'] = false
+			echo 'setting saved'
+		else
+			# fixme
+		end
+	elsif cmd[1] =~ /^look/
+		if cmd[2] =~ /^(?:true|yes|on)$/i
+			GameSettings['look'] = true
+			echo 'setting saved'
+		elsif cmd[2] =~ /^(?:false|no|off)$/i
+			GameSettings['look'] = false
+			echo 'setting saved'
+		else
+			# fixme
+		end
+	elsif cmd[1] =~ /^object/
+		if cmd[2] =~ /^(?:true|yes|on)$/i
+			GameSettings['objects'] = true
+			echo 'setting saved'
+		elsif cmd[2] =~ /^(?:false|no|off)$/i
+			GameSettings['objects'] = false
+			echo 'setting saved'
+		else
+			echo 'huh'
+			# fixme
+		end
+	elsif cmd[1] =~ /^save-?map/
+		if cmd[2] =~ /^(?:true|yes|on)$/i
+			GameSettings['save_map'] = true
+			echo 'setting saved'
+		elsif cmd[2] =~ /^(?:false|no|off)$/i
+			GameSettings['save_map'] = false
+			echo 'setting saved'
+		else
+			echo 'huh'
+			# fixme
+		end
+	else
+		echo "You're doing it wrong."
+	end
+
+
+elsif cmd[0] == 'list'
+	respond
+	respond "       lazy: #{GameSettings['lazy'] ? 'on' : 'off'}"
+	respond "    objects: #{GameSettings['objects'] ? 'on' : 'off'}"
+	respond "       look: #{GameSettings['look'] ? 'on' : 'off'}"
+	respond "   save-map: #{GameSettings['save_map'] ? 'on' : 'off'}"
+	respond
+	respond "map pending: #{GameSettings['map_pending'].empty? ? '(none)' : GameSettings['map_pending'].keys.join(', ')}"
+	respond
+	respond "   map done: #{GameSettings['map_done'].empty? ? '(none)' : GameSettings['map_done'].join(', ')}"
+	respond
+	respond "fix pending: #{GameSettings['fix_pending'].empty? ? '(none)' : GameSettings['fix_pending'].keys.join(', ')}"
+	respond
+	respond "   fix done: #{GameSettings['fix_done'].empty? ? '(none)' : GameSettings['fix_done'].join(', ')}"
+	respond
+
+else
+	script_starter = "#{$lich_char}#{script.name}"
+	script_spacerr = ''.ljust(script_starter.length, ' ')
+	respond
+	respond "This script edits your local map database."
+	respond
+	respond "Usage:"
+	respond
+	respond "   #{script_starter} boundary   Marks the current room as already checked, which"
+	respond "   #{script_spacerr}            may keep the script in an area while mapping."
+	respond
+	respond "   #{script_starter} map        Map mode.  Finds new rooms and directions and adds"
+	respond "   #{script_spacerr}            them to the map database."
+	respond
+	respond "   #{script_starter} fix        Fix mode.  Tests existing directions in the map database"
+	respond "   #{script_spacerr}            and makes sure they lead to the room they're supposed to."
+	respond "   #{script_spacerr}            This mode allows you to add multiple room descriptions."
+	respond
+	respond "   #{script_starter} new        Starts a new mapping session, which just means no rooms"
+	respond "   #{script_spacerr}            are marked done or pending."
+	respond
+	respond "   #{script_starter} check      Does some quick checks on the map database without moving."
+	respond
+	respond "   #{script_starter} info       Shows a few stats."
+	respond
+	respond "   #{script_starter} set lazy on            Exit when no rooms are pending (in map or fix mode)."
+	respond
+	respond "   #{script_starter} set lazy off           Continue to the closest room that hasn't been checked"
+	respond "   #{script_spacerr}                        when no rooms are pending."
+	respond
+	respond "   #{script_starter} set objects <on|off>   Test objects in the room to see if they lead somewhere."
+	respond
+	respond "   #{script_starter} set look <on|off>      Look at object in the room to possibly find more objects"
+	respond "   #{script_spacerr}                        (doesn't do anything if objects setting is off)."
+	respond
+	respond "   #{script_starter} set save-map <on|off>  Save map database when the script exits"
+	respond
+	respond "This script is not foolproof."
+	respond
+	exit
+end

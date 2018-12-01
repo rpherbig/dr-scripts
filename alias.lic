@@ -1,0 +1,214 @@
+#quiet
+=begin
+
+	Implements aliases for Lich.
+
+	Start the script and type ;alias help
+
+	author: Tillmen (tillmen@lichproject.org)
+	game: any
+	tags: core
+	required: Lich >= 4.6.0
+	version: 0.4
+
+	changelog:
+		0.4 (2014-11-13):
+			remove leading spaces before sending the alias target
+		0.3 (2014-11-07):
+			sort ;alias list
+		0.2 (2014-10-05):
+			don't crash from recursive aliases 
+
+=end
+
+if script.vars[1] =~ /^stop/i
+	if UpstreamHook.list.include('alias-service')
+		UpstreamHook.remove('alias-service')
+		respond "\n--- Lich: alias service stopped\n\n"
+	else
+		respond "\n--- Lich: alias service is not running\n\n"
+	end
+	exit
+end
+
+db = Script.open_file('db3')
+character = "#{XMLData.game.downcase}_#{XMLData.name.downcase}".gsub(/[^a-z_]/, '').encode('UTF-8')
+
+db.execute("CREATE TABLE IF NOT EXISTS global (trigger TEXT NOT NULL, target TEXT NOT NULL, UNIQUE(trigger));")
+db.execute("CREATE TABLE IF NOT EXISTS #{character} (trigger TEXT NOT NULL, target TEXT NOT NULL, UNIQUE(trigger));")
+
+character_regex = nil
+global_regex = nil
+
+update_regex = proc {
+	global_regex = Array.new
+	db.execute("SELECT trigger FROM global;") do |row|
+		global_regex.push(Regexp.escape(row[0]))
+	end
+	if global_regex.empty?
+		global_regex = nil
+	else
+		global_regex = /^(?:<c>)?(#{global_regex.join('|')})(?:\s+|$)(.*)/i
+	end
+
+	character_regex = Array.new
+	db.execute("SELECT trigger FROM #{character};") do |row|
+		character_regex.push(Regexp.escape(row[0]))
+	end
+	if character_regex.empty?
+		character_regex = nil
+	else
+		character_regex = /^(?:<c>)?(#{character_regex.join('|')})(?:\s+|$)(.*)/i
+	end
+	true
+}
+
+update_regex.call
+
+hook_proc = proc { |client_string|
+	if client_string =~ /^(?:<c>)?#{$lich_char}alias\s+(.*)/
+		args = $1
+		if args =~ /^(\-\-global\s+)?(?:add|set)\s+(\-\-global\s+)?([^=]+)=\s*(.+)$/i
+			if ($1 || $2)
+				table = 'global'
+			else
+				table = character
+			end
+			trigger = $3.strip
+			target = $4
+			if old_target = db.get_first_value("SELECT target FROM #{table} WHERE trigger=?", trigger.encode('UTF-8'))
+				db.execute("UPDATE #{table} SET target=? WHERE trigger=?;", target.encode('UTF-8'), trigger.encode('UTF-8'))
+				respond "\n--- Alias updated.  (old alias was: #{old_target})\n\n"
+			else
+				db.execute("INSERT INTO #{table} (trigger,target) VALUES(?,?);", trigger.encode('UTF-8'), target.encode('UTF-8'))
+				respond "\n--- Alias saved\n\n"
+			end
+			update_regex.call
+		elsif args =~ /^(\-\-global\s+)?(?:rem(?:ove)?|del(?:ete)?)\s+(\-\-global\s+)?(.+)/i
+			if ($1 || $2)
+				table = 'global'
+			else
+				table = character
+			end
+			trigger = $3
+			if target = db.get_first_value("SELECT target FROM #{table} WHERE trigger=?", trigger.encode('UTF-8'))
+				db.execute("DELETE FROM #{table} WHERE trigger=?", trigger.encode('UTF-8'))
+				respond "\n--- Alias deleted (#{trigger} => #{target})\n\n"
+			else
+				respond "\n--- Alias was not found in #{if table == 'global'; 'global'; else; "#{XMLData.name}'s"; end} list\n\n"
+			end
+		elsif args =~ /^list$/i
+			output = "\nGlobal Aliases:\n\n"
+			list = Array.new
+			db.execute("SELECT trigger,target FROM global;") do |row|
+				list.push "   #{row[0]} => #{row[1]}\n"
+			end
+			if list.empty?
+				output.concat "   (none)\n"
+			else
+				output.concat list.sort.join
+			end
+			output.concat "\n#{XMLData.name}'s Aliases:\n\n"
+			list.clear
+			db.execute("SELECT trigger,target FROM #{character};") do |row|
+				list.push "   #{row[0]} => #{row[1]}\n"
+			end
+			if list.empty?
+				output.concat "   (none)\n"
+			else
+				output.concat list.sort.join
+			end
+			output.concat "\n"
+			respond output
+		elsif args =~ /^reload/i
+			update_regex.call
+			respond "\n--- Alias data reloaded\n\n"
+		elsif args =~ /^stop/i
+			UpstreamHook.remove('alias-service')
+			db.close rescue()
+			respond "\n--- Lich: alias service stopped\n\n"
+		else
+			output = "\n"
+			output.concat "Usage:\n"
+			output.concat "\n"
+			output.concat "     #{$clean_lich_char}alias add <trigger> = <target>\n"
+			output.concat "     #{$clean_lich_char}alias add --global <trigger> = <target>\n"
+			output.concat "          Creates a new alias.  When you send a command that starts with <trigger>, it will be replaced\n"
+			output.concat "          with <target>.  If --global is specified, the alias will be active for all characters.\n"
+			output.concat "          \\r and \\? in the target are treated special.\n"
+			output.concat "\n"
+			output.concat "     #{$clean_lich_char}alias remove <trigger>\n"
+			output.concat "     #{$clean_lich_char}alias remove --global <trigger>\n"
+			output.concat "          Deletes the given alias\n"
+			output.concat "\n"
+			output.concat "     #{$clean_lich_char}alias list\n"
+			output.concat "          Lists the currently active aliases\n"
+			output.concat "\n"
+			output.concat "Examples:\n"
+			output.concat "\n"
+			output.concat "     ;alias add zap = ;eq cast(901, \"\\?\")\n"
+			output.concat "     ;alias add --global ;code = ;lnet chat on code\n"
+			output.concat "     ;alias add --global ls = look\n"
+			output.concat "\n"
+			respond output
+		end
+		nil
+	elsif caller.count { |x| x =~ /do_client/ } < 2
+		if character_regex and (client_string =~ character_regex)
+			trigger, extra = $1, $2
+			if target = db.get_first_value("SELECT target FROM #{character} WHERE trigger=?;", trigger.encode('UTF-8'))
+				target = target.split('\\r')#.collect { |line| line.sub(/^\s+/, '') }
+				if extra.empty?
+					target.collect! { |line| line.gsub('\\?', '') }
+				elsif target.any? { |line| line.include?('\\?') }
+					target.collect! { |line|
+						if line =~ /^;e.*"\\\?"/
+							line.gsub('"\\?"', extra.inspect)
+						elsif line.include?('\\?')
+							line.gsub('\\?', extra)
+						else
+							line
+						end
+					}
+				elsif target.length == 1
+					target.first.concat(" #{extra}")
+				end
+				target.each { |line| do_client("#{line.chomp}\n") }
+			else
+				respond "[alias: fixme 1]"
+			end
+			nil
+		elsif global_regex and (client_string =~ global_regex)
+			trigger, extra = $1, $2
+			if target = db.get_first_value("SELECT target FROM global WHERE trigger=?;", trigger.encode('UTF-8'))
+				target = target.split('\\r')#.collect { |line| line.sub(/^\s+/, '') }
+				if extra.empty?
+					target.collect! { |line| line.gsub('\\?', '') }
+				elsif target.any? { |line| line.include?('\\?') }
+					target.collect! { |line|
+						if line =~ /^;e.*"\\\?"/
+							line.gsub('"\\?"', extra.inspect)
+						elsif line.include?('\\?')
+							line.gsub('\\?', extra)
+						else
+							line
+						end
+					}
+				elsif target.length == 1
+					target.first.concat(" #{extra}")
+				end
+				target.each { |line| do_client("#{line.chomp}\n") }
+			else
+				respond "[alias: fixme 2]"
+			end
+			nil
+		else
+			client_string
+		end
+	else
+		client_string
+	end
+}
+
+UpstreamHook.add('alias-service', hook_proc)
+respond "--- Lich: alias service started"

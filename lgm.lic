@@ -1,0 +1,375 @@
+=begin
+
+  Lich Gem Manager:
+
+  this script is designed to bring better dependency management to
+  the Lich ecosystem.
+  
+  What does it do?
+    1. it installs bundler (https://bundler.io)
+    2. creates the <lich folder>/lgm/ directory
+    3. generates a Gemfile there so that bundler can manage your dependencies
+    4. installs Olib (my core extensions for Gemstone IV)
+    5. autoupdates dependencies when you login (this will probably change to not run everytime after development)
+
+  permissions:
+    - this script makes network requests and writes to the filesystem
+      you must ;trust it for it to work
+
+  author: Ondreian
+  game: any
+  tags: core
+  required: Lich >= 4.3.12
+  version: 0.0.5
+
+  changelog:
+    0.0.1 initial release
+    0.0.2 use IO.popen to read data from commands dynamically
+    0.0.3 fix ssl verification on Windows systems
+    0.0.4 check for gem executable in the path
+    0.0.5 refresh Gem cache for installed gems after updates
+
+=end
+unless $SAFE == 0
+	echo "this script must be trusted to work (;trust #{script.name})"
+	exit
+end
+
+require "json"
+require "net/http"
+require "base64"
+require "yaml"
+require "ostruct"
+require "digest/sha1"
+require "fileutils"
+require "optparse"
+require "open-uri"
+
+##
+## Lich Gem Manager
+##
+module LGM
+  ##
+  ## interface for working with Bundler
+  ##
+  module Manager
+    NAME         = "bundler"
+    # try always installing latest
+    VERSION      = nil
+    BUNDLER_SPEC = Gem::Dependency.new(NAME, VERSION)
+    ##
+    ## @brief      exposes the self dependency of the bundler gem
+    ##             LGM uses to manage dependencies
+    ##
+    ## @return     Gem::Dependency
+    ##
+    def self.dependency
+      BUNDLER_SPEC
+    end
+    ##
+    ## @brief      check to see if bundler is already installed
+    ##
+    ## @return     Boolean
+    ##
+    def self.exists?
+      self.dependency.matching_specs.max_by(&:version)
+    end
+    ##
+    ## @brief      attempts to install bundler
+    ##
+    def self.install!
+      begin
+        Gem.install NAME, self.dependency.requirement
+      rescue Exception => e
+        respond %{
+          Error: installing #{NAME}
+
+          Message:
+            #{e.message}
+          
+          Stack:
+            #{e.backtrace}
+
+          ...attempting autorecovery for borked ssl
+        }
+        LGM.fix_ssl
+        retry
+      end
+    end
+    ##
+    ## @brief      maybe installs bundler if it does not already exist
+    ##
+    def self.maybe_install!
+      unless Manager.exists?
+        echo "installing bundler... this may take some time"
+        install!
+        echo "...success"
+      end
+    end
+  end
+
+  class Opts
+    def self.parse(args=Script.current.vars)
+      parsed = OpenStruct.new
+      
+      parser = OptionParser.new do |opts|
+        opts.banner = "
+        lgm (lich gem manager)
+
+        usage: ;lgm [options]
+        "
+
+        opts.separator ""
+
+        opts.on("-I", "--init", "init lgm") do |lib|
+          parsed.command = :init
+        end
+
+        opts.on("-i", "--install=[gem]", "install [gem] and add it to your Gemfile") do |lib|
+          parsed.command = :install
+          parsed.lib     = lib
+        end
+
+        opts.on("-u", "--update", "update all installed gems") do
+          parsed.command = :update
+        end
+
+        opts.on("-v", "--version=[version]", "specify the version of the gem you wish to install") do |v|
+          parsed.version = v
+        end
+
+        opts.on("-h", "--help", "show this message") do
+          respond opts
+          exit
+        end
+
+        opts.on("-d", "--debug", "show some debug messaging") do
+          parsed.debug = true
+        end
+      end
+
+      parser.parse!(args)
+
+      return parsed
+    end
+  end
+
+  DATA_DIR = File.join($lich_dir, "lgm")
+  GEM_FILE = File.join(DATA_DIR, "Gemfile")
+  ENV["BUNDLE_GEMFILE"] = GEM_FILE
+
+  INITIAL_DEPS = [
+    ["Olib"]
+  ]
+
+  @@opts = Opts.parse
+
+  def self.opts
+    @@opts
+  end
+
+  def self.debug(msg, label=nil)
+    if opts.debug
+      respond %{[#{Script.current.name}.debug#{label ? ".#{label}" : ""}] #{msg}}
+    end
+  end
+
+  def self.update_system_gem!
+    run("gem update --system")
+  end
+
+  def self.data_file(name)
+    File.join(DATA_DIR, name)
+  end
+
+  def self.download_file(remote, outfile)
+    File.open(outfile, "wb") do |saved_file|
+      # the following "open" is provided by open-uri
+      open(remote, "rb") do |read_file|
+        saved_file.write(read_file.read)
+      end
+    end
+  end
+
+  def self.clobber(lib)
+    stale = $LOADED_FEATURES.select {|path| path.include?("gems") && path =~ /#{lib}/ }
+    unless stale.empty?
+      stale.each do |old|
+        begin
+          if old.end_with?(".rb")
+            load old
+            debug old, :reloaded
+          else
+            debug old, :skipping
+          end
+        rescue Exception => e
+          #debug e.message, :error
+        end
+      end
+      debug "#{stale.size} files", :clobbered
+    else
+      begin
+        require lib
+        debug lib, :required
+      rescue Exception => e
+        #debug e.message, :require_error
+      end
+    end
+  end
+
+  def self.fix_ssl
+    original_version = %x{gem --version}
+    download_file("http://rubygems.org/gems/rubygems-update-2.6.12.gem", 
+      data_file("rubygems-update-2.6.10.gem"))
+    run("gem install --local --no-rdoc --silent rubygems-update-2.6.10.gem")
+    run("update_rubygems")
+    run("gem uninstall rubygems-update -x")
+    respond %{
+      i probably worked...
+      
+      you have to log out and back in to reload the Lich environment
+
+      if you do not get a success after that, please tell Ondreian
+    }
+  end
+  ##
+  ## find an executable in the environment
+  ##
+  def self.which(cmd)
+    exts = ENV['PATHEXT'] ? ENV['PATHEXT'].split(';') : ['']
+    ENV['PATH'].split(File::PATH_SEPARATOR).each do |path|
+      exts.each do |ext|
+        exe = File.join(path, "#{cmd}#{ext}")
+        return exe if File.executable?(exe) && !File.directory?(exe)
+      end
+    end
+    return nil
+  end
+  ##
+  ## @brief      initializes the LGM application data
+  ##
+  def self.init!
+    FileUtils.mkdir_p(DATA_DIR)
+    Manager.maybe_install!
+    require "bundler"
+    unless File.exists?(GEM_FILE)
+      update_system_gem!
+      run "bundle init"
+      INITIAL_DEPS.each do |dep|
+        install *dep
+      end
+    else
+      update!
+    end
+  end
+  ##
+  ## @brief      runs a code block within the pwd context of DATA_DIR
+  ##
+  ## @param      block  The block
+  ##
+  ## @return     self
+  ##
+  def self.in_context(&block)
+    if Dir.pwd == DATA_DIR
+      block.call
+    else
+      Dir.chdir(DATA_DIR) do
+        block.call
+      end
+    end
+    self
+  end
+  ##
+  ## @brief      runs a bundler command in a clean lgm context
+  ##
+  ## @param      cmd   The command
+  ##
+  ## @return     self
+  ##
+  def self.run(cmd)
+    LGM.debug "#{cmd}", :exec
+    in_context do
+      IO.popen(cmd) do |io|
+        while line = io.gets
+          respond line
+        end
+      end
+    end
+  end
+
+  def self.reload_env!
+    Gem.clear_paths
+    Gem.loaded_specs.values.each do |spec|
+      clobber spec
+    end
+    LGM.debug "environment reloaded"
+  end
+  ##
+  ## @brief      lgm contextified bundle install
+  ##
+  ## @return     self
+  ##
+  def self.install!
+    run "bundle install"
+    reload_env!
+  end
+  ##
+  ## @brief      lgm contextified bundle update
+  ##             to ensure that dependencies are kept fresh and clean
+  ##
+  ## @return     self
+  ##
+  def self.update!
+    run "bundle update"
+    reload_env!
+  end
+  ##
+  ## @brief      installs a gem within the lgm shared context
+  ##  
+  ## @example    LGM.install("rails", version: "4.0.0")
+  ##
+  ## @param      gem_name  The gem name
+  ## @param      args      The arguments
+  ##
+  ## @return     self
+  ##
+  def self.install(gem_name, **args)
+    LGM.debug("installing #{gem_name}", :install)
+    run "bundle add #{gem_name}" + ([:version, :source].reduce("") do |memo, flag|
+      if args[flag].nil?
+        memo
+      else 
+        memo + " --" + flag.to_s + "=" + args[flag].to_s
+      end
+    end)
+  end
+end
+
+LGM.debug %{ opts : #{LGM.opts}}
+LGM.debug %{  gem : #{LGM.which("gem")}}
+LGM.debug %{ data : #{LGM::DATA_DIR}}
+
+if LGM.which("gem").nil?
+  raise Exception.new(%{
+    `gem` not found in path
+
+    you forgot to check `Add Ruby executables to your PATH`
+
+    when installing Ruby
+    
+    screenshot : http://bit.ly/installing-ruby
+  })
+end
+
+
+
+case LGM.opts.command
+when :install
+  LGM.install(LGM.opts.lib, **LGM.opts.to_h)
+when :update
+  LGM.update!
+when :init
+  LGM.init!
+else
+  respond LGM::Opts.parse(["--help"])
+end

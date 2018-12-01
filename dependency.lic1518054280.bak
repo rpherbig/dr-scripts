@@ -1,0 +1,1244 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_development#dependency
+=end
+
+require 'json'
+require 'net/http'
+require 'base64'
+require 'yaml'
+require 'ostruct'
+require 'digest/sha1'
+
+$DEPENDENCY_VERSION = '1.2'
+
+toggle_unique
+no_pause_all
+no_kill_all
+
+class Object
+  # IMPORT FUTURE LAWLZ
+  def itself
+    self
+  end
+end
+
+class ArgParser
+  def parse_args(data, flex_args = false)
+    raw_args = variable.first
+    baselist = variable.drop(1).dup
+
+    unless baselist.size == 1 && baselist.grep(/^help$|^\?$|^h$/).any?
+
+      result = data.map { |definition| check_match(definition, baselist.dup, flex_args) }.compact
+
+      return result.first if result.length == 1
+
+      if result.empty?
+        echo "***INVALID ARGUMENTS DON'T MATCH ANY PATTERN***"
+        respond "Provided Arguments: '#{raw_args}'"
+      elsif result.length > 1
+        echo '***INVALID ARGUMENTS MATCH MULTIPLE PATTERNS***'
+        respond "Provided Arguments: '#{raw_args}'"
+      end
+
+    end
+
+    display_args(data)
+    exit
+  end
+
+  def display_args(data)
+    data.each do |def_set|
+      respond ''
+      respond "  ;#{Script.current.name} " + def_set.map { |x| format_item(x) }.join(' ')
+      def_set.each { |x| respond "   #{(x[:display] || x[:name]).ljust(12)} #{x[:description]} #{x[:options] ? '[' + x[:options].join(', ') + ']' : ''}"; }
+    end
+  end
+
+  private
+
+  def matches_def(definition, item)
+    echo "#{definition}:#{item}" if UserVars.parse_args_debug
+    return true if definition[:regex] && definition[:regex] =~ item
+    return true if definition[:options] && definition[:options].find { |option| item =~ /^#{option}#{'$' if definition[:option_exact]}/i }
+    false
+  end
+
+  def check_match(defs, vars, flex)
+    args = OpenStruct.new
+
+    defs.reject { |x| x[:optional] }.each do |definition|
+      return nil unless matches_def(definition, vars.first)
+
+      args[definition[:name]] = vars.first.downcase
+      vars.shift
+    end
+
+    defs.select { |x| x[:optional] }.each do |definition|
+      if match = vars.find { |x| matches_def(definition, x) }
+        args[definition[:name]] = match.downcase
+        vars.delete(match)
+      end
+    end
+
+    if flex
+      args.flex = vars
+    else
+      return nil unless vars.empty?
+    end
+    args
+  end
+
+  def format_item(definition)
+    item = definition[:display] || definition[:name]
+    if definition[:optional]
+      item = "[#{item}]"
+    elsif definition[:variable] || definition[:options]
+      item = "<#{item}>"
+    end
+    item
+  end
+end
+
+def parse_args(defn, flex_args = false)
+  ArgParser.new.parse_args(defn, flex_args)
+end
+
+def display_args(defn)
+  ArgParser.new.display_args(defn)
+end
+
+arg_definitions = [
+  [
+    { name: 'debug', regex: /debug/i, optional: true },
+    { name: 'install', regex: /install/i, optional: true }
+  ]
+]
+
+args = parse_args(arg_definitions)
+
+debug = args.debug
+install = args.install
+
+class OpenStruct
+  def new_ostruct_member(name)
+    name = name.to_sym
+    unless respond_to?(name)
+      define_singleton_method(name) { |*_a| @table[name] }
+      define_singleton_method("#{name}=") { |x| modifiable[name] = x }
+    end
+    name
+  end
+  protected :new_ostruct_member
+
+  def method_missing(mid, *args)
+    mname = mid.id2name
+    len = args.length
+    if mname.chomp!('=')
+      if len != 1
+        raise ArgumentError, "wrong number of arguments (#{len} for 1)", caller(1)
+      end
+      modifiable[new_ostruct_member(mname)] = args[0]
+    elsif len.zero?
+      @table[mid]
+    elsif len == 1
+      echo("Failed to find yaml setting #{mid}, using default:#{args[0]}")
+      args[0]
+    else
+      raise NoMethodError, "undefined method `#{mid}' for #{self}", caller(1)
+    end
+  end
+end
+
+class ScriptManager
+  attr_reader :autostarts
+
+  def initialize(debug)
+    @debug = debug
+    @git_token = '4491b4c6' + '20864db1575' + '3542a5d8729cf362acd1c'
+    @paste_bin_token = 'dca351a27a8af501a8d3123e29af7981'
+    @paste_bin_url = 'http://pastebin.com/api/api_post.php'
+    @firebase_url = 'https://dr-scripts.firebaseio.com/'
+    @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
+    @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
+    @lich_url = 'https://api.github.com/repos/rcuhljr/dr-lich/git/trees/master'
+    UserVars.autostart_scripts ||= []
+    UserVars.autostart_scripts.uniq!
+    UserVars.autostart_scripts = UserVars.autostart_scripts - ['dependency']
+    Settings['autostart'] ||= []
+    Settings['autostart'].uniq!
+    Settings['autostart'] = Settings['autostart'] - ['dependency']
+
+    Settings['base_versions'] ||= {}
+
+    @developer = Settings['dependency-developer'] || false
+    @add_autos = []
+    @remove_autos = []
+    update_autostarts
+    @self_updated = false
+    @thievery_queue = []
+    @shop_update_queue = []
+
+    @enable_fork = LICH_VERSION =~ /f/
+
+    @versions = nil
+  end
+
+  def updated_dependency?
+    @self_updated
+  end
+
+  def update_autostarts
+    @autostarts = UserVars.autostart_scripts + Settings['autostart']
+  end
+
+  def toggle_developer
+    @developer = !@developer
+  end
+
+  def add_global_auto(script)
+    @add_autos << script
+  end
+
+  def remove_global_auto(script)
+    @remove_autos << script
+  end
+
+  def get_versions
+    if @versions
+      @versions
+    else
+      @versions = build_version_hash
+    end
+  end
+
+  def build_version_hash
+    Dir['./scripts/*.lic'].each_with_object({}) do |path, versions|
+      file = File.basename(path)
+      body = File.open("./scripts/#{file}", 'r').readlines.join('')
+      sha = Digest::SHA1.hexdigest('blob' + " #{body.size}" + "\0" + body)
+      versions[file] = sha
+    end
+  end
+
+  def autos_proccessed?
+    @add_autos.empty? && @remove_autos.empty?
+  end
+
+  def queue_thieving_update(id, update)
+    @thievery_queue << [id, update]
+  end
+
+  def queue_shop_update(shop_data)
+    @shop_update_queue << shop_data
+  end
+
+  def run_queue
+    Settings['dependency-developer'] = @developer
+    update = false
+
+    unless @add_autos.empty?
+      update = true
+      @add_autos.each { |script| Settings['autostart'] << script }
+      @add_autos = []
+    end
+    unless @remove_autos.empty?
+      update = true
+      @remove_autos.each { |script| Settings['autostart'].delete(script) }
+      @remove_autos = []
+    end
+    if @disable_fork
+      stop_download_lich
+      @disable_fork = nil
+    elsif @enable_fork
+      download_lich
+      @enable_fork = nil
+    end
+
+    submit_thieving_update(*@thievery_queue.pop) unless @thievery_queue.empty?
+    submit_shop_update(@shop_update_queue.pop) unless @shop_update_queue.empty?
+    update_autostarts if update
+  end
+
+  def submit_shop_update(shop_data)
+    partial = shop_data[:surfaces].nil?
+
+    key = "#{shop_data[:root_room]}-#{shop_data[:entrance]}"
+
+    uri = URI.parse("#{@firebase_url}/shop-data/#{key}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    begin
+      request = partial ? Net::HTTP::Patch.new(uri.request_uri) : Net::HTTP::Put.new(uri.request_uri)
+      request['Content-Type'] = 'application/json'
+      request.body = shop_data.to_json
+      response = http.request(request)
+      response.body.chomp
+    rescue => e
+      echo(e)
+      echo('Error in submitting shop data')
+    end
+  end
+
+  def get_script(filename, force = false)
+    filename = filename.dup
+    echo("checking:#{filename} force:#{force}") if @debug
+    download_script(filename, force)
+  end
+
+  def repo_scripts
+    $manager.get_status['tree'].map { |element| element['path'] }.select { |file| file.include?('.lic') && !file.include?('-setup') }
+  end
+
+  def start_scripts(force = false)
+    @versions = nil
+    repo_scripts.each { |name, _| get_script(name, force) }
+    custom_require.call(autostarts)
+  end
+
+  def queue_lich
+    @enable_fork = true
+  end
+
+  def unqueue_lich
+    @disable_fork = true
+  end
+
+  def download_lich
+    lich_data = make_request(@lich_url)['tree'].find { |data| data['path'] == 'lich.rbw' }
+    if LICH_VERSION =~ /f/ && Settings['lich_fork_sha'] == lich_data['sha']
+      echo('latest version of lich fork already downloaded.')
+      return
+    end
+    blob = make_request(lich_data['url'])
+    File.open('lich.rbw', 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    Settings['lich_fork_sha'] = lich_data['sha']
+    echo('New version of lich installed, please restart Lich.')
+  end
+
+  def stop_download_lich
+    Settings['lich_fork_sha'] = nil
+  end
+
+  def download_script(filename, force = false)
+    return if filename.nil? || filename.empty?
+    echo("downloading:#{filename}") if @debug
+    info = get_file_status(filename)
+    return unless info
+    return if @developer
+    return if get_versions[filename] == info['sha'] && !force
+
+    echo("info:#{info}") if @debug
+    blob = make_request(info['url'])
+    File.open("./scripts/#{filename}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+
+    @self_updated = true if filename == 'dependency.lic'
+  end
+
+  def verify_or_make_dir(path)
+    Dir.mkdir(path) unless Dir.exist?(path)
+  end
+
+  def setup_profiles
+    verify_or_make_dir './scripts/profiles'
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
+    make_request(profile_tree_url)['tree'].each do |setup_file|
+      echo("downloading #{setup_file}") if @debug
+      blob = make_request(setup_file['url'])
+      File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    end
+  end
+
+  def setup_data
+    verify_or_make_dir './scripts/data'
+    data_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
+    make_request(data_tree_url)['tree'].each do |setup_file|
+      echo("downloading #{setup_file}") if @debug
+      blob = make_request(setup_file['url'])
+      File.open("./scripts/data/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+    end
+  end
+
+  def update_local_stealing_yaml(id, update, new_entry = false)
+    stealing_path = './scripts/data/base-stealing.yaml'
+    stealing_data = $setupfiles.safe_load_yaml(stealing_path)
+    result = nil
+    if new_entry
+      stealing_data[:stealing_options].push(update)
+    else
+      stealing_data[:stealing_options].each do |data|
+        if data['id'] == id
+          result = data.dup
+          data.merge!(update)
+        end
+      end
+    end
+    File.open(stealing_path, 'w') { |file| file.print(stealing_data.to_yaml) }
+    result
+  end
+
+  def check_base_files
+    return if @developer
+    verify_or_make_dir './scripts/profiles'
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
+    make_request(profile_tree_url)['tree']
+      .select { |data| /^base.+yaml/ =~ data['path'] }
+      .reject { |setup_file| setup_file['sha'] == Settings['base_versions'][setup_file['path']] }
+      .each do |setup_file|
+        echo("downloading #{setup_file}") if @debug
+        blob = make_request(setup_file['url'])
+        File.open("./scripts/profiles/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+        Settings['base_versions'][setup_file['path']] = setup_file['sha']
+      end
+  end
+
+  def check_data_files
+    return if @developer
+    verify_or_make_dir './scripts/data'
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
+    make_request(profile_tree_url)['tree']
+      .select { |data| /^base.+yaml/ =~ data['path'] }
+      .reject { |setup_file| setup_file['sha'] == Settings['base_versions'][setup_file['path']] }
+      .each do |setup_file|
+        echo("downloading #{setup_file}") if @debug
+        blob = make_request(setup_file['url'])
+        File.open("./scripts/data/#{setup_file['path']}", 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+        Settings['base_versions'][setup_file['path']] = setup_file['sha']
+      end
+  end
+
+  def run_script(filename)
+    filename.sub!(/\.lic$/, '')
+    echo("refresh:#{filename}") if @debug
+    stop_script(filename) if Script.running?(filename)
+    pause 0.1 while Script.running?(filename)
+    start_script(filename)
+  end
+
+  def file_outdated?(filename)
+    echo("file_outdated?:#{filename}") if @debug
+    local_version = get_versions[filename]
+    echo("local:#{local_version}") if @debug
+    info = get_file_status(filename)
+    unless info
+      echo("file not found in repository: #{filename}")
+      return false
+    end
+    echo("remote:#{info['sha']}") if @debug
+    info['sha'] != local_version
+  end
+
+  def get_file_status(filename)
+    get_status['tree'].find { |element| element['path'] == filename }
+  end
+
+  def get_status
+    return @status if @status && Time.now - @status_time <= 30 # prevent flooding
+    @status_time = Time.now
+    @status = make_request(@status_url)
+  end
+
+  def make_request(raw_uri)
+    uri = URI.parse(raw_uri)
+    args = { access_token: @git_token }
+    uri.query = URI.encode_www_form(args)
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Get.new(uri.request_uri)
+
+    response = http.request(request)
+    JSON.parse(response.body)
+  end
+
+  def submit_thieving_update(id, update)
+    return submit_new_thieving_item(id, update) if update.delete('new')
+
+    old_data = update_local_stealing_yaml(id, update)
+
+    data = get_current_stealing_data(id)
+
+    update.delete_if do |key, value|
+      echo("checking:#{data[key]}:#{old_data[key]}") if UserVars.crossing_trainer_debug
+      key =~ /_min$/ ? data[key] && data[key] != old_data[key] && value >= data[key] : data[key] && data[key] != old_data[key] && value <= data[key]
+    end
+
+    if update.empty?
+      echo('Nothing left to update') if UserVars.crossing_trainer_debug
+      return
+    end
+
+    echo("submitting:#{id}:#{update}") if UserVars.crossing_trainer_debug
+    uri = URI.parse("#{@firebase_url}/stealing-options/#{id}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Patch.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    request.body = update.to_json
+    response = http.request(request)
+    response.body.chomp
+  end
+
+  def submit_new_thieving_item(id, data)
+    id = (id.to_i + 1).to_s while get_current_stealing_data(id)
+
+    data['id'] = id
+
+    update_local_stealing_yaml(id, data, true)
+
+    echo("submittingNEW:#{id}:#{data}") if UserVars.crossing_trainer_debug
+
+    uri = URI.parse("#{@firebase_url}/stealing-options/#{id}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Put.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    request.body = data.to_json
+    response = http.request(request)
+    response.body.chomp
+  end
+
+  def get_current_stealing_data(id)
+    uri = URI.parse("#{@firebase_url}/stealing-options/#{id}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Get.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    response = http.request(request)
+    return nil if response.body.nil?
+    begin
+      JSON.parse(response.body.chomp)
+    rescue
+      return nil
+    end
+  end
+
+  def submit_pastebin(message_body)
+    uri = URI.parse(@paste_bin_url)
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = false
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Post.new(uri.request_uri)
+    request.set_form_data(api_dev_key: @paste_bin_token, api_paste_code: message_body, api_paste_private: '0', api_option: 'paste')
+
+    response = http.request(request)
+    result = response.body.chomp
+    if result.size >= 200
+      'Failed to upload pastebin.'
+    else
+      result
+    end
+  end
+
+  def submit_help_pastebin
+    message_body = "Trusted Scripts: #{Script.list_trusted.uniq}"
+    message_body += "\n"
+    message_body += Dir['./scripts/profiles/*.*'].join(',')
+    message_body += "\n"
+    message_body += Dir['./scripts/data/*.*'].join(',')
+    message_body += "\n"
+    message_body += "Lich Version: #{LICH_VERSION}"
+    message_body += "\n"
+    message_body += "Ruby Version: #{RUBY_VERSION}"
+    message_body += "\n"
+    message_body += "Dependency Version: #{$DEPENDENCY_VERSION}"
+    message_body += "\n"
+
+    Dir['./scripts/profiles/*.yaml'].map { |item| File.path(item) }.select { |path| path.include?("#{checkname}-") }.each do |path|
+      message_body += "\n****\n" * 3
+      message_body += path.to_s
+      message_body += "\n"
+      message_body += File.read(path)
+    end
+
+    submit_pastebin(message_body)
+  end
+end
+
+class BankbotManager
+  def initialize(debug)
+    @debug = debug
+    @save = false
+    @load = false
+    @transaction = ''
+    @ledger = {}
+  end
+
+  attr_reader :ledger
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    save_transaction
+    load_ledger
+  end
+
+  def save_bankbot_transaction(transaction, ledger)
+    @transaction = transaction
+    @ledger = ledger.to_yaml
+    @save = true
+  end
+
+  def load_bankbot_ledger
+    @load = true
+  end
+
+  private
+
+  def save_transaction
+    return unless @save
+    File.open("./#{checkname}-transactions.log", 'a') do |file|
+      file.puts('----------')
+      file.puts(Time.now)
+      file.puts(@transaction)
+      file.puts(@ledger)
+      file.puts('----------')
+    end
+    File.open("./#{checkname}-ledger.yaml", 'wb') { |file| file.puts(@ledger) }
+    @save = false
+  end
+
+  def load_ledger
+    return unless @load
+    @ledger = safe_load_yaml("./#{checkname}-ledger.yaml")
+    @load = false
+  end
+
+  def safe_load_yaml(path)
+    OpenStruct.new(YAML.load_file(path)).to_h
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return {}
+  end
+end
+
+class ReportbotManager
+  def initialize(debug)
+    @debug = debug
+    @save = false
+    @load = false
+    @whitelist = []
+  end
+
+  attr_reader :whitelist
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    save_whitelist
+    load_whitelist
+  end
+
+  def save_reportbot_whitelist(whitelist)
+    @whitelist = whitelist.to_yaml
+    @save = true
+  end
+
+  def load_reportbot_whitelist
+    @load = true
+  end
+
+  private
+
+  def save_whitelist
+    return unless @save
+    File.open('./reportbot-whitelist.yaml', 'wb') { |file| file.puts(@whitelist) }
+    @save = false
+  end
+
+  def load_whitelist
+    return unless @load
+    @whitelist = safe_load_yaml('./reportbot-whitelist.yaml')
+    @load = false
+  end
+
+  def safe_load_yaml(path)
+    YAML.load_file(path)
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return []
+  end
+end
+
+class SlackbotManager
+  def initialize(debug)
+    @debug = debug
+    @slackbot = nil
+    @username = nil
+    @messages = []
+  end
+
+  def run_queue
+    register_slackbot
+    send_messages
+  end
+
+  def register(username)
+    return if @slackbot
+
+    @username = username
+  end
+
+  def send_message(message)
+    return unless @slackbot
+    return unless message
+
+    @messages << message
+  end
+
+  private
+
+  def register_slackbot
+    return if @slackbot
+    return unless @username
+
+    custom_require.call('slackbot')
+    @slackbot = SlackBot.new
+  end
+
+  def send_messages
+    until @messages.empty?
+      message = @messages.shift
+      @slackbot.direct_message(@username, message)
+    end
+  end
+end
+
+class SetupFiles
+  def initialize(debug)
+    @debug = debug
+    @load = true
+    @save = false
+    @latest = false
+    @settings = {}
+    @extras = []
+    @base_file_stamps = {}
+    @base_files = {}
+    load_base_settings
+    load_data_settings
+  end
+
+  def request_settings(options)
+    request(options, false)
+  end
+
+  def request_data(file)
+    request(file, true)
+  end
+
+  def pending?
+    @load
+  end
+
+  def request(options, data_load = false)
+    @data_load = data_load
+    @load = true
+    @extras = options
+    @settings = {}
+  end
+
+  def loaded?
+    !@load
+  end
+
+  def run_queue
+    load_base_settings if @load
+    load_settings if @load && !@data_load
+    load_data if @load && @data_load
+    save_settings if @save
+  end
+
+  def save_character_settings(contents)
+    @contents = contents
+    @save = true
+  end
+
+  def save_settings
+    profile = "./scripts/profiles/#{checkname}-setup.yaml"
+    File.open(profile, 'wb') { |file| file.puts(@contents.to_yaml) }
+    @save = false
+  end
+
+  attr_reader :settings
+
+  def safe_load_yaml(path)
+    OpenStruct.new(YAML.load_file(path)).to_h
+  rescue => e
+    echo('*** ERROR PARSING YAML FILE ***')
+    echo(e.message)
+    return {}
+  end
+
+  def load_base_settings
+    Dir['./scripts/profiles/base*.yaml'].map { |item| File.basename(item) }.each do |filename|
+      file_path = "./scripts/profiles/#{filename}"
+      mtime = File.exist?(file_path) ? File.stat(file_path).mtime : Time.new(0)
+      if @base_file_stamps[filename] != mtime
+        @base_files[filename] = safe_load_yaml(file_path)
+      end
+      @base_file_stamps[filename] = mtime
+    end
+  end
+
+  def load_data_settings
+    Dir['./scripts/data/base*.yaml'].map { |item| File.basename(item) }.each do |filename|
+      file_path = "./scripts/data/#{filename}"
+      mtime = File.exist?(file_path) ? File.stat(file_path).mtime : Time.new(0)
+      if @base_file_stamps[filename] != mtime
+        @base_files[filename] = safe_load_yaml(file_path)
+      end
+      @base_file_stamps[filename] = mtime
+    end
+  end
+
+  def load_data
+    if @extras.is_a? Array
+      @settings = {}
+      @extras.each do |extra|
+        filename = "base-#{extra}.yaml"
+        @settings.merge!(@base_files[filename].dup) if @base_files[filename]
+      end
+      @settings = OpenStruct.new(@settings)
+    else
+      filename = "base-#{@extras}.yaml"
+      @settings = OpenStruct.new(@base_files[filename].dup) if @base_files[filename]
+    end
+    @load = false
+  end
+
+  def load_settings
+    profile = "./scripts/profiles/#{checkname}-setup.yaml"
+    settings = @base_files['base.yaml'].dup
+    if File.exist?(profile)
+      settings.merge!(safe_load_yaml(profile) || {})
+      @extras.each do |subfile|
+        filepath = "./scripts/profiles/#{checkname}-#{subfile}.yaml"
+        if File.exist?(filepath)
+          settings.merge!(safe_load_yaml(filepath))
+        else
+          echo("Tried to request setting file that doesn't exist '#{subfile}'")
+        end
+      end
+    end
+    @settings = transform_settings(settings)
+    @load = false
+  end
+
+  def transform_settings(settings)
+    s = OpenStruct.new(settings)
+
+    # Populate nil settings with default values
+    @base_files['base-empty.yaml'][:empty_values].each { |name, value| s[name] ||= value }
+
+    base_items = @base_files['base-items.yaml']
+    base_lootables = base_items[:lootables]
+    boxes = base_items[:box_nouns]
+    gems = base_items[:gem_nouns]
+    scrolls = base_items[:scroll_nouns]
+    s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
+
+    spells = @base_files['base-spells.yaml'][:spell_data]
+    s.offensive_spells.map! { |spell| spells[spell['name']] ? spells[spell['name']].merge(spell) : spell }
+
+    s.offensive_spells
+     .each_with_index
+     .select { |spell, _i| spell['skill'].casecmp('targeted magic').zero? || (spells[spell['name']]['skill'].casecmp('targeted magic').zero? && spell['skill'].casecmp('sorcery').zero?) }
+     .reject { |spell, _i| spell['prep'] }
+     .each { |_data, i| s.offensive_spells[i]['prep'] = 'target' }
+
+    s.buff_spells
+     .select { |spell| spells[spell] }
+     .each { |name, _data| s.buff_spells[name] = spells[name].merge(s.buff_spells[name]) }
+
+    s.lockpick_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+       spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+             .each { |_name, data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+     end
+
+    s.astrology_buffs['spells']
+     .each_with_index
+     .select do |spell, i|
+       spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
+             .each { |_name, data| s.astrology_buffs['spells'][i] = data.merge(spell) }
+     end
+
+    s.waggle_sets
+     .select { |set_name, set_spells| set_spells.select { |spell_name, spell_data| spells[spell_name].each { s.waggle_sets[set_name][spell_name] = spells[spell_name].merge(spell_data) } } }
+
+    # Pull sensitive settings from UserVars
+    s.crossing_training_sorcery_room ||= UserVars.crossing_training_sorcery_room
+    s.engineering_room ||= UserVars.engineering_room
+    s.outfitting_room ||= UserVars.outfitting_room
+    s.safe_room ||= UserVars.safe_room
+    s.safe_room_id ||= UserVars.safe_room_id
+    s.safe_room_empath ||= UserVars.safe_room_empath
+    s.slack_username ||= UserVars.slack_username
+    s.bankbot_name ||= UserVars.bankbot_name
+    s.bankbot_room_id ||= UserVars.bankbot_room_id
+
+    s
+  end
+end
+
+class MoonWatch
+  attr_reader :moon_data
+
+  def initialize(debug)
+    @debug = debug
+    @moon_data = {}
+    @firebase_url = 'https://dr-scripts.firebaseio.com/'
+    @queue = []
+    load_moon_data
+  end
+
+  def debug
+    @debug = !@debug
+  end
+
+  def connections
+    return nil unless @debug
+    [@f, @moon_source]
+  end
+
+  def load_moon_data
+    @last_connect = Time.now
+
+    uri = URI.parse("#{@firebase_url}/moon_data.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Get.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    response = http.request(request)
+    if response.body.nil?
+      @moon_data = nil
+    end
+    begin
+      @moon_data = JSON.parse(response.body.chomp)
+    rescue
+      @moon_data = nil
+    end
+
+  rescue => e
+    echo("error in moonwatch #{e.inspect}")
+  end
+
+  def queue_update(moon, data)
+    @queue << [moon, data]
+  end
+
+  def run_queue
+    if Time.now - @last_connect > 60
+      load_moon_data
+    end
+    return if @queue.empty?
+    item = @queue.shift
+    update_moon(item.first, item.last)
+  end
+
+  private
+
+  def update_moon(moon, data)
+    echo("updating #{moon} with #{data}") if @debug
+    uri = URI.parse("#{@firebase_url}/moon_data/#{moon}.json")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+
+    request = Net::HTTP::Put.new(uri.request_uri)
+    request['Content-Type'] = 'application/json'
+    request.body = data.to_json
+    response = http.request(request)
+    response.body.chomp
+  end
+
+end
+
+$setupfiles = SetupFiles.new(debug)
+$manager = ScriptManager.new(debug)
+$bankbot = BankbotManager.new(debug)
+$reportbot = ReportbotManager.new(debug)
+$slackbot = SlackbotManager.new(debug)
+
+def enable_moon_connection
+  $turn_on_moon_watch = true
+end
+
+def get_settings(options = [])
+  pause 0.05 while $setupfiles.pending?
+  $setupfiles.request_settings(options)
+  pause 0.05 until $setupfiles.loaded?
+  $setupfiles.settings
+end
+
+def get_data(file)
+  pause 0.05 while $setupfiles.pending?
+  $setupfiles.request_data(file)
+  pause 0.05 until $setupfiles.loaded?
+  $setupfiles.settings
+end
+
+def save_character_profile(new_file_contents)
+  $setupfiles.save_character_settings(new_file_contents)
+end
+
+def save_bankbot_transaction(transaction, ledger)
+  $bankbot.save_bankbot_transaction(transaction, ledger)
+end
+
+def load_bankbot_ledger
+  $bankbot.load_bankbot_ledger
+  pause 0.1 until $bankbot.loaded?
+  $bankbot.ledger
+end
+
+def save_reportbot_whitelist(whitelist)
+  $reportbot.save_reportbot_whitelist(whitelist)
+end
+
+def load_reportbot_whitelist
+  $reportbot.load_reportbot_whitelist
+  pause 0.1 until $reportbot.loaded?
+  $reportbot.whitelist
+end
+
+def send_slackbot_message(message)
+  $slackbot.send_message(message)
+end
+
+def register_slackbot(username)
+  $slackbot.register(username)
+end
+
+def format_name(name)
+  name =~ /\.lic$/ ? name : "#{name}.lic"
+end
+
+def format_yaml_name(name)
+  name =~ /\.yaml$/ ? name : "#{name}.yaml"
+end
+
+def custom_require
+  lambda do |script_names|
+    script_names = [script_names] unless script_names.is_a?(Array)
+    before = Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
+    respond("CR:#{before}:#{script_names}") if UserVars.bootstrap_debug
+    force_start_script('bootstrap', script_names)
+    until before >= Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
+      pause 0.05
+      respond("CR:waiting #{before}:#{script_names}") if UserVars.bootstrap_debug
+    end
+    respond("CR:done #{before}:#{script_names}") if UserVars.bootstrap_debug
+  end
+end
+
+def verify_script(script_names)
+  script_names = [script_names] unless script_names.is_a?(Array)
+  state = true
+  script_names
+    .reject { |name| Script.exists?(name) }
+    .each do |name|
+      echo "*** Failed to find a script named '#{name}' ***"
+      echo '*** Please report this to Etreu, Sheltim, or https://github.com/rpherbig/dr-scripts/issues  ***'
+      state = false
+    end
+  state
+end
+
+def get_script(script_name)
+  $manager.get_script(format_name(script_name), true)
+end
+
+def force_refresh_scripts
+  $manager.start_scripts
+end
+
+def list_tracked_scripts
+  $manager.get_versions.sort
+end
+
+def full_install
+  respond 'Removing lich autostarts for existing scripts...'
+  remove_from_autostart(managed_scripts)
+  respond 'Adding dependency.lic to lich autostart'
+  add_self_to_autostart
+  respond 'Creating a /profiles directory and downloading default profiles'
+  setup_profiles
+  respond 'Creating a /data directory and downloading data files'
+  setup_data
+  respond 'Backing up existing scripts and replacing with latest versions'
+  replace_all
+  respond 'Finished install!'
+end
+
+def replace_all
+  managed_scripts
+    .each do |script|
+      new_name = "#{script}#{Time.now.to_i}.bak"
+      respond "Renaming existing script #{script} to #{new_name}"
+      File.rename("./scripts/#{script}", "./scripts/#{new_name}")
+    end
+
+  respond 'Downloading all scripts'
+  $manager.repo_scripts.each(&method(:get_script))
+end
+
+def managed_scripts
+  local_scripts = Dir['./scripts/*.lic'].map { |item| File.basename(item) }
+  $manager.repo_scripts & local_scripts
+end
+
+def list_autostarts
+  $manager.autostarts
+end
+
+def autostart(script_names, global = true)
+  script_names = [script_names] unless script_names.is_a?(Array)
+  script_names.map!(&method(:format_name))
+  if global
+    script_names.each { |script| $manager.add_global_auto(script) }
+  else
+    script_names.each { |script| UserVars.autostart_scripts.push(script) unless UserVars.autostart_scripts.include?(script) }
+  end
+  script_names.each { |script| $manager.run_script(script) }
+end
+
+def stop_autostart(script)
+  if UserVars.autostart_scripts.include?(script)
+    UserVars.autostart_scripts.delete(script)
+  else
+    $manager.remove_global_auto(script)
+  end
+end
+
+def toggle_developer_mode
+  echo "Developer mode now set to: #{$manager.toggle_developer}"
+end
+
+def use_lich_fork
+  echo 'Now switching onto the DR lich fork...'
+  start_script('repository', ['unset-lich-updatable'])
+  $manager.queue_lich
+end
+
+def use_lich_main
+  echo 'Now switching onto the lich mainline...'
+  start_script('repository', ['set-lich-updatable'])
+  pause
+  start_script('repository', ['download-lich'])
+  pause
+  pause 1 while Script.running?('repository')
+  echo('New version of lich installed, please restart Lich.')
+end
+
+def toggle_lich_fork
+  echo 'THIS METHOD IS NO LONGER USED. USE ;e use_lich_fork and ;e use_lich_main'
+end
+
+def setup_profiles
+  $manager.setup_profiles
+end
+
+def setup_data
+  $manager.setup_data
+end
+
+def remove_from_autostart(scripts)
+  scripts.each do |script|
+    start_script('autostart', ['remove', '--global', File.basename(script, '.*')])
+    pause 0.1 while Script.running?('autostart')
+    start_script('autostart', ['remove', File.basename(script, '.*')])
+    pause 0.1 while Script.running?('autostart')
+  end
+end
+
+def add_self_to_autostart
+  start_script('autostart', ['add', '--global', File.basename('dependency', '.*')])
+  pause 0.1 while Script.running?('autostart')
+end
+
+def update_d
+  echo('Restarting Dependency in 2 seconds...')
+  force_start_script('bootstrap', ['wipe_constants'])
+  before_dying do
+    sleep 2
+    force_start_script('dependency')
+  end
+  stop_script('dependency')
+end
+
+def help_me(user = nil)
+  result = $manager.submit_help_pastebin
+  if user
+    LNet.send_message({ 'type' => 'private', 'to' => user }, result)
+  else
+    LNet.send_message({ 'type' => 'channel' }, result)
+  end
+end
+
+def submit_thieving_update(id, update)
+  $manager.queue_thieving_update(id, update)
+end
+
+def submit_shop_data(shop_data)
+  $manager.queue_shop_update(shop_data)
+end
+
+def get_all_moon_data
+  $moon_watch ? $moon_watch.moon_data : nil
+end
+
+def update_moon_data(moon, data)
+  $moon_watch.queue_update(moon, data)
+end
+
+full_install if install
+
+force_start_script('bootstrap', ['wipe_constants'])
+
+$manager.check_base_files
+$manager.check_data_files
+$manager.start_scripts
+
+if $manager.updated_dependency?
+  echo('Update found for dependency.lic')
+  update_d
+end
+
+before_dying do
+  $moon_watch = nil
+end
+
+loop do
+  if $turn_on_moon_watch && $moon_watch.nil?
+    $moon_watch = MoonWatch.new(debug)
+    $turn_on_moon_watch = nil
+  end
+
+  $manager.run_queue
+  $setupfiles.run_queue
+  $bankbot.run_queue
+  $reportbot.run_queue
+  $slackbot.run_queue
+  $moon_watch.run_queue if $moon_watch
+  pause 0.1
+end

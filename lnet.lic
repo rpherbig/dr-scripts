@@ -1,0 +1,1666 @@
+=begin
+
+	Chat client for Lich.
+
+	;lnet help
+
+	  author: Tillmen (tillmen@lichproject.org)
+	    game: any
+	    tags: core
+	required: Lich >= 4.3.12
+	 version: 1.6
+
+	changelog:
+		1.6 (2016-01-10):
+			fixed room id lookup for ;locate command
+			added alias feature
+		1.5 (2015-11-25):
+			added reply command (DR:Etreu)
+		1.4 (2015-05-13):
+			move channel owners and moderators to the front of the ;who list
+
+=end
+=begin
+
+		1.3 (2015-01-21):
+			give a warning if the system date is outside the range of the CA cert date
+			disable SSLv2 and SSLv3
+		1.2 (2015-01-16):
+			new host name
+		1.1 (2014-10-25):
+			workaround to deal with the plat_updater script disabling OpenSSL::SSL::VERIFY_PEER
+
+=end
+
+if $SAFE > 0
+	echo "error: This script needs to be trusted to work. (;trust #{script.name})"
+	exit
+end
+
+# fixme: option to separate private messages to familiar window
+# fixme: scrub
+
+require 'openssl'
+
+toggle_unique
+clear
+hide_me
+
+class LNet
+
+	@@server    ||= nil
+	@@script    ||= nil
+	@@options   ||= Hash.new
+	@@waiting   ||= Array.new
+	@@last_recv ||= Time.now
+	@@last_send ||= Time.now
+	@@last_priv ||= nil
+	@@secret    ||= Array.new
+	@@version     = '1.6'
+
+	@@server_restart = false
+
+	def LNet.server;        if $SAFE==0; @@server;        else; nil; end; end
+	def LNet.server=(val);  if $SAFE==0; @@server=val;    else; nil; end; end
+	def LNet.script;        if $SAFE==0; @@script;        else; nil; end; end
+	def LNet.script=(val);  if $SAFE==0; @@script=val;    else; nil; end; end
+	def LNet.options;       if $SAFE==0; @@options;       else; nil; end; end
+	def LNet.options=(val); if $SAFE==0; @@options=val;   else; nil; end; end
+	def LNet.alias;         if $SAFE==0; @@alias;         else; nil; end; end
+	def LNet.alias=(val);   if $SAFE==0; @@alias=val;     else; nil; end; end
+
+	def LNet.server_restart;       if $SAFE==0; @@server_restart;     else; nil; end; end
+	def LNet.server_restart=(val); if $SAFE==0; @@server_restart=val; else; nil; end; end
+
+	def LNet.store_secret=(val); if $SAFE==0; @@secret=val;    else; nil; end; end
+	def LNet.secret=(val);       if $SAFE==0; @@secret[0]=val; else; nil; end; end
+
+	def LNet.last_send
+		@@last_send
+	end
+
+	def LNet.last_recv
+		@@last_recv
+	end
+
+	def LNet.last_priv
+		@@last_priv
+	end
+
+	def LNet.connect
+		begin
+			hostname = 'lnet.lichproject.org'
+			port     = 7155
+			ca_cert  = OpenSSL::X509::Certificate.new("-----BEGIN CERTIFICATE-----\nMIIDlTCCAn2gAwIBAgIJAKuu65i5NsruMA0GCSqGSIb3DQEBCwUAMGExCzAJBgNV\nBAYTAlVTMREwDwYDVQQIDAhJbGxpbm9pczESMBAGA1UECgwJTWF0dCBMb3dlMQ8w\nDQYDVQQDDAZSb290Q0ExGjAYBgkqhkiG9w0BCQEWC21hdHRAaW80LnVzMB4XDTE0\nMDYwNzE3NDUwMFoXDTI0MDYwNDE3NDUwMFowYTELMAkGA1UEBhMCVVMxETAPBgNV\nBAgMCElsbGlub2lzMRIwEAYDVQQKDAlNYXR0IExvd2UxDzANBgNVBAMMBlJvb3RD\nQTEaMBgGCSqGSIb3DQEJARYLbWF0dEBpbzQudXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQCcIRn0IMCNYeL5agKmkdedgJXsIyTJS8qKrY6EvQsq4tt0\nmO3Or9K8IaDl7qFdQ9nfSJ5phNgoCy9wZ9rDWv5FhY5MnnVHGr3fCa7RkMxJFR/N\nwiD4ihQlixOUly76glceyc/6QQS9bNe96evZDstERGAFfzgHY4qAlyurR6mBu9Mb\nyyCRok6xMRnjrbTMNkvvOsuG0sY9ot+SLHGgU3qT7+wVh/CbWcjeF7/Qwa//fbFk\nmq5c1FuvhU3DanSSz+VuWudPFSyZ3r5pYrLMJWsyomDa4gkL2bJ5jya2BWDMXvSS\nCpdQgPDIlClMfAFLd/Ss8ZIGa6uNFcSK6Xca51ClAgMBAAGjUDBOMB0GA1UdDgQW\nBBScbglRiGzz9yzuhgBwFYjgimeByDAfBgNVHSMEGDAWgBScbglRiGzz9yzuhgBw\nFYjgimeByDAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA7MLZYfqam\n5aaSBqQpT6sOGDtVc9koIok59oTQmNXqe+awg2VUnAiesxtLd+FWGUMp8XzHdGWw\nH3O6kAUkPm/in001X7TRAhbgDujfTRbTzxND0XrjuEzDMALs3YpDM1pMXqC7RXWA\n7z+N0gRaUgmh1rMbk/qA3cAfC2dwf2j3NYy3bDw3lMpdyIwAfOQxiZVglYgX3dgT\nU9b//gsUyPCvlpL0mYcmhOOLt6oqQhMJaw1I6A9xMe2kO2L+8KPGK2u1B+P5/Sx0\nFE8LIp5KA3a7yRbOty19NsGR+yW7WwV7BL6c6GOKb/iKJBLYzTmNG6m16hRrxDGj\ntGu91I0ORptB\n-----END CERTIFICATE-----")
+			if ca_cert.not_before > Time.now
+				respond "\n---\n--- warning: The current date is set incorrectly on your computer. This will\n---          cause the SSL certificate verification to fail and prevent LNet\n---          from connecting to the server.  Fix it.\n---\n\n"
+				sleep 3
+			end
+			if ca_cert.not_after < Time.now
+				respond "\n---\n--- warning: Your computer thinks the date is #{Time.now.strftime("%m-%d-%Y")}.  If this is the\n---          correct date, you need an updated version of this script.  If \n---          this is not the correct date, you need to change it.  In either\n---          case, this date makes the SSL certificate in this script\n---          invalid and will prevent LNet from connecting to the server.\n---\n\n"
+				sleep 3
+			end
+			cert_store              = OpenSSL::X509::Store.new
+			ssl_context             = OpenSSL::SSL::SSLContext.new
+			ssl_context.cert_store  = cert_store
+			ssl_context.options     = (OpenSSL::SSL::OP_NO_SSLv2 + OpenSSL::SSL::OP_NO_SSLv3)
+			cert_store.add_cert(ca_cert)
+			if OpenSSL::SSL::VERIFY_PEER == OpenSSL::SSL::VERIFY_NONE
+				# the plat_updater script redefines OpenSSL::SSL::VERIFY_PEER, disabling it for everyone
+				ssl_context.verify_mode = 1 # probably right
+			else
+				ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+			end
+			socket = TCPSocket.open(hostname, port)
+			ssl_socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+			ssl_socket.sync_close = true
+			ssl_socket.connect
+			if (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == 'CN' }[1] != 'lichproject.org') and (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == 'CN' }[1] != 'LichNet')
+				echo "error: server certificate hostname mismatch"
+				ssl_socket.close
+				exit
+			end
+			LNet.server = ssl_socket
+
+			xml = REXML::Document.new
+			element = xml.add_element('login')
+			element.add_attribute('name', XMLData.name)
+			element.add_attribute('game', XMLData.game)
+			element.add_attribute('client', @@version)
+			element.add_attribute('lich', $version)
+			if @@secret[0]
+				element.add_attribute('password', @@secret[0])
+			end
+			@@server.puts(xml)
+			@@last_send = Time.now
+			xml = element = nil
+		rescue
+			echo $!
+			respond $!.backtrace[0..1]
+		end
+	end
+
+	def LNet.send_ping
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('ping')
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.send_ping."
+		end
+	end
+
+	def LNet.send_message(attributes, message)
+		return false if @@server.closed?
+		# causes errors in Ruby 1.9.2
+		#message.gsub!(/\x80|\x81|\x86|\x87|\x8D|\x8F|\x90|\x95|\x9C|\x9D/, '?')
+		#message.gsub!(/\x83/, 'f')
+		#message.gsub!(/\x84/, ',,')
+		#message.gsub!(/\x85/, '...')
+		#message.gsub!(/\x88/, '^')
+		#message.gsub!(/\x89/, '%o')
+		#message.gsub!(/\x8A/, 'S')
+		#message.gsub!(/\x8B/, '<')
+		#message.gsub!(/\x8C/, 'CE')
+		#message.gsub!(/\x8E/, 'Z')
+		#message.gsub!(/\x91|\x92/, "'")
+		#message.gsub!(/\x93|\x94/, '"')
+		#message.gsub!(/\x96|\x97|\x98/, '-')
+		#message.gsub!(/\x99/, '(tm)')
+		#message.gsub!(/\x9A/, 's')
+		#message.gsub!(/\x9B/, '>')
+		#message.gsub!(/\x9E/, 'z')
+		#message.gsub!(/\x9F/, 'Y')
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('message')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			element.text = message
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.send_message."
+		end
+	end
+
+	def LNet.send_query(attributes)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('query')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.send_query."
+		end
+	end
+
+	def LNet.send_request(attributes)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('request')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.send_request."
+		end
+	end
+
+	def LNet.send_data(attributes, data)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('data')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			element.text = [Marshal.dump(data)].pack('m').strip
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.send_data."
+		end
+	end
+
+	def LNet.tune_channel(channel)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('tune')
+			element.add_attribute('channel', channel)
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.tune_channel."
+		end
+	end
+
+	def LNet.untune_channel(channel)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('untune')
+			element.add_attribute('channel', channel)
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.untune_channel."
+		end
+	end
+
+	def LNet.moderate(attributes)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('moderate')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.moderate."
+		end
+	end
+
+	def LNet.admin(attributes)
+		return false if @@server.closed?
+		if $SAFE == 0
+			xml = REXML::Document.new
+			element = xml.add_element('admin')
+			attributes.each_pair { |name,val| element.add_attribute(name, val) }
+			@@server.puts(xml)
+			@@last_send = Time.now
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.admin."
+		end
+	end
+
+	def LNet.echo_thought(from, message, channel)
+		if $SAFE == 0
+			aliased_from = (LNet.alias[from] || from)
+			channel = "[#{channel}]-" unless from == '[server]'
+			if @@options['timestamps']
+				timestamp = "  (#{Time.now.strftime('%X')})"
+			else
+				timestamp = String.new
+			end
+			if @@options['fam_window']
+				xml_thought = "<pushStream id=\"familiar\" ifClosedStyle=\"watching\"/>#{channel}#{aliased_from}: \"#{message.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')}\"#{timestamp}\n<popStream/>\n"
+			else
+#				xml_thought = "<stream id=\"thoughts\">#{channel}#{aliased_from}: \"#{message.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')}\"#{timestamp}</stream>\n"
+				xml_thought = "<pushStream id=\"thoughts\"/>#{channel}#{aliased_from}: \"#{message.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;')}\"#{timestamp}\n<popStream/>\n"
+			end
+			unless LNet.ignored?(from)
+				if $frontend =~ /wizard|avalon/
+					if @@options['fam_window']
+						$_CLIENT_.puts("\034GSe\r\n#{channel}#{aliased_from}: \"#{message}\"#{timestamp}\r\n\034GSf\r\n")
+					else
+						$_CLIENT_.puts("You hear the faint thoughts of #{channel}#{aliased_from} echo in your mind:\n\"#{message}\"#{timestamp}\r\n")
+					end
+					Script.new_downstream("#{channel}#{aliased_from}: \"#{message}\"#{timestamp}")
+				else
+					if defined?(_respond)
+						_respond(xml_thought)
+					else
+						$_CLIENT_.puts(xml_thought)
+					end
+				end
+			end
+			$_SERVERBUFFER_.push(xml_thought)
+			Script.new_downstream_xml(xml_thought)
+			Script.new_downstream("#{channel}#{aliased_from}: \"#{message}\"#{timestamp}")
+		else
+			respond "--- Lich: Untrusted script (#{Script.self.name}) called LNet.echo_thought."
+		end
+	end
+
+	def LNet.allow?(action, name)
+		if @@options['permission'][action] == 'all'
+			true
+		elsif @@options['permission'][action] == 'friends'
+			if LNet.friend?(name)
+				true
+			else
+				false
+			end
+		elsif @@options['permission'][action] == 'enemies'
+			if LNet.enemy?(name)
+				false
+			else
+				true
+			end
+		else
+			false
+		end
+	end
+
+	def LNet.ignored?(name)
+		@@options['ignore'].include?(name) or @@options['ignore'].include?(name.slice(/[A-Z][a-z]+$/))
+	end
+
+	def LNet.friend?(name)
+		@@options['friends'].include?(name) or @@options['friends'].include?(name.slice(/[A-Z][a-z]+$/))
+	end
+
+	def LNet.enemy?(name)
+		@@options['enemies'].include?(name) or @@options['enemies'].include?(name.slice(/[A-Z][a-z]+$/))
+	end
+
+	def LNet.get_data(name, type)
+		if $SAFE == 0
+			return false if (name.class != String) or name.empty? or (type.class != String) or type.empty? or @@server.closed?
+			name.capitalize!
+			waiter = { 'type'=>type, 'name'=>name, 'data'=>:waiting }
+			@@waiting.push(waiter)
+			begin
+				LNet.send_request(attr={'type'=>type, 'to'=>name})
+				80.times { sleep 0.1; break unless waiter['data'] == :waiting }
+			ensure
+				@@waiting.delete(waiter)
+			end
+			if waiter['data'] == :waiting
+				false
+			else
+				waiter['data']
+			end
+		else
+			UNTRUSTED_LNET_GET_DATA.call(name, type)
+		end
+	end
+
+	def LNet.upload_spell_ranks
+		if $SAFE == 0
+			begin
+				return false if @@server.closed?
+				data = {
+					'minorspiritual' => Spells.minorspiritual,
+					'majorspiritual' => Spells.majorspiritual,
+					'cleric'         => Spells.cleric,
+					'minorelemental' => Spells.minorelemental,
+					'majorelemental' => Spells.majorelemental,
+					'ranger'         => Spells.ranger,
+					'sorcerer'       => Spells.sorcerer,
+					'wizard'         => Spells.wizard,
+					'bard'           => Spells.bard,
+					'empath'         => Spells.empath,
+					'paladin'        => Spells.paladin,
+					'arcanesymbols'  => Skills.arcanesymbols,
+					'magicitemuse'   => Skills.magicitemuse,
+				}
+				begin
+					data['minormental'] = Spells.minormental
+				rescue
+					nil
+				end
+				LNet.send_data(attr={'type'=>'spell-ranks'}, data)
+				return true
+			rescue
+				return false
+			end
+		else
+			UNTRUSTED_LNET_UPLOAD_SPELL_RANKS.call
+		end
+	end
+
+	def initialize
+		@active_tags = Array.new
+		@active_attributes = Array.new
+	end
+
+	def tag_start(tag_name, attributes)
+		begin
+			@@last_recv = Time.now
+			@active_tags.push(tag_name)
+			@active_attributes.push(attributes)
+			if tag_name == 'ping'
+				xml = REXML::Document.new
+				xml.add_element('pong')
+				@@server.puts(xml)
+				@@last_send = Time.now
+			elsif (tag_name == 'request') and (type = attributes['type']) and (name = attributes['from'])
+				if LNet.ignored?(name)
+					LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+				elsif type == 'spells'
+					if LNet.allow?('spells', name)
+						echo "sending spell info to #{name}..."
+						active_spells = Hash.new
+						Spell.active.each { |spell| active_spells[spell.num.to_s] = spell.timeleft }
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, active_spells)
+					else
+						echo "rejecting request from #{name} for spell info..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				elsif type == 'skills'
+					if LNet.allow?('skills', name)
+						echo "sending skills to #{name}..."
+						skills = Hash.new
+						skills['Two Weapon Combat'] = Skills.twoweaponcombat if Skills.twoweaponcombat > 0
+						skills['Armor Use'] = Skills.armoruse if Skills.armoruse > 0
+						skills['Shield Use'] = Skills.shielduse if Skills.shielduse > 0
+						skills['Combat Maneuvers'] = Skills.combatmaneuvers if Skills.combatmaneuvers > 0
+						skills['Edged Weapons'] = Skills.edgedweapons if Skills.edgedweapons > 0
+						skills['Blunt Weapons'] = Skills.bluntweapons if Skills.bluntweapons > 0
+						skills['Two-Handed Weapons'] = Skills.twohandedweapons if Skills.twohandedweapons > 0
+						skills['Ranged Weapons'] = Skills.rangedweapons if Skills.rangedweapons > 0
+						skills['Thrown Weapons'] = Skills.thrownweapons if Skills.thrownweapons > 0
+						skills['Polearm Weapons'] = Skills.polearmweapons if Skills.polearmweapons > 0
+						skills['Brawling'] = Skills.brawling if Skills.brawling > 0
+						skills['Ambush'] = Skills.ambush if Skills.ambush > 0
+						skills['Multi Opponent Combat'] = Skills.multiopponentcombat if Skills.multiopponentcombat > 0
+						skills['Combat Leadership'] = Skills.combatleadership if Skills.combatleadership > 0
+						skills['Physical Fitness'] = Skills.physicalfitness if Skills.physicalfitness > 0
+						skills['Dodging'] = Skills.dodging if Skills.dodging > 0
+						skills['Arcane Symbols'] = Skills.arcanesymbols if Skills.arcanesymbols > 0
+						skills['Magic Item Use'] = Skills.magicitemuse if Skills.magicitemuse > 0
+						skills['Spell Aiming'] = Skills.spellaiming if Skills.spellaiming > 0
+						skills['Harness Power'] = Skills.harnesspower if Skills.harnesspower > 0
+						skills['Elemental Mana Control'] = Skills.emc if Skills.emc > 0
+						skills['Mental Mana Control'] = Skills.mmc if Skills.mmc > 0
+						skills['Spirit Mana Control'] = Skills.smc if Skills.smc > 0
+						skills['Elemental Lore - Air'] = Skills.elair if Skills.elair > 0
+						skills['Elemental Lore - Earth'] = Skills.elearth if Skills.elearth > 0
+						skills['Elemental Lore - Fire'] = Skills.elfire if Skills.elfire > 0
+						skills['Elemental Lore - Water'] = Skills.elwater if Skills.elwater > 0
+						skills['Spiritual Lore - Blessings'] = Skills.slblessings if Skills.slblessings > 0
+						skills['Spiritual Lore - Religion'] = Skills.slreligion if Skills.slreligion > 0
+						skills['Spiritual Lore - Summoning'] = Skills.slsummoning if Skills.slsummoning > 0
+						skills['Sorcerous Lore - Demonology'] = Skills.sldemonology if Skills.sldemonology > 0
+						skills['Sorcerous Lore - Necromancy'] = Skills.slnecromancy if Skills.slnecromancy > 0
+						skills['Mental Lore - Divination'] = Skills.mldivination if Skills.mldivination > 0
+						skills['Mental Lore - Manipulation'] = Skills.mlmanipulation if Skills.mlmanipulation > 0
+						skills['Mental Lore - Telepathy'] = Skills.mltelepathy if Skills.mltelepathy > 0
+						skills['Mental Lore - Transference'] = Skills.mltransference if Skills.mltransference > 0
+						skills['Mental Lore - Transformation'] = Skills.mltransformation if Skills.mltransformation > 0
+						skills['Survival'] = Skills.survival if Skills.survival > 0
+						skills['Disarming Traps'] = Skills.disarmingtraps if Skills.disarmingtraps > 0
+						skills['Picking Locks'] = Skills.pickinglocks if Skills.pickinglocks > 0
+						skills['Stalking and Hiding'] = Skills.stalkingandhiding if Skills.stalkingandhiding > 0
+						skills['Perception'] = Skills.perception if Skills.perception > 0
+						skills['Climbing'] = Skills.climbing if Skills.climbing > 0
+						skills['Swimming'] = Skills.swimming if Skills.swimming > 0
+						skills['First Aid'] = Skills.firstaid if Skills.firstaid > 0
+						skills['Trading'] = Skills.trading if Skills.trading > 0
+						skills['Pickpocketing'] = Skills.pickpocketing if Skills.pickpocketing > 0
+						skills['Major Elemental'] = Spells.majorelemental if Spells.majorelemental > 0
+						skills['Minor Elemental'] = Spells.minorelemental if Spells.minorelemental > 0
+						begin
+							skills['Minor Mental'] = Spells.minormental if Spells.minormental > 0
+						rescue
+							nil
+						end
+						skills['Major Spirit'] = Spells.majorspiritual if Spells.majorspiritual > 0
+						skills['Minor Spirit'] = Spells.minorspiritual if Spells.minorspiritual > 0
+						skills['Wizard'] = Spells.wizard if Spells.wizard > 0
+						skills['Sorcerer'] = Spells.sorcerer if Spells.sorcerer > 0
+						skills['Ranger'] = Spells.ranger if Spells.ranger > 0
+						skills['Paladin'] = Spells.paladin if Spells.paladin > 0
+						skills['Empath'] = Spells.empath if Spells.empath > 0
+						skills['Cleric'] = Spells.cleric if Spells.cleric > 0
+						skills['Bard'] = Spells.bard if Spells.bard > 0
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, skills)
+					else
+						echo "rejecting request from #{name} for skills..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				elsif type == 'info'
+					if LNet.allow?('info', name)
+						echo "sending stats to #{name}..."
+						info = {
+							'Race' => Stats.race,
+							'Profession' => Stats.prof,
+							'Gender' => Stats.gender,
+							'Age' => Stats.age,
+							'Expr' => Stats.exp,
+							'Level' => XMLData.level,
+							'Strength' => Stats.str,
+							'Constitution' => Stats.con,
+							'Dexterity' => Stats.dex,
+							'Agility' => Stats.agi,
+							'Discipline' => Stats.dis,
+							'Aura' => Stats.aur,
+							'Logic' => Stats.log,
+							'Intuition' => Stats.int,
+							'Wisdom' => Stats.wis,
+							'Influence' => Stats.inf,
+							'Mana' => mana,
+						}
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, info)
+					else
+						echo "rejecting request from #{name} for stats..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				elsif type == 'locate'
+					if LNet.allow?('locate', name)
+						echo "sending location to #{name}..."
+						room = {
+							'title' => XMLData.room_title,
+							'description' => XMLData.room_description,
+							'exits' => XMLData.room_exits_string,
+							'loot' => GameObj.loot.collect { |loot| loot.name },
+						}
+						room['pcs'] = Array.new
+						GameObj.pcs.each { |pc| room['pcs'].push(hash={'name'=>pc.name, 'status'=>pc.status}) }
+						unless hidden? or invisible?
+							status = Array.new
+							status.push 'dead' if dead?
+							status.push 'webbed' if webbed?
+							status.push 'stunned' if stunned?
+							if kneeling?
+								status.push 'kneeling'
+							elsif sitting?
+								status.push 'sitting'
+							elsif !standing?
+								if GameObj.pcs.any? { |pc| pc.status =~ /prone/ } or GameObj.pcs.any? { |pc| pc.status =~ /prone/ }
+									status.push 'prone'
+								else
+									status.push 'lying down'
+								end
+							end
+							if status.empty?
+								room['pcs'].push(h={'name'=>Char.name, 'status'=>nil})
+							else
+								room['pcs'].push(h={'name'=>Char.name, 'status'=>status.join(' ')})
+							end
+						end
+						room['npcs'] = Array.new
+						GameObj.npcs.each { |npc| room['npcs'].push(hash={'name'=>npc.name, 'status'=>npc.status}) }
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, room)
+					else
+						echo "rejecting request from #{name} for location..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				elsif type == 'health'
+					if LNet.allow?('health', name)
+						echo "sending health to #{name}..."
+						health = {
+							'injuries' => XMLData.injuries,
+							'health' => XMLData.health,
+							'max_health' => XMLData.max_health,
+							'spirit' => XMLData.spirit,
+							'max_spirit' => XMLData.max_spirit,
+							'stamina' => XMLData.stamina,
+							'max_stamina' => XMLData.max_stamina,
+						}
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, health)
+					else
+						echo "rejecting request from #{name} for health info..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				elsif type == 'bounty'
+					if LNet.allow?('bounty', name)
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, bounty?)
+					else
+						echo "rejecting request from #{name} for bounty info..."
+						LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+					end
+				else
+					echo "rejecting unknown request (#{type}) from #{name}..."
+					LNet.send_data(attr={'type'=>type, 'to'=>name}, nil)
+				end
+			elsif (tag_name == 'notify')
+				if (attributes['type'] == 'new-spell-ranks') and defined?(SpellRanks)
+					LNet.send_request(attr={'type'=>'spell-ranks', 'to'=>'server', 'timestamp'=>SpellRanks.timestamp.to_s})
+				elsif attributes['type'] == 'server-restart'
+					@@server_restart = true
+					@@server.close rescue()
+				end
+			end
+		rescue
+			echo $!
+			respond $!.backtrace[0..1]
+		end
+	end
+
+	def text(text)
+		begin
+			if @active_tags.last == 'message'
+				if @active_attributes.last['type'] == 'greeting'
+					respond text if @@options['greeting']
+				elsif @active_attributes.last['type'] == 'server'
+					if text =~ /(?!kill).*(?:incorrect password|password required)/
+						output = "\n"
+						output.concat "If you have forgotten your password, visit https://lnet.lichproject.org to reset it."
+						output.concat "\n"
+						output.concat "To attempt to log in with a different password, type: #{$clean_lich_char}#{@@script.name} password=<password>\n"
+						output.concat "\n"
+						respond output
+						Script.self.kill
+					end
+					LNet.echo_thought('[server]', text, '')
+				elsif (@active_attributes.last['type'] == 'private') and (from = @active_attributes.last['from'])
+					@@last_priv = from
+					LNet.echo_thought(from, text, 'Private')
+				elsif (@active_attributes.last['type'] == 'privateto') and (to = @active_attributes.last['to'])
+					LNet.echo_thought(to, text, 'PrivateTo')
+				elsif (@active_attributes.last['type'] == 'channel') and (from = @active_attributes.last['from']) and (channel = @active_attributes.last['channel'])
+					LNet.echo_thought(from, text, channel)
+				end
+			elsif (@active_tags.last == 'data')
+				begin
+					data = Marshal.load(text.unpack('m').first)
+				rescue
+					return
+				end
+				if @active_attributes.last['from'] and @active_attributes.last['type'] and (waiter = @@waiting.find { |w| (@active_attributes.last['from'] =~ /^#{Regexp.escape(w['name'])}/i) and (w['type'] == @active_attributes.last['type']) and w['data'] == :waiting })
+					waiter['data'] = data
+				elsif (@active_attributes.last['type'] == 'connected') and (@active_attributes.last['from'] == 'server')
+					output = String.new
+					sort_by_game = Hash.new
+					for name in data
+						if name =~ /^(.+)\:(.+)$/
+							sort_by_game[$1] ||= Array.new
+							sort_by_game[$1].push($2)
+						else
+							sort_by_game['unknown'] ||= Array.new
+							sort_by_game['unknown'].push(name)
+						end
+					end
+					who_columns = 5
+					sort_by_game.each_pair { |game,name_list|
+						name_list = name_list.sort { |a,b| if (a =~ /\^$/) or (a =~ /\*$/ and b !~ /\^$/); 1; else; 0; end }
+						output.concat "\n#{game} (#{name_list.length}):\n\n"
+						column = Array.new
+						longest = Array.new
+						who_columns.times {
+							column.push Array.new
+							longest.push 0
+						}
+						until name_list.empty?
+							for i in 0..(who_columns-1)
+								if name = name_list.pop
+									column[i].push(name)
+									longest[i] = [ longest[i], name.length ].max
+								end
+							end
+						end
+						until column[0].empty?
+							for i in 0..(who_columns-1)
+								if name = column[i].shift
+									output.concat name.ljust(longest[i]+3)
+								end
+							end
+							output = output.strip.concat "\n"
+						end
+					}
+					if channel = @active_attributes.last['channel']
+						output.concat "\nTotal tuned to #{channel}: #{data.length}\n\n"
+					else
+						output.concat "\nTotal connected: #{data.length}\n\n"
+					end
+					respond "\n#{output}"
+				elsif (@active_attributes.last['type'] == 'channels') and (@active_attributes.last['from'] == 'server')
+					total = @active_attributes.last['total']
+					name_width = tuned_width = 0
+					data.each { |channel|
+						name_width = [ name_width, channel['name'].length ].max
+						tuned_width = [ tuned_width, channel['tuned'].to_s.length ].max
+					}
+					output = "\nAvailable channels:\n\n"
+					data.each { |channel|
+						output.concat "#{if channel['status'] == 'default'; '+' elsif channel['status'] == 'tuned'; '-'; else ' '; end} #{channel['name'].rjust(name_width)}   #{channel['tuned'].to_s.rjust(tuned_width)}   #{channel['description']}\n"
+					}
+					output.concat "\nuse \";channels full\" to see #{total.to_i - data.length} more\n" if data.length < total.to_i
+					output.concat "\n"
+					respond output
+				elsif (@active_attributes.last['type'] == 'server stats') and (@active_attributes.last['from'] == 'server')
+					format_time = proc { |time|
+						seconds    =  time.to_i % 60
+						difference = (time - seconds) / 60
+						minutes    =  difference % 60
+						difference = (difference - minutes) / 60
+						hours      =  difference % 24
+						days       = (difference - hours) / 24
+						formatted_time = Array.new
+						formatted_time.push "#{days.to_i} day#{'s' unless days == 1}" if days > 0
+						formatted_time.push "#{hours.to_i} hour#{'s' unless hours == 1}" if hours > 0
+						formatted_time.push "#{minutes.to_i} minute#{'s' unless minutes == 1}" if minutes > 0
+						formatted_time.push "#{seconds.to_i} second#{'s' unless seconds == 1}" if (seconds > 0) and (days < 1) and (hours < 1)
+						formatted_time = formatted_time.join(', ').sub(/^1 day$/, '24 hours')
+						formatted_time
+					}
+					output = "\n"
+					if data['uptime'] and data['uptime'].to_i > 0
+						output.concat "No major accidents in the last #{format_time.call(data['uptime'])}\n"
+					end
+					if data['character connections'] and not data['character connections'].empty?
+						for length,num in data['character connections']
+							output.concat "#{num} characters have connected in the last #{format_time.call(length)}\n"
+						end
+					end
+					if data['ip connections'] and not data['ip connections'].empty?
+						for length,num in data['ip connections']
+							output.concat "About #{num} players have connected in the last #{format_time.call(length)}\n"
+						end
+					end
+					output.concat "\n"
+					for channel_name,channel_data in data['own_channels']
+						output.concat "#{channel_name} (owner)\n"
+						if channel_data['moderators'].empty?
+							output.concat "   moderators: none\n"
+						else
+							output.concat "   moderators: #{channel_data['moderators'].join(', ')}\n"
+						end
+						if channel_data['invited'].nil?
+							nil
+						elsif channel_data['invited'].empty?
+							output.concat "   invited: none\n"
+						else
+							output.concat "   invited: #{channel_data['invited'].join(', ')}\n"
+						end
+						if channel_data['banned'].nil?
+							nil
+						elsif channel_data['banned'].empty?
+							output.concat "   banned: none\n"
+						else
+							output.concat "   banned:\n"
+							for name,ban_time in channel_data['banned']
+								if ban_time.nil?
+									ban_time = 'indefinite'
+								else
+									ban_time = format_time.call(ban_time)
+								end
+								output.concat "      #{name.ljust(16)} (#{ban_time})\n"
+							end
+						end
+						if channel_data['gagged'].empty?
+							output.concat "   gagged: none\n"
+						else
+							output.concat "   gagged:\n"
+							for name,gag_time in channel_data['gagged']
+								if gag_time.nil?
+									gag_time = 'indefinite'
+								else
+									#echo "gag_time: #{gag_time.inspect}"
+									gag_time = format_time.call(gag_time)
+								end
+								output.concat "      #{name.ljust(16)} (#{gag_time})\n"
+							end
+						end
+					end
+					for channel_name,channel_data in data['mod_channels']
+						output.concat "#{channel_name} (moderator)\n"
+						if channel_data['invited'].nil?
+							nil
+						elsif channel_data['invited'].empty?
+							output.concat "   invited: none\n"
+						else
+							output.concat "   invited: #{channel_data['invited'].join(', ')}\n"
+						end
+						if channel_data['banned'].nil?
+							nil
+						elsif channel_data['banned'].empty?
+							output.concat "   banned: none\n"
+						else
+							output.concat "   banned:\n"
+							for name,ban_time in channel_data['banned']
+								if ban_time.nil?
+									ban_time = 'indefinite'
+								else
+									ban_time = format_time.call(ban_time)
+								end
+								output.concat "      #{name.ljust(16)} (#{ban_time})\n"
+							end
+						end
+						if channel_data['gagged'].empty?
+							output.concat "   gagged: none\n"
+						else
+							output.concat "   gagged:\n"
+							for name,gag_time in channel_data['gagged']
+								if gag_time.nil?
+									gag_time = 'indefinite'
+								else
+									gag_time = format_time.call(gag_time)
+								end
+								output.concat "      #{name.ljust(16)} (#{gag_time})\n"
+							end
+						end
+					end
+					output.concat "\n" unless data['own_channels'].empty? and data['mod_channels'].empty?
+					respond output
+				elsif (@active_attributes.last['type'] == 'spell-ranks') and (@active_attributes.last['from'] == 'server') and defined?(SpellRanks)
+					begin
+						# fixme: really really slow to do the whole list, also too large (1.7mb or something)
+						format = data['_format_']
+						for name,ranks in data
+							next if name =~ /^_/
+							name = name.sub(/^.*\:/, '')
+							char = SpellRanks[name] || SpellRanks.new(name)
+							data['_format_'].each_index { |i|
+								char.send("#{data['_format_'][i]}=", ranks[i].to_i) rescue()
+							}
+						end
+						SpellRanks.timestamp = data['_timestamp_']
+						SpellRanks.save
+					rescue
+						echo $!
+						echo $!.backtrace[0..2]
+					end
+				elsif (@active_attributes.last['type'] == 'spells') and (name = @active_attributes.last['from'])
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for spell information."
+						elsif data == false
+							echo 'no such user'
+						elsif data.empty?
+							echo "#{name} has no spells."
+						else
+							output = "\n#{name}:\n"
+							last_circle = nil
+							data.sort.each { |spell|
+								unless last_circle == Spell[spell[0]].circlename
+									last_circle = Spell[spell[0]].circlename
+									output.concat "\n- #{last_circle}:\n"
+								end
+								output.concat "#{spell[0].to_s.rjust(4)}:  #{Spell[spell[0]].name.ljust(22)}- #{spell[1].as_time}\n"
+							}
+							output.concat "\n"
+							respond output
+						end
+					end
+				elsif (@active_attributes.last['type'] == 'skills') and (name = @active_attributes.last['from'])
+					order = [ 'Two Weapon Combat', 'Armor Use', 'Shield Use', 'Combat Maneuvers', 'Edged Weapons', 'Blunt Weapons', 'Two-Handed Weapons', 'Ranged Weapons', 'Thrown Weapons', 'Polearm Weapons', 'Brawling', 'Ambush', 'Multi Opponent Combat', 'Combat Leadership', 'Physical Fitness', 'Dodging', 'Arcane Symbols', 'Magic Item Use', 'Spell Aiming', 'Harness Power', 'Elemental Mana Control', 'Mental Mana Control', 'Spirit Mana Control', 'Elemental Lore - Air', 'Elemental Lore - Earth', 'Elemental Lore - Fire', 'Elemental Lore - Water', 'Spiritual Lore - Blessings', 'Spiritual Lore - Religion', 'Spiritual Lore - Summoning', 'Sorcerous Lore - Demonology', 'Sorcerous Lore - Necromancy', 'Mental Lore - Divination', 'Mental Lore - Manipulation', 'Mental Lore - Telepathy', 'Mental Lore - Transference', 'Mental Lore - Transformation', 'Survival', 'Disarming Traps', 'Picking Locks', 'Stalking and Hiding', 'Perception', 'Climbing', 'Swimming', 'First Aid', 'Trading', 'Pickpocketing', 'Major Elemental', 'Minor Elemental', 'Minor Mental', 'Major Spirit', 'Minor Spirit', 'Wizard', 'Sorcerer', 'Ranger', 'Paladin', 'Empath', 'Cleric', 'Bard' ]
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for skill information."
+						elsif data == false
+							echo 'no such user'
+						else
+							output = "\n#{name}:\n\n"
+							output.concat "  Skill Name                         | Current Current\n"
+							output.concat "                                     |   Bonus   Ranks\n"
+							order.each { |skill_name|
+								if data[skill_name]
+									if skill_name =~ /Minor Elemental|Major Elemental|Minor Mental|Minor Spirit|Major Spirit|Wizard|Sorcerer|Ranger|Paladin|Empath|Cleric|Bard/
+										output.concat "\nSpell Lists\n"
+										output.concat "  #{skill_name.ljust(35, '.')}|#{data[skill_name].to_s.rjust(16)}\n"
+									else
+										output.concat "  #{skill_name.ljust(35, '.')}|#{Skills.to_bonus(data[skill_name]).to_s.rjust(8)}#{data[skill_name].to_s.rjust(8)}\n"
+									end
+									data.delete(skill_name)
+								end
+							}
+							# data should be empty by now, but just in case..
+							data.each_pair { |skill_name,ranks|
+								if skill_name =~ /Minor Elemental|Major Elemental|Minor Mental|Minor Spirit|Major Spirit|Wizard|Sorcerer|Ranger|Paladin|Empath|Cleric|Bard/
+									output.concat "\nSpell Lists\n"
+									output.concat "  #{skill_name.ljust(35, '.')}|#{ranks.to_s.rjust(16)}\n"
+								else
+									output.concat "  #{skill_name.ljust(35, '.')}|#{Skills.to_bonus(ranks).to_s.rjust(8)}#{ranks.to_s.rjust(8)}\n"
+								end
+							}
+							output.concat "\n"
+							respond output
+						end
+					end
+				elsif (@active_attributes.last['type'] == 'info') and (name = @active_attributes.last['from'])
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for stat information."
+						elsif data == false
+							echo 'no such user'
+						else
+							output = String.new
+							output.concat "\nName: #{name} Race: #{data['Race']}  Profession: #{data['Profession']}\n"
+							output.concat "Gender: #{data['Gender']}    Age: #{data['Age']}    Expr: #{data['Expr']}    Level:  #{data['Level']}\n"
+							output.concat "                  Normal (Bonus)  ...  Enhanced (Bonus)\n"
+							output.concat "    Strength (STR):   #{data['Strength'][0].to_s.rjust(3)} (#{data['Strength'][1].to_s.rjust(2)})    ...  #{data['Strength'][0].to_s.rjust(3)} (#{data['Strength'][1].to_s.rjust(2)})\n"
+							output.concat "Constitution (CON):   #{data['Constitution'][0].to_s.rjust(3)} (#{data['Constitution'][1].to_s.rjust(2)})    ...  #{data['Constitution'][0].to_s.rjust(3)} (#{data['Constitution'][1].to_s.rjust(2)})\n"
+							output.concat "   Dexterity (DEX):   #{data['Dexterity'][0].to_s.rjust(3)} (#{data['Dexterity'][1].to_s.rjust(2)})    ...  #{data['Dexterity'][0].to_s.rjust(3)} (#{data['Dexterity'][1].to_s.rjust(2)})\n"
+							output.concat "     Agility (AGI):   #{data['Agility'][0].to_s.rjust(3)} (#{data['Agility'][1].to_s.rjust(2)})    ...  #{data['Agility'][0].to_s.rjust(3)} (#{data['Agility'][1].to_s.rjust(2)})\n"
+							output.concat "  Discipline (DIS):   #{data['Discipline'][0].to_s.rjust(3)} (#{data['Discipline'][1].to_s.rjust(2)})    ...  #{data['Discipline'][0].to_s.rjust(3)} (#{data['Discipline'][1].to_s.rjust(2)})\n"
+							output.concat "        Aura (AUR):   #{data['Aura'][0].to_s.rjust(3)} (#{data['Aura'][1].to_s.rjust(2)})    ...  #{data['Aura'][0].to_s.rjust(3)} (#{data['Aura'][1].to_s.rjust(2)})\n"
+							output.concat "       Logic (LOG):   #{data['Logic'][0].to_s.rjust(3)} (#{data['Logic'][1].to_s.rjust(2)})    ...  #{data['Logic'][0].to_s.rjust(3)} (#{data['Logic'][1].to_s.rjust(2)})\n"
+							output.concat "   Intuition (INT):   #{data['Intuition'][0].to_s.rjust(3)} (#{data['Intuition'][1].to_s.rjust(2)})    ...  #{data['Intuition'][0].to_s.rjust(3)} (#{data['Intuition'][1].to_s.rjust(2)})\n"
+							output.concat "      Wisdom (WIS):   #{data['Wisdom'][0].to_s.rjust(3)} (#{data['Wisdom'][1].to_s.rjust(2)})    ...  #{data['Wisdom'][0].to_s.rjust(3)} (#{data['Wisdom'][1].to_s.rjust(2)})\n"
+							output.concat "   Influence (INF):   #{data['Influence'][0].to_s.rjust(3)} (#{data['Influence'][1].to_s.rjust(2)})    ...  #{data['Influence'][0].to_s.rjust(3)} (#{data['Influence'][1].to_s.rjust(2)})\n"
+							output.concat "Mana:  #{data['Mana']}\n\n"
+							respond output
+						end
+					end
+				elsif (@active_attributes.last['type'] == 'health') and (name = @active_attributes.last['from'])
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for health information."
+						elsif data == false
+							echo 'no such user'
+						else
+							wound_message = {
+								'head'      => [ '', 'minor bruises about the head', 'minor lacerations about the head and a possible mild concussion', 'severe head trauma and bleeding from the ears' ],
+								'neck'      => [ '', 'minor bruises on your neck', 'moderate bleeding from your neck', 'snapped bones and serious bleeding from the neck' ],
+								'chest'     => [ '', 'minor cuts and bruises on your chest', 'deep lacerations across your chest', 'deep gashes and serious bleeding from your chest' ],
+								'abdomen'   => [ '', 'minor cuts and bruises on your abdominal area', 'deep lacerations across your abdominal area', 'deep gashes and serious bleeding from your abdominal area' ],
+								'back'      => [ '', 'minor cuts and bruises on your back', 'deep lacerations across your back', 'deep gashes and serious bleeding from your back' ],
+								'rightEye'  => [ '', 'a bruised right eye', 'a swollen right eye', 'a blinded right eye' ],
+								'leftEye'   => [ '', 'a bruised left eye', 'a swollen left eye', 'a blinded left eye' ],
+								'rightLeg'  => [ '', 'some minor cuts and bruises on your right leg', 'a fractured and bleeding right leg', 'a completely severed right leg' ],
+								'leftLeg'   => [ '', 'some minor cuts and bruises on your left leg', 'a fractured and bleeding left leg', 'a completely severed left leg' ],
+								'rightArm'  => [ '', 'some minor cuts and bruises on your right arm', 'a fractured and bleeding right arm', 'a completely severed right arm' ],
+								'leftArm'   => [ '', 'some minor cuts and bruises on your left arm', 'a fractured and bleeding left arm', 'a completely severed left arm' ],
+								'rightHand' => [ '', 'some minor cuts and bruises on your right hand', 'a fractured and bleeding right hand', 'a completely severed right hand' ],
+								'leftHand'  => [ '', 'some minor cuts and bruises on your left hand', 'a fractured and bleeding left hand', 'a completely severed left hand' ],
+								'nsys'      => [ '', 'a strange case of muscle twitching', 'a case of sporadic convulsions', 'a case of uncontrollable convulsions' ],
+								'rightFoot' => [ '', 'missing message', 'missing message', 'missing message' ],
+								'leftFoot'  => [ '', 'missing message', 'missing message', 'missing message' ],
+							}
+							scar_message = {
+								'head'      => [ '', 'a scar across your face', 'several facial scars', 'old mutilation wounds about your head' ],
+								'neck'      => [ '', 'a scar across your neck', 'some old neck wounds', 'terrible scars from some serious neck injury' ],
+								'chest'     => [ '', 'an old battle scar across your chest', 'several painful-looking scars across your chest', 'terrible, permanent mutilation of your chest muscles' ],
+								'abdomen'   => [ '', 'an old battle scar across your abdominal area', 'several painful-looking scars across your abdominal area', 'terrible, permanent mutilation of your abdominal muscles' ],
+								'back'      => [ '', 'an old battle scar across your back', 'several painful-looking scars across your back', 'terrible, permanent mutilation of your back muscles' ],
+								'rightEye'  => [ '', 'a black-and-blue right eye', 'severe bruises and swelling around your right eye', 'a missing right eye' ],
+								'leftEye'   => [ '', 'a black-and-blue left eye', 'severe bruises and swelling around your left eye', 'a missing left eye' ],
+								'rightLeg'  => [ '', 'old battle scars on your right leg', 'a mangled right leg', 'a missing right leg' ],
+								'leftLeg'   => [ '', 'old battle scars on your left leg', 'a mangled left leg', 'a missing left leg' ],
+								'rightArm'  => [ '', 'old battle scars on your right arm', 'a mangled right arm', 'a missing right arm' ],
+								'leftArm'   => [ '', 'old battle scars on your left arm', 'a mangled left arm', 'a missing left arm' ],
+								'rightHand' => [ '', 'old battle scars on your right hand', 'a mangled right hand', 'a missing right hand' ],
+								'leftHand'  => [ '', 'old battle scars on your left hand', 'a mangled left hand', 'a missing left hand' ],
+								'nsys'      => [ '', 'developed slurred speech', 'constant muscle spasms', 'a very difficult time with muscle control' ],
+								'rightFoot' => [ '', 'missing message', 'missing message', 'missing message' ],
+								'leftFoot'  => [ '', 'missing message', 'missing message', 'missing message' ],
+							}
+							output = "\n#{name}:\n\n"
+							if data['injuries'].values.any? { |hash| (hash['wound'].to_i > 0) or (hash['scar'].to_i > 0) }
+								wound_array = data['injuries'].to_a.collect { |inj| wound_message[inj[0]][inj[1]['wound'].to_i] }.delete_if { |msg| msg.nil? or msg.empty? }
+								if wound_array.length == 1
+									output.concat "You have #{wound_array.first}.\n"
+								elsif wound_array.length > 1
+									output.concat "You have #{wound_array[0..-2].join(', ')}, and #{wound_array[-1]}.\n"
+								end
+								scar_array = data['injuries'].to_a.collect { |inj| scar_message[inj[0]][inj[1]['scar'].to_i] }.delete_if { |msg| msg.nil? or msg.empty? }
+								if scar_array.length == 1
+									output.concat "You have #{scar_array.first}.\n"
+								elsif scar_array.length > 1
+									output.concat "You have #{scar_array[0..-2].join(', ')}, and #{scar_array[-1]}.\n"
+								end
+							else
+								output.concat "You seem to be in one piece.\n"
+							end
+							output.concat "\n"
+							output.concat "    Maximum Health Points: #{data['max_health']}\n"
+							output.concat "  Remaining Health Points: #{data['health']}\n"
+							output.concat "\n"
+							output.concat "    Maximum Spirit Points: #{data['max_spirit']}\n"
+							output.concat "  Remaining Spirit Points: #{data['spirit']}\n"
+							output.concat "\n"
+							output.concat "    Maximum Stamina Points: #{data['max_stamina']}\n"
+							output.concat "  Remaining Stamina Points: #{data['stamina']}\n"
+							output.concat "\n"
+							respond output
+						end
+					end
+				elsif (@active_attributes.last['type'] == 'locate') and (name = @active_attributes.last['from'])
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for location information."
+						elsif data == false
+							echo 'no such user'
+						else
+							output = "\n#{name}:\n\n"
+							also_see = Array.new
+							data['npcs'].each { |npc| if npc['status'].nil?; also_see.push(npc['name']); else; also_see.push("#{npc['name']} (#{npc['status']})"); end }
+							also_see = (also_see + data['loot']) unless data['loot'].nil? or data['loot'].empty?
+							also_here = Array.new
+							data['pcs'].each { |pc| if pc['status'].nil?; also_here.push(pc['name']); else; also_here.push("#{pc['name']} (#{pc['status']})"); end }
+							room = Map.list.find { |room| room.title.include?(data['title']) and room.desc.include?(data['description'].strip) and room.paths.include?(data['exits']) }
+							unless room
+								desc_regex = /#{Regexp.escape(data['description'].strip.sub(/\.+$/, '')).gsub(/\\\.(?:\\\.\\\.)?/, '|')}/
+								room = Map.list.find { |room| room.title.include?(data['title']) and room.paths.include?(data['exits']) and room.desc.find { |desc| desc =~ desc_regex } }
+							end
+							output.concat "#{data['title']}#{' (' + room.id.to_s + ')' if room}\n"
+							if also_see.empty?
+								output.concat "#{data['description']}\n"
+							else
+								output.concat "#{data['description']}  You also see #{also_see.join(', ')}.\n"
+							end
+							output.concat "Also here: #{also_here.join(', ')}\n" unless also_here.empty?
+							output.concat "#{data['exits']}\n"
+							respond output
+						end
+					end
+				elsif (@active_attributes.last['type'] == 'bounty') and (name = @active_attributes.last['from'])
+					unless LNet.ignored?(name)
+						if data.nil?
+							echo "#{name} declined your request for bounty information."
+						elsif data == false
+							echo 'no such user'
+						else
+							respond "\n#{name}:\n#{data}\n\n"
+						end
+					end
+				else
+					# echo data.inspect
+				end
+
+			end
+		rescue
+			echo $!
+			respond $!.backtrace[0..1]
+		end
+	end
+
+	def tag_end(tag_name)
+		@active_tags.pop
+		@active_attributes.pop
+	end
+
+end
+
+unless defined?(UNTRUSTED_LNET_GET_DATA)
+	UNTRUSTED_LNET_GET_DATA = proc { |name, type| LNet.get_data(name, type) }
+end
+
+unless defined?(UNTRUSTED_LNET_UPLOAD_SPELL_RANKS)
+	UNTRUSTED_LNET_UPLOAD_SPELL_RANKS = proc { LNet.upload_spell_ranks }
+end
+
+def lichnet_get_spells(name)
+	LNet.get_data(name, 'spells')
+end
+
+CharSettings['options'] ||= Hash.new
+LNet.options = CharSettings['options']
+
+CharSettings['secret'] ||= Array.new
+LNet.store_secret = CharSettings['secret']
+
+if LNet.options.empty?
+	LNet.options['timestamps'] = Settings['options']['timestamps']
+	LNet.options['fam_window'] = Settings['options']['fam_window']
+	LNet.options['greeting']   = Settings['options']['greeting']
+	LNet.options['friends']    = Settings['options']['friends'].dup
+	LNet.options['enemies']    = Settings['options']['enemies'].dup
+	LNet.options['permission'] = Settings['options']['permission'].dup
+	LNet.options['ignore']     = Settings['options']['ignore'].dup
+	LNet.secret                = Settings['options'][XMLData.name]['password'].dup
+	Settings['options'][XMLData.name]['password'] = nil
+end
+
+LNet.options['timestamps'] = false if LNet.options['timestamps'].nil?
+LNet.options['fam_window'] = false if LNet.options['timestamps'].nil?
+LNet.options['greeting']   = true  if LNet.options['greeting'].nil?
+
+LNet.options['friends']    = Array.new unless LNet.options['friends'].class    == Array
+LNet.options['enemies']    = Array.new unless LNet.options['enemies'].class    == Array
+LNet.options['permission'] = Hash.new  unless LNet.options['permission'].class == Hash
+LNet.options['ignore']     = Array.new unless LNet.options['ignore'].class     == Array
+
+Settings['alias']          = Hash.new  unless Settings['alias'].class          == Hash
+LNet.alias = Settings['alias']
+
+if script.vars[1] =~ /^password=([^\s]+)$/i
+	if $1 == 'nil'
+		LNet.secret = nil
+		echo 'Password cleared.'
+	else
+		LNet.secret = $1
+		echo 'Password saved locally.'
+	end
+elsif script.vars[1].downcase == 'help'
+	script.unique_buffer.push('help')
+end
+
+before_dying { LNet.server.close rescue(); LNet.script = nil }
+LNet.script = Script.self
+
+#
+# capture input from the client
+#
+script_name = script.name.dup
+action = proc { |client_string|
+	begin
+		if client_string =~ /^(?:<c>)?#{$lich_char}(,|chat |reply |who|locate |spells |info |skills |health |bounty |tune |untune |channels?)(.*)/
+			cmd, extra = $1, $2
+			cmd = 'chat ' if cmd == ','
+			if s = (Script.running + Script.hidden).find { |val| val.name == script_name }
+				s.unique_buffer.push("#{cmd}#{extra}")
+				nil
+			else
+				respond '--- Lich: lnet is not running'
+				UpstreamHook.remove(script_name)
+				nil
+			end
+		elsif client_string =~ /^(?:<c>)?#{$lich_char}([A-z]+):(.*)/
+			name, message = $1, $2
+			if s = (Script.running + Script.hidden).find { |val| val.name == script_name }
+				s.unique_buffer.push("chat ::#{name} #{message}")
+				nil
+			else
+				respond '--- Lich: lnet is not running'
+				UpstreamHook.remove(script_name)
+				nil
+			end
+		elsif client_string =~ /^(?:<c>)?#{$lich_char}#{script_name}(.*)/
+			cmd = $1
+			if s = (Script.running + Script.hidden).find { |val| val.name == script_name }
+				s.unique_buffer.push(cmd)
+				nil
+			else
+				UpstreamHook.remove(script_name)
+				client_string
+			end
+		else
+			client_string
+		end
+	rescue
+		UpstreamHook.remove(script_name)
+		client_string
+	end
+}
+before_dying { UpstreamHook.remove(script_name) }
+UpstreamHook.add(script_name, action)
+
+#
+# keepalive
+#
+Thread.new {
+	loop {
+		begin
+			sleep [50 - (Time.now - LNet.last_send), 5].max
+			LNet.send_ping if (Time.now - LNet.last_send) > 49
+		rescue
+			echo $!
+			puts $!.backtrace[0..1]
+			sleep 1
+		end
+	}
+}
+
+#
+# connect and listen to the server
+#
+Thread.new {
+	loop {
+		last_connect_attempt = Time.now
+		begin
+			LNet.connect
+			LNet.send_request(attr={'type'=>'spell-ranks', 'to'=>'server', 'timestamp'=>SpellRanks.timestamp.to_s}) if defined?(SpellRanks)
+			REXML::Document.parse_stream(LNet.server, LNet.new)
+		rescue
+			echo $!
+			respond $!.backtrace[0..1]
+		end
+		LNet.server.close rescue()
+		if LNet.server_restart
+			LNet.server_restart = false
+			echo 'server is restarting; waiting 30 seconds to reconnect...'
+			sleep 30
+		else
+			echo 'connection lost'
+			wait_time = [300 - (Time.now - last_connect_attempt), 1].max
+			if wait_time > 1
+				echo "waiting #{wait_time.to_i} seconds before trying to reconnect..."
+			end
+			sleep wait_time
+		end
+	}
+}
+
+#
+# report found herb locations
+#
+if XMLData.game =~ /^GS/
+	room_title = XMLData.room_title
+	room_description = XMLData.room_description
+	room_exits = XMLData.room_exits_string
+	found_list = Array.new
+	stick = /^(?:stick|thick|stained|slender|pointed|twisted|long|slim|charred|flexible|sturdy|dark|hefty|cracked|thin|small|bent|short|heavy) stick$/
+	hook_proc = proc { |server_string|
+		if server_string =~ /^(?:<.*?>)?.*?<streamWindow id='room' title=.*? subtitle=" - (.*?)" location=.*?>.*?<compDef id='room desc'>(.*?)<\/compDef>/
+			room_title = "[#{$1}]"
+			room_description = $2.gsub(/<.*?>/, '')
+		elsif server_string =~ /<compDef id='room exits'>(.*?)<\/compDef>/
+			room_exits = $1.gsub(/<.*?>/, '')
+		elsif server_string =~ /^You forage briefly and manage to find (?:a |an )?<a exist=".*?" noun=".*?">(.*?)<\/a>!/
+			herb = $1
+			if herb =~ stick
+				herb = 'stick'
+			end
+			found_list.push h={ :herb => herb, :room_title => room_title, :room_description => room_description, :room_exits => room_exits }
+		end
+		server_string
+	}
+	Thread.new {
+		begin
+			DownstreamHook.add('lnet-watch-forage', hook_proc)
+			loop {
+				wait_while { found_list.empty? }
+				found = found_list.shift
+				room_list = Map.list.find_all { |r| r.title.include?(found[:room_title]) and r.description.include?(found[:room_description].strip) and r.paths.include?(found[:room_exits].strip) }
+				if room_list.length == 1
+					room = room_list.first
+					unless room.tags.include?(found[:herb])
+						room.tags.push(found[:herb])
+						found[:game] = XMLData.game
+						LNet.send_data(a={'to'=>'server','type'=>'forage'}, found)
+					end
+				end
+			}
+		rescue
+			echo $!
+			respond $![0..1]
+			sleep 0.3
+		ensure
+			DownstreamHook.remove('lnet-watch-forage')
+		end
+	}
+end
+
+if XMLData.game =~ /^DR/
+	room_title = XMLData.room_title
+	room_description = XMLData.room_description
+	room_exits = XMLData.room_exits_string
+	found_list = Array.new
+	hook_proc = proc { |server_string|
+		if server_string =~ /^(?:<.*?>)?.*?<streamWindow id='room' title=.*? subtitle=" - (.*?)" location/
+			room_title = "[#{$1}]"
+		elsif server_string =~ /<component id='room desc'>(.*?)<\/component>/
+			room_description = $1.gsub(/<.*?>/, '')
+		elsif server_string =~ /<component id='room exits'>(.*?)<\/component>/
+			room_exits = $1.gsub(/<.*?>/, '')
+		elsif server_string =~ /^(?:<.*?>)?You manage to find (?:a |an |some )?(.*?)\./
+			herb = $1
+			found_list.push h={ :herb => herb, :room_title => room_title, :room_description => room_description, :room_exits => room_exits }
+		elsif server_string =~ /^(?:<.*?>)?You manage to collect a pile of (.*?)s\./
+			herb = $1
+			herb.sub!(/leave$/, 'leaf')
+			herb.sub!(/gras$/, 'grass')
+			herb.sub!(/branche$/, 'branch')
+			found_list.push h={ :herb => herb, :room_title => room_title, :room_description => room_description, :room_exits => room_exits }
+		end
+		server_string
+	}
+	Thread.new {
+		begin
+			DownstreamHook.add('lnet-watch-forage', hook_proc)
+			loop {
+				wait_while { found_list.empty? }
+				found = found_list.shift
+				room_list = Map.list.find_all { |r| r.title.include?(found[:room_title]) and r.description.include?(found[:room_description].strip) and r.paths.include?(found[:room_exits].strip) }
+				if room_list.length == 1
+					room = room_list.first
+					unless room.tags.include?(found[:herb])
+						room.tags.push(found[:herb])
+						found[:game] = XMLData.game
+						LNet.send_data(a={'to'=>'server','type'=>'forage'}, found)
+					end
+				end
+			}
+		rescue
+			echo $!
+			respond $![0..1]
+			sleep 0.3
+		ensure
+			DownstreamHook.remove('lnet-watch-forage')
+		end
+	}
+end
+
+#
+# listen to the user
+#
+while msg = unique_get.strip
+	if msg =~ /^chat\s+\:\:(.+?) (.*)/i or msg =~ /^chat\s+to\s+(.+?) (.*)/i
+		LNet.send_message(attr={'type'=>'private', 'to'=>$1}, $2)
+	elsif msg =~ /^chat\s+\:([^\:].*?) (.*)/i or msg =~ /^chat\s+on\s+(.+?) (.*)/i
+		LNet.send_message(attr={'type'=>'channel', 'channel'=>$1}, $2)
+	elsif msg =~ /^chat\s+(?!:\:|to |on |ot )(.*)/i
+		message = $1.sub(/^\.(to|on) /i, '\\1 ')
+		LNet.send_message(attr={'type'=>'channel'}, message)
+	elsif msg =~/reply\s(.+)/i
+		if LNet.last_priv
+			LNet.send_message(attr={'type'=>'private', 'to'=>LNet.last_priv}, $1)
+		else
+			echo "No private message to reply to."
+		end
+	elsif msg =~ /^who$/i
+		LNet.send_query(attr={'type'=>'connected'})
+	elsif msg =~ /^stats$/i
+		LNet.send_query(attr={'type'=>'server stats'})
+	elsif msg =~ /^who\s+([A-z\:]+)$/i
+		LNet.send_query(attr={'type'=>'connected', 'name'=>$1})
+	elsif msg =~ /^channels?\s*(full|all)?/i
+		if $1
+			LNet.send_query(attr={'type'=>'channels'})
+		else
+			LNet.send_query(attr={'type'=>'channels', 'num'=>'15'})
+		end
+	elsif msg =~ /^tune\s+([A-z]+)$/i
+		LNet.tune_channel($1)
+	elsif msg =~ /^untune\s+([A-z]+)$/i
+		LNet.untune_channel($1)
+	elsif msg =~ /^(spells|skills|info|locate|health|bounty)\s+([A-z\:]+)$/i
+		type = $1.downcase
+		name = $2
+		if LNet.ignored?(name)
+			echo "There's no point in sending a request to someone you're ignoring."
+		else
+			LNet.send_request(attr={'type'=>type, 'to'=>name})
+		end
+	elsif msg =~ /^add\s?alias\s+([^\s]+)\s+(.+)$/i
+		real_name = $1
+		aliased_name = $2
+		old_alias = LNet.alias[real_name]
+		LNet.alias[real_name] = aliased_name
+		echo "chats from #{real_name} will now appear as #{aliased_name}"
+		if real_name !~ /^[A-Z][A-z]+:[A-Z][a-z]+$/
+			echo "The name should be entered exactly as it appears in the thought window, for example:   ;lnet add alias GSIV:Jeril StrangerDanger"
+			echo "If #{real_name} is incorrect, you can remove it using:   ;lnet remove alias #{aliased_name}"
+		end
+	elsif msg =~ /^(?:del|rem|delete|remove)\s?alias\s+(.+)$/i
+		aliased_name = $1
+		if LNet.alias.values.any? { |v| v == aliased_name }
+			LNet.alias.delete_if { |k,v| v == aliased_name }
+			echo "alias deleted"
+		else
+			echo "couldn't find an alias by that name"
+		end
+	elsif msg =~ /^aliases$/i
+		if LNet.alias.empty?
+			echo 'You have no aliases.'
+		else
+			output = "\n"
+			max_k = 0; max_v = 0; LNet.alias.each_pair { |k,v| max_k = [max_k,k.length].max; max_v = [max_v,v.length].max }
+			LNet.alias.each_pair { |k,v|
+				output.concat "   #{k.ljust(max_k)} => #{v.ljust(max_v)}\n"
+			}
+			output.concat "\n"
+			respond output
+		end
+	elsif msg =~ /^add\s?friends?\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['friends'].include?(name)
+			echo "#{name} is already on your friend list."
+		else
+			LNet.options['friends'].push(name)
+			echo "#{name} was added to your friend list."
+		end
+	elsif msg =~ /^(?:del|rem|delete|remove)\s?friends?\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['friends'].delete(name)
+			echo "#{name} was removed from your friend list."
+		else
+			echo "#{name} was not found on your friend list."
+		end
+	elsif msg =~ /^add\s?en[ie]m(?:y|ies)\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['enemies'].include?(name)
+			echo "#{name} is already on your enemy list."
+		else
+			LNet.options['enemies'].push(name)
+			echo "#{name} was added to your enemy list."
+		end
+	elsif msg =~ /^(?:del|rem|delete|remove)\s?en[ie]m(?:y|ies)\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['enemies'].delete(name)
+			echo "#{name} was removed from your enemy list."
+		else
+			echo "#{name} was not found on your enemy list."
+		end
+	elsif msg =~ /^friends?$/i
+		if LNet.options['friends'].empty?
+			echo 'You have no friends.'
+		else
+			echo "friends: #{LNet.options['friends'].join(', ')}"
+		end
+	elsif msg =~ /^enem(?:y|ies)$/i
+		if LNet.options['enemies'].empty?
+			echo 'You have no enemies.'
+		else
+			echo "enemies: #{LNet.options['enemies'].join(', ')}"
+		end
+	elsif msg =~ /^allow$/i
+		fix_type = { 'all' => 'everyone', 'friends' => 'only your friends', 'enemies' => 'everyone except your enemies', 'none' => 'no one', nil => 'no one' }
+		fix_action = { 'locate' => 'locate you', 'spells' => 'view your active spells', 'skills' => "view your #{if rand(100)==0; 'mad '; end}skills", 'info' => 'view your stats', 'health' => 'view your health', 'bounty' => 'view your bounties' }
+		[ 'locate', 'spells', 'skills', 'info', 'health', 'bounty' ].each { |action|
+			respond "You are allowing #{fix_type[LNet.options['permission'][action]]} to #{fix_action[action]}."
+		}
+	elsif msg =~ /^allow\s+(locate|spells|skills|info|health|bounty|all)\s+(all|friend|friends|non\-enemies|nonenemies|enemies|enemy|none)$/i
+		action, group = $1, $2
+		fix_action = { 'locate' => 'locate you', 'spells' => 'view your active spells', 'skills' => "view your #{if rand(100)==0; 'mad '; end}skills", 'info' => 'view your stats', 'health' => 'view your health', 'bounty' => 'view your bounties' }
+		if action =~ /^all$/i
+			for action in [ 'locate', 'spells', 'skills', 'info', 'health', 'bounty' ]
+				if group =~ /^all$/i
+					LNet.options['permission'][action] = 'all'
+					echo "You are now allowing everyone to #{fix_action[action]}."
+				elsif group =~ /^friends?$/i
+					LNet.options['permission'][action] = 'friends'
+					echo "You are now allowing only your friends to #{fix_action[action]}."
+				elsif group =~ /enem/i
+					LNet.options['permission'][action] = 'enemies'
+					echo "You are now allowing everyone except your enemies to #{fix_action[action]}."
+				elsif group =~ /^none$/i
+					LNet.options['permission'][action] = 'none'
+					echo "You are now allowing no one to #{fix_action[action]}."
+				end
+			end
+		elsif group =~ /^all$/i
+			LNet.options['permission'][action] = 'all'
+			echo "You are now allowing everyone to #{fix_action[action]}."
+		elsif group =~ /^friends?$/i
+			LNet.options['permission'][action] = 'friends'
+			echo "You are now allowing only your friends to #{fix_action[action]}."
+		elsif group =~ /enem/i
+			LNet.options['permission'][action] = 'enemies'
+			echo "You are now allowing everyone except your enemies to #{fix_action[action]}."
+		elsif group =~ /^none$/i
+			LNet.options['permission'][action] = 'none'
+			echo "You are now allowing no one to #{fix_action[action]}."
+		end
+	elsif msg =~ /^ignore$/i
+		if LNet.options['ignore'].empty?
+			echo 'You are not ignoring anyone.'
+		else
+			echo "You are ignoring the following people: #{LNet.options['ignore'].join(', ')}"
+		end
+	elsif msg =~ /^ignore\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['ignore'].include?(name)
+			echo "You were already ignoring #{name}."
+		else
+			LNet.options['ignore'].push(name)
+			echo "You are now ignoring #{name}."
+		end
+	elsif msg =~ /^unignore\s+([A-z]+\:)?([A-z]+)$/i
+		fix_game = { 'gsf' => 'GSF', 'gsiv' => 'GSIV', 'gsplat' => 'GSPlat' }
+		name = $2.capitalize
+		if game = $1.sub(/\:$/, '')
+			game = fix_game[game.downcase] if fix_game[game.downcase]
+			name = "#{game}:#{name}"
+		end
+		if LNet.options['ignore'].delete(name)
+			echo "You are no longer ignoring #{name}."
+		else
+			echo "#{name} wasn't being ignored."
+		end
+	elsif msg =~ /^timestamps?=(on|off)$/i
+		if $1 == 'on'
+			LNet.options['timestamps'] = true
+			echo 'timestamps will be shown'
+		else
+			LNet.options['timestamps'] = false
+			echo 'timestamps will not be shown'
+		end
+	elsif msg =~ /^famwindow=(on|off)$/i
+		if $1 == 'on'
+			LNet.options['fam_window'] = true
+			echo 'chats will be sent to the familiar window'
+		else
+			LNet.options['fam_window'] = false
+			echo 'chats will be sent to the thought window'
+		end
+	elsif msg =~ /^greeting=(on|off)$/i
+		if $1 == 'on'
+			LNet.options['greeting'] = true
+			echo 'greeting will be shown at login'
+		else
+			LNet.options['greeting'] = false
+			echo 'getting will not be shown'
+		end
+	elsif msg =~ /^password=([^\s]+)$/i
+		LNet.send_data(attr={'type'=>'newpassword'}, $1)
+		if $1 == 'nil'
+			LNet.secret = nil
+			echo 'Password cleared.'
+		else
+			LNet.secret = $1
+			echo 'Password saved locally.'
+		end
+	elsif msg =~ /^email=([^\s]+)$/i
+		LNet.send_data(attr={'type'=>'newemail'}, $1)
+	elsif msg =~ /^(ban|gag|mod|banip)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)$/i
+		LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3})
+	elsif msg =~ /^(ban|gag|banip)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)\s+for\s+([0-9]+)\s*(seconds?|minutes?|hours?|days?|years?|s|m|h|d|y)$/i
+		multiplier = { nil => 1, 's' => 1, 'second' => 1, 'seconds' => 1, 'm' => 60, 'minute' => 60, 'minutes' => 60, 'h' => 3600, 'hour' => 3600, 'hours' => 3600, 'd' => 86400, 'day' => 86400, 'days' => 86400, 'y' => 31536000, 'year' => 31536000, 'years' => 31536000 }
+		LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3, 'length'=>($4.to_i * multiplier[$5]).to_s})
+	elsif msg =~ /^(unban|ungag|unmod)\s+([\:A-z0-9]+)\s+on\s+([A-z]+)$/i
+		LNet.moderate(attr={'action'=>$1.downcase, 'name'=>$2, 'channel'=>$3})
+	elsif msg =~ /^create\s+(hidden)?\s*(private)?\s*channel\s+([A-z]+)\s+(.+?)$/i
+		attr = attr={ 'action'=>'create channel', 'name'=>$3, 'description'=>$4.strip }
+		if $1
+			attr['hidden'] = 'yes'
+		else
+			attr['hidden'] = 'no'
+		end
+		if $2
+			attr['private'] = 'yes'
+		else
+			attr['private'] = 'no'
+		end
+		LNet.admin(attr)
+	elsif msg =~ /^create\s+poll\s+/i
+		if msg =~ /\-\-question\s+(.+?)\s*(?:\-\-|$)/
+			question = $1[0,512].strip
+		else
+			question = nil
+		end
+		if msg =~ /\-\-vote\-time\s+([0-9]+)\s*(seconds?|minutes?|hours?|days?|years?|s|m|h|d|y)(?:\-\-|$)/
+			multiplier = { nil => 1, 's' => 1, 'second' => 1, 'seconds' => 1, 'm' => 60, 'minute' => 60, 'minutes' => 60, 'h' => 3600, 'hour' => 3600, 'hours' => 3600, 'd' => 86400, 'day' => 86400, 'days' => 86400, 'y' => 31536000, 'year' => 31536000, 'years' => 31536000 }
+			vote_time = $1.to_i * multiplier[$2]
+		else
+			vote_time = nil
+		end
+		num = 1
+		option = Hash.new
+		while msg =~ /\-\-option\-#{num}\s+(.+?)\s*(?:\-\-|$)/
+			option[num] = $1[0,64].strip
+			num += 1
+		end
+		if question and (option.length > 1)
+			attr = { 'action'=>'create poll', 'question'=>question }
+			option.each_pair { |num,opt| attr["option #{num}"] = opt }
+			if vote_time
+				attr['length'] = vote_time
+			end
+			# fixme: confirm
+			LNet.admin(attr)
+		else
+			echo "You're doing it wrong.  Type #{$clean_lich_char}#{script.name} help"
+		end
+	elsif msg =~ /^delete\s+channel\s+([A-z]+)$/i
+		LNet.admin(attr={'action'=>'delete channel', 'name'=>$1})
+	elsif msg =~ /^eval (.+)$/
+		LNet.send_data(attr={'type'=>'eval'}, $1)
+	elsif msg =~ /^help$/i
+		output = String.new
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}chat <message>                     send a message to your default channel\n"
+		output.concat "#{$clean_lich_char},<message>                         ''\n"
+		output.concat "#{$clean_lich_char}chat on <channel name> <message>   send a message to the given channel\n"
+		output.concat "#{$clean_lich_char}chat :<channel name> <message>     ''\n"
+		output.concat "#{$clean_lich_char}chat to <name> <message>           send a private message\n"
+		output.concat "#{$clean_lich_char}chat ::<name> <message>            ''\n"
+		output.concat "#{$clean_lich_char}<name>:<message>                   ''\n"
+		output.concat "#{$clean_lich_char}who                                list who's connected\n"
+		output.concat "#{$clean_lich_char}who <channel>                      list who's tuned into the given channel\n"
+		output.concat "#{$clean_lich_char}who <name>                         tells if a user is connected\n"
+		output.concat "#{$clean_lich_char}channels                           list the 15 most populated channels\n"
+		output.concat "#{$clean_lich_char}channels full                      list all available channels\n"
+		output.concat "#{$clean_lich_char}tune <channel name>                listen to the given channel, or set as default if already tuned\n"
+		output.concat "#{$clean_lich_char}untune <channel name>              stop listening to the given channel\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}locate <name>                      show someone's current room\n"
+		output.concat "#{$clean_lich_char}spells <name>                      show someone's active spells and time remaining\n"
+		output.concat "#{$clean_lich_char}skills <name>                      show someone's skills\n"
+		output.concat "#{$clean_lich_char}info <name>                        show someone's stats\n"
+		output.concat "#{$clean_lich_char}health <name>                      show someone's health, spirit, stamina and injuries\n"
+		output.concat "#{$clean_lich_char}bounty <name>                      show someone's current adventurer's guild task\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} stats                         unhelpful information\n"
+		output.concat "#{$clean_lich_char}#{script.name} timestamps=<on/off>           turn on/off all chats having a timestamp\n"
+		output.concat "#{$clean_lich_char}#{script.name} famwindow=<on/off>            turn on/off sending chats to your familiar window\n"
+		output.concat "#{$clean_lich_char}#{script.name} greeting=<on/off>             turn on/off showing a server greeting at logon\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} friends                       list friends\n"
+		output.concat "#{$clean_lich_char}#{script.name} add friend <name>             add a name to your friend list\n"
+		output.concat "#{$clean_lich_char}#{script.name} del friend <name>             delete a name from your friend list\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} enemies                       list enemies\n"
+		output.concat "#{$clean_lich_char}#{script.name} add enemy <name>              add a name to your enemy list\n"
+		output.concat "#{$clean_lich_char}#{script.name} del enemy <name>              delete a name from your enemy list\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} allow                         list your current permissions\n"
+		output.concat "#{$clean_lich_char}#{script.name} allow <action> <group>        set permissions\n"
+		output.concat "      <action> can be one of: locate, spells, skills, info, health, bounty, all\n"
+		output.concat "      <group> can be one of: all, friends, non-enemies, none\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} aliases                       list aliases\n"
+		output.concat "#{$clean_lich_char}#{script.name} add alias <name> <new_name>   causes chats from name to appear as new_name\n"
+		output.concat "#{$clean_lich_char}#{script.name} del alias <new_name>          delete an alias\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} ignore                        list names currently being ignored\n"
+		output.concat "#{$clean_lich_char}#{script.name} ignore <name>                 ignore chats/private chats/data requests from a person\n"
+		output.concat "#{$clean_lich_char}#{script.name} unignore <name>               unignore a person\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} password=<password>           protect your character name on the server with a password\n"
+		output.concat "#{$clean_lich_char}#{script.name} password=nil                  remove password protection\n"
+#		output.concat "#{$clean_lich_char}#{script.name} email=<email>                 save your email address on the server for password recovery\n"
+#		output.concat "#{$clean_lich_char}#{script.name} email=nil                     delete your email address from the server\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} create [hidden] [private] channel <name> <description>\n"
+		output.concat "      hidden channels don't show up in the channel list\n"
+		output.concat "      private channels ban everyone by default, and the owner (or moderator) must unban anyone he wants to allow in\n"
+#		output.concat "#{$clean_lich_char}#{script.name} modify channel <name> <new description>\n"
+		output.concat "#{$clean_lich_char}#{script.name} delete channel <name>\n"
+		output.concat "\n"
+		output.concat "#{$clean_lich_char}#{script.name} ban <character> on <channel> for <time>\n"
+		output.concat "#{$clean_lich_char}#{script.name} unban <character> on <channel>\n"
+		output.concat "#{$clean_lich_char}#{script.name} gag <character> on <channel> for <time>\n"
+		output.concat "#{$clean_lich_char}#{script.name} ungag <character> on <channel>\n"
+		output.concat "#{$clean_lich_char}#{script.name} mod <character> on <channel>\n"
+		output.concat "#{$clean_lich_char}#{script.name} unmod <character> on <channel>\n"
+		output.concat "      <time> should be a number followed by one of: seconds, minutes, hours, days, or years (may be abbreviated to one letter)\n"
+		output.concat "\n"
+		respond output
+	else
+		echo "You're doing it wrong.  Type #{$clean_lich_char}#{script.name} help"
+	end
+end

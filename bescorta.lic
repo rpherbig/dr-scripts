@@ -1,0 +1,1120 @@
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#bescort
+
+custom_require.call(%w[common common-arcana common-items common-travel common-money drinfomon equipmanager events skill-recorder])
+
+$turns_since_bad = 0
+
+class MazeRoom
+  include DRC
+  include DRCT
+
+  $CARDINALS = { 'n' => 's', 's' => 'n', 'ne' => 'sw', 'sw' => 'ne', 'nw' => 'se', 'se' => 'nw', 'e' => 'w', 'w' => 'e' }
+  $ADJUSTMENTS = { 'n' => [0, 1], 's' => [0, -1], 'ne' => [1, 1], 'sw' => [-1, -1], 'nw' => [-1, 1], 'se' => [1, -1], 'e' => [1, 0], 'w' => [-1, 0] }
+
+  attr_accessor :desc, :exits, :checked, :parent, :coords
+
+  def initialize(came_from = nil, source_room = nil)
+    if came_from
+      @exits = { $CARDINALS[came_from] => source_room }
+      source_room.exits[came_from] = self
+      @coords = update_coords(source_room.coords, came_from)
+    else
+      @@room_list = []
+      @exits = {}
+      @coords = [0, 0]
+    end
+
+    populate_exits
+    @@room_list << self
+  end
+
+  def find_room_by_coords(coords)
+    @@room_list.find { |room| room.coords == coords }
+  end
+
+  def update_coords(coords, traveled)
+    [coords.first + $ADJUSTMENTS[traveled].first, coords.last + $ADJUSTMENTS[traveled].last]
+  end
+
+  def best_path
+    @@room_list.each do |room|
+      room.checked = false
+      room.parent = nil
+    end
+    @checked = true
+    queue = [self]
+    until queue.empty?
+      current = queue.shift
+      current.exits.each do |dir, child|
+        return current.parent || dir if child.nil?
+        next if child.checked
+        child.checked = true
+        child.parent = current.parent || dir
+        queue << child
+      end
+    end
+  end
+
+  def condense_direction(direction)
+    direction.gsub(/orth|est|ast|outh/i, '')
+  end
+
+  def populate_exits
+    remaining_exits = XMLData.room_exits.map { |exit| condense_direction(exit) } - @exits.keys
+
+    remaining_exits.each { |exit| @exits[exit] = nil }
+  end
+
+  def wander
+    dir_to_go = @exits.keys.first if @exits.size == 1
+    dir_to_go, = @exits.find { |_, room| room.nil? } unless dir_to_go
+    dir_to_go, = best_path unless dir_to_go
+
+    fix_standing
+    move(dir_to_go)
+    pause
+
+    return @exits[dir_to_go] if @exits[dir_to_go]
+
+    if existing_room = find_room_by_coords(update_coords(@coords, dir_to_go))
+      @exits[dir_to_go] = existing_room
+      existing_room.exits[$CARDINALS[dir_to_go]] = self
+      return existing_room
+    end
+
+    MazeRoom.new(dir_to_go, self)
+  end
+end
+
+class Bescort
+  include DRC
+  include DRCT
+  include DRCA
+  include DRCI
+  include DRCM
+
+  $ICE_PATH_HIB = %w[nw ne ne e ne ne ne nw sw w w nw]
+  $ICE_PATH_SHARD = %w[se e e ne se sw sw sw w sw sw se]
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'wilds', regex: /wilds/i, description: 'The Leucro and Geni wilds on the NTR.' },
+        { name: 'mode', options: %w[exit leucro1 leucro2 geni], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'oshu_manor', regex: /oshu_manor/i, description: "The Seordhevor kartais & grave worms in Oshu'ehhrsk Manor. Near germish'din on the STR." },
+        { name: 'mode', options: %w[exit worms kartais], description: 'kartais: takes you to seordhevor kartais. worms: takes you to grave worms exit: exits.' }
+      ],
+      [
+        { name: 'faldesu', regex: /faldesu/i, description: 'The Faldesu river at the end of the NTR.' },
+        { name: 'mode', options: %w[haven crossing], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'zaulfang', regex: /zaulfang/i, description: 'For crossing the Zaulfang swamp maze outside Haven' },
+        { name: 'mode', options: %w[exit enter], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'segoltha', regex: /segoltha/i, description: 'The Segoltha south of the crossing' },
+        { name: 'mode', options: %w[north south], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'crocs', regex: /crocs/i, description: 'Blue belly crocodiles on NTR' },
+        { name: 'mode', options: %w[enter exit], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'ways', regex: /ways/i, description: 'Astral travelling' },
+        { name: 'mode', options: %w[shard crossing leth riverhaven merkresh fang raven throne muspari aesry taisgath theren steppes], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'mammoth', regex: /mammoth/i, description: 'The mammoths between Acenamacra, Fang Cove, and Ratha' },
+        { name: 'mode', options: %w[acen fang ratha], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'iceroad', regex: /iceroad/i, description: 'The ice road between Shard and Hibarnhvidar' },
+        { name: 'mode', options: %w[shard hibarnhvidar], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'basalt', regex: /basalt/i, description: 'The ferry between Ratha and Necromancer Island' },
+        { name: 'mode', options: %w[island ratha], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'dirigible', regex: /dirigible/i, description: 'The air ship between Shard and Aesry' },
+        { name: 'mode', options: %w[shard aesry], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'therenropebridge', regex: /therenropebridge/i, description: 'The rope bridge between Theren and Rossman\'s Landing' },
+        { name: 'mode', options: %w[totheren torossman], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'gondola', regex: /gondola/i, description: 'Gondola between Shard and Leth Deriel' },
+        { name: 'mode', options: %w[north south], description: 'Which direction are you going?' }
+      ],
+      [
+        { name: 'sandbarge', regex: /sandbarge/i, description: 'The sand barge between Hvaral, Oasis, and Muspari' },
+        { name: 'start_location', options: %w[hvaral oasis muspari], description: 'Where are you coming from?' },
+        { name: 'end_location', options: %w[hvaral oasis muspari], description: 'Where do you need to get to?' }
+      ],
+      [
+        { name: 'desert', regex: /desert/i, description: 'Hidasharon Desert on Mriss for hunting armadillos' },
+        { name: 'mode', options: %w[adult juvenile elder oasis exit], description: 'Where to?' }
+      ],
+      [
+        { name: 'ferry', regex: /ferry/i, description: 'Ferry between Leth Deriel and the Crossing' },
+        { name: 'mode', options: %w[leth crossing], description: 'Which town are you going to?' }
+      ],
+      [
+        { name: 'ferry1', regex: /ferry1/i, description: 'Ferry between Hibarnhvidar and the Ain Ghazal' },
+        { name: 'mode', options: %w[hibarnhvidar ainghazal], description: 'Which town are you going to?' }
+      ],
+      [
+        { name: 'lang_barge', regex: /lang/, description: 'Barge between Langenfirth and Riverhaven' }
+      ],
+      [
+        { name: 'shard_gates', regex: /shard/i, description: 'Use the Shard gates' }
+      ],
+	   [{ name: 'thief_guild', regex: /thief_guild/i, description: 'Enter the Shard thieves guild' }],
+      [
+        { name: 'abyss', regex: /abyss/i, description: 'Use the Cleric entrance to the Abyss; requires Rezz' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    pause
+
+    if args.wilds
+      wilds(args.mode)
+    elsif args.oshu_manor
+      oshu_manor(args.mode)
+    elsif args.faldesu
+      faldesu(args.mode)
+    elsif args.zaulfang
+      zaulfang(args.mode)
+    elsif args.segoltha
+      segoltha(args.mode)
+    elsif args.crocs
+      croc_swamp(args.mode)
+    elsif args.ways
+      astral_walk(args.mode)
+    elsif args.mammoth
+      take_mammoth(args.mode)
+    elsif args.iceroad
+      iceroad(args.mode)
+    elsif args.basalt
+      take_crawling_plague(args.mode)
+    elsif args.dirigible
+      take_dirigible(args.mode)
+    elsif args.therenropebridge
+      take_theren_rope_bridge(args.mode)
+    elsif args.gondola
+      ride_gondola(args.mode)
+    elsif args.sandbarge
+      take_sandbarge(args.start_location, args.end_location)
+    elsif args.desert
+      desert(args.mode)
+    elsif args.ferry
+      take_xing_ferry(args.mode)
+    elsif args.ferry1
+      take_ain_ghazal_ferry(args.mode)
+    elsif args.abyss
+      abyss_enter
+    elsif args.lang_barge
+      take_rh_lang_barge
+    elsif args.shard_gates
+      use_shard_gates
+	elsif args.thief_guild
+	  enter_thief_guild
+    end
+  end
+
+  private
+
+  def do_map_move(movement)
+    if movement.is_a?(StringProc) || movement.is_a?(Proc)
+      movement.call
+    else
+      move movement
+    end
+  end
+
+  def manual_go2(goal_room)
+    return if Room.current.id == goal_room
+    path = Map.findpath(Room.current.id, Map[goal_room])
+    path.each { |step| do_map_move(Room.current.wayto[step.to_s]) }
+    do_map_move(Room.current.wayto[goal_room.to_s])
+  end
+
+  def search
+    fput('search')
+    pause
+    waitrt?
+    retreat
+  end
+
+  def search_path(pathname, visible = true, movetype = 'go')
+    if visible
+      loop do
+        loop do
+          search
+          # 'other stuff' indicates the room is full - any paths could be rolled up into that collection
+          break if DRRoom.room_objs.find { |obj| obj.include?(pathname) || obj.include?('other stuff') }
+        end
+        break if move "#{movetype} #{pathname}"
+        pause
+      end
+      pause
+    else
+      search
+      until move "#{movetype} #{pathname}"
+        pause
+        search
+      end
+    end
+  end
+
+  def move_direction?(dir_priority, force_match = nil)
+    if choice = dir_priority.find { |dir| XMLData.room_exits.include?(dir) }
+      $turns_since_bad = 0
+      move choice
+      true
+    elsif force_match
+      dir_priority.each do |dir|
+        if force_match.find { |msg| XMLData.room_description.include?(msg) }
+          return false
+        end
+        move(dir)
+        pause 0.5
+        waitrt?
+      end
+      true
+    elsif XMLData.room_exits.empty?
+      # fog?
+      move dir_priority[$turns_since_bad % dir_priority.size]
+      $turns_since_bad += 1
+      $turns_since_bad < 15
+    else
+      false
+    end
+  end
+
+  def find_room_maze(valid_move = proc { |_| true }, error_rooms = {})
+    loop do
+      error_rooms[Room.current.id].call if error_rooms[Room.current.id]
+      return if DRRoom.pcs.empty? && DRRoom.npcs.empty?
+      return if !DRRoom.pcs.empty? && (DRRoom.pcs - UserVars.friends).empty? && DRRoom.pcs.size <= 2
+      exits = XMLData.room_exits.dup.shuffle
+      exits = %w[nw n ne e se s sw w].shuffle if exits.empty?
+      exits.rotate! until valid_move.call(exits.first)
+      move exits.first
+    end
+  end
+
+  def find_room_list(moves, min = 0)
+    count = 0
+    moves.each do |dir|
+      count += 1
+      break if DRRoom.pcs.empty? && DRRoom.npcs.empty? && count > min
+      move dir
+      pause 0.5
+    end
+  end
+
+
+  
+  def oshu_manor(mode)
+    if mode !~ /exit/i && Room.current.id != 2317
+      echo('Oshu manor script must be started from 2317')
+      exit
+    end
+    case mode
+    when /exit/i
+      walk_to(2317)
+    when /worms/i
+      wait_for_script_to_complete('oshu_manor', ['worms'])
+      find_room_list(%w[sw w w w w n n s s e s e s se ne e w n n ne])
+    when /kartais/i
+      wait_for_script_to_complete('oshu_manor', ['kartais'])
+      find_room_list(%w[e e w w w n n n])
+    end
+  end
+
+  def take_sandbarge(start_location, end_location)
+    if start_location == end_location
+      echo('You entered the same locations.')
+      exit
+    end
+
+    case start_location # determines what room to find the barge
+    when 'muspari'
+      manual_go2(6872)
+    when 'oasis'
+      if end_location == 'hvaral'
+        manual_go2(7578)
+      elsif end_location == 'muspari'
+        manual_go2(7579)
+      end
+    when 'hvaral'
+      manual_go2(3766)
+    end
+
+    case end_location # determines how and when to exit the barge
+    when 'muspari'
+      port_type = 'platform'
+      port_call = 'The sand barge pulls into dock'
+    when 'oasis'
+      port_type = 'oasis'
+      port_call = 'The sand barge pulls up to a desert oasis'
+    when 'hvaral'
+      port_type = 'dock'
+      port_call = 'The sand barge pulls into dock'
+    end
+
+    case bput('go barge', 'What were you referring to', "One of the barge's crew members watching", "You can't do that right now")
+    when /What were you referring to/, /You can't do that right now/
+      hide?
+      waitfor 'A sand barge pulls'
+      take_sandbarge(start_location, end_location)
+    when /One of the barge's crew members watching/
+      hide?
+      waitfor port_call
+      fput("go #{port_type}")
+    end
+  end
+
+  def desert_enter
+    walk_to(12_581)
+    move 'down'
+  end
+
+  def desert(mode)
+    priority_directions = %w[northeast east north northwest south southeast west southwest]
+    if mode !~ /exit/i && Room.current.id != 6760
+      echo('Desert script must be started in 6760')
+      exit
+    end
+    case mode
+    when /oasis/
+      echo 'Not implemented'
+      exit
+    when /juvenile/
+      desert_enter
+      find_room_maze
+    when /adult/
+      desert_enter
+      move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+      move 'go trail'
+      find_room_maze
+    when /elder/
+      desert_enter
+      move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+      move 'go trail'
+      move_direction?(priority_directions) until DRRoom.room_objs.include?('faint path leading to some nearby dunes')
+      move 'go path'
+      find_room_maze
+      exit
+    when /exit/
+      if XMLData.room_title.include?('Sand Valley') # Adult Area
+        move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail leading to some nearby dunes')
+        move 'go trail'
+        desert(mode)
+      end
+      if XMLData.room_title.include?('High Dunes') # Juvie Area or Elder
+        move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley') || DRRoom.room_objs.include?('faint path that stretches towards a sand-filled valley')
+        if DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
+        else
+          move 'go path'
+          desert(mode)
+          exit
+        end
+        move 'south'
+        move 'northeast'
+        walk_to(6760)
+      end
+    end
+  end
+
+  def wilds(mode)
+    if mode !~ /exit/i && Room.current.id != 7958
+      echo('Wilds script must be started from 7958')
+      exit
+    end
+    case mode
+    when /exit/i
+      wilds_leave
+    when /leucro1/i
+      wilds_enter
+      find_room_maze(proc { |dir| !(XMLData.room_exits == %w[east south northwest] && dir == 'northwest') }, 7958 => proc { search_path('spot') }, 7957 => proc { move('east') })
+    when /leucro2/i
+      wilds_enter
+      wilds_leucro_maze(true)
+      find_room_list(%w[se s se sw sw sw w w w w s se], 4)
+    when /geni/i
+      wilds_enter
+      wilds_leucro_maze(true)
+      wilds_leucro_walk
+      find_room_maze
+    end
+  end
+
+  def wilds_enter
+    search_path('spot')
+  end
+
+  def wilds_leucro_walk
+    attempts = 0
+    until XMLData.room_description.include?('small creatures still lurk beneath its surface -- perhaps following the remnant of an old, long unused trail.')
+      unless move_direction?(%w[southeast south southwest west])
+        move('southeast')
+      end
+      pause 0.5
+      attempts += 1
+      if attempts == 50
+        echo 'Train your perception!'
+        exit
+      end
+    end
+    search_path('trail', false)
+  end
+
+  def wilds_leucro_maze(entering)
+    if entering
+      while move_direction?(%w[northeast east north southeast])
+        pause 0.5
+        break if DRRoom.room_objs.include?('tangled deadfall')
+      end
+      if Room.current.id == 7958
+        move 'go spot'
+        wilds_leucro_maze(entering)
+        return
+      end
+      move 'go dead'
+    else
+      pause 0.5 while move_direction?(%w[northwest west north])
+    end
+  end
+
+  def wilds_leave_trail
+    pause 0.5 while move_direction?(%w[northeast north northwest east south], ['A fearsomely large black plant rests at the bottom of two slopes.  Its serpentine, multiple stems end in large red tubular openings, which exude a smell like a cross between donkey roadkill and flayed skunk'])
+    move 'go dead'
+  end
+
+  def wilds_leave
+    matches = [
+      'It drips slowly into the undergrowth, creating a damp sludge that makes walking unpleasant and hazardous',
+      'Several sets of yellow eyes stare out unblinkingly from the safety of oak tree limbs too high for even the largest creatures to reach.  The sound of softly fluttering wings drifts down',
+      'A fearsomely large black plant rests at the bottom of two slopes.  Its serpentine, multiple stems end in large red tubular openings, which exude a smell like a cross between donkey roadkill and flayed skunk',
+      'A lively brook once bubbled through the narrow gully, but time and drought have left only this cracked streambed as a reminder.'
+    ]
+
+    loop do
+      pause 0.25 while move_direction?(%w[northwest west north northeast], matches)
+
+      if XMLData.room_description.include?(matches[0])
+        search_path('trail', false)
+      elsif XMLData.room_description.include?(matches[1]) || XMLData.room_description.include?(matches[2])
+        wilds_leave_trail
+      else
+        break
+      end
+    end
+  end
+
+  def faldesu(mode)
+    unless mode =~ /haven|crossing/i
+      echo 'You must specify haven or crossing for traversing the faldesu river'
+      exit
+    end
+
+    if UserVars.athletics >= 140
+      swim_faldesu(mode =~ /haven/i)
+    else
+      take_rh_ferry(mode =~ /haven/i)
+    end
+  end
+
+  def iceroad(mode)
+    unless mode =~ /shard|hibarnhvidar/i
+      echo 'You must specify shard or hibarnhvidar for traversing the ice road'
+      exit
+    end
+
+    path = mode == 'shard' ? $ICE_PATH_SHARD : $ICE_PATH_HIB
+
+    if exists?('skates')
+      EquipmentManager.new.empty_hands
+      footwear = get_settings.footwear
+      fput("remove #{footwear}") if footwear
+      bput("stow my #{footwear}", 'You put') if footwear
+      fput('get skates')
+      fput('wear skates')
+      path.each do |movement|
+        move(movement)
+      end
+      fput('rem skates')
+      fput('stow skates')
+      bput("get my #{footwear}", 'You get') if footwear
+      fput("wear #{footwear}") if footwear
+    else
+      path.each do |movement|
+        move(movement)
+        waitrt?
+        collect('rock')
+        waitrt?
+      end
+    end
+  end
+
+  def swim(dir)
+    move dir
+    pause
+    waitrt?
+  end
+
+  def swim_faldesu(north)
+    start = north ? 1375 : 473
+    manual_go2(start)
+    moveset = north ? %w[north northwest northeast] : %w[south southwest southeast]
+    move 'dive river'
+    swim(moveset[0]) while XMLData.room_exits.include?(moveset[0])
+
+    swim(moveset[1]) while XMLData.room_exits.include?('east')
+
+    swim(moveset[2]) while XMLData.room_exits.include?(moveset[0])
+
+    move 'climb bridge'
+  end
+
+  def take_mammoth(mode)
+    case mode
+    when 'fang'
+      id_to_mammoth = { 2239 => 'tall', 11_130 => 'sea' }
+      closest_mammoth = sort_destinations(id_to_mammoth.keys).first
+      manual_go2(closest_mammoth)
+      mammoth_type = id_to_mammoth[closest_mammoth]
+    when 'acen'
+      manual_go2(8301)
+      mammoth_type = 'tall'
+    when 'ratha'
+      manual_go2(8301)
+      mammoth_type = 'sea'
+    end
+    case bput("join #{mammoth_type} mammoth", 'What were you referring to', 'You join the Merelew driver')
+    when /What were you referring to/
+      waitfor 'The waves along the waterline increase drastically', 'A watery trumpeting sound heralds the swift approach'
+      take_mammoth(mode)
+    when /You join the Merelew driver/
+      waitfor 'The burly beast trumpets a series of watery blasts', 'Here we are, ladies and gentlemen'
+    end
+  end
+
+  def take_crawling_plague(mode)
+    case mode
+    when 'island'
+      manual_go2(12_282)
+    when 'ratha'
+      manual_go2(12_292)
+    end
+    case bput('join crawling plague', "You join the ship's captain", 'What were you referring to?')
+    when /You join the ship's captain/
+      hide?
+      board_time = Time.now if UserVars.bescort_debug
+      pause 1 until XMLData.room_title != '[[The Crawling Plague, Deck]]'
+      echo "Trip time: #{Time.now - board_time} seconds" if UserVars.bescort_debug
+    when /What were you referring to/
+      hide?
+      waitfor 'JOIN CRAWLING PLAGUE before it leaves if you would like to go'
+      take_crawling_plague(mode)
+    end
+  end
+
+  def take_dirigible(mode)
+    case mode
+    when 'aesry'
+      manual_go2(12_862)
+      if wealth('Shard') < 10_000
+        echo('Get money you slob!')
+        return
+      end
+    when 'shard'
+      if wealth('Aesry') < 10_000
+        echo('Get money you slob!')
+        return
+      end
+      manual_go2(12_942)
+    end
+    case bput('join dirigible', 'The Elothean aeromancer says, "Woah there', 'What were you referring to?')
+    when /Elothean aeromancer/
+      case bput('join dirigible', 'You hand over your funds and step closer', 'You reach your funds, but')
+      when /closer/
+        pause 5
+        pause until XMLData.room_title != '[[Aboard the Dirigible, Gondola]]'
+      else
+        return
+      end
+    when /What were you referring to/
+      waitfor 'JOIN CHARCOAL DIRIGIBLE'
+      take_dirigible(mode)
+    end
+  end
+
+  def take_rh_ferry(north)
+    if north
+      manual_go2(1385)
+    else
+      manual_go2(470)
+    end
+    case bput('go ferry', 'You .* climb aboard', 'Come back when you can afford the fare', 'not here', 'I could not find what you were referring to', 'stuck here until the next one arrives')
+    when /not here/, /I could not find what you were referring to/i, /stuck here until the next one arrives/
+      hide?
+      waitfor 'pulls into the dock', 'pulls up to the dock'
+      take_rh_ferry(north)
+    when /climb aboard/
+      hide?
+      waitfor 'reaches the dock and its crew ties the ferry off'
+      fput('go dock')
+    end
+  end
+
+  def zaulfang(mode)
+    Flags.add('zfswamp-reset', 'The noxious swamp gas takes its toll on your mind, and your surroundings seem to shift as you grow immensely dizzy')
+    case mode
+    when /enter/i
+      unless Room.current.id == 8540
+        echo('Must enter Zaulfang swamp from 8540')
+        exit
+      end
+      move('go path')
+      pause
+      wander_maze_until('sickly tree that looms far above the swamp', 'climb tree')
+    when /exit/i
+      unless Room.current.id == 19_415
+        echo('Must exit Zaulfang swamp from 19415')
+        exit
+      end
+      move('down')
+      pause
+      wander_maze_until('curving path', 'go path')
+    end
+  end
+
+  def wander_maze_until(target, exit_command)
+    current_room = MazeRoom.new
+    loop do
+      if Flags['zfswamp-reset']
+        Flags.reset('zfswamp-reset')
+        result = bput('look', 'Obvious paths:.*').split(':').last.split(', ').first.delete('.')
+        move(result)
+        pause
+        current_room = MazeRoom.new
+      end
+
+      if DRRoom.room_objs.include?(target)
+        unless move(exit_command)
+          fix_standing
+          wander_maze_until(target, exit_command)
+        end
+        return
+      end
+      current_room = current_room.wander
+    end
+  end
+
+  def segoltha(mode)
+    EquipmentManager.new.empty_hands
+    EquipmentManager.new.wear_equipment_set?('swimming')
+    if mode =~ /^n/i
+      dir_of_travel = 'north'
+      start_room = 19_373
+    elsif mode =~ /^s/i
+      dir_of_travel = 'south'
+      start_room = 19_457
+    else
+      echo('Must specify north or south for swimming the segoltha')
+      exit
+    end
+
+    unless start_room == Room.current.id
+      echo("Must start bescort in room #{start_room} for traveling #{dir_of_travel}")
+      exit
+    end
+
+    loop do
+      waitrt?
+      if XMLData.room_exits.length == 2
+        move 'west'
+      elsif XMLData.room_exits.include?(dir_of_travel)
+        move dir_of_travel
+      else
+        break
+      end
+    end
+    EquipmentManager.new.wear_equipment_set?('standard')
+  end
+
+  def croc_swamp(mode)
+    if mode == 'enter'
+      unless Room.current.id == 1358
+        echo('Must start bescort in room 1358 to enter the swamp')
+        exit
+      end
+      move('nw')
+      move('n')
+      move('go reed')
+      until DRRoom.pcs.empty? && DRRoom.npcs.empty?
+        move(%w[w nw n ne e se s sw].sample)
+      end
+    else
+      loop do
+        if bput('study reed', 'Study what?', 'You see nothing unusual', 'could not find', 'but see nothing special.') == 'but see nothing special.'
+          move('go reed')
+          break
+        end
+        if DRRoom.room_objs.include?('ruined shack')
+          move('w')
+          move('nw')
+        else
+          move(%w[w nw n ne e se s sw].sample)
+        end
+      end
+      while move_direction?(%w[south southeast])
+      end
+    end
+  end
+
+  def take_theren_rope_bridge(mode)
+    theren_side_roomid = 8650
+    rossman_side_roomid = 8637
+    if mode == 'totheren'
+      if Room.current.id != rossman_side_roomid
+        echo('Must start on the south side of the rope bridge')
+        exit
+      end
+      shuffle_direction = 'north'
+      target_room = theren_side_roomid
+    elsif mode == 'torossman'
+      if Room.current.id != theren_side_roomid
+        echo('Must start on the north side of the rope bridge')
+        exit
+      end
+      shuffle_direction = 'south'
+      target_room = rossman_side_roomid
+    else
+      echo("Unrecognized argument: #{mode}")
+      exit
+    end
+
+    start_room = Room.current.id
+    Flags.add('rope_wait', 'finally arriving on this side', 'finally reaching the far side')
+    while Room.current.id == start_room
+      retreat
+      Flags.reset('rope_wait') # avoiding race conditions
+      case bput('climb rope', 'Roundtime', 'is already on the rope', 'You climb onto a', 'You are engaged', 'You can\'t possibly manage to cross the rope bridge while holding')
+      when 'You can\'t possibly manage to cross the rope bridge while holding'
+        fput('stow right') if checkright
+        fput('stow left') if checkleft
+      when 'is already on the rope'
+        sleep(0.1) until Flags['rope_wait']
+        Flags.reset('rope_wait')
+      else
+        sleep(2)
+        waitrt?
+      end
+    end
+
+    start_time = Time.now
+    until Room.current.id == target_room || Time.now - start_time > 300
+      bput("shuffle #{shuffle_direction}", 'Roundtime')
+      sleep(3)
+      waitrt?
+    end
+    return if Time.now - start_time <= 300
+
+    3.times do
+      beep
+      sleep(0.5)
+    end
+    echo('ROPE BRIDGE TRIP TIMEOUT! This has taken too long. Something is wrong! Fix it!')
+    exit
+  end
+
+  def abyss_enter
+    unless Room.current.id == 8142
+      echo('Abyss entrance script must be started from 8142')
+      exit
+    end
+    release_cyclics
+    unless cast_spell({ 'abbrev' => 'rezz',
+                        'mana' => 5,
+                        'cyclic' => true }, get_settings)
+      echo('Failed to cast Resurrection! Try again or use the puzzle to enter.')
+      exit
+    end
+    move('go spirits')
+    release_cyclics
+  end
+
+  def power_walk(pattern)
+    fput 'exit' if dead? || Flags['ap-danger']
+    if Flags['harness-check']
+      harness_mana([20]) unless Flags['harness-check'].include?('effortlessly')
+      Flags.reset('harness-check')
+    end
+    result = bput('pow', pattern)
+    result =~ pattern
+    waitrt
+    return if result.eql?('You are already at the end of the conduit.')
+    if Flags['pattern-shift']
+      Flags.reset('pattern-shift')
+    else
+      move Regexp.last_match[:direction]
+    end
+  end
+
+  def know_shard?(shard_name, shard_list)
+    return true if UserVars.known_shards.include?(shard_name)
+    bput('recall heavens grazhir', shard_name, 'Roundtime')
+    lines = reget(30).map(&:strip)
+    UserVars.known_shards = lines & shard_list
+    UserVars.known_shards.include?(shard_name)
+  end
+
+  def focus_shard(name)
+    stow_hands
+    bput("focus #{name}", 'Roundtime', 'You move into the chaotic tides of energy')
+  end
+
+  def open_gate(shard, entering_ap)
+    Flags.reset('gate-failure')
+    release_cyclics
+    unless prepare?('mg', 5)
+      echo 'You may need to move to another room'
+      exit
+    end
+    if entering_ap
+      focus_shard(shard) if DRStats.circle < 100
+      harness_mana([20, 20, 20])
+      waitcastrt?
+      if DRStats.circle > 99
+        unless cast?('cast grazhir')
+          echo 'You may need to move to another room'
+          fput('release mana')
+          exit
+        end
+      else
+        cast?("cast #{shard}")
+      end
+    else
+      focus_shard(shard)
+      waitcastrt?
+      cast?("cast #{shard}")
+    end
+    pause 0.25
+    open_gate(shard, entering_ap) if Flags['gate-failure']
+  end
+
+  def astral_walk(mode)
+    Flags.add('harness-check', /You (.*) maintain your place among the shifting streams of mana\./)
+    Flags.add('pattern-shift', 'A wave of rippling air sweeps through the conduit!  The streams of mana writhe violently before settling into new patterns')
+    Flags.add('gate-failure', 'With supreme effort, you are able to bring the spell to an end without harm.')
+    Flags.add('ap-danger', "Unlike most astral phenomena, the static does not go away after a few moments. In fact, it's getting stronger. Closer.")
+
+    room_id_to_shard = {
+      9999 => "Asharshpar'i",
+      607 => 'Rolagi',
+      2493 => 'Marendin',
+      306 => 'Taniendar',
+      3002 => 'Mintais',
+      3105 => 'Dinegavren',
+      4542 => 'Tamigen',
+      5050 => 'Erekinzil',
+      6867 => 'Auilusi',
+      8302 => 'Vellano',
+      3777 => "Dor'na'torna",
+      287 => 'Tabelrem'
+    }
+
+    mode_to_shard = {
+      'shard' => 'Marendin',
+      'crossing' => 'Rolagi',
+      'leth' => "Asharshpar'i",
+      'theren' => 'Dinegavren',
+      'throne' => 'Mintais',
+      'raven' => 'Tamigen',
+      'riverhaven' => 'Taniendar',
+      'taisgath' => 'Erekinzil',
+      'aesry' => 'Auilusi',
+      'fang' => 'Vellano',
+      'muspari' => 'Tabelrem',
+      'steppes' => "Dor'na'torna",
+      'merkresh' => 'Besoge'
+    }
+
+    mode_to_pillar_roomid = {
+      'shard' => 9806,
+      'merkresh' => 9806,
+      'crossing' => 9764,
+      'muspari' => 9764,
+      'aesry' => 9807,
+      'steppes' => 9807,
+      'fang' => 9805,
+      'leth' => 9803,
+      'raven' => 9803,
+      'theren' => 9762,
+      'riverhaven' => 9762,
+      'throne' => 9808,
+      'taisgath' => 9808
+    }
+
+    direction_to_pattern = {
+      'center' => /the microcosm is to the (?<direction>.*)\.$/,
+      'exit' => /You believe the end of the conduit lies (?<direction>.*)\.$|^You are already at the end of the conduit\.$/
+    }
+
+    destination_shard = mode_to_shard[mode]
+    unless know_shard?(destination_shard, mode_to_shard.values)
+      echo 'You dont know that shard!'
+      exit
+    end
+
+    source_shard = room_id_to_shard[Room.current.id]
+    unless source_shard || DRStats.circle > 99
+      echo 'You are not in a room with a Grazhir shard.'
+      exit
+    end
+    open_gate(source_shard, true)
+    pause 0.25 until XMLData.room_exits.empty?
+    power_walk(direction_to_pattern['center']) while XMLData.room_exits.empty?
+    walk_to mode_to_pillar_roomid[mode]
+    focus_shard(destination_shard)
+    while DRRoom.room_objs.empty?
+      power_walk(direction_to_pattern['exit'])
+      focus_shard(destination_shard) unless XMLData.room_exits.empty?
+    end
+    open_gate(destination_shard, false)
+    fput('rel mana')
+  end
+
+  def ride_gondola(mode)
+    case bput('go gondola', 'There is no wooden gondola here', 'Gondola, Cab')
+    when /no wooden gondola here/i
+      waitfor 'The gondola stops on the platform and the door silently swings open'
+      ride_gondola(mode)
+    when /Gondola, Cab/
+      move mode
+      waitfor 'With a soft bump, the gondola comes to a stop at its destination'
+      move 'out'
+    end
+  end
+
+  def take_xing_ferry(mode)
+    unless [1904, 957].include?(Room.current.id)
+      echo 'You are not at the ferry docks'
+      return
+    end
+
+    if UserVars.citizenship != 'Zoluren' && wealth('Crossing') < 35
+      echo('Get money you slob!')
+      return
+    end
+
+    hide? unless DRRoom.room_objs.find { |x| x =~ /the ferry/ }
+    pause 1 until DRRoom.room_objs.find { |x| x =~ /the ferry/ }
+
+    case bput('go ferry', 'The Captain gives you a little nod', 'You hand him', 'The ferry has just pulled away from the dock', 'There is no ferry here to go aboard', 'Come back when you can afford the fare')
+    when 'You hand him', 'The Captain gives you a little nod'
+      hide?
+      waitfor 'reaches the dock and its crew ties the ferry off'
+      move 'go dock'
+    when 'The ferry has just pulled away from the dock', 'There is no ferry here to go aboard'
+      pause 1 while DRRoom.room_objs.find { |x| x =~ /the ferry/ }
+      take_xing_ferry(mode)
+    when 'Come back when you can afford the fare'
+      echo('Your fare has mysteriously disappeared!')
+      return
+    end
+  end
+
+  def take_ain_ghazal_ferry(mode)
+    unless [3986, 11_027].include?(Room.current.id)
+      echo 'You are not at the ferry docks'
+      return
+    end
+
+    if wealth('Shard') < 31
+      echo('Get money you slob!')
+      return
+    end
+
+    hide? unless DRRoom.room_objs.find { |x| x =~ /Damaris. Kiss|Evening Star/ }
+    echo(DRRoom.room_objs) if UserVars.bescort_debug
+    pause 1 until DRRoom.room_objs.find { |x| x =~ /Damaris. Kiss|Evening Star/ }
+
+    case bput('go ferry', 'You hand him', 'The ferry has just pulled away from the dock', 'is steadily approaching', 'Come back when you can afford the fare', 'Sorry, but we cannot take any more passengers', 'You see that the')
+    when 'You hand him'
+      hide?
+      waitfor 'You come to a very soft stop'
+      move 'go dock'
+    when 'is steadily approaching', 'You see that the', 'The ferry has just pulled away from the dock', 'Sorry, but we cannot take any more passengers'
+      waitfor 'comes to an easy landing at the dock and the crew quickly begin to unload the supplies they brought across the river while the passengers make their way off as best they can.'
+      take_ain_ghazal_ferry(mode)
+    when 'Come back when you can afford the fare'
+      echo('Your fare has mysteriously disappeared!')
+      return
+    end
+  end
+
+  def take_rh_lang_barge
+    unless [466, 50_948, 3434].include?(Room.current.id)
+      echo 'You are not at the ferry docks'
+      return
+    end
+
+    if wealth('Riverhaven') < 300
+      echo('Get money you slob!')
+      return
+    end
+
+    hide? unless DRRoom.room_objs.find { |x| x =~ /the barge/ }
+    pause 1 until DRRoom.room_objs.find { |x| x =~ /the barge/ }
+
+    case bput('go barge', "One of the barge's crew members stops you and requests a transportation fee of 65 lirums as you board the craft", 'You hand him', "The barge .* isn't docked, so you're stuck here until the next one arrives", 'The barge .* has just pulled away from the dock', 'There is no ferry here to go aboard', 'Come back when you can afford the fare')
+    when 'You hand him', "One of the barge's crew members stops you and requests a transportation fee of 65 lirums as you board the craft"
+      hide?
+      waitfor 'reaches its dock and its crew ties the barge off'
+      if DRRoom.room_objs.find { |x| x =~ /Langenfirth wharf/ }
+        move 'go wharf'
+      else
+        move 'go pier'
+      end
+    when /The barge .* has just pulled away from the dock/, /The barge .* isn't docked, so you're stuck here until the next one arrives/
+      pause 1 while DRRoom.room_objs.find { |x| x =~ /the barge/ }
+      take_rh_lang_barge
+    when 'Come back when you can afford the fare'
+      echo('Your fare has mysteriously disappeared!')
+      return
+    end
+  end
+  
+  def enter_thief_guild
+    password = get_settings.shard_thief_password
+    bput('knock', 'You knock on the door')
+    bput("say #{password}", 'You lean towards the doorway')
+    move 'go door'
+  end
+  
+  def use_shard_gates
+    unless [2640, 2658, 2807, 2525, 6452, 2516].include?(Room.current.id)
+      echo 'You are not at the Shard gates'
+      return
+    end
+
+    case bput('go gate', 'You pass', 'KNOCK', 'errant shadow')
+    when 'KNOCK'
+      release_invisibility
+      bput('knock gate', 'You knock')
+    end
+  end
+end
+
+Bescort.new

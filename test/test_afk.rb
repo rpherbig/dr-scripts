@@ -5,6 +5,9 @@ load 'test/test_harness.rb'
 
 include Harness
 
+class EquipmentManager
+end
+
 class Room
   def self.current
     Map.new

@@ -1,12 +1,11 @@
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_repository#combat-trainer
 =end
-custom_require.call(%w[common common-arcana common-healing common-items common-summoning common-travel drinfomon equipmanager events spellmonitor])
+custom_require.call(%w[common common-arcana common-healing common-items common-summoning drinfomon equipmanager events spellmonitor common-moonmage])
 
 class SetupProcess
   include DRC
   include DRCS
-  include DRCT
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1243,7 +1242,7 @@ class SpellProcess
     if game_state.casting_regalia
       result = DRCA.parse_regalia
       if result.empty? # if not wearing a regalia, retreat, swap to regalia gearset, then cast
-        DRCT.retreat
+        DRC.retreat
         @equipment_manager.wear_equipment_set?('regalia')
         @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill) if @settings.gear_sets['regalia'].include?(game_state.weapon_name)
       else # otherwise break what you're already wearing then cast.
@@ -1865,6 +1864,8 @@ end
 class TrainerProcess
   include DRC
   include DRCT
+  include DRCI
+  include DRCMM
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1873,7 +1874,7 @@ class TrainerProcess
     echo("  @training_abilities: #{@training_abilities}") if $debug_mode_ct
 
     @skill_map = { 'Hunt' => 'Perception', 'Pray' => 'Theurgy', 'PercMana' => 'Attunement', 'Almanac' => 'Anything',
-                   'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal', 'PrayerMat' => 'Theurgy',
+                   'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal', 'PrayerMat' => 'Theurgy', 'Flee' => 'Athletics',
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics', 'Analyze' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation', 'Teach' => 'Scholarship',
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Ambush Choke' => 'Debilitation',
@@ -1939,6 +1940,21 @@ class TrainerProcess
 
     @pet_count = @skill_map.include?('Locks') ? get_boxes(@pet_box_source).count : 0
     echo("  @pet_count: #{@pet_count}") if $debug_mode_ct
+
+    @have_divination_bones = settings.have_divination_bones
+    echo("  @have_divination_bones: #{@have_divination_bones}") if $debug_mode_ct
+
+    @divination_bones_container = settings.divination_bones_storage['container']
+    echo("  @divination_bones_container: #{@divination_bones_container}") if $debug_mode_ct
+
+    @divination_bones_tied = settings.divination_bones_storage['tied']
+    echo("  @divination_bones_tied: #{@divination_bones_tied}") if $debug_mode_ct
+
+    @have_telescope = settings.have_telescope
+    echo("  @have_telescope: #{@have_telescope}") if $debug_mode_ct
+
+    @astrology_prediction_skills_survival = settings.astrology_prediction_skills['survival']
+    echo("  @astrology_prediction_skills_survival: #{@have_telescope}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -1953,6 +1969,8 @@ class TrainerProcess
       bput('perc heal', 'You close your eyes')
     when 'Astro'
       astrology(game_state)
+    when 'Flee'
+      waitfor('Obvious') unless bput('flee bluff', 'You begin', 'see anything engaged with you', 'You suddenly realize') == 'see anything engaged with you'
     when 'App'
       appraise(game_state, '')
     when 'App Quick'
@@ -2298,9 +2316,92 @@ class TrainerProcess
     return if game_state.retreating?
 
     retreat
-    bput('predict weather', 'You predict that', 'You are far too', 'you lack the skill to grasp them fully')
+    if DRSkill.getrank('Astrology') <= 120
+      bput('predict weather', 'You predict that', 'You are far too', 'you lack the skill to grasp them fully')
+      waitrt?
+      fput('engage')
+    else
+      retreat
+      check_heavens(game_state)
+      Flags.reset('bad-search')
+    end
+  end
+
+  def check_heavens(game_state)
+    @equipment_manager.stow_weapon(game_state.weapon_name)
+    case DRC.bput('get my telescope', 'You get a', 'You need a free hand to pick that up.', 'You are already holding that.')
+    when 'You get a'
+      determine_time
+    when 'You need a free hand to pick that up.'
+      return
+    when 'You are already holding that.'
+      determine_time
+    end
+    @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+  end
+
+  def determine_time
+    echo 'Determining time'
+    case DRC.bput('time', 'it is dawn', 'morning', 'midday', 'noon', 'afternoon', 'dusk', 'sunset', 'evening', 'midnight', 'night', 'almost dawn', 'approaching sunrise')
+    when 'it is dawn', 'morning', 'midday', 'noon', 'afternoon', 'dusk'
+      center('sun')
+    when 'sunset', 'evening', 'midnight', 'night', 'almost dawn', 'approaching sunrise'
+      center('heart')
+    end
+  end
+
+  def center(target)
+    case DRCMM.center_telescope_on(target)
+    when "That's a bit tough to do when you can't see the sky", 'Your search for'
+      stow_telescope
+    else 
+      observe
+    end
+  end
+ 
+  def observe
+    case DRCMM.peer_telescope
+    when "You believe you've learned all that you can about survival", 'Too many futures cloud your mind - you learn nothing.'
+      waitrt?
+      stow_telescope
+      check_predict
+    else
+      waitrt?
+      stow_telescope
+    end
+  end
+    
+  def stow_telescope
+    case DRC.bput('stow my telescope', 'Stow what', 'You put your telescope')
+    when 'You put your telescope'
+      pause 1
+      return
+    when 'Stow what'
+      return
+    end
+  end
+
+  def check_predict
     waitrt?
-    fput('engage')
+    pause 1
+    return if DRSkill.getxp('Astrology') > 25
+    DRCMM.align(@astrology_prediction_skills_survival)
+    waitrt?
+    pause 1
+    execute_predict
+  end
+
+  def execute_predict
+    retreat
+    case DRC.bput('predict future', 'You are far too occupied by present matters to immerse yourself in matters of the future', 'You look inside yourself')
+    when 'You are far too occupied by present matters to immerse yourself in matters of the future'
+      retreat
+      waitrt?
+      execute_predict
+    when 'You look inside yourself'
+      stow_hands
+      return
+    end
   end
 
   def reset_ability(game_state, ability_name, offset = 0)
@@ -2442,11 +2543,18 @@ class AttackProcess
         end
       end
 
-      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden')
+      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack')
     end
 
     pause
     waitrt?
+
+    if reget(5, 'flying too high for you to attack')
+      case bput('face next', 'There is nothing', 'You turn to face')
+      when 'There is nothing'
+        pause 5
+      end
+    end
 
     if reget(5, 'You can\'t backstab that')
       if game_state.npcs.uniq.length == 1
@@ -2605,7 +2713,7 @@ class AttackProcess
   end
 
   def aim(game_state)
-    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow')
+    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment')
     when 'You are already'
       game_state.loaded = true
     when 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your riot crossbow'

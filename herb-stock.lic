@@ -1,0 +1,106 @@
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#restock
+custom_require.call(%w[common common-items common-money])
+class Herbstock
+  include DRC
+  include DRCM
+  include DRCI
+  def initialize
+    setup
+    items = parse_restockable_items
+
+    custom_loc_items = items.select { |k| k['hometown'] }
+
+    items -= custom_loc_items
+    restock_items(items, @settings.hometown)
+
+    custom_loc_items.map { |k| k['hometown'] }.uniq
+                    .each do |_hometown|
+      custom_loc_items.group_by { |v| v['hometown'] }
+                      .each { |hometown, items| restock_items(items, hometown) }
+    end
+  end
+
+  def restock_items(item_list, town)
+    items_to_restock = []
+    coin_needed = 0
+
+    item_list.each do |item|
+      remaining = count_combinable_item(item['name'])
+
+      next unless remaining < item['quantity']
+      num_needed = item['quantity'] - remaining
+      buy_num = (num_needed / item['size'].to_f).ceil
+      coin_needed += buy_num * item['price']
+      item['buy_num'] = buy_num
+      items_to_restock.push(item)
+    end
+    get_money_from_specific_bank?("#{coin_needed} copper #{town_currency(town)}", town) if coin_needed > 0
+    items_to_restock.each do |item|
+      item['buy_num'].times do
+        stow_hands
+        bput("get my #{item['name']}", 'You get', 'What were you referring') if item['stackable']
+        buy_item(item['room'], item['name'])
+        split_name = item['name'].split(' ')
+        bput("combine #{split_name.last} with #{split_name.last}", 'You combine', 'You must be holding') if item['stackable']
+        stow_hands
+      end
+    end
+  end
+
+  def setup
+    @settings = get_settings
+    @restock = @settings.herbs
+    @hometown = @settings.hometown
+    get_settings.storage_containers.each { |container| fput("open my #{container}") }
+  end
+
+  def parse_restockable_items
+    item_list = @restock
+    hometown_data = get_data('consumables')[@hometown]
+    items = []
+    item_list.each do |key, value|
+      if hometown_data.key?(key) && !value.key?('hometown')
+        ht_data = hometown_data[key]
+        data = ht_data.each_key { |k| ht_data[k] = value[k] if value.key?(k) }
+        items.push(data)
+      elsif valid_item_data?(value)
+        items.push(value)
+      else
+        echo "No hometown of explicit data for '#{key}'"
+      end
+    end
+    items
+  end
+
+  def count_combinable_item(item)
+    count = 0
+    $ORDINALS.each do |ordinal|
+      count_msg = bput("count my #{ordinal} #{item}", 'I could not find what you were referring to.', 'tell you much of anything.', 'There is only one part', 'There are (.+) parts left of the ')
+      case count_msg
+      when 'I could not find what you were referring to.'
+        break
+      when 'tell you much of anything.'
+        echo "#{item} is marked as stackable but is not!"
+        break
+      when 'There is only one part'
+        count += 1
+      else
+        count_txt = count_msg.match(/There \w+ (.+) \w+ left of the /).captures.first.tr('-', ' ')
+        count += text2num(count_txt)
+      end
+      waitrt?
+    end
+    count
+  end
+
+  def valid_item_data?(item_data)
+    return true if  item_data.key?('name') && \
+                    item_data.key?('size') && \
+                    item_data.key?('room') && \
+                    item_data.key?('price') && \
+                    item_data.key?('stackable') && \
+                    item_data.key?('quantity')
+    false
+  end
+end
+Herbstock.new

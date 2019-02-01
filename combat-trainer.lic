@@ -996,7 +996,11 @@ class SpellProcess
     @regalia_spell = settings.waggle_sets['regalia']['Regalia']
     echo("  @regalia_spell: #{@regalia_spell}") if $debug_mode_ct
 
+    @aura_frequency = settings.aura_frequency
+    echo("  @aura_frequency: #{@aura_frequency}") if $debug_mode_ct
+
     @perc_health_timer = Time.now
+    @aura_timer = 0
 
     @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
     echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}") if $debug_mode_ct
@@ -1073,6 +1077,7 @@ class SpellProcess
     check_ignite(game_state)
     check_rutilors_edge(game_state)
     check_health(game_state)
+    check_starlight(game_state)
     check_buffs(game_state)
     check_training(game_state)
     check_offensive(game_state)
@@ -1358,6 +1363,7 @@ class SpellProcess
                        .select { |_name, data| data['recast'] || data['recast_every'] || data['expire'] }
                        .select { |_name, data| data['expire'] ? Flags["ct-#{data['abbrev']}"] : true }
                        .select { |name, _data| check_buff_conditions?(name, game_state) }
+                       .select { |_name, data| data['starlight_threshold'] ? enough_starlight?(game_state, data) : true }
 
     name, data = recastable_buffs.find do |name, data|
       if data['pet_type']
@@ -1412,12 +1418,26 @@ class SpellProcess
     end
   end
 
-  def check_trader_magic(game_state) # handles starlight-related effects and cleans flags
+  def check_starlight(game_state)
+    return unless DRStats.trader?
+    return unless @aura_frequency > 0 && (Time.now - @aura_timer).to_i > @aura_frequency
+    @aura_timer = Time.now
+    game_state.starlight_values = DRCA.perc_aura
+  end
+
+  def enough_starlight?(game_state, data)
+    return UserVars.sun['night'] unless DRStats.trader?
+    return true unless game_state.starlight_values
+    data['starlight_threshold'] <= game_state.starlight_values['level']
+  end
+
+  def check_trader_magic(game_state) # handles starlight-depletion and regalia
     return unless DRStats.trader?
     if Flags['ct-starlight-depleted']
       echo '----OUT OF STARLIGHT - DELETING STARLIGHT MAGIC----'
       @buff_spells.reject! { |spell| @buff_spells[spell]['starlight_threshold'] > -1 } # delete all buffs and offensive spells. Potential to add stellar collector support later
       @offensive_spells.reject! { |spell| spell['starlight_threshold'] > -1 }
+      @aura_frequency = 0
       game_state.regalia_cancel = true # stop all regalia swap functions and clean it up next time it expires.
     end
     if game_state.casting_regalia
@@ -1488,6 +1508,7 @@ class SpellProcess
                    .select { |spell| spell['night'] ? UserVars.sun['night'] : true }
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
                    .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
+                   .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
     data = if @offensive_spell_cycle.empty?
              ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
            else
@@ -1885,7 +1906,7 @@ class TrainerProcess
                    'Perc' => 'Attunement', 'Astro' => 'Astrology', 'App' => 'Appraisal', 'PrayerMat' => 'Theurgy', 'Flee' => 'Athletics',
                    'App Quick' => 'Appraisal', 'App Careful' => 'Appraisal', 'Tactics' => 'Tactics', 'Analyze' => 'Tactics',
                    'Scream' => 'Bardic Lore', 'Perc Health' => 'Empathy', 'Khri Prowess' => 'Debilitation', 'Teach' => 'Scholarship',
-                   'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Ambush Choke' => 'Debilitation',
+                   'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Ambush Choke' => 'Debilitation', 'App Pouch' => 'Appraisal',
                    'Favor Orb' => 'Anything', 'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
                    'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
                    'Barb Research Debilitation' => 'Debilitation', 'Collect' => 'Outdoorsmanship', 'Smite' => 'Conviction', 'Locks' => 'Locksmithing' }
@@ -1985,6 +2006,9 @@ class TrainerProcess
       appraise(game_state, 'quick')
     when 'App Careful'
       appraise(game_state, 'careful')
+    when 'App Pouch'
+      retreat
+      bput('app my pouch quick', 'You sort', 'Appraise what', 'You cannot appraise')
     when 'Tactics'
       bput($tactics_actions.sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
     when 'Analyze'
@@ -2054,6 +2078,14 @@ class TrainerProcess
       use_almanac(game_state)
     when 'Smite'
       smite(game_state)
+    when 'Herbs'
+      if game_state.npcs.empty?
+        game_state.sheath_whirlwind_offhand
+        wait_for_script_to_complete('heal-herb',['quick'])
+        game_state.wield_whirlwind_offhand
+      else
+        wait_for_script_to_complete('heal-herb',['quick','nohands'])
+      end
     end
     waitrt?
     false
@@ -2468,8 +2500,7 @@ class AttackProcess
 
     @ambush_location = settings.ambush_location
     echo("  @ambush_location: #{@ambush_location}") if $debug_mode_ct
-	
-	
+
     @get_actions = %w[get wield]
     echo("  @get_actions: #{@get_actions}") if $debug_mode_ct
 
@@ -2920,7 +2951,7 @@ class GameState
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia, :starlight_values
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -2944,6 +2975,7 @@ class GameState
     @regalia_cancel = false
     @last_regalia_type = nil
     @swap_regalia_type = nil
+    @starlight_values = nil
     @casting_weapon_buff = false
     @casting_consume = false
     @prepare_consume = false
@@ -3018,13 +3050,13 @@ class GameState
 
     @use_stealth_attacks = settings.use_stealth_attacks
     echo("  @use_stealth_attacks: #{@use_stealth_attacks}") if $debug_mode_ct
-	
-	@use_stealth_ranged = settings.use_stealth_ranged 
+    
+    @use_stealth_ranged = settings.use_stealth_ranged 
     echo("  @use_stealth_ranged: #{@use_stealth_ranged}") if $debug_mode_ct
-
+	
     @ambush = settings.ambush
     echo("  @ambush: #{@ambush}") if $debug_mode_ct
-
+	
     @backstab = settings.backstab
     echo("  @backstab: #{@backstab}") if $debug_mode_ct
 
@@ -3347,13 +3379,13 @@ class GameState
   def use_stealth_attack?
     @use_stealth_attacks && use_stealth?
   end
-
-  def ambush?
-    @ambush && DRSkill.getxp('Backstab') < 34 && !brawling?
-  end
   
   def use_stealth_ranged? #new
     @use_stealth_ranged && use_stealth? #new
+  end
+  
+  def ambush?
+    @ambush && DRSkill.getxp('Backstab') < 34 && !brawling?
   end
 
   def backstab?
@@ -3657,4 +3689,5 @@ end
 
 $COMBAT_TRAINER = CombatTrainer.new
 $COMBAT_TRAINER.start_combat
+
 

@@ -7,20 +7,36 @@ custom_require.call(%w[common common-healing common-items])
 
 arg_definitions = [
   [
-    { name: 'debug', regex: /debug/i, optional: true }
+    { name: 'debug', regex: /debug/i, optional: true },
+    { name: 'nohands', regex: /nohands/i, optional: true, description: 'Skip herbs which must be held to use' },
+    { name: 'noscars', regex: /noscars/i, optional: true, description: 'Skip scar healing herbs' },
+    { name: 'quick', regex: /quick/i, optional: true, description: 'Skip delay between wound and scar herbs' },
+    { name: 'level', regex: /\d+/i, optional: true, description: 'Healing level desired.' },
   ]
 ]
 
 args = parse_args(arg_definitions)
 $debug_mode_hr = args.debug
+$nohands_mode = args.nohands
+$noscars_mode = args.noscars
+$quick_mode = args.quick
 
-$remedies = get_data('remedies')
+if args.level
+  $heal_level = args.level.to_i
+else
+  $heal_level = 0
+end
+
+@settings = get_settings
+$remedies = get_data('remedies') unless @settings.herbs
+$remedies = get_data('herbs') if @settings.herbs
+@wounds_applied = FALSE
 
 def wounds
   wounds = DRCH.check_health['wounds']
   pause 1
   echo wounds if $debug_mode_hr
-  hurt = wounds.select { |level, _| level >= 4 }.values.flatten
+  hurt = wounds.select { |level, _| level >= $heal_level }.values.flatten
   wound_grouping = { 'right arm' => 'limbs', 'left arm' => 'limbs', 'left leg' => 'limbs', 'right leg' => 'limbs', 'right hand' => 'limbs', 'left hand' => 'limbs', 'right eye' => 'eyes', 'left eye' => 'eyes' }
   scar_grouping = { 'right arm' => 'limbs', 'left arm' => 'limbs', 'left leg' => 'limbs', 'right leg' => 'limbs', 'right hand' => 'limbs', 'left hand' => 'limbs', 'head' => 'face', 'neck' => 'face', 'eyes' => 'face', 'chest' => 'body', 'abdomen' => 'body', 'back' => 'body' }
   hurt = hurt.map { |raw| wound_grouping[raw] || raw }.uniq
@@ -41,17 +57,20 @@ def wounds
   hurt.each do |key|
     echo key if $debug_mode_hr
     echo('In hurt loop') if $debug_mode_hr
-    apply_wounds(key)
+    remedy_apply_wounds(key) unless @settings.herbs
+    herb_apply_wounds(key) if @settings.herbs
   end
-  pause 180 # pause 3 minutes before using scar remedies
+  return unless @wounds_applied
+  pause 180 if !$quick_mode # pause 3 minutes before using scar remedies
   scar.each do |key|
     echo key if $debug_mode_hr
     echo('In scar loop') if $debug_mode_hr
-    apply_scars(key)
+    remedy_apply_scars(key) unless @settings.herbs
+    herb_apply_scars(key) if @settings.herbs
   end
 end
 
-def apply_wounds(key)
+def remedy_apply_wounds(key)
   echo("In apply_wounds function and key is #{key}") if $debug_mode_hr
   rem_wounds = $remedies['remedies']['external'][key]
   echo(rem_wounds) if $debug_mode_hr
@@ -72,7 +91,7 @@ def apply_wounds(key)
   end
 end
 
-def apply_scars(key)
+def remedy_apply_scars(key)
   echo("In apply_scar function and key is #{key}") if $debug_mode_hr
   rem_scars = $remedies['remedies']['scars'][key]
   echo(rem_scars) if $debug_mode_hr
@@ -95,7 +114,7 @@ def apply_scars(key)
   end
 end
 
-def apply_general_scar(key)
+def remedy_apply_general_scar(key)
   echo("In apply_gerneral_scar function and key is #{key}") if $debug_mode_hr
   rem_scars_general = $remedies['remedies']['scars'][key]
   echo(rem_scars_general) if $debug_mode_hr
@@ -110,9 +129,57 @@ def apply_general_scar(key)
         DRC.bput("drink #{key}", 'You')
       end
       DRC.bput("stow #{key}", 'You')
+      @wounds_applied = TRUE
     else
       echo("*** No more #{key}! ***")
     end
+  end
+end
+def herb_apply_wounds(key)
+  echo("In apply_wounds function and key is #{key}") if $debug_mode_hr
+  rem_wounds = $remedies['remedies']['external'][key]
+  echo(rem_wounds) if $debug_mode_hr
+  rem_wounds.each do |key|
+    loop_debug
+     case key
+     when /salve/, /sap/
+       DRC.bput("get #{key}", 'You get', 'referring to?') unless $nohands_mode
+       DRC.bput("rub my #{key}", 'You', 'Rub what?') unless $nohands_mode
+       DRC.bput("stow #{key}", 'You', 'Stow what?') unless $nohands_mode
+       @wounds_applied = TRUE
+     when /ungent/, /poultices/, /ointment/
+       DRC.bput("rub my #{key}", 'You', 'Rub what?')
+       @wounds_applied = TRUE
+     when /potion/, /tonic/, /elixir/, /draught/
+       DRC.bput("drink my #{key}", 'You', 'Drink what?')
+       @wounds_applied = TRUE
+     when /flower/, /root/, /leaf/, /grass/
+       DRC.bput("eat my #{key}", 'You', 'you referring to?')
+       @wounds_applied = TRUE
+     end
+  end
+end
+
+def herb_apply_scars(key)
+  echo("In apply_scar function and key is #{key}") if $debug_mode_hr
+  rem_scars = $remedies['remedies']['scars'][key]
+  echo(rem_scars) if $debug_mode_hr
+  rem_scars.each do |key|
+    loop_debug
+     case key
+     when /genich/
+       DRC.bput("get #{key}", 'You get', 'referring to?') unless $nohands_mode
+       DRC.bput("inhale my #{key}", 'You') unless $nohands_mode
+       DRC.bput("stow #{key}", 'You', 'Stow what?') unless $nohands_mode
+     when /salve/, /ungent/, /poultices/, /ointment/, /sap/
+       DRC.bput("rub my #{key}", 'You', 'Rub what?')
+     when /tonic/, /draught/, /qun/
+       DRC.bput("drink my #{key}", 'You', 'Drink what?')
+     when /potion/
+       DRC.bput("eat my #{key}", 'You', 'you referring to?') 
+     when /flower/, /root/, /leaf/, /grass/, /potion/, /nuloe/, /elixir/, /jadice/
+       DRC.bput("eat my #{key}", 'You', 'you referring to?')
+     end
   end
 end
 

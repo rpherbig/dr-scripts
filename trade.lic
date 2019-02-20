@@ -12,6 +12,24 @@ class Trade
   include DRCM
 
   def initialize
+    arg_definitions = [
+      [
+        { name: 'destination', regex: /\d+/i, optional: true, description: 'Give a room ID to bring your caravan to' }
+      ],
+      [
+        { name: 'closeup', regex: /closeup/i, optional: false, description: 'Close up by delivering all remaining crates and accepting no new contracts' },
+        { name: 'exit', regex: /exit/i, optional: true, description: 'Exits the game after delivering all crates and returning the caravan' }
+      ],
+      [
+        { name: 'outpost', regex: /outpost/i, optional: false, description: 'Bring the caravan to the trade outpost of a town.' },
+        { name: 'town_name', regex: /\w+/i, variable: true, description: 'First word of the town name.' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    @closeup = args.closeup
+    @exit = args.exit
+    @caravan = OpenStruct.new
+    
     @town_data = get_data('town')
     @equipment_manager = EquipmentManager.new
     @settings = get_settings
@@ -22,6 +40,7 @@ class Trade
     @caravan_coins_on_hand = @settings.caravan_coins_on_hand.to_i
     @caravan_interior = @settings.caravan_interior
     @caravan_being_led = false
+    @held_contracts = []
     @force_contract_from = []
     Flags.add('lead-arrived', 'having arrived at its destination', 'You feel the momentum of the room shift and then hear a voice from outside announce')
     Flags.add('lead-failed', 'Your caravan guide comes to you and suggests')
@@ -38,10 +57,10 @@ class Trade
     @equipment_manager = EquipmentManager.new(@settings)
     @cooldown_timers = {}
     @caravan_training_skills = @settings.caravan_training_skills
-    @lead_training_skills = @caravan_training_skills.select { |skill, _cooldown| !['Mechanical Lore', 'Augmentation', 'Utility', 'Warding'].include?(skill) }
+    @lead_training_skills = @caravan_training_skills.reject { |skill, _cooldown| ['Mechanical Lore', 'Augmentation', 'Utility', 'Warding'].include?(skill) }
     @walk_training_skills = @caravan_training_skills.select { |skill, _cooldown| ['Augmentation', 'Utility', 'Warding', 'Attunement', 'Performance', 'Appraisal', 'Mechanical Lore'].include?(skill) }
     @craft_bag = @settings.crafting_container
-    @craft_belt = @settings.engineering_belt
+    @craft_belt = nil
 
     @yarn_quantity = @settings.yarn_quantity > 300 ? 301 : @settings.yarn_quantity
     @lumber_quantity = @settings.lumber_quantity > 30 ? 30 : @settings.lumber_quantity
@@ -57,30 +76,9 @@ class Trade
     @loot_nouns = @settings.lootables
     @trash_nouns = get_data('items').trash_nouns
 
-    arg_definitions = [
-      [
-        { name: 'destination', regex: /\d+/i, optional: true, description: 'Give a room ID to bring your caravan to' }
-      ],
-      [
-        { name: 'closeup', regex: /closeup/i, optional: false, description: 'Close up by delivering all remaining crates and accepting no new contracts' },
-        { name: 'exit', regex: /exit/i, optional: true, description: 'Exits the game after delivering all crates and returning the caravan' }
-      ],
-      [
-        { name: 'outpost', regex: /outpost/i, optional: false, description: 'Bring the caravan to the trade outpost of a town.' },
-        { name: 'town_name', regex: /\w+/i, variable: true, description: 'First word of the town name.' }
-      ]
-    ]
-    args = parse_args(arg_definitions)
-    validate_requirements(args)
     setup_town_data
-
-    @closeup = args.closeup
-    @exit = args.exit
-    @caravan = OpenStruct.new
-    recall_caravan?
-
-    @held_contracts = []
-
+    validate_requirements(args)
+    
     bput("open my #{@contract_container}", 'You open', 'That is already', 'You can.t')
     @equipment_manager.empty_hands
 
@@ -167,7 +165,6 @@ class Trade
         magic_cleanup
         wait_for_script_to_complete('buff', ['trade'])
         get_contract
-        load_caravan
       else
         close_out unless exists?('contract')
       end
@@ -501,9 +498,12 @@ class Trade
 
   def compute_path(destination)
     echo "computing path #{destination}" if debugging?
+    Script.pause('skill-recorder') if Script.running?('skill-recorder')
+    UserVars.athletics = 1
     previous, _shortest_paths = Map.dijkstra(Room.current.id, destination)
     path = [destination]
     path.push(previous[path[-1]]) until previous[path[-1]].nil?
+    Script.unpause('skill-recorder') if Script.running?('skill-recorder')
     path.reverse
   end
 
@@ -716,6 +716,7 @@ class Trade
     else
       @force_contract_from - [find_town(minister_id)] if @force_contract_from.include?(find_town(minister_id))
     end
+    load_caravan
   end
 
   def caravan_check?(stationary = true) # The traders' guild hands out identical caravans
@@ -732,7 +733,7 @@ class Trade
   end
 
   def caravan_exists?
-    return false unless @caravan.adjective && @caravan.noun
+    return recall_caravan? unless @caravan.adjective && @caravan.noun
     true
   end
 
@@ -869,7 +870,7 @@ class Trade
 
   def magic_routine
     return if @training_spells.empty?
-    return unless %w[Augmentation Warding Utility Outdoorsmanship Perception].include?(@training_token)
+    return unless ['Augmentation', 'Warding', 'Utility', 'Outdoorsmanship', 'Perception', 'Mechanical Lore'].include?(@training_token)
     echo "magic_routine" if debugging?
     if @preparing && Flags['trading-magic-ready'] && mana > 40
       crafting_cast_spell(@preparing, @settings)
@@ -1092,7 +1093,7 @@ class Trade
     bput('close my feedbag', 'You close', 'What were', 'That is already')
     bput('get my grass', 'You get', 'What were you')
     bput('open my feedbag', 'You open', 'What were')
-    result = bput('stow my grass', 'You stow', 'You put', 'What were you') if braid?('grass')
+    result = bput('stow my grass', 'You stow', 'You put', 'What were you', 'The braided grass is too long') if braid?('grass')
     drop_grass
     @training_token = nil
     @step_toggle = @step_toggle == 100 ? 2 : 0
@@ -1248,6 +1249,7 @@ class Trade
   def outfitting_routine # knits. If interrupted, put the needles away.  Will resume any unfinished project.
     return unless @training_token == 'Outfitting'
     return if Script.running?('sew')
+    @craft_belt = @settings.outfitting_belt
     if @crafted_item && left_hand.include?(@crafted_item.split.last) || right_hand.include?(@crafted_item.split.last)
       bput("drop my #{@crafted_item.split.last}", 'You drop', 'You place', 'What were', 'You spread')
     end
@@ -1315,6 +1317,7 @@ class Trade
   def engineering_routine # shapes.  Will stow unfinished projects, and search your storage_containers for them later.
     return unless @training_token == 'Engineering'
     return if Script.running?('shape')
+    @craft_belt = @settings.engineering_belt
     rank = DRSkill.getrank('Engineering')
 
     if rank <= 25 # Tier 1  Extremely Easy
@@ -1476,6 +1479,7 @@ before_dying do
   Flags.delete('lead-arrived')
   Flags.delete('lead-failed')
   Flags.delete('lockbox-done')
+  Script.unpause('skill-recorder') if Script.paused?('skill-recorder')
 end
 
 Trade.new.run

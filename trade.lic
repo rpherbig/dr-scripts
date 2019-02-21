@@ -61,6 +61,7 @@ class Trade
     @walk_training_skills = @caravan_training_skills.select { |skill, _cooldown| ['Augmentation', 'Utility', 'Warding', 'Attunement', 'Performance', 'Appraisal', 'Mechanical Lore'].include?(skill) }
     @craft_bag = @settings.crafting_container
     @craft_belt = nil
+    @appraisal_queue = ['zills', 'pouch', 'full-pouch', 'bundle']
 
     @yarn_quantity = @settings.yarn_quantity > 300 ? 301 : @settings.yarn_quantity
     @lumber_quantity = @settings.lumber_quantity > 30 ? 30 : @settings.lumber_quantity
@@ -78,6 +79,7 @@ class Trade
 
     setup_town_data
     validate_requirements(args)
+    be_outside_caravan
     
     bput("open my #{@contract_container}", 'You open', 'That is already', 'You can.t')
     @equipment_manager.empty_hands
@@ -327,6 +329,7 @@ class Trade
 
   def be_inside_caravan # call whenever you need to be inside the caravan
     return unless @caravan_interior
+    return unless @caravan_being_led
     return if ["Interior", "Hodierna", "Kertigen", "Ferry", "South Bank"].any? { |name| XMLData.room_title.include?(name) } # Don't do this on ferrys - you can't tell when you've arrived.
     track_caravan
     bput("go caravan", 'You open the door')
@@ -816,47 +819,80 @@ class Trade
 
   def appraisal_routine
     return unless @training_token == 'Appraisal'
-    @caravan_being_led ? lead_appraisal : walk_appraisal
-  end
-
-  def walk_appraisal # TO DO swap pouches through ordinals
-    echo "walk_appraisal" if debugging?
-    return unless @training_token == 'Appraisal'
     return unless @caravan_being_led || @step_toggle > 1
-    case bput("appraise my #{@gem_pouch_adjective} pouch", 'Roundtime', 'You can.t appraise the', 'Appraise what')
-    when 'You can.t appraise the'
-      case bput("get pouch from my #{@full_pouch_container}", '^You get ', '^What were you referring')
-      when /^You get /
-        bput("appraise my #{@gem_pouch_adjective} pouch quick", 'Roundtime')
-        waitrt?
-        bput("put my pouch in my #{@full_pouch_container}", 'You put')
+    be_inside_caravan
+    case @appraisal_queue.first
+    when 'zills'
+      @appraisal_queue = @appraisal_queue.rotate
+      return appraisal_routine unless assess_zills?
+    when 'bundle'
+      @appraisal_queue = @appraisal_queue.rotate
+      return appraisal_routine unless appraise_bundle? 
+    when 'pouch'
+      @appraisal_queue = @appraisal_queue.rotate
+      return appraisal_routine unless appraise_worn_pouch?
+    when 'full-pouch'
+      unless appraise_held_pouch?
+        @appraisal_queue = @appraisal_queue.rotate
+        return appraisal_routine
       end
     end
     @step_toggle = 0
     wipe_token
-  end
-
-  def lead_appraisal
-    echo "lead_appraisal" if debugging?
-    return unless @training_token == 'Appraisal'
-    @appraisal_timer ||= Time.now
-    return appraisal_cleanup if Time.now - @appraisal_timer > 100 || DRSkill.getxp('Appraisal') >= 30
-    return if Script.running?('appraisal')
-    be_inside_caravan
-    start_script('appraisal')
-  end
-
-  def appraisal_cleanup
-    return unless @training_token == 'Appraisal'
-    echo "appraisal_cleanup" if debugging?
-    wipe_token
-    @appraisal_timer = nil
-    return unless Script.running?('appraisal')
-    stop_script('appraisal')
     @cooldown_timers['Appraisal'] = Time.now
+  end
+  
+  def appraise_worn_pouch?
+    case bput("appraise my #{@gem_pouch_adjective} pouch", 'Roundtime', 'You can.t appraise the', 'Appraise what')
+    when 'You can.t appraise the', 'Appraise what'
+      @appraisal_queue -= ['pouch']
+      false
+    end
+    true
+  end
+  
+  def appraise_held_pouch?
+    @pouch_ordinal ||= 0
+    @pouch_ordinal = 0 if @pouch_ordinal > 10
+    case bput("get #{$ORDINALS[@pouch_ordinal]} pouch from my #{@full_pouch_container}", '^You get ', '^What were you referring')
+    when /^You get /
+      bput('appraise my pouch', 'Roundtime')
+      waitrt?
+      bput("put my pouch in my #{@full_pouch_container}", 'You put')
+      @pouch_ordinal += 1
+      true
+    else
+      @appraisal_queue -= 'full-pouch' if @pouch_ordinal == 0
+      @pouch_ordinal = 0
+      false
+    end
+  end
+  
+  def appraise_bundle?
+    case bput('appraise my bundle', 'Roundtime', 'Appraise what', 'You cannot appraise')
+    when 'Appraise what', 'You cannot appraise'
+      @appraisal_queue -= ['bundle']
+      return false
+    end
     waitrt?
-    @equipment_manager.empty_hands
+    true
+  end
+
+  def assess_zills?
+    if DRSkill.getrank('Appraisal') >= 250
+      @appraisal_queue -= ['zills']
+      return false
+    end
+
+    case bput('remove my zill', 'You slide', 'Remove what')
+    when 'Remove what'
+      @appraisal_queue -= ['zills']
+      return false
+    end
+    bput('assess my zill', 'you carefully look them over')
     waitrt?
+    bput('wear my zill', 'You slide')
+    true
   end
 
   def wipe_token
@@ -913,7 +949,6 @@ class Trade
     first_aid_cleanup
     performance_cleanup
     locksmithing_cleanup
-    appraisal_cleanup
     magic_cleanup
   end
 
@@ -932,7 +967,6 @@ class Trade
     echo "training_cleanup" if debugging?
     magic_cleanup
     performance_cleanup
-    appraisal_cleanup
     wipe_token
     @step_toggle = -1
   end
@@ -1084,18 +1118,22 @@ class Trade
 
   def mechlore_routine
     return unless @training_token.include?('Mechanical Lore')
+    @unfinished_grass ||= true
     if @current_grass_count < 30
       @training_token = nil
       return wipe_skill('Mechanical Lore', @walk_training_skills) 
     end
     return unless @caravan_being_led || @step_toggle > 1
-    be_inside_caravan if @caravan_being_led
-    bput('close my feedbag', 'You close', 'What were', 'That is already')
-    bput('get my grass', 'You get', 'What were you')
-    bput('open my feedbag', 'You open', 'What were')
-    result = bput('stow my grass', 'You stow', 'You put', 'What were you', 'The braided grass is too long') if braid?('grass')
+    be_inside_caravan # if @caravan_being_led
+    if @unfinished_grass
+      bput('close my feedbag', 'You close', 'What were', 'That is already')
+      bput('get my grass', 'You get', 'What were you')
+      bput('open my feedbag', 'You open', 'What were')
+    end
+    result = bput('stow my grass', 'You put', 'What were you', 'The braided grass is too long') if braid?('grass')
+    @unfinished_grass = result == 'You put' ? true : false
     drop_grass
-    @training_token = nil
+    wipe_token
     @step_toggle = @step_toggle == 100 ? 2 : 0
   end
 

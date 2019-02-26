@@ -23,13 +23,19 @@ class Trade
       [
         { name: 'outpost', regex: /outpost/i, optional: false, description: 'Bring the caravan to the trade outpost of a town.' },
         { name: 'town_name', regex: /\w+/i, variable: true, description: 'First word of the town name.' }
+      ],
+      [
+        { name: 'duration', regex: /duration/i, optional: false, description: 'Run for a certain amount of time plus the time required to closeup.' },
+        { name: 'minutes', regex: /\d+/i, optional: false, variable: true, description: 'Duration of the run in minutes.' },
+        { name: 'exit', regex: /exit/i, optional: true, description: 'Exits the game after delivering all crates and returning the caravan' }
       ]
     ]
     args = parse_args(arg_definitions)
     @closeup = args.closeup
     @exit = args.exit
     @caravan = OpenStruct.new
-    
+    @duration = args.minutes
+
     @town_data = get_data('town')
     @equipment_manager = EquipmentManager.new
     @settings = get_settings
@@ -82,7 +88,8 @@ class Trade
     setup_town_data
     validate_requirements(args)
     be_outside_caravan
-    
+    @time_to_end = Time.now + 60 * @duration.to_i if @duration
+
     bput("open my #{@contract_container}", 'You open', 'That is already', 'You can.t')
     @equipment_manager.empty_hands
 
@@ -127,7 +134,7 @@ class Trade
     if @caravan_training_skills.include?('First Aid')
       unless @settings.textbook ? exists?(@settings.textbook_type) : exists?('compendium')
         echo "NO COMPENDIUM OR TEXTBOOK FOUND.  CHECK YOUR ;FIRST-AID SETTINGS"
-        wipe_skill('First Aid', @lead_training_skills) 
+        wipe_skill('First Aid', @lead_training_skills)
       end
     end
   end
@@ -163,6 +170,10 @@ class Trade
     take_caravan_to(find_closest_id('trader_outpost'))
     walk_to(find_closest_id('shipment_clerk'))
     fput("return #{@caravan.noun}")
+    walk_to(find_closest_id('trader_outpost'))
+    bput('get my balsa lumber', 'You get', 'You are already', 'What were you')
+    bput('drop my balsa lumber', 'You drop', 'What were you')
+    fput('DUMP JUNK')
     fput('exit') if @exit
     exit
   end
@@ -190,6 +201,7 @@ class Trade
       deliver_contract
       pay_dues
       hometown_business
+      @closeup = true if Time.now > @time_to_end
     end
   end
 
@@ -268,7 +280,7 @@ class Trade
 
   def do_lead_from # you must escape the gravity of certain towns for your caravan to break orbit and lead you away
     echo "do_lead_from" if debugging?
-    return unless @caravan.noun == 'caravan' 
+    return unless @caravan.noun == 'caravan'
     nearest_town = find_town(find_closest_id('trader_outpost'))
     destination_town = find_town(@current_caravan_destination)
     return if nearest_town == destination_town
@@ -287,7 +299,7 @@ class Trade
 
   def do_lead_to # handles final lead-to approach to certain towns AFTER escaping do_lead_from
     echo "do_lead_to #{@current_caravan_destination}" if debugging?
-    return unless @caravan.noun == 'caravan' 
+    return unless @caravan.noun == 'caravan'
     no_lead_towns = ['Tiger Clan', 'Wolf Clan']
     destination_town = find_town(@current_caravan_destination)
     nearest_town = find_town(find_closest_id('trader_outpost'))
@@ -545,7 +557,7 @@ class Trade
       return false
     end
   end
-  
+
   def ride_gondola
     mode = 'south' if Room.current.id == 2249
     mode = 'north' if Room.current.id == 2904
@@ -646,7 +658,7 @@ class Trade
     when 'wait'
       wait_messages = [
         'You pass on the order to wait to your driver, who makes sure your .* does your bidding',
-        'You grab hold of your .* harness and make it wait.'        
+        'You grab hold of your .* harness and make it wait.'
       ]
       bput("tell #{@caravan.noun} to wait", wait_messages)
       return true
@@ -676,8 +688,29 @@ class Trade
   end
 
   def get_contract
-    nearest_minister = find_closest_id('trade_minister')
-    get_new_contract(nearest_minister)
+    minister_id = find_closest_id('trade_minister')
+    return if @trading_towns[find_town(minister_id)]['contracts_from'] > 0
+    echo "Getting a new contract from room #{minister_id}" if debugging?
+    walk_to(minister_id)
+    minister_messages = [
+      'The minister plucks a contract from the hands',
+      'The minister reminds you that you still owe .*',
+      'You still have another contract'
+    ]
+    response = bput('ask minister for contract', minister_messages)
+    case response
+    when /The minister reminds you/
+      /The minister reminds you that you still owe (?<dues_amt>.*) (?<dues_currency>Kronars|Lirums|Dokoras) in dues to (?:The )?(?<outpost>.*) and asks that you pay the clerk before s?he issues you a new contract\./ =~ response
+      echo "Need to pay #{dues_amt} #{dues_currency} to #{outpost}" if debugging?
+      ensure_copper_on_hand(dues_amt.to_i, @settings)
+      pay_dues
+      get_contract
+    when /You still have another contract/
+      @force_contract_from.push(find_town(minister_id)) unless @trading_towns['contracts_from'] # force_contract_from handles contracts that have somehow been lost.  The minister won't give another until it would have expired
+    else
+      @force_contract_from - [find_town(minister_id)] if @force_contract_from.include?(find_town(minister_id))
+    end
+    load_caravan
   end
 
   def deliver_contract
@@ -713,8 +746,12 @@ class Trade
   end
 
   def get_caravan
-    echo "NOT YET IMPLEMENTED.  GO RENT A CARAVAN FROM THE CLERK AND START TRADE IN THE SAME ROOM!"
-    exit
+    clerk_id = find_closest_id('shipment_clerk')
+    walk_to(clerk_id)
+    bput('rent caravan', 'You want to upgrade from a', 'The clerk nods and says')
+    trader_outpost = find_closest_id('trader_outpost')
+    walk_to(trader_outpost)
+    recall_caravan?
   end
 
   def feed_caravan # feeds your caravan from a feedbag.
@@ -742,31 +779,6 @@ class Trade
     echo "Presenting contract to clerk in room: #{clerk_id}" if debugging?
     walk_to(clerk_id)
     give_clerk
-  end
-
-  def get_new_contract(minister_id)
-    return if @trading_towns[find_town(minister_id)]['contracts_from'] > 0
-    echo "Getting a new contract from room #{minister_id}" if debugging?
-    walk_to(minister_id)
-    minister_messages = [
-      'The minister plucks a contract from the hands',
-      'The minister reminds you that you still owe .*',
-      'You still have another contract'
-    ]
-    response = bput('ask minister for contract', minister_messages)
-    case response
-    when /The minister reminds you/
-      /The minister reminds you that you still owe (?<dues_amt>.*) (?<dues_currency>Kronars|Lirums|Dokoras) in dues to (?:The )?(?<outpost>.*) and asks that you pay the clerk before s?he issues you a new contract\./ =~ response
-      echo "Need to pay #{dues_amt} #{dues_currency} to #{outpost}" if debugging?
-      ensure_copper_on_hand(dues_amt.to_i, @settings)
-      pay_dues
-      get_new_contract(minister_id)
-    when /You still have another contract/
-      @force_contract_from.push(find_town(minister_id)) unless @trading_towns['contracts_from'] # force_contract_from handles contracts that have somehow been lost.  The minister won't give another until it would have expired
-    else
-      @force_contract_from - [find_town(minister_id)] if @force_contract_from.include?(find_town(minister_id))
-    end
-    load_caravan
   end
 
   def caravan_check?(stationary = true) # The traders' guild hands out identical caravans
@@ -828,10 +840,7 @@ class Trade
     bput('get my contract', 'You get', 'You are already holding that')
     Flags.add('caravan-upgrade', /Unfortunately, this load would kill/)
     bput('give my contract to clerk', /The .* clerk accepts your contract and peruses it\./)
-    if Flags['caravan-upgrade']
-      bput('rent caravan', 'You want to upgrade from a')
-      recall_caravan?
-    end
+    get_caravan if Flags['caravan-upgrade']
     bput("put my contract in my #{@contract_container}", 'You put')
     Flags.delete('caravan-upgrade')
   end
@@ -875,7 +884,7 @@ class Trade
       return appraisal_routine unless assess_zills?
     when 'bundle'
       @appraisal_queue = @appraisal_queue.rotate
-      return appraisal_routine unless appraise_bundle? 
+      return appraisal_routine unless appraise_bundle?
     when 'pouch'
       @appraisal_queue = @appraisal_queue.rotate
       return appraisal_routine unless appraise_worn_pouch?
@@ -889,7 +898,7 @@ class Trade
     wipe_token
     @cooldown_timers['Appraisal'] = Time.now
   end
-  
+
   def appraise_worn_pouch?
     case bput("appraise my #{@gem_pouch_adjective} pouch", 'Roundtime', 'You can.t appraise the', 'Appraise what')
     when 'You can.t appraise the', 'Appraise what'
@@ -898,7 +907,7 @@ class Trade
     end
     true
   end
-  
+
   def appraise_held_pouch?
     @pouch_ordinal ||= 0
     @pouch_ordinal = 0 if @pouch_ordinal > 10
@@ -915,7 +924,7 @@ class Trade
       false
     end
   end
-  
+
   def appraise_bundle?
     case bput('appraise my bundle', 'Roundtime', 'Appraise what', 'You cannot appraise')
     when 'Appraise what', 'You cannot appraise'
@@ -977,7 +986,7 @@ class Trade
     @preparing = @training_spells[needs_training]
     crafting_prepare_spell(@preparing, @settings)
   end
-  
+
   def release_symbiosis
     if Flags['trading-symbiosis-ready']
        bput('release symbiosis', "But you haven't", 'You release', 'Repeat this command') unless Flags['trading-symbiosis-done']
@@ -985,7 +994,7 @@ class Trade
     Flags.reset('trading-symbiosis-done')
     Flags.reset('trading-symbiosis-ready')
   end
-  
+
   def lead_training # Training that is done while being led or riding a caravan. Can have much longer RTs than in walk_training
     training_skills = @lead_training_skills
     echo "in lead training - training token is #{@training_token}" if debugging?
@@ -999,7 +1008,7 @@ class Trade
     outfitting_routine
     engineering_routine
   end
-  
+
   def lead_training_cleanup # all training shuts down immediately upon arrival. Any routine that needs sanitizing goes here.
     outfitting_cleanup
     engineering_cleanup
@@ -1038,7 +1047,7 @@ class Trade
     @cooldown_timers[ability] = Time.now
     ability
   end
-  
+
   def next_to_train(skill_list)
     return skill_list.sort_by { |skill, _cooldown| DRSkill.getxp(skill) }
                           .find { |skill, cooldown| check_ability?(skill, cooldown) }.first
@@ -1054,11 +1063,13 @@ class Trade
 
   def locksmithing_routine # runs training boxes and pets
     return unless @training_token == 'Locksmithing'
-
     return locksmithing_cleanup if DRSkill.getxp('Locksmithing') > 32 || Flags['lockbox-done']
+    return locksmithing_cleanup if Script.running?('lockbox') && Time.now - @cooldown_timers['lockbox-timer'] > 60
     return if Script.running?('lockbox')
+
     if @box
       be_outside_caravan # can't pick inside a caravan because reasons
+      @cooldown_timers['lockbox-timer'] ||= Time.now
       Flags.add('lockbox-done', 'The lock feels warm')
       start_script('lockbox')
     else
@@ -1157,6 +1168,7 @@ class Trade
     wipe_token
     stop_script('lockbox') if Script.running?('lockbox')
     @cooldown_timers['Locksmithing'] = Time.now
+    @cooldown_timers['lockbox-timer'] = nil
     waitrt?
     if @box && @worn_lockbox
       bput("pick my #{@box}", 'not making any progress', 'it opens.', "isn't locked", 'The lock feels warm')
@@ -1182,7 +1194,7 @@ class Trade
     return unless @training_token.include?('Mechanical Lore')
     if @current_grass_count < 30
       @training_token = nil
-      return wipe_skill('Mechanical Lore', @walk_training_skills) 
+      return wipe_skill('Mechanical Lore', @walk_training_skills)
     end
     return unless @caravan_being_led || @step_toggle > 1
     be_inside_caravan
@@ -1191,11 +1203,10 @@ class Trade
       bput('stow my grass', 'You put', 'What were you', 'The braided grass is too long')
       drop_grass
     end
-
     wipe_token unless next_to_train(@walk_training_skills) == 'Mechanical Lore'
     @step_toggle = @step_toggle == 100 ? 2 : 0
   end
-  
+
   def mechlore_cleanup
     bput('stow my grass', 'You put', 'What were you', 'The braided grass is too long') if right_hand.include?('grass') || left_hand.include?('grass')
     drop_grass
@@ -1514,7 +1525,7 @@ class Trade
   def performance_routine # runs ;performance for 2 minutes.  Will run ;first-aid too, if it hasn't been done very recently.
     return unless @training_token == 'Performance'
     echo "performance routine" if debugging?
-    if @lead_training_skills.include?('First Aid') && @caravan_being_led && check_ability?('First Aid', 180) 
+    if @lead_training_skills.include?('First Aid') && @caravan_being_led && check_ability?('First Aid', 180)
       @training_token = 'First Aid'
       return
     end

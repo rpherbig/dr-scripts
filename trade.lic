@@ -30,12 +30,6 @@ class Trade
         { name: 'exit', regex: /exit/i, optional: true, description: 'Exits the game after delivering all crates and returning the caravan' }
       ]
     ]
-    
-    echo "**********************************************************************"
-    echo "**** DETAILS ON SCRIPT USAGE AND CONFIGURATION CAN BE FOUND ON    ****"
-    echo "**** https://github.com/rpherbig/dr-scripts/wiki/Trader-Tutorials ****"
-    echo "**********************************************************************"
-    
     args = parse_args(arg_definitions)
     @closeup = args.closeup
     @exit = args.exit
@@ -46,7 +40,9 @@ class Trade
     @equipment_manager = EquipmentManager.new
     @settings = get_settings
     @contract_container = @settings.trade_contract_container
-    @hub_city = 'Crossing'
+    @hub_city = nil
+    @trading_towns = {}
+    @no_ride_rooms = ["Interior", "Hodierna", "Kertigen", 'Damaris', 'Evening', "Ferry", "South Bank", "Gondola", "Platform",]
     @emergency_delivery_town = nil
     @current_caravan_destination = nil
     @caravan_coins_on_hand = @settings.caravan_coins_on_hand.to_i
@@ -105,7 +101,7 @@ class Trade
       exit
     elsif args.outpost
       unless @current_caravan_destination = find_town_from_arg(args.town_name)
-        echo "TOWN NOT FOUND OR NOT SUPPORTED.  CURRENTLY SUPPORTS ZOLUREN ONLY"
+        echo "TOWN NOT FOUND OR NOT SUPPORTED.  CURRENTLY SUPPORTS ZOLUREN, ILITHI, FORFEDHAR ONLY"
         exit
       end
       echo "Taking the caravan directly to #{args.town_name}'s trade outpost"
@@ -117,8 +113,10 @@ class Trade
   end
 
   def find_town_from_arg(town_arg)
-    zoluren_towns = ['Wolf Clan', 'Tiger Clan', 'Crossing', 'Arthe Dale', 'Stone Clan', 'Dirge', 'Leth Deriel']
-    return zoluren_towns.find { |town_data| town_data.split.first.casecmp(town_arg).zero? }
+    all_towns = ['Wolf Clan', 'Tiger Clan', 'Crossing', 'Arthe Dale', 'Stone Clan', 'Dirge', 'Leth Deriel',
+                 'Shard', "Fayrin's Rest", 'Steelclaw Clan', 'Darkling Wood',
+                 'Ain Ghazal', 'Boar Clan', 'Hibarnhvidar', "Raven's Point"]
+    return all_towns.find { |town_data| town_data.split.first.casecmp(town_arg).zero? }
   end
 
   def validate_requirements(args) # warnings and errors for items you may be missing
@@ -221,9 +219,7 @@ class Trade
     echo "find_closest_id" if debugging?
     rooms = @town_data.to_h.values.select { |data| data[entity] }
                       .map { |data| data[entity]['id'] }
-    echo "rooms: #{rooms}" if debugging?
     result = sort_destinations(rooms)
-    echo "sorted rooms #{rooms}" if debugging?
     if need_business
       result.find do |data|
         echo "data in room search is #{data}" if debugging?
@@ -235,12 +231,32 @@ class Trade
   end
 
   def setup_town_data # builds @trading_towns from town_data and will later handle multiple provinces
-    zoluren_towns = { 'Wolf Clan' => 2, 'Tiger Clan' => 2, 'Crossing' => 2, 'Arthe Dale' => 2, 'Stone Clan' => 2, 'Dirge' => 2, 'Leth Deriel' => 3 }
-    @trading_towns = {}
-    zoluren_towns.each do |town_name, threshold|
+    case find_province
+    when 'Zoluren'
+      province_towns = { 'Wolf Clan' => 2, 'Tiger Clan' => 2, 'Crossing' => 2, 'Arthe Dale' => 2, 'Stone Clan' => 2, 'Dirge' => 2, 'Leth Deriel' => 3 }
+      @hub_city = 'Crossing'
+    when 'Ilithi'
+      province_towns = { 'Shard' => 3, 'Steelclaw Clan' => 3, "Fayrin's Rest" => 3, 'Darkling Wood' => 3 }
+      @hub_city = 'Shard'
+    when 'Forfedhar'
+      province_towns = { 'Hibarnhvidar' => 3, 'Boar Clan' => 3, "Raven's Point" => 3, 'Ain Ghazal' => 3 }
+      @hub_city = 'Hibarnhvidar'
+    end
+    province_towns.each do |town_name, threshold|
       @trading_towns[town_name] = @town_data[town_name]
       @trading_towns[town_name]['contracts_to'] = @trading_towns[town_name]['contracts_from'] = 0
       @trading_towns[town_name]['contract_threshold'] = threshold
+    end
+  end
+
+  def find_province
+    case find_town(find_closest_id('trader_outpost'))
+    when 'Wolf Clan', 'Tiger Clan', 'Crossing', 'Arthe Dale', 'Stone Clan', 'Dirge', 'Leth Deriel'
+      'Zoluren'
+    when 'Shard', "Fayrin's Rest", 'Steelclaw Clan', 'Darkling Wood'
+      'Ilithi'
+    when 'Ain Ghazal', 'Boar Clan', 'Hibarnhvidar', "Raven's Point"
+      'Forfedhar'
     end
   end
 
@@ -293,11 +309,18 @@ class Trade
     end
   end
 
+  def town_lead_name(town_name) # very different parsing for some town names
+      town_map = {'Leth Deriel' => 'Leth', 'Darkling Wood' => 'Darkling', "Raven's Point" => 'Raven' }
+      town_map[town_name] ? town_map[town_name] : town_name
+  end
+
   def do_lead_from # you must escape the gravity of certain towns for your caravan to break orbit and lead you away
     echo "do_lead_from" if debugging?
     return unless @caravan.noun == 'caravan'
     nearest_town = find_town(find_closest_id('trader_outpost'))
     destination_town = find_town(@current_caravan_destination)
+    echo "destination is #{destination_town}" if debugging?
+    echo "nearest_town is #{nearest_town}" if debugging?
     return if nearest_town == destination_town
 
     case nearest_town
@@ -309,15 +332,44 @@ class Trade
       take_caravan_to(895) # walk it across the Ferry, then proceed.
     when 'Wolf Clan', 'Tiger Clan'
       take_caravan_to(863) unless destination_town == 'Wolf Clan' || destination_town == 'Tiger Clan' # no leading around the western clans
+    when 'Darkling Wood'
+      take_caravan_to(2663)
+    when 'Shard'
+      take_caravan_to(2780)
+    when 'Boar Clan'
+      lead_caravan_to?('Hibarnhvidar')
+    when 'Ain Ghazal'
+      if destination_town == 'Boar Clan'
+        take_caravan_to(3986) unless lead_caravan_to?('Hibarnhvidar')
+      else
+        take_caravan_to(3986) unless lead_caravan_to?(destination_town)
+      end
+    when "Raven's Point"
+      if destination_town == 'Boar Clan'
+        take_caravan_to(4452) unless lead_caravan_to?('Hibarnhvidar')
+      else
+        take_caravan_to(4452) unless lead_caravan_to?(destination_town)
+      end
+    when 'Hibarnhvidar'
+      if destination_town == 'Boar Clan'
+        unless lead_caravan_to?('Boar Clan')
+          lead_caravan_to?('Hibarnhvidar')
+          take_caravan_to(3991)
+        end
+      else
+        take_caravan_to(3943) unless lead_caravan_to?(destination_town)
+      end
     end
   end
 
   def do_lead_to # handles final lead-to approach to certain towns AFTER escaping do_lead_from
     echo "do_lead_to #{@current_caravan_destination}" if debugging?
     return unless @caravan.noun == 'caravan'
-    no_lead_towns = ['Tiger Clan', 'Wolf Clan']
+    no_lead_towns = ['Tiger Clan', 'Wolf Clan', "Fayrin's Rest", 'Steelclaw Clan']
     destination_town = find_town(@current_caravan_destination)
     nearest_town = find_town(find_closest_id('trader_outpost'))
+    echo "destination is #{destination_town}" if debugging?
+    echo "nearest_town is #{nearest_town}" if debugging?
     return if no_lead_towns.include?(nearest_town)
 
     case destination_town
@@ -325,11 +377,24 @@ class Trade
       lead_caravan_to?('Crossing') # driver can only take you as far as Crossing
     when 'Leth Deriel'
       if nearest_town == 'Leth Deriel'
-        lead_caravan_to?('Leth Deriel') # if already on the south bank (startup mid run), just try leading there first
+        lead_caravan_to?(destination_town) # if already on the south bank (startup mid run), just try leading there first
       else
         lead_caravan_to?('Crossing') # otherwise go to crossing,
         take_caravan_to(1904) # then to the ferry
-        lead_caravan_to?('Leth Deriel') # then to Leth
+        lead_caravan_to?(destination_town) # then to Leth
+      end
+    when 'Boar Clan'
+      if ["Raven's Point", 'Ain Ghazal'].include?(nearest_town)
+        take_caravan_to(3943) unless lead_caravan_to?('Hibarnhvidar')
+        take_caravan_to(3991)
+        lead_caravan_to?('Boar Clan')
+      elsif nearest_town == 'Boar Clan'
+        lead_caravan_to?(destination_town)
+      end
+    when "Raven's Point", 'Ain Ghazal'
+      if nearest_town == 'Hibarnhvidar'
+        take_caravan_to(3943) unless lead_caravan_to?(destination_town)
+        lead_caravan_to?(destination_town) unless find_town(find_closest_id('trader_outpost')) == destination_town
       end
     else
       lead_caravan_to?(destination_town)
@@ -340,7 +405,7 @@ class Trade
     track_caravan
     return true if Room.current.id == outpost_from_name(town_name)
     @caravan_being_led = true
-    return false unless command_caravan?("lead to #{town_name}")
+    return false unless command_caravan?("lead to #{town_lead_name(town_name)}")
     be_inside_caravan
 
     until Flags['lead-arrived'] || Flags['lead-failed'] # main wait loop while training happens
@@ -363,7 +428,7 @@ class Trade
   def be_inside_caravan # call whenever you need to be inside the caravan
     return unless @caravan_interior
     return unless @caravan_being_led
-    return if ["Interior", "Hodierna", "Kertigen", "Ferry", "South Bank", "Gondola", "Platform"].any? { |name| XMLData.room_title.include?(name) } # Don't do this on ferrys - you can't tell when you've arrived.
+    return if @no_ride_rooms.any? { |name| XMLData.room_title.include?(name) } # Don't do this on ferrys - you can't tell when you've arrived.
     track_caravan
     bput('go caravan', 'You open the door')
     pause 1.5
@@ -426,7 +491,7 @@ class Trade
   end
 
   def find_town(room_id) # takes a room_id and returns a town_name if find_value? finds it in a town's data.
-    return @trading_towns.find { |name, data| find_value?(data, room_id) }.first
+    return @town_data.to_h.find { |name, data| find_value?(data, room_id) }.first.to_s
   end
 
   def find_value?(towninfo, room_id)
@@ -516,7 +581,7 @@ class Trade
 
   def forage_grass # periodically forages for grass if below 70
     return if @current_grass_count > 70 || @training_token
-    return if ['Crossing', 'Lava', 'Dirge'].any? { |roomcheck| XMLData.room_title.include?(roomcheck) }
+    return if ['Crossing', 'Lava', 'Dirge', 'Ghazal'].any? { |roomcheck| XMLData.room_title.include?(roomcheck) }
     return unless @step_toggle > 1
     @cooldown_timers['Grass'] ||= Time.now - 10
     return if Time.now - @cooldown_timers['Grass'] < 10
@@ -557,22 +622,31 @@ class Trade
   end
 
   def handle_special_room?(dir) # handles very specific rooms (bescort rooms currently) - allows training on ferries.
-  ### Note: Needs an entry for the Shard gondola eventually.  Bescort will jump two rooms ahead and leave the caravan behind.
     case dir
     when StringProc
-      if dir.inspect.include?("ferry', 'crossing'")
-        ferry_run('crossing')
-        return true
-      elsif dir.inspect.include?("ferry', 'leth'")
-        ferry_run('leth')
+      if dir.inspect.include?("ferry.?'")
+        ferry_run
         return true
       elsif dir.inspect.include?("'gondola'")
         ride_gondola
         return true
+      elsif dir.inspect.include?('iceroad')
+        run_iceroad
+        return true
+     # elsif Room.current.id == 4056 # There's a weird room that normally you won't run into
       end
     else
       return false
     end
+  end
+
+  def run_iceroad
+    echo "DOESN'T SUPPORT THE ICEROAD ATM.  YOU SHOULD HAVE BEEN LED THROUGH HERE"
+    exit
+    #case Room.current.id
+    #when 4430 #shardside
+    #when 4366 #hibside
+    #end
   end
 
   def ride_gondola
@@ -607,14 +681,30 @@ class Trade
     @caravan_being_led = false
   end
 
-  def ferry_run(town) # Crossing-Leth Fery
+  def ferry_run
     echo "ferry_run #{town}" if debugging?
+    case Room.current.id
+    when 3986
+      town = 'hibarnhvidar'
+      mode = 'ferry1'
+    when 11027
+      town = 'ainghazal'
+      mode = 'ferry1'
+    when 1904
+      town = 'crossing'
+      mode = 'ferry'
+    when 957
+      town = 'leth'
+      mode = 'ferry'
+    end
+
     walk_training_cleanup
-    start_script('bescort', ['ferry', town])
+    start_script('bescort', [mode, town])
     @caravan_being_led = true
     wipe_skill('Outdoorsmanship', @lead_training_skills)
     wipe_skill('Perception', @lead_training_skills)
     until !Script.running?('bescort')
+      Flags.reset('caravan-arrived') if Flags['caravan-arrived']
       pause 1.5
       lead_training
     end
@@ -685,10 +775,9 @@ class Trade
       ]
       lead_fail = [
         'but turns back and says',
-        'The driver of the sturdy caravan looks at you confused and says'
+        "The driver of the .* looks at you confused and says"
       ]
-      result = bput("tell #{@caravan.noun} to #{command}", lead_success + lead_fail)
-      lead_fail.include?(result) ? false : true
+      bput("tell #{@caravan.noun} to #{command}", lead_success + lead_fail) == 'You pass on the order to lead to your driver' ? true : false
     else
       false
     end
@@ -696,7 +785,6 @@ class Trade
 
   def should_go_to_town?(town_name) # is there any reason at all to visit this town's outpost?
     if @closeup
-      echo "closeup #{town_name} and #{@trading_towns[town_name]['contracts_to']}" if debugging?
       return true if @trading_towns[town_name]['contracts_to'] > 0
     else
       return true if @trading_towns[town_name]['contracts_to'] > 0 || @trading_towns[town_name]['contracts_from'].zero?
@@ -719,7 +807,9 @@ class Trade
     when /The minister reminds you/
       /The minister reminds you that you still owe (?<dues_amt>.*) (?<dues_currency>Kronars|Lirums|Dokoras) in dues to (?:The )?(?<outpost>.*) and asks that you pay the clerk before s?he issues you a new contract\./ =~ response
       echo "Need to pay #{dues_amt} #{dues_currency} to #{outpost}" if debugging?
+      room = Room.current.id
       ensure_copper_on_hand(dues_amt.to_i, @settings)
+      walk_to(room)
       pay_dues
       get_contract
     when /You still have another contract/
@@ -749,7 +839,7 @@ class Trade
     end
   end
 
-  def pay_dues # TODO: Handle Missing DUES
+  def pay_dues
     clerk_id = find_closest_id('shipment_clerk')
     echo "Paying dues at clerk_room: #{clerk_id}" if debugging?
     clerk_messages = [
@@ -812,13 +902,13 @@ class Trade
   end
 
   def caravan_exists?
+    recall_caravan? unless @caravan.adjective && @caravan.noun
     return recall_caravan? unless @caravan.adjective && @caravan.noun
     true
   end
 
   def dump_expired # checks for expired contracts, and gets rid of them and the matching crate. TODO: recheck contracts before tossing them.  Hasn't broken yet, but...
     return unless @held_contracts
-    echo @held_contracts if debugging?
     @held_contracts.each_with_index do |contract, index|
       if contract['expired']
         find_crates(contract.origin_town)
@@ -1338,7 +1428,6 @@ class Trade
 
   def buy_wood(skipcoin = false)
     be_outside_caravan
-    room = Room.current.id
     crafting_data = get_data('crafting')
     stow_hands
     ensure_copper_on_hand(3000, @settings) unless skipcoin
@@ -1348,12 +1437,10 @@ class Trade
     @current_lumber_count = bput('count my balsa lumber', 'You count out \d+').scan(/\d+/).first.to_i
     buy_wood(true) if @current_lumber_count < @lumber_quantity
     stow_hands
-    walk_to(room)
   end
 
   def buy_yarn(skipcoin = false)
     be_outside_caravan
-    room = Room.current.id
     crafting_data = get_data('crafting')
     stow_hands
     ensure_copper_on_hand(3000, @settings) unless skipcoin
@@ -1363,7 +1450,6 @@ class Trade
     @current_yarn_count = bput('count my wool yarn', 'You count out \d+ yards').scan(/\d+/).first.to_i
     buy_yarn(true) if @current_yarn_count < @yarn_quantity
     stow_hands
-    walk_to(room)
   end
 
   def get_item(item)
@@ -1576,8 +1662,10 @@ class Trade
   def hometown_business # run every time it delivers/picks up a contract from Crossing/another hub. Replenishes resources and stocks coins
     return unless find_town(find_closest_id('trader_outpost')) == @hub_city
     deposit_coins(@caravan_coins_on_hand, Room.current.id)
+    room = Room.current.id
     check_yarn
     check_wood
+    walk_to(room)
     count_grass
     repair_tools
     restocked_restore

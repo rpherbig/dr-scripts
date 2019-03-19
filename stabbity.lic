@@ -1,0 +1,253 @@
+=begin
+Stabbity, Stabbity, Stabbity. Repeat.
+=end
+custom_require.call(%w[common drinfomon equipmanager events])
+
+class Stabbity
+  include DRC
+
+  def initialize
+    unless DRStats.thief?
+      echo '*** But you\'re not a thief! ***'
+      exit
+    end
+    
+    arg_definitions = [
+      [
+        { name: 'mode', options: %w[arena single equip cleanup], optional: true, description: 'What mode to use' },
+        { name: 'noloot', options: %w[noloot], optional: true, description: 'Do not loot corpses' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    @debug = UserVars.stabbity_debug
+    @equipmanager = EquipmentManager.new
+    @preferred_weapon = @settings['stabbity']['weapons']['preferred']
+    @alternate_weapon = @settings['stabbity']['weapons']['alternate']
+    @thrown_weapon = @settings['stabbity']['weapons']['thrown']
+    @alternate_weapon_npcs = @settings['stabbity']['use_alternate_on']
+    @thrown_weapon_npcs = @settings['stabbity']['use_thrown_on']
+    @noloot = (args.mode == 'arena' || args.noloot) ? true : false
+    @mode = args.mode
+    @ignore_npcs = %w[Usdiwi Servant leopard construct zombie representative]
+    @current_weapon = ''
+    @arena_trap = nil
+    
+    cleanup if cleanup_mode?
+    use_weapon
+    exit if equip_mode?
+    hide?
+    combat_loop
+  end
+
+  def arena_mode?
+    @mode == 'arena'
+  end
+
+  def single_mode?
+    @mode == 'single'
+  end
+
+  def equip_mode?
+    @mode == 'equip'
+  end
+
+  def cleanup_mode?
+    @mode == 'cleanup'
+  end
+
+  def cleanup
+    echo "*** Cleaning up ***" if @debug
+    @equipmanager.stow_weapon
+    exit
+  end
+
+  def combat_loop
+    loop do
+      npcs = get_npcs
+      if npcs.count > 0
+        @target = npcs.first
+        @npc_is_alive = true
+        echo "*** Target is #{@target} ***" if @debug
+        watch_target if arena_mode?
+        if @alternate_weapon_npcs.include?(@target) || @thrown_weapon_npcs.include?(@target)
+          dodge_arena_trap if arena_mode?
+        end
+        case bput("advance #{@target}", 'You are already at melee', 'is already quite dead', 'You begin to', 'You spin around')
+        when 'is already quite dead'
+          pause 2
+        end
+        using_right_weapon?
+        if @thrown_weapon_npcs.include? @target
+          echo "*** Target #{@target} is in thrown_weapon_npcs ***"
+          kill_thrown
+          waitrt?
+          loot_mob unless @noloot
+          use_weapon 'preferred'
+          hide?
+        else
+          kill_stabbity
+          waitrt?
+          loot_mob unless @noloot
+          use_weapon 'preferred'
+          hide?
+        end
+      else
+        echo "*** No targets ***" if @debug
+        exit if single_mode?
+        pause 1
+      end
+    end
+  end
+
+  def kill_stabbity
+    while @npc_is_alive
+      fix_standing
+      case bput('backstab', 'You must be hidden to blindside', 
+                            'It would help if you were closer',
+                            'You\'ll need to stand up first',
+                            'flying out of reach',
+                            'to stop flying before',
+                            'Roundtime',
+                            /\[You\'re /,
+                            'There is nothing else')
+      when 'There is nothing else'
+        @npc_is_alive = false
+        return
+      when 'You must be hidden to blindside'
+        hide?
+        waitrt?
+      when 'It would help if you were closer'
+        fput('advance')
+        pause 3
+      when 'You\'ll need to stand up first'
+        fix_standing
+        hide?
+      when 'flying out of reach', 'to stop flying before'
+        echo "*** Switch to thrown -- add this MOB to your use_thrown_on list ***" if @debug
+        use_weapon 'thrown'
+        kill_thrown
+        return
+      when 'Roundtime', /\[You\'re /
+        return if npc_dead?
+        waitrt?
+        dodge_arena_trap if arena_mode?
+        hide?
+      end
+    end
+  end
+
+  def kill_thrown
+    action = @settings['stabbity']['thrown_action'].nil? ? 'throw' : @settings['stabbity']['thrown_action']
+    recover_command = @settings['stabbity']['thrown_invoke'] ? 'invoke' : "get #{@thrown_weapon}"
+    fix_standing
+    while @npc_is_alive
+      case bput(action, 'Roundtime', 'What are you trying', 'There is nothing else')
+      when 'What are you trying'
+        bput(recover_command, 'You pick up', 'suddenly leaps')
+        waitrt?
+      when 'Roundtime'
+        waitrt?
+        bput(recover_command, 'You pick up', 'suddenly leaps')
+        return if npc_dead?
+        waitrt?
+      when 'There is nothing else'
+        @npc_is_alive = false
+        return
+      end
+    end
+  end
+
+  def get_npcs
+    DRRoom.npcs - @ignore_npcs
+  end
+
+  def npc_dead?
+    if DRRoom.dead_npcs.include?(@target) || get_npcs.empty?
+      echo "*** Target #{@target} has died ***" if @debug
+      @npc_is_alive = false
+      return true
+    else
+      return false
+    end
+  end
+
+  def using_right_weapon?
+    if @alternate_weapon_npcs.include? @target
+      echo "*** Switching to alternate weapon ***" if @debug
+      use_weapon 'alternate'
+      hide?
+    elsif @thrown_weapon_npcs.include? @target
+      echo "*** Switching to thrown weapon ***" if @debug
+      use_weapon 'thrown'
+    elsif @current_weapon != 'preferred'
+      echo "*** Switching to preferred weapon" if @debug
+      use_weapon
+      hide?
+    end
+  end
+
+  def use_weapon(type = 'preferred')
+    echo "*** Already on right type ***" if @debug && @current_weapon == type
+    return if @current_weapon == type
+    case type
+    when 'preferred'
+      @current_weapon = 'preferred'
+      return if right_hand =~ /#{@preferred_weapon}/
+      @equipmanager.stow_weapon
+      @equipmanager.wield_weapon(@preferred_weapon) unless @preferred_weapon.empty?
+    when 'alternate'
+      @current_weapon = 'alternate'
+      return if right_hand =~ /#{@alternate_weapon}/
+      @equipmanager.stow_weapon
+      @equipmanager.wield_weapon(@alternate_weapon) unless @alternate_weapon.empty?
+    when 'thrown'
+      @current_weapon = 'thrown'
+      return if right_hand =~ /#{@thrown_weapon}/
+      @equipmanager.stow_weapon
+      @equipmanager.wield_weapon(@thrown_weapon)
+    end
+    echo "*** Changed weapon type to #{type} ***" if @debug
+  end
+
+  def watch_target
+    case bput("watch #{@target}", 'you could try to pedal', 
+                                 'you could try to bob', 
+                                 'you could try to duck', 
+                                 'you could try to jump', 
+                                 'you could try to lean', 
+                                 'you could try to cower',
+                                 '.*')
+    when 'you could try to pedal'
+      @arena_trap = 'pedal'
+    when 'you could try to bob'
+      @arena_trap = 'bob'
+    when 'you could try to duck'
+      @arena_trap = 'duck'
+    when 'you could try to jump'
+      @arena_trap = 'jump'
+    when 'you could try to lean'
+      @arena_trap = 'lean'
+    when 'you could try to cower'
+      @arena_trap = 'cower'
+    end
+  end
+
+  def dodge_arena_trap
+    if @arena_trap
+      echo "*** Performing arena action #{@arena_trap} ***" if @debug
+      bput(@arena_trap, '.*')
+      @arena_trap = nil
+    end
+  end
+
+  def loot_mob
+    bput('loot', '.*')
+    pause 1
+    #todo/maybe -- pick up loot
+  end
+
+end
+
+Stabbity.new

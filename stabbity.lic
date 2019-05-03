@@ -1,5 +1,6 @@
 =begin
 Stabbity, Stabbity, Stabbity. Repeat.
+https://elanthipedia.play.net/Lich_script_repository#stabbity
 =end
 custom_require.call(%w[common drinfomon equipmanager events])
 
@@ -30,12 +31,12 @@ class Stabbity
     @thrown_weapon_npcs = @settings['stabbity']['use_thrown_on']
     @noloot = (args.mode == 'arena' || args.noloot) ? true : false
     @mode = args.mode
-    @ignore_npcs = %w[Usdiwi Servant leopard construct zombie representative]
-    @current_weapon = ''
+    @ignored_npcs = @settings.ignored_npcs
+    @current_weapon_type = nil
     @arena_trap = nil
     
     cleanup if cleanup_mode?
-    use_weapon
+    use_weapon 'preferred'
     exit if equip_mode?
     hide?
     combat_loop
@@ -78,9 +79,9 @@ class Stabbity
         when 'is already quite dead'
           pause 2
         end
-        using_right_weapon?
+        switch_weapon
         if @thrown_weapon_npcs.include? @target
-          echo "*** Target #{@target} is in thrown_weapon_npcs ***"
+          echo "*** Target #{@target} is in thrown_weapon_npcs ***" if @debug
           kill_thrown
           waitrt?
           loot_mob unless @noloot
@@ -125,7 +126,7 @@ class Stabbity
         fix_standing
         hide?
       when 'flying out of reach', 'to stop flying before'
-        echo "*** Switch to thrown -- add this MOB to your use_thrown_on list ***" if @debug
+        echo "*** Switch to thrown -- add '#{@target}' to your use_thrown_on list ***" if @debug
         use_weapon 'thrown'
         kill_thrown
         return
@@ -139,17 +140,17 @@ class Stabbity
   end
 
   def kill_thrown
-    action = @settings['stabbity']['thrown_action'].nil? ? 'throw' : @settings['stabbity']['thrown_action']
-    recover_command = @settings['stabbity']['thrown_invoke'] ? 'invoke' : "get #{@thrown_weapon}"
     fix_standing
+    attack_verb = thrown_attack_verb
+    retrieve_verb = thrown_retrieve_verb
     while @npc_is_alive
-      case bput(action, 'Roundtime', 'What are you trying', 'There is nothing else')
+      case bput(attack_verb, 'Roundtime', 'What are you trying', 'There is nothing else')
       when 'What are you trying'
-        bput(recover_command, 'You pick up', 'suddenly leaps')
+        bput(retrieve_verb, 'You pick up', 'suddenly leaps')
         waitrt?
       when 'Roundtime'
         waitrt?
-        bput(recover_command, 'You pick up', 'suddenly leaps')
+        bput(retrieve_verb, 'You pick up', 'suddenly leaps')
         return if npc_dead?
         waitrt?
       when 'There is nothing else'
@@ -160,7 +161,7 @@ class Stabbity
   end
 
   def get_npcs
-    DRRoom.npcs - @ignore_npcs
+    DRRoom.npcs - @ignored_npcs
   end
 
   def npc_dead?
@@ -173,7 +174,7 @@ class Stabbity
     end
   end
 
-  def using_right_weapon?
+  def switch_weapon
     if @alternate_weapon_npcs.include? @target
       echo "*** Switching to alternate weapon ***" if @debug
       use_weapon 'alternate'
@@ -181,63 +182,74 @@ class Stabbity
     elsif @thrown_weapon_npcs.include? @target
       echo "*** Switching to thrown weapon ***" if @debug
       use_weapon 'thrown'
-    elsif @current_weapon != 'preferred'
+    elsif @current_weapon_type != 'preferred'
       echo "*** Switching to preferred weapon" if @debug
-      use_weapon
+      use_weapon 'preferred'
       hide?
     end
   end
 
-  def use_weapon(type = 'preferred')
-    echo "*** Already on right type ***" if @debug && @current_weapon == type
-    return if @current_weapon == type
-    case type
+  def use_weapon(weapon_type)
+    echo "*** Already on weapon type #{weapon_type} ***" if @debug && @current_weapon_type == weapon_type
+    return if @current_weapon_type == weapon_type
+    case weapon_type
     when 'preferred'
-      @current_weapon = 'preferred'
+      @current_weapon_type = 'preferred'
       return if right_hand =~ /#{@preferred_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@preferred_weapon) unless @preferred_weapon.empty?
     when 'alternate'
-      @current_weapon = 'alternate'
+      @current_weapon_type = 'alternate'
       return if right_hand =~ /#{@alternate_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@alternate_weapon) unless @alternate_weapon.empty?
     when 'thrown'
-      @current_weapon = 'thrown'
+      @current_weapon_type = 'thrown'
       return if right_hand =~ /#{@thrown_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@thrown_weapon)
     end
-    echo "*** Changed weapon type to #{type} ***" if @debug
+    echo "*** Changed weapon type to #{weapon_type} ***" if @debug
+  end
+
+  def lodging_weapon?
+    item = @equipmanager.item_by_desc(@settings['stabbity']['weapons'][@current_weapon_type])
+    item && item.lodges
+  end
+
+  def bound_weapon?
+    item = @equipmanager.item_by_desc(@settings['stabbity']['weapons'][@current_weapon_type])
+    item && item.bound
+  end
+
+  def thrown_attack_verb
+    if bound_weapon?
+      'hurl'
+    elsif lodging_weapon?
+      'lob'
+    else
+      'throw'
+    end
+  end
+
+  def thrown_retrieve_verb
+    if bound_weapon?
+      'invoke'
+    else
+      "get my #{@thrown_weapon}"
+    end
   end
 
   def watch_target
-    case bput("watch #{@target}", 'you could try to pedal', 
-                                 'you could try to bob', 
-                                 'you could try to duck', 
-                                 'you could try to jump', 
-                                 'you could try to lean', 
-                                 'you could try to cower',
-                                 '.*')
-    when 'you could try to pedal'
-      @arena_trap = 'pedal'
-    when 'you could try to bob'
-      @arena_trap = 'bob'
-    when 'you could try to duck'
-      @arena_trap = 'duck'
-    when 'you could try to jump'
-      @arena_trap = 'jump'
-    when 'you could try to lean'
-      @arena_trap = 'lean'
-    when 'you could try to cower'
-      @arena_trap = 'cower'
-    end
+    # Actions as of DuskRuin 2019: pedal, bob, duck, jump, lean, cower
+    @arena_trap = bput("watch #{@target}", /(?:pedal|bob|duck|jump|lean|cower)/)
+    echo "*** Will #{@arena_trap} to avoid trap ***" if @debug
   end
 
   def dodge_arena_trap
     if @arena_trap
-      echo "*** Performing arena action #{@arena_trap} ***" if @debug
-      bput(@arena_trap, '.*')
+      echo "*** Performing #{@arena_trap} to avoid trap ***" if @debug
+      bput(@arena_trap, 'You set yourself up to')
       @arena_trap = nil
     end
   end

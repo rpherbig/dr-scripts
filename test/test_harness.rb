@@ -1,4 +1,9 @@
 module Harness
+  # Lich global for the last time a user sent a command to the game
+  $_IDLETIMESTAMP_ = Time.now
+  # Lich global for the last time a script sent a command to the game
+  $_SCRIPTIDLETIMESTAMP_ = Time.now
+  
   class Script
     def gets?
       get?

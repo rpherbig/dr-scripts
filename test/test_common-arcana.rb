@@ -58,7 +58,8 @@ class TestDRCA < Minitest::Test
       'cast_command' => 'cast',
       'focus' => 'staff',
       'worn_focus' => true,
-      'ritual' => true
+      'ritual' => true,
+      'prep_type' => 'prepare'
     }
     $history = [
       'Setting your Evasion stance to 100%, your Parry stance to 0%, and your Shield stance to 80%.  You have 12 stance points left.',

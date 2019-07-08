@@ -1,0 +1,149 @@
+=begin
+author: Crannach
+game: dr
+version: 0.0.4
+
+Notes
+* Requires dependency
+* Type ';research help' to see the research options
+* You can define a waggle set called 'gaf' with only gauge flow in it if you want to override the min prep gaf casting.
+
+Summary
+Does research on a single subject. Specify the subject as an argument, e.g. ;researcher augmentation
+
+=end
+custom_require.call %[common common-arcana drinfomon events]
+
+class Researcher
+  include DRC
+ # [] Add debug arg
+ # [] If no args then go by yaml settings
+ # [] Support sorcerous research
+ # [] On dying delete flags
+  def initialize
+    args = get_args
+
+    @settings = get_settings
+    @current_topic = nil
+    add_flags
+    UserVars.researcher ||= {}
+    check_status
+    if args.skill || args.symbiosis
+      @current_topic = args.skill if args.skill
+      @current_topic = "symbiosis #{args.sym_type}" if args.symbiosis
+      check_research
+      loop do
+        pause 5
+        check_research
+        break unless researching
+      end
+      wait_for_script_to_complete('safe-room', ['force']) if Flags['research-backfire']
+    end
+    cleanup
+  end
+
+  def debug?
+    UserVars.researcher_debug
+  end
+
+  def set_researching(status)
+    echo "researching=#{status}" if debug?
+    UserVars.researcher['researching'] = status
+    UserVars.researcher['timestamp'] = Time.now
+  end
+
+  def researching
+    return false if Flags['research-partial']
+    return false if Flags['research-complete']
+    return false unless DRSpells.active_spells.include?('Gauge Flow')
+    UserVars.researcher['researching']
+  end
+
+  def add_flags
+    # Using the same flags from crossing-training
+    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 
+                                  'distracted by combat', 
+                                  'distracted by your spellcasting', 
+                                  'You lose your focus on your research project', 
+                                  'you forget what you were') unless Flags['research-partial']
+    Flags.add('research-complete', '^Breakthrough!', 'You complete reviewing your knowledge of the \w+ symbiosis and commit the details to memory') unless Flags['research-complete']
+    Flags.add('research-backfire', 'The pattern you were experimenting with wrenches itself out of your control')
+  end
+
+  def cleanup
+    Flags.delete('research-partial')
+    Flags.delete('research-complete')
+    Flags.delete('research-backfire')
+  end
+
+  def check_status
+    case bput('research status', 'You estimate that you will complete it a few minutes from now', "You're not researching anything", /You have completed \d+% of a project about/)
+    when 'You estimate that you will complete it a few minutes from now',
+      set_researching(true)
+    when "You're not researching anything", /You have completed \d+% of a project about/
+      set_researching(false)
+    end
+  end
+
+  def check_research
+    if Flags['research-partial']
+      Flags.reset('research-partial')
+      set_researching(false)
+      start_research
+    elsif Flags['research-complete']
+      Flags.reset('research-complete')
+      set_researching(false)
+      @current_topic = nil
+    else
+      start_research
+    end
+  end
+
+  def start_research
+    return if researching
+
+    check_gaf
+    @current_topic = 'stream' if @current_topic == 'attunement'
+    case bput("research #{@current_topic} 300", 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You cannot begin', 'You are already busy', 'Usage:', "You do not know how to research", 'You start to research', 'With a mixture of rational concern and bravado', 'You begin to bend the mana streams into novel configurations', 'You bring yourself to the verge of a prophetic trance', 'You expertly coach yourself into an emotional rage')
+    when 'You cannot begin'
+      fput('research cancel')
+      fput('research cancel')
+      start_research
+    when 'You focus', 'You tentatively', 'You confidently', 'Abandoning the normal', 'You are already busy', 'You start to research', 'With a mixture of rational concern and bravado', 'You begin to bend the mana streams into novel configuration'
+      set_researching(true)
+    when 'Usage:', 'You do not know how to research'
+      echo "Invalid research option"
+      set_researching(false)
+      exit
+    end
+  end
+
+  def check_gaf
+    return if DRSpells.active_spells.include?('Gauge Flow')
+    if @settings['waggle_sets']['gaf'] && @settings['waggle_sets']['gaf']['Gauge Flow']
+      echo "Using waggle set settings" if @debug
+      echo "waggle data: #{@settings['waggle_sets']['gaf']}" if @debug
+      DRCA.cast_spell(@settings['waggle_sets']['gaf']['Gauge Flow'], @settings)
+    else
+      echo "Using min prep. Make a waggle_set called 'gaf' with Gauge Flow in it if you want more control"
+      DRCA.cast_spell({ 'abbrev' => 'gaf', 'mana' => 5}, @settings)
+    end
+  end
+
+  def get_args
+    arg_definitions = [
+      [],
+      [
+        { name: 'skill', options: %w[attunement augmentation energy field fundamental plane spell symbiosis utility warding], description: 'What skill or type of research do you want to do?'}
+      ],
+      [
+        { name: 'symbiosis', regex: /symbiosis/i, description: "Do symbiosis research?"},
+        { name: 'sym_type', options: %w[activate avoid cast discern endure examine explore harness harvest heal impress learn perform remember resolve spell spring strengthen watch], description: "Which symbiosis do you want to research?"}
+      ]
+    ]
+    DRC.parse_args(arg_definitions)
+  end
+
+end
+
+Researcher.new

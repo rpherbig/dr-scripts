@@ -1,0 +1,271 @@
+=begin
+
+	This script will display the contents of your containers in categories
+	when you look in them.
+
+	;sorter width=<window width in characters>    to display contents in columns
+	;sorter width=nil                             to stop using columns
+
+	 author: Tillmen (tillmen@lichproject.org)
+	   game: Gemstone
+	   tags: cosmetic
+	version: 0.9
+
+	changelog:
+		0.9 (2016-08-17):
+			fix for the last fix
+		0.8 (2016-08-07):
+			fix for containers that give XML of what's inside the container when you look on the container
+		0.7 (2015-04-16):
+			fix display of broken containers on WizardFE
+
+=end
+=begin
+
+		0.6 (2015-02-17):
+			fix the fix for squelching containers that can't be sorted
+		0.5 (2015-02-17):
+			another fix for squelching containers that can't be sorted
+		0.4 (2014-11-21):
+			fix for squelching containers that can't be sorted
+		0.3 (2014-11-21):
+			testing fix for squelching containers that can't be sorted
+		0.2 (2014-11-10):
+			don't display container contents twice on Lich 4.6
+
+=end
+
+custom_require.call(%w[common])
+
+if script.vars[1] =~ /^width=([0-9]+|nil)$/
+	if $1 == 'nil'
+		CharSettings['screen_width'] = nil
+	else
+		CharSettings['screen_width'] = $1.to_i
+	end
+	echo 'setting saved'
+	exit
+elsif script.vars[1]
+	output = "\n"
+	output.concat "   #{$clean_lich_char}#{script.name} width=<#>     Specify how many characters wide your game window is, and the script will\n"
+	output.concat "   #{''.rjust($clean_lich_char.length)}#{''.rjust(script.name.length)}               display container contents in columns.\n"
+	output.concat "\n"
+	output.concat "   #{$clean_lich_char}#{script.name} width=nil     Clear the setting.\n"
+	output.concat "\n"
+	respond output	
+	exit
+end
+
+if defined?(GameObj.type_data)
+	GameObj.load_data if GameObj.type_data.empty? or GameObj.type_data.nil?
+	if GameObj.type_data.nil?
+		wait_while { running?('updater') }
+		wait_while { running?('repository') }
+		start_script 'repository', [ 'download', 'gameobj-data.xml' ]
+		wait_while { running?('repository') }
+		wait_while { running?('updater') }
+		start_script 'updater', [ 'add', 'gameobj-data.xml' ]
+		wait_while { running?('updater') }
+		GameObj.load_data
+		exit if GameObj.type_data.nil?
+	end
+end
+
+script.want_downstream = false
+script.want_downstream_xml = true
+hide_me
+
+#show_sellable = false
+
+best_column_count = proc { |list|
+	num_columns = 1
+	loop {
+		items_per_column = (list.length / num_columns.to_f).ceil
+		total_width = 0
+		for column_num in 0...num_columns
+			max_width = 0
+			list[(column_num*items_per_column)...((column_num+1)*items_per_column)].each { |item_name| max_width = [ max_width, item_name.length ].max }
+			total_width += max_width
+		end
+		total_width += (num_columns - 1) * 8
+		if total_width > CharSettings['screen_width'] - 8
+			num_columns -= 1
+			break
+		elsif num_columns >= list.length
+			break
+		end
+		num_columns += 1
+	}
+	[ num_columns, 1 ].max
+}
+
+begin
+	action = proc { |s|
+		if s =~ /^(<(?:c|clearC|exposeC)ontainer.+>)?(?:[IO]n the .*? you see |You rummage around .*? and see .*?(?:, | and )(?:a|an|some) )/
+			xml_only = $1
+			if s =~ /In the/ and s =~ /On the/
+				s
+			elsif s =~ /^(?:<container.*inv>|<clearContainer.*inv>|<exposeContainer.*inv>)(?:(?:[IO]n the .*?) you see .*\.|(?:You rummage around .*? and see .*?)(?:, | and )(?:a|an|some) .*\.)/
+				xml_only
+			else
+				#s
+			end
+		else
+			s
+		end
+	}
+	DownstreamHook.add('sorter', action)
+	while (line = get)
+		if line =~ /^(?:<container.*inv>|<clearContainer.*inv>|<exposeContainer.*inv>)?([IO]n the .*?) (you see .*\.)/
+			container = $1
+            contents = $2
+			next if line =~ /In the/ and line =~ /On the/
+		elsif line =~ /^(?:<container.*inv>|<clearContainer.*inv>|<exposeContainer.*inv>)?(You rummage around .*?)( and see .*?\.)/
+			container = $1
+            contents = $2
+			next if line =~ /In the/ and line =~ /On the/
+		else
+			next
+		end
+		if contents =~ /(?:and|you) see (.*)\./
+			if contents = DRC.list_to_array($1)
+				sorted_contents = Hash.new
+				contents.each{|item|
+					category_name = ''#item.type || 'other'
+					sorted_contents[category_name] ||= Hash.new
+                    sorted_contents ||= Hash.new
+                    item_name = item.sub(/^\s?(?:a |an |some )/,'')
+					if sorted_contents[category_name][item_name].nil?
+						sorted_contents[category_name][item_name] = Hash.new
+						sorted_contents[category_name][item_name]['noun'] = DRC.get_noun(item)
+						#sorted_contents[category_name][item_name]['exist'] = item.id
+						sorted_contents[category_name][item_name]['count'] = 1
+					else
+						sorted_contents[category_name][item_name]['count'] += 1
+					end
+                }
+				if CharSettings['screen_width'] and $frontend == 'stormfront'
+					output = "<output class=\"mono\"/>\n"
+				else
+					output = String.new
+				end
+				output.concat "#{container}:\n"
+				if CharSettings['screen_width']
+					for category_name, category_contents in sorted_contents
+						count = 0
+						category_contents.values.each { |value| count += value['count'] }
+						output.concat "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} \n"
+						category_contents = category_contents.sort { |a,b| a[0].split(/\s/).last <=>  b[0].split(/\s/).last }
+						column_count = best_column_count.call(category_contents.collect { |a| a[0] })
+						row_count = (category_contents.length / column_count.to_f).ceil
+						column_count = (category_contents.length / row_count.to_f).ceil
+						column_widths = Array.new
+						for column_num in 0...column_count
+							category_contents[(column_num*row_count)...((column_num+1)*row_count)].each { |item_name,item_info| column_widths[column_num] = [ column_widths[column_num].to_i, item_name.length ].max }
+						end
+						for row_num in 0...row_count
+							output.concat '    '
+							for column_num in 0...column_count
+								item_name, item_info = category_contents[(column_num*row_count) + row_num]
+								if item_info['count'] > 1
+									#str = "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a> (#{item_info['count']})"
+                                    str = "#{item_name} (#{item_info['count']})"
+								else
+									#str = "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a>"
+                                    str = "#{item_name}"
+								end
+								str = str.ljust(column_widths[column_num] + str.length + 12)
+								if column_num == column_count - 1
+									str = str.strip
+								end
+								output.concat str
+							end
+							output.concat "\n"
+						end
+						output.concat "\n"
+					end
+				else
+					for category_name, category_contents in sorted_contents
+						count = 0
+						category_contents.values.each { |value| count += value['count'] }
+						output.concat "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} "
+						category_contents = category_contents.sort { |a,b| a[0].split(/\s/).last <=>  b[0].split(/\s/).last }
+						for item_name, item_info in category_contents
+							if item_info['count'] > 1
+								#output.concat "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a> (#{item_info['count']}), "
+                                output.concat "#{item_name} (#{item_info['count']}), "
+							else
+								#output.concat "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a>, "
+                                output.concat "#{item_name}, "
+							end
+						end
+						output.chop!
+						output.chop!
+						output.concat ".\n"
+					end
+				end
+				if CharSettings['screen_width'] and $frontend == 'stormfront'
+					output.concat "<output class=\"\"/>\n"
+				end
+				output.gsub!(/<.*?>/, '') unless $frontend =~ /^(?:stormfront|profanity)$/
+				if defined?(_respond)
+					_respond output
+				else
+					$stdout.puts output
+				end
+=begin
+				if show_sellable
+					sorted_contents = Hash.new
+					for item in contents
+						category_name = item.sellable || 'nil'
+						sorted_contents[category_name] ||= Hash.new
+						if item.full_name =~ /^a crystalline flask containing/
+							item_name = item.full_name.sub(/^a crystalline flask containing /, '')
+						else
+							item_name = item.full_name.sub(/containing (.*)$/) { "(#{$1})" }
+						end
+						if sorted_contents[category_name][item_name].nil?
+							sorted_contents[category_name][item_name] = Hash.new
+							sorted_contents[category_name][item_name]['noun'] = item.noun
+							sorted_contents[category_name][item_name]['exist'] = item.id
+							sorted_contents[category_name][item_name]['count'] = 1
+						else
+							sorted_contents[category_name][item_name]['count'] += 1
+						end
+					end
+					output = "\n#{container}:\n"
+					for category_name, contents in sorted_contents
+						count = 0
+						contents.values.each { |value| count += value['count'] }
+						output.concat "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} "
+						contents = contents.sort { |a,b| a[0].split(/\s/).last <=>  b[0].split(/\s/).last }
+						for item_name, item_info in contents
+							if item_info['count'] > 1
+								output.concat "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a> (#{item_info['count']}), "
+							else
+								output.concat "<a exist=\"#{item_info['exist']}\" noun=\"#{item_info['noun']}\">#{item_name}</a>, "
+							end
+						end
+						output.chop!
+						output.chop!
+						output.concat ".\n"
+					end
+					if CharSettings['screen_width'] and $frontend == 'stormfront'
+						output.concat "<output class=\"\"/>\n"
+					end
+					output.gsub!(/<.*?>/, '') unless $frontend =~ /^(?:stormfront|profanity)$/
+					if defined?(_respond)
+						_respond output
+					else
+						$stdout.puts output
+					end
+				end
+=end			
+            else
+				echo 'fixme'
+			end
+		end
+	end
+ensure
+	DownstreamHook.remove('sorter')
+end

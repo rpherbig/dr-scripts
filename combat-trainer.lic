@@ -1262,6 +1262,7 @@ class SpellProcess
     end
 
     snapshot = DRSkill.getxp(@skill)
+    check_face(game_state) if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     success = cast?(@custom_cast, @symbiosis, @before, @after)
     if @symbiosis && @use_auto_mana
       if !success
@@ -1627,6 +1628,22 @@ class SpellProcess
     @use_auto_mana = data['use_auto_mana']
     game_state.action_taken if (@skill == 'Targeted Magic' || @prep == 'target') && game_state.weapon_skill == 'Targeted Magic'
   end
+  
+  def check_face(game_state)
+    return unless Flags['ct-face-what'] || DRRoom.dead_npcs.size > 0
+    if (game_state.npcs.length > 0)
+        case bput("eng #{game_state.npcs.first}", 'You will have to retreat from your current melee first', 'You are already at melee', 'You begin to advance', 'You spin around to face', 'is already quite dead')
+        when /You will have to retreat from your current melee first/
+           fput("face #{game_state.npcs.first}")
+        when /is already quite dead/
+           case bput("eng #{game_state.npcs.last}", 'You will have to retreat from your current melee first', 'You are already at melee', 'You begin to advance', 'You spin around to face', 'is already quite dead')
+           when /You will have to retreat from your current melee first/
+              fput("face #{game_state.npcs.last}")
+           end
+        end
+        Flags.reset('ct-face-what')
+    end
+  end
 end
 
 class PetProcess
@@ -1853,12 +1870,14 @@ class ManipulateProcess
     @manip_to_train = settings.manipulate_only_to_train
     echo("  @manip_to_train: #{@manip_to_train}") if $debug_mode_ct
 
+    Flags.add('ct-manip-broke', 'You feel your link with .* suddenly break', 'You feel your link suddenly break', 'You feel your link with .* weakening with distance.')
+
     @last_manip = Time.now - 200
   end
 
   def execute(game_state)
     return if game_state.danger || @threshold.nil? || game_state.construct_mode?
-    @filtered_npcs = game_state.npcs
+    @filtered_npcs = DRRoom.npcs
     manipulate(game_state) if should_manipulate?
   end
 
@@ -1867,7 +1886,7 @@ class ManipulateProcess
   def should_manipulate?
     return false if @manip_to_train && DRSkill.getxp('Empathy') > 30
 
-    @filtered_npcs.length >= @threshold && Time.now - @last_manip > 120
+    @filtered_npcs.length >= @threshold && (Time.now - @last_manip > 120 || Flags['ct-manip-broke'])
   end
 
   def manipulate(game_state)
@@ -1883,8 +1902,8 @@ class ManipulateProcess
       index = npc_occurrences[npc]
       ordinal_string = $ORDINALS[index]
 
-      case bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'beyond your ken', 'You attempt to empathically manipulate', 'You strain', 'does not seem to have a life essence')
-      when 'does not seem to have a life essence' then
+      case bput("manipulate friendship #{ordinal_string} #{npc}", 'You\'re already manipulating', 'beyond your ken', 'You strain', 'does not seem to have a life essence', 'is definitely attracted to you', 'Roundtime', 'You have certainly attracted', 'Manipulate what\?')
+      when 'does not seem to have a life essence', 'is definitely attracted to you', 'You have certainly attracted' then
         game_state.construct(npc)
       else
         manipulate_count += 1
@@ -1893,6 +1912,7 @@ class ManipulateProcess
     end
 
     @last_manip = Time.now
+    Flags.reset('ct-manip-broke')
   end
 end
 
@@ -2536,7 +2556,8 @@ class AttackProcess
 
     Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
-    Flags.add('ct-face-what', 'Face what')
+    Flags.add('ct-face-what', 'Face what', 'You search the')
+    Flags['ct-face-what'] = true
   end
 
   def execute(game_state)
@@ -2584,14 +2605,24 @@ class AttackProcess
   private
 
   def check_face(game_state)
-    return unless Flags['ct-face-what']
-
-    fput("eng #{game_state.npcs.first}")
-    Flags.reset('ct-face-what')
+    return unless Flags['ct-face-what'] || DRRoom.dead_npcs.size > 0
+    if (game_state.npcs.length > 0)
+        case bput("eng #{game_state.npcs.first}", 'You will have to retreat from your current melee first', 'You are already at melee', 'You begin to advance', 'You spin around to face', 'is already quite dead')
+        when /You will have to retreat from your current melee first/
+           fput("face #{game_state.npcs.first}")
+        when /is already quite dead/
+           case bput("eng #{game_state.npcs.last}", 'You will have to retreat from your current melee first', 'You are already at melee', 'You begin to advance', 'You spin around to face', 'is already quite dead')
+           when /You will have to retreat from your current melee first/
+              fput("face #{game_state.npcs.last}")
+           end
+        end
+        Flags.reset('ct-face-what')
+    end
   end
 
   def attack_melee(charged_maneuver, game_state)
     waitrt?
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     if charged_maneuver
       use_charged_maneuver(charged_maneuver, game_state)
     else
@@ -2645,6 +2676,7 @@ class AttackProcess
   end
 
   def attack_thrown(game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     attack_action = game_state.thrown_attack_verb
     attack_action += ' left' if game_state.offhand?
     bput(attack_action, 'roundtime', 'What are you trying to')
@@ -2669,6 +2701,7 @@ class AttackProcess
   end
 
   def shoot_aimed(command, game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
     when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
@@ -2684,6 +2717,7 @@ class AttackProcess
   end
 
   def attack_aimed(charged_maneuver, game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     game_state.selected_maneuver = charged_maneuver unless game_state.loaded
     game_state.loaded = false if game_state.mob_died && !(game_state.casting_consume || game_state.prepare_consume)
     game_state.clear_aim_queue if Flags['ct-ranged-ready']
@@ -2768,6 +2802,7 @@ class AttackProcess
   end
 
   def execute_aiming_action?(action, game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     case bput(action, 'Roundtime', 'close enough', 'What are you', 'There is nothing', 'must be closer', 'Bumbling, you slip')
     when 'close enough', 'must be closer'
       return false if game_state.retreating?
@@ -2780,6 +2815,7 @@ class AttackProcess
   end
 
   def aim(game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment', "isn't loaded")
     when 'You are already', 'You begin to target'
       game_state.loaded = true
@@ -2806,6 +2842,7 @@ class AttackProcess
   end
 
   def dance(game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     if game_state.npcs.empty?
       pause 1
     else
@@ -2832,6 +2869,7 @@ class AttackProcess
   end
 
   def use_charged_maneuver(action, game_state)
+    return if DRRoom.dead_npcs.size > 0 && DRStats.empath?
     game_state.cooldown_timers[action] = Time.now
     attempt = bput("maneuver #{action}", 'You raise your', 'You brace your', 'balanced and', 'Taking a full step back', 'You take a step back', 'You lower your shoulders', 'You angle to the side and ', 'rest a bit longer', 'You square up your feet', 'You crouch down', 'You step to the side')
     return if attempt == 'rest a bit longer'
@@ -3714,6 +3752,7 @@ before_dying do
   Flags.delete('ct-accuracy-ready')
   Flags.delete('ct-damage-ready')
   Flags.delete('ct-need-bless')
+  Flags.delete('ct-manip-broke')
   Flags.delete('last-stance')
   Flags.delete('ct-regalia-expired')
   Flags.delete('ct-starlight-depleted')

@@ -1,0 +1,844 @@
+=begin
+
+Ulf'hara script
+
+=end
+
+custom_require.call(%w[common common-items common-money common-travel drinfomon common-arcana equipmanager events spellmonitor])
+
+@returnpath = []
+
+class UlfHara
+  include DRC
+  include DRCA
+  include DRCI
+  include DRCM
+  include DRCT
+
+  def initialize
+    @settings = get_settings
+
+    arg_definitions = [
+      [],
+      [
+        { name: 'task', regex: /tas.*/i, optional: true, description: 'Get task from Zukir' },
+        { name: 'supply', regex: /sup.*/i, optional: true, description: 'Ally Re-supply Task' },
+        { name: 'combo', regex: /com.*/i, optional: true, description: 'Combination Lock Task' },
+        { name: 'healing', regex: /hea.*/i, optional: true, description: 'Healing Task' },
+        { name: 'hunting', regex: /kill|hunt.*/i, optional: true, description: 'Hunting Task' },
+        { name: 'missing', regex: /miss.*|pers.*/i, optional: true, description: 'Missing Person Task' },
+        { name: 'disarm', regex: /trap.*|disa.*|pick.*/i, optional: true, description: 'Trap Disarm Task' },
+        { name: 'recovery', regex: /trea.*|reco.*|sear.*/i, optional: true, description: 'Treasure Recovery Task' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    @baddies = ['veteran','partisan','mage','monstrosity','golem','warrior','ruffian','cutthroat','footpad','lowlife','fleshreaper', 'lout', 'bandit', 'ghoul', 'Dwarf', 'Prydaen', 'Gor\'Tog', 'Human', 'Elf', 'Elothean', 'Halfling', 'Mur', 'Rakash', 'Gnome', 'Kaldar', 'zombie', 'oaf']
+    @notfoods = ['lockpick', 'flint', 'torch', 'crab', 'fish', 'foot', 'haunch', 'leg', 'mouse', 'rat', 'absinthe', 'aesjaal', 'ale', 'Arrack', 'beer', 'Brandy', 'Brew', 'champagne', 'chocolate', 'cider', 'coffee', 'comfort', 'cream', 'dadanen', 'Delight', 'dream', 'Fluff', 'frappe', 'frostwynne', 'grog', 'haze', 'jaalkwego', 'juice', 'lemonade', 'Liqueur', 'mead', 'milk', 'moonshine', 'ouisque', 'punch', 'sherry', 'springwynne', 'tea', 'Tease', 'tequila', 'water', 'wine']
+    @notdrinks= ['lockpick', 'flint', 'torch', 'crab', 'fish', 'foot', 'haunch', 'leg', 'mouse', 'rat', 'asparagus', 'broccoli', 'cake', 'cheese', 'cheesecake', 'cupcake', 'lollipop', 'sandwich', 'potato', 'mushrooms', 'tart', 'tarts', 'tenderloin', 'wedges']
+    @hunting_cameo = []
+    @task_return = 0
+    
+
+
+    @rooms = %w[12872 12873 12874 12875 12876 12875 12877 12878 12881 12882 12883 12882 14865 14866 14867 14866 14868 14869 14870 14871 14872 14873 14874 14875 12880 12879 12878 12881 12884 12885 12884 12886 12887 12888 12889 12890 12891 12890 12892 12893 12894 12893 12895 12896 12897 12898 12899 12900 12899 12901 12902 12903 12904 12905 12906 12905 12907 0 0 1 1 12909 0 0 1 1 12910 0 0 1 1 12911 12912 12911 12913 12911 12910 12914 12915 14876 12872]
+
+    @current_room = MazeRoom.new
+    
+    @ignore = ['Zukir']
+    @rooms_count = 0
+
+    Flags.add("UlfHara-task-complete","You have completed your task!  Return to Zukir!", "ASK ZUKIR ABOUT TASK COMPLETE", "You quickly snatch", "You should probably go find Zukir.", "You should notify Zukir at once!", "You should go and report", "give you another mission", "You should head back to Zukir")
+    Flags.add("UlfHara-combo-chest", "You poke and prod, but fail to find anything of interest")
+    Flags.add('disarm-more', 'not fully disarmed', 'not yet fully disarmed', 'still has more to torment you with')
+    Flags.add('maze-reset', 'You can\'t go there', 'You can\'t swim in that direction.')
+    Flags.add('cameo-loot', 'You quickly snatch it up!  Zukir will want this right away!')
+    
+    messages = get_data('picking').picking
+    @pick_careful = messages['pick_careful']
+    @pick_quick = messages['pick_quick']
+    @pick_blind = messages['pick_blind']
+    @pick_retry = messages['pick_retry']
+    @disarm_failed = messages['disarm_failed']
+    @disarm_retry = messages['disarm_retry']
+    @disarm_identify_failed = messages['disarm_identify_failed']
+    @disarm_too_hard = messages['disarm_too_hard']
+    @disarm_careful = messages['disarm_careful']
+    @disarm_quick = messages['disarm_quick']
+    @disarm_normal = messages['disarm_normal']
+
+    if args.supply =~ /sup/i
+      supply
+    elsif args.combo =~ /com/i
+      combo
+    elsif args.healing =~ /hea/i
+      healing
+    elsif args.hunting =~ /kil|hun/i
+      hunting
+    elsif args.missing =~ /mis|per/i
+      missing
+    elsif args.disarm =~ /tra|dis/i
+      disarm
+    elsif args.recovery =~ /tre|rec|sea/i
+      recovery
+    else
+      task
+    end
+  end
+
+    def task
+      Flags.reset('UlfHara-combo-chest')
+      @ignore = ['Zukir']
+      @rooms_count = 0
+      fput("drop my sack") if (right_hand || left_hand) =~ /sack/
+      test = walk_to_special(@rooms[0])
+      echo "Starting/Ending a task"
+      if Flags['UlfHara-task-complete']
+        Flags.reset('UlfHara-task-complete')
+        bput('ask zukir about task complete', "hands you", "You are not currently on a task")
+      end
+      task = bput("ask zukir for task", "STUDY their situation for clues", "Safes and other strongboxes were hidden around the keep", "help any of our wounded you encounter", "KILL the invaders to find them", "need to SEARCH the ruins", " SEARCHing the sewers to remove these threats", "Will you SEARCH and recover these items", "Thank you for your service", "you must wait before", "We could use some help thinning their numbers", "You are already on a task.  Please complete that task")
+      case task
+      when /STUDY their situation for clues/i
+        fput("accept task")
+        stow_hands
+        fput("ask zukir for supplies")
+        fput("swap")
+        supply
+      when /Safes and other strongboxes were hidden around the keep/i
+        fput("accept task")
+        stow_hands
+        combo
+      when /help any of our wounded you encounter/
+        fput("accept task")
+        stow_hands
+        bput("get my medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") if right_hand != "medicated cloth"
+        if right_hand != "medicated cloth"
+          while bput("get medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") =~ /Best wait a bit/
+          end
+        end
+        healing
+      when /KILL the invaders to find them|We could use some help thinning their numbers/
+        fput("accept task")
+        hunting
+      when /need to SEARCH the ruins/
+        fput("accept task")
+        missing
+      when /SEARCHing the sewers to remove these threats/
+        fput("accept task")
+        disarm
+      when /Will you SEARCH and recover these items/
+        fput("accept task")
+        recovery
+      when /Thank you for your service/
+        new_task
+      when /you must wait before/
+        echo "Waiting a minute to ask again"
+        pause 60
+        new_task
+      when /You are already on a task.  Please complete that task/
+        Flags.reset('UlfHara-task-complete')
+        bput('ask zukir about task complete', "hands you", "You are not currently on a task")
+        new_task
+      else
+        echo "Bad string"
+      end
+    end
+    
+    def new_task
+      task
+    end
+
+    def supply
+      echo "Ally Re-supply Task"
+      fput("swap") if right_hand == "dirty sack"
+      temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+      food = list_to_nouns(temp) - @notfoods
+      drink = list_to_nouns(temp) - @notdrinks
+      if (food.empty? || drink.empty?)
+        fput("drop my sack")
+        temproom = Room.current.id
+        walk_to_special(@rooms[0])
+        fput("ask zukir for supplies")
+        fput("swap")
+        temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+        food = list_to_nouns(temp) - @notfoods
+        drink = list_to_nouns(temp) - @notdrinks
+        walk_to_special(temproom)
+      end
+      
+      lastroom = Room.current
+      while !Flags['UlfHara-task-complete']
+        if (DRRoom.npcs - @baddies - @ignore).empty?
+          @rooms_count += 1
+          @ignore = ['Zukir']
+          walk_to_special(@rooms[@rooms_count])
+        end
+        npcs = DRRoom.npcs - @baddies - @ignore
+        npcs.each{|npc|
+          break if Flags['UlfHara-task-complete']
+          if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+            retreat
+          end
+          bput("stow my #{right_hand}", "You put", "What were you", "Please rephrase") if right_hand
+          supply = bput("study #{npc}", /need of (.*) to complete.*mission|spare some (.*)|Others will assist|surely a sign of dehydration.|Study what?/i)
+          case supply
+          when /need of (.*) to complete.*mission/
+            supply = $1.sub(/e?s$/,'')
+            case bput("get my #{supply} in my sack", "You get", "What were you referring to", "Please rephrase that")
+            when /You get/
+              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
+            when /What were you referring to|Please rephrase that/
+              fput("drop my sack")
+              temproom = Room.current.id
+              walk_to_special(@rooms[0])
+              fput("ask zukir for supplies")
+              fput("swap")
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              food = list_to_nouns(temp) - @notfoods
+              drink = list_to_nouns(temp) - @notdrinks
+              walk_to_special(temproom)
+            end
+          when /spare some (.*)/
+            case bput("get my #{food[0]} in my sack", "You get", "What were you referring to", "Please rephrase that")
+            when /You get/
+              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
+              food = food.drop(1)
+            when /What were you referring to|Please rephrase that/
+              fput("drop my sack")
+              temproom = Room.current.id
+              walk_to_special(@rooms[0])
+              fput("ask zukir for supplies")
+              fput("swap")
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              food = list_to_nouns(temp) - @notfoods
+              drink = list_to_nouns(temp) - @notdrinks
+              walk_to_special(temproom)
+            end
+          when /surely a sign of dehydration/
+            case bput("get my #{drink[0]} in my sack", "You get", "What were you referring to", "Please rephrase that")
+            when /You get/
+              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
+              drink = drink.drop(1)
+            when /What were you referring to|Please rephrase that/
+              fput("drop my sack")
+              temproom = Room.current.id
+              walk_to_special(@rooms[0])
+              fput("ask zukir for supplies")
+              fput("swap")
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              food = list_to_nouns(temp) - @notfoods
+              drink = list_to_nouns(temp) - @notdrinks
+              walk_to_special(temproom)
+            end
+          when /Others will assist/
+            @ignore.push(npc)
+          end
+        }
+      end
+      fput("drop my sack")
+      task
+    end
+
+    def combo
+      if !Flags['UlfHara-combo-chest']
+        lastroom = Room.current
+        walk_to_special(12916)
+      end
+      echo "Combination Lock Task"
+      #combowander = MazeRoom.new
+      @current_room = MazeRoom.new
+      while !Flags['UlfHara-task-complete']
+        case bput("search", "After much shuffling, you manage to find", "Roundtime", "as you're about to give up", "You poke and prod, but fail to find anything of interest","dust settles, you notice", "gleaming chest", "You're sure you searched this area recently")
+        when /After much shuffling, you manage to find|as you're about to give up|dust settles, you notice|gleaming chest/
+          while bput("turn blue dial", /^You turn the .+ dial to .\.$/, "A faint tick can be heard from the mechanism.", "A faint click can be heard from the mechanism.") =~ /^You turn the .+ dial to .\.$|A faint tick can be heard from the mechanism./i
+          end
+          bput("push blue dial", "until you feel it lock")
+          while bput("turn green dial", /^You turn the .+ dial to .\.$/, "A faint tick can be heard from the mechanism.", "A faint click can be heard from the mechanism.") =~ /^You turn the .+ dial to .\.$|A faint tick can be heard from the mechanism./i
+          end
+          bput("push green dial", "until you feel it lock")
+          while bput("turn red dial", /^You turn the .+ dial to .\.$/, "A faint tick can be heard from the mechanism.", "A faint click can be heard from the mechanism.") =~ /^You turn the .+ dial to .\.$|A faint tick can be heard from the mechanism./i
+          end
+          bput("push red dial", "until you feel it lock")
+          fput("pull latch")
+          loot_box("chest")
+          Flags.reset('UlfHara-combo-chest')
+        end
+        #combowander = combowander.wander unless (Flags['UlfHara-combo-chest'] || Flags['UlfHara-task-complete'])
+        @current_room = @current_room.wander unless (Flags['UlfHara-combo-chest'] || Flags['UlfHara-task-complete'])
+      end
+      Flags.reset('UlfHara-combo-chest')
+      wander_maze_until('ladder', 'climb ladder')
+      task
+    end
+
+    def healing
+      echo "Healing Task"
+      lastroom = Room.current
+      bput("get my medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") if right_hand != "medicated cloth"
+      if right_hand != "medicated cloth"
+        while bput("get medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") =~ /Best wait a bit/
+        end
+      end
+      while !Flags['UlfHara-task-complete']
+        @rooms_count += 1
+        walk_to_special(@rooms[@rooms_count])
+        @ignore = ['Zukir']
+        if lastroom != Room.current
+          lastroom = Room.current
+          npcs = DRRoom.npcs - @baddies - @ignore
+            npcs.each{|npc|
+              break if Flags['UlfHara-task-complete']
+              if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+                retreat
+              end
+              bput("study #{npc}", "carries some wounds that an Empath or medic", "Others will assist", "Study what?", "You are NOT on this task, you don\'t need")
+              if reget(5, 'carries some wounds that an Empath or medic')
+                if DRStats.empath?
+                  fput("touch #{npc}")
+                  fput("take #{npc}")
+                end
+                while bput("rub #{npc} with cloth", "Roundtime", "You discard what", "swats at you and shouts","Rub what?", "You should go and report", "That is probably not a good idea") =~ /Roundtime|You discard what/i
+                  break if Flags['UlfHara-task-complete']
+                  if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+                    retreat
+                  end
+                  bput("get my medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") if right_hand != "medicated cloth"
+                  if right_hand != "medicated cloth"
+                    temproom = Room.current.id
+                    walk_to_special(@rooms[0])
+                    while bput("get medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") =~ /Best wait a bit/
+                    end
+                    walk_to_special(temproom)
+                  end
+                end
+                @ignore.push(npc)
+                break if Flags['UlfHara-task-complete']
+              elsif reget(5, 'Others will assist')
+                @ignore.push(npc)
+              end
+            }
+        end
+      end
+      bput("stow my medi cloth", "You drop", "You put", "What were") if (right_hand || left_hand) =~ /medicated cloth/
+      task
+    end
+
+    def hunting
+      echo "Hunting Task"
+      task_temp = bput("task", /wants you to kill as many as you must to recover (.*) of these treasures|You need the killing blow/)
+      if task_temp =~ /wants you to kill as many as you must to recover (.*) of these treasures/i
+        @task_return = $1.to_i
+      end
+      echo @task_return
+      while !Flags['UlfHara-task-complete'] || (@hunting_cameo.length.to_i+1) >= @task_return
+        npcs = DRRoom.npcs - @ignore
+        if npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+          start_script 'combat-trainer', ['d0'] unless Script.running?('combat-trainer')
+          if left_hand && Flags['cameo-loot']
+            pause_script 'combat-trainer'
+            @hunting_cameo.push(left_hand)
+            bput("stow left", "You drop", "You put", "What were")
+            Flags.reset('cameo-loot')
+            unpause_script 'combat-trainer'
+          end
+        else
+          if left_hand && Flags['cameo-loot']
+            pause_script 'combat-trainer'
+            @hunting_cameo.push(left_hand)
+            bput("stow left", "You drop", "You put", "What were")
+            Flags.reset('cameo-loot')
+            unpause_script 'combat-trainer'
+          end
+          $COMBAT_TRAINER.stop
+          wait_while { Script.running?('combat-trainer') }
+          @rooms_count += 1
+          walk_to_special(@rooms[@rooms_count])
+        end
+      end
+      if left_hand && Flags['cameo-loot']
+        pause_script 'combat-trainer'
+        @hunting_cameo.push(left_hand)
+        bput("stow left", "You drop", "You put", "What were")
+        Flags.reset('cameo-loot')
+        unpause_script 'combat-trainer'
+      end
+      echo "TASK DONE!"
+      $COMBAT_TRAINER.stop
+      wait_while { Script.running?('combat-trainer') }
+      walk_to_special(@rooms[0])
+      @hunting_cameo.size.to_i.times{
+        bput("get my #{@hunting_cameo[0]}", "You pick", "You get", "What")
+        bput("give zukir", "Lord Zukir accepts", "What")
+        bput("stow right", "You drop", "You put", "What were") if right_hand
+        bput("stow left", "You drop", "You put", "What were") if left_hand
+        @hunting_cameo.shift
+      }
+      task
+    end
+
+    def missing
+      echo "Missing Person Task"
+      lastroom = nil
+      missingfound = false
+      while !Flags['UlfHara-task-complete']
+        if (missingfound == false && (DRRoom.npcs - @baddies - @ignore).size == 0)
+          @rooms_count += 1
+          walk_to_special(@rooms[@rooms_count])
+          @ignore = ['Zukir']
+        end
+        if lastroom != Room.current && missingfound == false
+          lastroom = Room.current
+          if (DRRoom.npcs - @baddies - @ignore).size > 0
+            if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+              retreat
+            end
+            case bput("ask #{(DRRoom.npcs - @baddies - @ignore)[0]} about follow", "Usage: ASK", "appreciate your help", "is already guiding me", "does not seem to know anything about that")
+            when /Usage: ASK|is already guiding me|does not seem to know anything about that/
+              @ignore.push((DRRoom.npcs - @baddies - @ignore)[0])
+            when /appreciate your help/
+              destination = Room["12872"]
+              missingfound = true
+              loop{
+                if Room.current == destination
+                  break
+                else
+                  escort(Room.current, destination)
+                  waitfor /enters, following you/i
+                  pause
+                  if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+                    retreat
+                  end
+                end
+              }
+            end
+          else
+            case bput("search", "Roundtime", "completely surprised as.*stumbles into you", "Perhaps somewhere else would have better odds.", "you notice.*unconscious form", "Someone puts a hand on your shoulder", "crawls out from it", "As you peek behind a nearby")
+            when /completely surprised as (.*) stumbles into you|you notice (.*)'s unconscious form|Someone puts a hand on your shoulder|crawls out from it|As you peek behind a nearby/
+              destination = Room["12872"]
+              missingfound = true
+              loop{
+                if Room.current == destination
+                  break
+                else
+                  escort(Room.current, destination)
+                  waitfor /enters, following you/i
+                  pause
+                  if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+                    retreat
+                  end
+                end
+              }
+            end
+          end
+        end
+      end
+      task
+    end
+
+    def disarm
+      lastroom = Room.current
+      walk_to_special(12916)
+      echo "Trap Disarm Task"
+      #disarmwander = MazeRoom.new
+      @current_room = MazeRoom.new
+      while !Flags['UlfHara-task-complete']
+        if DRRoom.room_objs.any? {|box| box =~ /coffer$|strongbox$|chest$|caddy$|trunk$|casket$|skippet$|crate$|box$/i } && DRRoom.pcs.empty?
+          DRRoom.room_objs.each{|box|
+            if box.sub(/gleaming chest/,'') =~ /coffer$|strongbox$|chest$|caddy$|trunk$|casket$|skippet$|crate$|box$/i
+              attempt_open(get_noun(box))
+            end
+          }
+        else
+          case bput("search", "After much shuffling, you manage to find", "Roundtime", "as you're about to give up", "but fail to find anything of interest", "but fail to find anything of interest.", "peeking out from a new pile of debris!","Somewhere else would have better odds.", "down a shattered stone that")
+          when /After much shuffling, you manage to find|as you're about to give up|peeking out from a new pile of debris|down a shattered stone that/
+            DRRoom.room_objs.each{|box|
+              if box.sub(/gleaming chest/,'') =~ /coffer$|strongbox$|chest$|caddy$|trunk$|casket$|skippet$|crate$|box$/i
+                attempt_open(get_noun(box))
+              end
+            }
+            Flags.reset('UlfHara-combo-chest')
+          end
+        end
+        #disarmwander = disarmwander.wander unless (Flags['UlfHara-combo-chest'] || Flags['UlfHara-task-complete'])
+        @current_room = @current_room.wander unless (Flags['UlfHara-combo-chest'] || Flags['UlfHara-task-complete'])
+      end
+      Flags.reset('UlfHara-combo-chest')
+      wander_maze_until('ladder', 'climb ladder')
+      task
+    end
+
+    def recovery
+      echo "Treasure Recovery Task"
+      lastroom = Room.current
+      walk_to_special(@rooms[1])
+      while !Flags['UlfHara-task-complete']
+        if lastroom != Room.current
+          lastroom = Room.current
+          fput "kneel" unless kneeling?
+          while bput("search", "Roundtime", "You quickly snatch") =~ /Roundtime/i
+            if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
+              fix_standing
+              retreat
+            end
+          end
+        end
+      end
+      walk_to_special(@rooms[0])
+      fput("give zukir")
+      task
+    end
+
+    def escort(start_room, destination_room)
+      unless $step2_path and (s = $step2_path.index(start_room.id)) and (d = $step2_path.index(destination_room.id)) and (s < d)
+        previous, shortest_distances = Map.dijkstra(Room.current.id, destination_room.id)
+        unless previous[destination_room.id]
+          echo "error: failed to find a path between your current room (#{start_room.id}) and destination room (#{destination_room.id})"
+          exit
+        end
+        $step2_path = [ destination_room.id ]
+        $step2_path.push(previous[$step2_path[-1]]) until previous[$step2_path[-1]].nil?
+        $step2_path.reverse!
+        previous = shortest_distances = nil
+      end
+      
+      way = start_room.wayto[$step2_path[$step2_path.index(start_room.id)+1].to_s]
+      
+      if way.class == String
+          move way
+      elsif way.class == Proc
+          way.call
+      else
+          echo 'error in the map database'
+      end
+    end
+
+    def wander_maze_until(target, exit_command)
+      #current_room = MazeRoom.new
+      loop do
+        if Flags['maze-reset']
+          echo "Maze Reset"
+          Flags.reset('maze-reset')
+          result = bput('look', 'Obvious exits:.*').split(':').last.split(', ').first.delete('.')
+          move(result)
+          @current_room = MazeRoom.new
+        end
+
+        if DRRoom.room_objs.include?(target)
+          unless move(exit_command)
+            fix_standing
+            wander_maze_until(target, exit_command)
+          end
+          return
+        end
+        #current_room = current_room.wander
+        @current_room.return
+      end
+    end
+    
+    def attempt_open(box)
+      waitrt?
+      echo "attempt_open(#{box})" if UserVars.lockpick_debug
+      
+      @equipment_manager = EquipmentManager.new
+
+      @equipment_manager.empty_hands
+
+      removed_items = @equipment_manager.remove_gear_by(&:hinders_lockpicking)
+
+      do_buffs
+
+      fput 'sit'
+
+      disarm?(box)
+      attempt_pick(box)
+
+      waitrt?
+      fput('stow my lockpick') unless @settings.use_lockpick_ring
+      
+      fix_standing
+      @equipment_manager.wear_items(removed_items)
+      
+      lockpick_buffs = @settings.lockpick_buffs
+      if lockpick_buffs['khri']
+        lockpick_buffs['khri'].each { |name| fput("khri stop #{name}") }
+      end
+
+      waitrt?
+      fput("open #{box}")
+      loot_box(box)
+      waitrt?
+    end
+    
+    def do_buffs
+      if DRRoom.pcs.include?(@settings.lockpick_buff_bot)
+        fput("whisper #{@settings.lockpick_buff_bot} buff hol")
+      end
+
+      if @settings.waggle_sets['pick']
+        wait_for_script_to_complete('buff', ['pick'])
+      else
+        buffs = @settings.lockpick_buffs
+        # TODO: Remove this sometime in end of February. That should be enough time for users to move to waggle
+        echo "*** You have outdated settings, please make a waggle_set called 'pick' ***" unless buffs.empty?
+        buffs['spells'].each do |spell|
+          echo "Buffing: #{spell}" if UserVars.lockpick_debug
+          cast_spell(spell, @settings)
+        end
+        buffs['khri']
+          .map { |name| "Khri #{name}" }
+          .each { |name| activate_khri?(@settings.kneel_khri, name) }
+        buffs['meditate'].each do |med|
+          bput("meditate #{med}", 'You feel a jolt as your vision snaps shut', 'Your inner fire lacks the strength')
+        end
+      end
+    end
+    
+    def disarm?(box)
+      waitrt?
+      echo "disarm?(#{box})" if UserVars.lockpick_debug
+      case bput("disarm #{box} identify", @disarm_identify_failed, @disarm_too_hard, @disarm_careful, @disarm_quick, @disarm_normal, 'Roundtime')
+      when 'Roundtime', *@disarm_careful
+        disarm_speed?(box, 'careful')
+      when *@disarm_quick
+        disarm_speed?(box, 'careful') if @settings.lockpick_force_disarm_careful
+        disarm_speed?(box, 'quick') unless @settings.lockpick_force_disarm_careful
+      when *@disarm_normal
+        disarm_speed?(box, 'careful') if @settings.lockpick_force_disarm_careful
+        disarm_speed?(box, '') unless @settings.lockpick_force_disarm_careful
+      when *@disarm_identify_failed
+        disarm_speed?(box, 'careful')
+      when *@disarm_too_hard
+        if @settings.lockpick_ignore_difficulty
+          disarm_speed?(box, 'careful')
+        else
+          false
+        end
+      end
+    end
+    
+    def disarm_speed?(box, speed)
+      waitrt?
+      echo "disarm_speed?(#{box}, #{speed})" if UserVars.lockpick_debug
+      Flags.reset('disarm-more')
+
+      case bput("disarm #{box} #{speed}", @disarm_failed, @disarm_retry, 'Roundtime')
+      when *@disarm_failed
+        beep
+        beep
+        echo('**SPRUNG TRAP**')
+        return false
+      when *@disarm_retry
+        new_speed = reget(10, 'something to shift') ? 'careful' : speed
+        return disarm_speed?(box, new_speed)
+      end
+      pause 1
+      waitrt?
+
+      result = true
+
+      result = disarm?(box) if Flags['disarm-more']
+
+      result
+    end
+    
+    def attempt_pick(box)
+      find_lockpick unless @settings.use_lockpick_ring
+      pause 0.5 while pick(box)
+    end
+
+    def pick(box)
+      waitrt?
+      case bput("pick #{box} ident", @pick_careful, @pick_quick, @pick_blind, @pick_retry, /Find a more appropriate tool and try again/, /It's not even locked, why bother/)
+      when /Find a more appropriate tool and try again/
+        find_lockpick
+        pick(box)
+      when /It's not even locked, why bother/
+        return false
+      when *@pick_careful
+        pick_speed(box, 'careful')
+      when *@pick_quick
+        pick_speed(box, 'quick')
+      when *@pick_blind
+        pick_speed(box, 'quick')
+      when *@pick_retry
+        pick_speed(box, 'careful')
+      end
+    end
+
+    def pick_speed(box, speed)
+      if @settings.pick_blind && DRSkill.getxp('Locksmithing') < 34
+        @original_speed = speed != 'blind' ? speed : nil
+        speed = 'blind'
+      end
+      if @original_speed && DRSkill.getxp('Locksmithing') == 34
+        speed = @original_speed
+        @original_speed = nil
+      end
+      waitrt?
+      case bput("pick #{box} #{speed}", 'You discover another lock protecting', 'You are unable to make any progress towards opening the lock', 'Roundtime', /Find a more appropriate tool and try again/)
+      when 'Roundtime'
+        waitrt?
+        return false
+      when 'You discover another lock protecting'
+        waitrt?
+        return true
+      when /Find a more appropriate tool and try again/
+        find_lockpick
+        return pick_speed(box, speed)
+      else
+        pause
+        return pick_speed(box, speed)
+      end
+    end
+
+    def find_lockpick
+      return if left_hand
+      waitrt?
+
+      case bput('get my lockpick', 'referring to\?', '^You get ')
+      when 'referring to?'
+        echo '***OUT OF LOCKPICKS***'
+        beep
+        fput('stow left') if checkleft
+        fput('stow right') if checkright
+        exit
+      end
+    end
+    
+    def loot_box(box)
+      loot = bput("look in #{box}", /.*#{box} you see (.*)/i)
+      list_to_nouns(loot.gsub(/In the.*you see |\.$/,'')).each{|item|
+        if item =~ /coin/
+          bput("get #{item} in #{box}", "You get", "You pick", "What")
+        else
+          bput("get #{item} in #{box}", "You get", "You pick", "What")
+          fput("stow right") if right_hand
+          fput("stow left") if left_hand
+        end
+      }
+    end
+    
+    def walk_to_special(room)
+      if @rooms_count >= 81
+        @rooms_count = 0
+        room = 12872
+      end
+      if room == "0"
+        move "go steel door"
+      elsif room == "1"
+        move "go iron door"
+      else
+        walk_to(room)
+      end
+    end
+end
+
+class MazeRoom
+  include DRC
+  include DRCT
+
+  $CARDINALS = { 'n' => 's', 's' => 'n', 'ne' => 'sw', 'sw' => 'ne', 'nw' => 'se', 'se' => 'nw', 'e' => 'w', 'w' => 'e' }
+  $ADJUSTMENTS = { 'n' => [0, 1], 's' => [0, -1], 'ne' => [1, 1], 'sw' => [-1, -1], 'nw' => [-1, 1], 'se' => [1, -1], 'e' => [1, 0], 'w' => [-1, 0] }
+
+  attr_accessor :desc, :exits, :checked, :parent, :coords, :return
+  
+  Flags.add('maze-reset', 'You can\'t go there', 'You can\'t swim in that direction.')
+
+  def initialize(came_from = nil, source_room = nil, return_direction = [])
+    @return = return_direction
+    if came_from
+      @exits = { $CARDINALS[came_from] => source_room }
+      source_room.exits[came_from] = self
+      @coords = update_coords(source_room.coords, came_from)
+    else
+      @@room_list = []
+      @exits = {}
+      @coords = [0, 0]
+    end
+
+    populate_exits
+    @@room_list << self
+  end
+
+  def find_room_by_coords(coords)
+    @@room_list.find { |room| room.coords == coords }
+  end
+
+  def update_coords(coords, traveled)
+    [coords.first + $ADJUSTMENTS[traveled].first, coords.last + $ADJUSTMENTS[traveled].last]
+  end
+
+  def best_path
+    @@room_list.each do |room|
+      room.checked = false
+      room.parent = nil
+    end
+    @checked = true
+    queue = [self]
+    until queue.empty?
+      current = queue.shift
+      current.exits.each do |dir, child|
+        return current.parent || dir if child.nil?
+        next if child.checked
+        child.checked = true
+        child.parent = current.parent || dir
+        queue << child
+      end
+    end
+  end
+
+  def condense_direction(direction)
+    direction.gsub(/orth|est|ast|outh/i, '')
+  end
+
+  def populate_exits
+    remaining_exits = DRRoom.exits.map { |exit| condense_direction(exit) } - @exits.keys
+
+    remaining_exits.each { |exit| @exits[exit] = nil }
+  end
+  
+  def return
+    fix_standing
+    if !@return.empty?
+      move($CARDINALS[@return[0]])
+      @return.shift
+      MazeRoom.new($CARDINALS[@return[0]], self)
+    else
+      wander
+    end
+  end
+
+  def wander
+    if Flags['maze-reset']
+      echo "Maze Reset"
+      Flags.reset('maze-reset')
+      bput('look', 'Obvious exits:.*')
+    end
+    
+    dir_to_go = @exits.keys.first if @exits.size == 1
+    dir_to_go, = @exits.find { |_, room| room.nil? } unless dir_to_go
+    dir_to_go, = best_path unless dir_to_go
+    
+    if dir_to_go == $CARDINALS[@return[0]]
+      @return.shift
+    else
+      @return.unshift(dir_to_go)
+    end
+    
+    fix_standing
+    move(dir_to_go)
+
+    return @exits[dir_to_go] if @exits[dir_to_go]
+
+    if existing_room = find_room_by_coords(update_coords(@coords, dir_to_go))
+      @exits[dir_to_go] = existing_room
+      existing_room.exits[$CARDINALS[dir_to_go]] = self
+      return existing_room
+    end
+
+    MazeRoom.new(dir_to_go, self, @return)
+  end
+end
+
+UlfHara.new

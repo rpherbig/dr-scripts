@@ -1,0 +1,229 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#enchant
+=end
+
+custom_require.call(%w[common common-arcana events common-crafting common-travel equipmanager])
+
+class Enchant
+  include DRC
+  include DRCC
+  include DRCA
+  include DRCT
+
+  def initialize
+    @settings = get_settings
+    @book_type = 'artificing'
+    @bag = @settings.crafting_container
+    @bag_items = @settings.crafting_items_in_container
+    @belt = @settings.enchanting_belt
+
+    arg_definitions = [
+      [
+        { name: 'chapter', regex: /\d+/i, variable: true, description: 'Chapter containing the item.' },
+        { name: 'recipe', display: 'recipe name', regex: /^[A-z\s\-']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
+        { name: 'noun', regex: /\w+/i, variable: true }
+      ]
+    ]
+
+    Flags.add('enchant-focus', 'material struggles to accept the sigil scribing')
+    Flags.add('enchant-meditate', 'The traced sigil pattern blurs before your eyes')
+    Flags.add('enchant-imbue', 'Once finished you sense an imbue spell will be required to continue enchanting')
+    Flags.add('enchant-push', 'You notice many of the scribed sigils are slowly merging back')
+    Flags.add('enchant-sigil', /You need another ([\w ]*)(primary|secondary) sigil to continue the enchanting process/)
+    Flags.add('enchant-complete', 'With the enchanting process completed, you believe it is safe to collect your things once more.', 'With the enchantment complete')
+    Flags.add('imbue-failed', 'The streams collide, rending the space before you and disrupting the enchantment')
+    Flags.add('imbue-backlash', 'Suddenly the streams slip through your grasp and cascade violently against each other')
+
+    @brazier = @settings.enchanting_tools.find { |item| /brazier/ =~ item } || 'brazier'
+    @fount = @settings.enchanting_tools.find { |item| /fount/ =~ item } || 'fount'
+    @loop = @settings.enchanting_tools.find { |item| /loop/ =~ item } || 'aug loop'
+    @imbue_wand = @settings.enchanting_tools.find { |item| /wand|rod/ =~ item } || 'rod'
+    @burin = @settings.enchanting_tools.find { |item| /burin/ =~ item } || 'burin'
+
+    @use_own_brazier = true
+    DRRoom.room_objs.each do |obj|
+      if obj.include?("enchanter's brazier")
+        @brazier = "enchanter's brazier"
+        @use_own_brazier = false
+      end
+    end
+
+    args = parse_args(arg_definitions)
+
+    @item = args.noun
+    @chapter = args.chapter
+    @recipe = args.recipe
+    @primary_sigils = []
+    @secondary_sigils = []
+
+    @equipment_manager = EquipmentManager.new
+    @equipment_manager.empty_hands
+
+    if @use_own_brazier
+      walk_to(@settings.enchanting_room) if @settings.enchanting_room
+    end
+
+    study_recipe
+
+    get_item(@fount)
+    bput("wave #{@fount} at #{@item} on #{@brazier}", 'You slowly wave')
+
+    imbue
+
+    get_item(@burin)
+    scribe
+  end
+
+  def study_recipe
+    get_item("#{@book_type} book")
+    turn_to("page #{find_recipe(@chapter, @recipe)}")
+    bput("study my #{@book_type} book", 'You scan', 'You review')
+
+    @equipment_manager.empty_hands
+    get_item(@brazier) if @use_own_brazier
+
+    case bput("get my #{@item}", 'You get a', 'That is far too dangerous')
+    when 'That is far too dangerous'
+      clean_brazier
+      empty_brazier
+      bput("get my #{@item}", 'You get a')
+    end
+    2.times do
+      case bput("put my #{@item} on #{@brazier}", 'You glance down', 'With a flick', 'You must first clean', 'You put')
+      when 'With a flick', 'You put'
+        break
+      when 'You must first clean'
+        clean_brazier
+        empty_brazier
+      end
+    end
+    waitrt?
+  end
+
+  def imbue
+    imbue_data = @settings['waggle_sets']['imbue']['Imbue']
+    if imbue_data
+      imbue_data['cast'] = "cast #{@item} on #{@brazier}"
+      crafting_prepare_spell(imbue_data, @settings)
+      castrt = checkcastrt - (imbue_data['cambrinth'].size * 3)
+      pause castrt
+      find_charge_invoke_stow(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap, @settings.dedicated_camb_use, imbue_data['cambrinth'], true)
+      waitcastrt?
+      crafting_cast_spell(imbue_data, @settings)
+    else
+      get_item(@imbue_wand) unless left_hand.include?(@imbue_wand)
+      case bput("wave #{@imbue_wand} at #{@item} on #{@brazier}", 'Roundtime', /You need another .* sigil/, 'The streams collide, rending the space before you and disrupting the enchantment')
+      when 'The streams collide, rending the space before you and disrupting the enchantment'
+        # Imbue wand failed.  Let's try again
+        imbue
+      else
+        stow_item(@imbue_wand) if left_hand.include?(@imbue_wand)
+      end
+    end
+    Flags.reset('enchant-imbue')
+  end
+
+  def clean_brazier
+    case bput("clean #{@brazier}", 'You prepare to clean off the brazier', 'There is nothing')
+    when 'You prepare to clean off the brazier'
+      bput("clean #{@brazier}", 'a massive ball of flame jets forward and singes everything nearby')
+    end
+  end
+
+  def empty_brazier
+    case bput("look on #{@brazier}", /On the brazier you see (.*)./, 'There is nothing')
+    when /On the brazier you see (.*)./
+      items = Regexp.last_match(1)
+      items = items.split(' and ')
+      items.each do |item|
+        item = item.split.last
+        get_item(item)
+        stow_crafting_item(item, @bag, @belt)
+      end
+    end
+  end
+
+  def trace_sigil(sigil)
+    bput("get #{sigil} sigil", 'You get')
+    bput("study my #{sigil} sigil", 'You study')
+    waitrt?
+    bput("trace #{@item} on #{@brazier}", 'you trace')
+  end
+
+  def scribe
+    if Flags['enchant-sigil']
+      sigil_type = Flags['enchant-sigil'][1]
+      Flags.reset('enchant-sigil')
+      sigil_type = 'induction' if sigil_type == ''
+      stow_item(@burin)
+      trace_sigil(sigil_type)
+      get_item(@burin)
+      scribe
+    elsif Flags['enchant-focus']
+      Flags.reset('enchant-focus')
+      bput("focus #{@item} on #{@brazier}", 'Once finished you sense an imbue spell will be required to continue enchanting.', 'Roundtime')
+      waitrt?
+      scribe
+    elsif Flags['enchant-meditate']
+      Flags.reset('enchant-meditate')
+      bput('meditate fount', 'Roundtime')
+      waitrt?
+      scribe
+    elsif Flags['enchant-push']
+      Flags.reset('enchant-push')
+      stow_item(@burin) if left_hand.include?('burin')
+      get_item(@loop)
+      bput("push #{@item} on #{@brazier} with my #{@loop}", 'Roundtime')
+      waitrt?
+      stow_item(@loop)
+      get_item(@burin)
+      scribe
+    elsif Flags['enchant-imbue']
+      Flags.reset('enchant-imbue')
+      stow_item(@burin) if left_hand.include?(@burin)
+      imbue
+      get_item(@burin)
+      scribe
+    elsif Flags['imbue-backlash']
+      stow_item(right_hand) if right_hand
+      stow_item(left_hand) if left_hand
+      cleanup
+      wait_for_script_to_complete('safe-room', ['force'])
+      exit
+    elsif Flags['enchant-complete']
+      stow_item(right_hand) if right_hand
+      stow_item(left_hand) if left_hand
+      cleanup
+      exit
+    else
+      bput("scribe #{@item} on #{@brazier} with my #{@burin}", 'Roundtime')
+      scribe
+    end
+  end
+
+  def cleanup
+    stow_item(right_hand) if right_hand
+    stow_item(left_hand) if left_hand
+    get_item(@fount)
+    stow_item(@fount)
+    get_item(@item)
+  end
+
+  def get_item(name)
+    get_crafting_item(name, @bag, @bag_items, @belt)
+  end
+
+  def stow_item(name)
+    stow_crafting_item(name, @bag, @belt)
+  end
+
+  def turn_to(section)
+    bput("turn my book to #{section}", 'You turn your', 'The book is already')
+  end
+end
+
+Enchant.new
+
+before_dying do
+  ['enchant-focus', 'enchant-imbue', 'enchant-meditate', 'enchant-push', 'enchant-sigil', 'enchant-complete', 'imbue-failed', 'imbue-backlash'].each { |flag| Flags.delete(flag) }
+end

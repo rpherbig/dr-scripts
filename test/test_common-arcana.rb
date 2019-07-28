@@ -11,6 +11,18 @@ class DRSpells
   end
 end
 
+class DRStats
+  def self.guild
+    'Barbarian'
+  end
+end
+
+class DRSkill
+  def self.getrank(_)
+    60
+  end
+end
+
 class TestDRCA < Minitest::Test
   def setup
     load 'common.lic'
@@ -74,6 +86,6 @@ class TestDRCA < Minitest::Test
       "At the ritual's peak, your prophetic connection blooms a thousand-fold.  You are alone.  An infinitesimal speck in space and time adrift in an infinite sea of possibility.  The course of your past, present and future are dictated by ceaseless currents beyond any mortal control."
     ]
     run_script_with_proc('common-arcana', proc { DRCA.ritual(spell_data, []) })
-    assert_sends_messages(['stance set 100 0 80', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
+    assert_sends_messages(['stance set 100 0 81', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
   end
 end

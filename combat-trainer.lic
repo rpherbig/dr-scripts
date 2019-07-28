@@ -102,7 +102,7 @@ class SetupProcess
     case bput("#{@warhorn_get_verb} my #{@warhorn}", 'You get', 'You remove', 'You take', 'What were you referring to', 'You need a free hand', 'Remove what')
     when 'You get', 'You remove', 'You take'
       if @warhorn.casecmp('egg').zero?
-        bput("invoke #{@warhorn}", 'light envelops the area briefly', 'light within the egg', 'Something about the area inhibits')
+        bput("invoke my #{@warhorn}", 'light envelops the area briefly', 'light within the egg', 'Something about the area inhibits')
       else
         bput("exhale #{@warhorn} lure", 'You sound a series of bursts from the', 'Your lungs are tired from having sounded a')
       end
@@ -192,7 +192,7 @@ class SetupProcess
 
     game_state.reset_action_count
 
-    if DRStats.moon_mage? && moon_used_to_summon_weapon.nil?
+    if DRStats.moon_mage? && !game_state.summoned_weapons.empty? && moon_used_to_summon_weapon.nil?
       echo('skipping summoned weapons because no moonblade available') if $debug_mode_ct
       weapon_training = weapon_training.reject { |skill, _| game_state.summoned_info(skill) }
     end
@@ -342,7 +342,11 @@ class LootProcess
     @arrange_all = skinning['arrange_all'] || false
     echo("  @arrange_all: #{@arrange_all}") if $debug_mode_ct
 
-    @arrange_count = skinning['arrange_count'] || 0
+    @arrange_count = if @arrange_all
+                       1
+                     else
+                       skinning['arrange_count'] || 0
+                     end
     echo("  @arrange_count: #{@arrange_count}") if $debug_mode_ct
 
     @tie_bundle = skinning['tie_bundle'] || false
@@ -481,6 +485,9 @@ class LootProcess
     when 'already in your inventory'
       if @gem_nouns.include?(item)
         bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
+      elsif @box_nouns.include?(item)
+        item_reg = item.split.join('.*')
+        return stow_loot(DRRoom.room_objs.grep(/\b#{item_reg}$/).first.split.last(2).join(' '), game_state)
       else
         bput("stow other #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
       end
@@ -559,7 +566,7 @@ class LootProcess
     return false unless @ritual_type
     return false if game_state.necro_casting?
     return true if @ritual_type == 'cycle'
-    return true if @ritual_type == 'butcher'
+    return true if @ritual_type == 'butcher' && DRSkill.getxp('Thanatology') < 32
     return true if @ritual_type == 'dissect' && DRSkill.getxp('First Aid') < 32
     return true if @ritual_type == 'harvest' && DRSkill.getxp('Skinning') < 32
     return true if DRSkill.getxp('Thanatology') < 32
@@ -671,7 +678,6 @@ class LootProcess
     echo "Butchering the #{mob_noun}'s corpse!" if $debug_mode_ct
     echo ' Only butchering it once!' if $debug_mode_ct && @dissect_and_butcher && !@ritual_type.eql?('butcher')
 
-    do_necro_ritual(mob_noun, 'preserve', game_state)
     @equipment_manager.stow_weapon(game_state.weapon_name)
 
     loop do
@@ -796,13 +802,13 @@ class LootProcess
     end
 
     snap = [left_hand, right_hand]
-    case bput('skin', 'roundtime', 'skin what', 'cannot be skinned', 'carrying far too many items', 'need a more appropriate weapon')
+    case bput('skin', 'roundtime', 'skin what', 'cannot be skinned', 'carrying far too many items', 'need a more appropriate weapon', 'need to have a bladed instrument to skin')
     when 'carrying far too many items'
       waitrt?
       fput 'get skin from my bundle'
       fput 'drop skin'
       fput 'skin'
-    when 'need a more appropriate weapon'
+    when 'need a more appropriate weapon', 'need to have a bladed instrument to skin'
       echo('BUY A SKINNING KNIFE')
       @skin = false
       return
@@ -1005,7 +1011,7 @@ class SpellProcess
     @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
     echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}") if $debug_mode_ct
 
-    Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target')
+    Flags.add('ct-spelllost', 'Your pattern dissipates with the loss of your target', 'Your secondary spell pattern dissipates because your target is dead, but the main spell remains intact', 'Your concentration lapses and you lose your targeting pattern')
     Flags.add('ct-need-bless', ' passes through the .* with no effect')
     Flags.add('ct-starlight-depleted', 'enough starlight') if DRStats.trader?
     Flags.add('ct-regalia-expired', 'Your .* glimmers? weakly') if DRStats.trader?
@@ -1533,7 +1539,7 @@ class SpellProcess
     data = update_astral_data(data)
     if data # update_astral_data returns nil on failure
       check_invoke(game_state)
-      ritual(data, @ignored_npcs)
+      ritual(data, @settings)
     end
 
     if summoned
@@ -1814,10 +1820,10 @@ class AbilityProcess
       fput action
       waitrt?
     end
-    return if game_state.danger && @kneel_khri
     @khri
       .map { |name| "Khri #{name}" }
       .each do |name|
+        next if game_state.danger && kneel_for_khri?(@kneel_khri, name)
         timer = game_state.cooldown_timers[name]
         next unless !timer || (Time.now - timer).to_i > 30
         game_state.cooldown_timers[name] = Time.now if activate_khri?(@kneel_khri, name)
@@ -1895,6 +1901,7 @@ class TrainerProcess
   include DRCT
   include DRCI
   include DRCMM
+  include DRCA
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -1988,6 +1995,8 @@ class TrainerProcess
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
 
+    @almanac_skills = settings.almanac_skills
+    echo("  @almanac_skills: #{@almanac_skills}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -2030,14 +2039,16 @@ class TrainerProcess
     when 'Scream'
       bput('Scream conc', 'Inhaling deeply', 'There is nothing', 'You open your mouth, then close it suddenly, looking somewhat like a fish') unless game_state.npcs.empty?
     when 'Khri Prowess'
-      if @kneel_khri
-        fput('retreat')
-        fput('kneel')
-      end
-      bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing') unless game_state.npcs.empty?
-      if @kneel_khri
-        waitrt?
-        fput('stand')
+      unless game_state.npcs.empty?
+        if kneel_for_khri?(@kneel_khri, 'khri prowess')
+          retreat
+          fput('kneel')
+        end
+        bput('khri prowess', 'Remembering the mantra of mind over matter', 'You\'re already using the Prowess meditation.', 'previous use of the Prowess', 'Your body is willing', 'Your mind and body are willing')
+        if kneel_for_khri?(@kneel_khri, 'khri prowess')
+          waitrt?
+          fix_standing
+        end
       end
     when 'Stealth'
       if hide?(@hide_type) && !@dont_stalk && !game_state.npcs.empty? && @hide_type == 'hide'
@@ -2085,10 +2096,10 @@ class TrainerProcess
     when 'Herbs'
       if game_state.npcs.empty?
         game_state.sheath_whirlwind_offhand
-        wait_for_script_to_complete('heal-remedy',['quick'])
+        wait_for_script_to_complete('heal-remedy', ['quick'])
         game_state.wield_whirlwind_offhand
       else
-        wait_for_script_to_complete('heal-remedy',['quick','nohands'])
+        wait_for_script_to_complete('heal-remedy', %w[quick nohands])
       end
     end
     waitrt?
@@ -2100,11 +2111,20 @@ class TrainerProcess
   def use_almanac(game_state)
     return unless Time.now - UserVars.almanac_last_use >= 600
     return if left_hand && !game_state.currently_whirlwinding
+    unless @almanac_skills.empty?
+      training_skill = @almanac_skills
+                       .select { |skill| DRSkill.getxp(skill) < 18 }
+                       .sort_by { |skill| DRSkill.getxp(skill) }.first
+      return unless training_skill
+    end
 
     game_state.sheath_whirlwind_offhand if game_state.currently_whirlwinding
     retreat
     fput('engage') unless game_state.npcs.empty? || game_state.retreating?
     bput('get my almanac', 'You get', 'What were')
+    if training_skill
+      bput("turn almanac to #{training_skill}", 'You turn', 'You attempt to turn')
+    end
     bput('study my almanac', 'You set about', 'gleaned all the insight you can', 'Study what')
     waitrt?
     bput('stow my almanac', 'You put', 'Stow what')
@@ -2318,7 +2338,7 @@ class TrainerProcess
     return if game_state.npcs.empty?
     return if fail_count > @analyze_retry_count
     return if DRSkill.getxp('Tactics') >= @combat_training_abilities_target
-    case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') # unless
+    case bput('analyze', 'roundtime', 'Analyze what', 'Your analysis reveals a massive opening', /You reveal an? .* (?:weakness|opening)/, /Your analysis reveals an? .* (?:weakness|opening)/, 'You fail to find any holes', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack', 'Bumbling, you slip') # unless
     when 'Analyze what'
       case bput('face next', 'There is nothing else', 'You turn', 'What are you trying')
       when 'There is nothing else', 'What are you trying'
@@ -2332,7 +2352,7 @@ class TrainerProcess
       return
     when 'You fail to find any holes'
       analyze(game_state, fail_count + 1)
-    when /You reveal an? .* [weakness|opening]/, /Your analysis reveals an? .* [weakness|opening]/
+    when /You reveal an? .* (?:weakness|opening)/, /Your analysis reveals an? .* (?:weakness|opening)/
       analyze(game_state, fail_count)
     end
     waitrt?
@@ -2352,7 +2372,7 @@ class TrainerProcess
   def moon_mage_perc(game_state)
     return if game_state.retreating?
 
-    retreat unless DRSkill.getrank('Attunement') > 500
+    retreat unless DRSkill.getrank('Attunement') > 500 || DRStats.trader?
     bput('perc mana', 'You reach out')
   end
 
@@ -2388,7 +2408,7 @@ class TrainerProcess
     echo 'Determining time'
     case DRC.bput('time', 'it is dawn', 'morning', 'midday', 'noon', 'afternoon', 'dusk', 'sunset', 'evening', 'midnight', 'night', 'almost dawn', 'approaching sunrise')
     when 'it is dawn', 'morning', 'midday', 'noon', 'afternoon', 'dusk'
-      center('sun')
+      center('elanthian sun')
     when 'sunset', 'evening', 'midnight', 'night', 'almost dawn', 'approaching sunrise'
       center('heart')
     end
@@ -2398,18 +2418,18 @@ class TrainerProcess
     case DRCMM.center_telescope_on(target)
     when "That's a bit tough to do when you can't see the sky", 'Your search for'
       stow_telescope
-    else 
+    else
       observe
     end
   end
- 
+
   def observe
     case DRCMM.peer_telescope
     when "You believe you've learned all that you can about survival", 'Too many futures cloud your mind - you learn nothing.'
       waitrt?
       stow_telescope
       check_predict
-    when "The pain is too much"
+    when 'The pain is too much'
       waitrt?
       stow_telescope
       @training_abilities.delete('Astro')
@@ -2418,14 +2438,14 @@ class TrainerProcess
       stow_telescope
     end
   end
-    
+
   def stow_telescope
     case DRC.bput('stow my telescope', 'Stow what', 'You put your telescope')
     when 'You put your telescope'
       pause 1
-      return
+      nil
     when 'Stow what'
-      return
+      nil
     end
   end
 
@@ -2591,7 +2611,7 @@ class AttackProcess
         end
       end
 
-      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack')
+      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip')
     end
 
     pause
@@ -2649,15 +2669,14 @@ class AttackProcess
   end
 
   def shoot_aimed(command, game_state)
-    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrow|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto) at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'your moving to fire went unobserved', 'notices your attempt to remain hidden', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
-    when /How can you (poach|snipe)/, 'notices your attempt to remain hidden'
+    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
+    when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
-    when 'your moving to fire went unobserved'
-      game_state.action_taken
-    when /you (fire|poach|snipe) an? (?:.*\s)?(arrow|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto) at/i
+    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto).* at/i
       game_state.action_taken
       ammo = Regexp.last_match(2)
       bput("stow my #{ammo}", 'You pick up', 'Stow what')
+      bput("stow my #{ammo}", 'You pick up', 'Stow what') if game_state.dual_load?
     when 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire'
       pause 1
       shoot_aimed(command, game_state)
@@ -2679,11 +2698,11 @@ class AttackProcess
         use_charged_maneuver(game_state.selected_maneuver, game_state)
         game_state.action_taken
       else
-        command = if game_state.use_stealth_ranged? && hide?(@hide_type)  
+        command = if game_state.use_stealth_ranged? && hide?(@hide_type)
                     @stealth_attack_aimed_action
                   elsif game_state.use_stealth_attack? && hide?(@hide_type)
-				    @stealth_attack_aimed_action
-			      else
+                    @stealth_attack_aimed_action
+                  else
                     'shoot'
                   end
         shoot_aimed(command, game_state)
@@ -2702,10 +2721,8 @@ class AttackProcess
                   ['gouge left', 'gouge left', 'gouge left']
                 elsif skill.eql?('Tactics')
                   $tactics_actions
-                elsif game_state.use_weak_attacks?
-                  ['jab left', 'jab left', 'jab left']
                 else
-                  ['jab left', 'feint left', 'draw left']
+                  ['jab left', 'jab left', 'jab left']
                 end
 
       actions.each do |action|
@@ -2732,12 +2749,12 @@ class AttackProcess
       end
     else
       if game_state.dual_load?
-        pause 0.5 until load_return = bput('load arrows', 'You reach into', 'already loaded', 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands')
+        pause 0.5 until (load_return = bput('load arrows', 'You reach into', 'already loaded', 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands')) != ''
         if ['but are unable to draw upon its majesty', 'without steadier hands', 'Such a feat would be impossible without the winds to guide'].include?(load_return)
-          pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded')
+          pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded') != ''
         end
       else
-        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded')
+        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded') != ''
       end
 
       waitrt?
@@ -2751,7 +2768,7 @@ class AttackProcess
   end
 
   def execute_aiming_action?(action, game_state)
-    case bput(action, 'Roundtime', 'close enough', 'What are you', 'There is nothing', 'must be closer')
+    case bput(action, 'Roundtime', 'close enough', 'What are you', 'There is nothing', 'must be closer', 'Bumbling, you slip')
     when 'close enough', 'must be closer'
       return false if game_state.retreating?
       fput('engage')
@@ -2763,14 +2780,14 @@ class AttackProcess
   end
 
   def aim(game_state)
-    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment')
-    when 'You are already'
+    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment', "isn't loaded")
+    when 'You are already', 'You begin to target'
       game_state.loaded = true
     when 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your riot crossbow'
       case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow')
       when 'A rapid series of clicks'
         aim(game_state)
-      when 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow'
+      when 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow', "isn't loaded"
         game_state.loaded = false
       end
     when 'Your repeating arbalest'
@@ -3054,13 +3071,13 @@ class GameState
 
     @use_stealth_attacks = settings.use_stealth_attacks
     echo("  @use_stealth_attacks: #{@use_stealth_attacks}") if $debug_mode_ct
-    
-    @use_stealth_ranged = settings.use_stealth_ranged 
+
+    @use_stealth_ranged = settings.use_stealth_ranged
     echo("  @use_stealth_ranged: #{@use_stealth_ranged}") if $debug_mode_ct
-	
+
     @ambush = settings.ambush
     echo("  @ambush: #{@ambush}") if $debug_mode_ct
-	
+
     @backstab = settings.backstab
     echo("  @backstab: #{@backstab}") if $debug_mode_ct
 
@@ -3112,8 +3129,8 @@ class GameState
     @use_weak_attacks = settings.use_weak_attacks
     echo("  @use_weak_attacks: #{@use_weak_attacks}") if $debug_mode_ct
 
-    @use_barb_combos = settings.use_barb_combos
-    echo("  @use_barb_combos: #{@use_barb_combos}") if $debug_mode_ct
+    @use_analyze_combos = settings.use_analyze_combos || settings.use_barb_combos
+    echo(" @use_analyze_combos: #{@use_analyze_combos}") if $debug_mode_ct
 
     @skip_last_kill = settings.skip_last_kill
     echo("  @skip_last_kill: #{@skip_last_kill}") if $debug_mode_ct
@@ -3122,6 +3139,7 @@ class GameState
     echo("  @attack_overrides: #{@attack_overrides}") if $debug_mode_ct
 
     @aiming_trainables = settings.aiming_trainables & settings.weapon_training.keys # Intersection of the arrays to make sure weapons are available in the hunt
+    @aiming_trainables.push('Tactics') if settings.aiming_trainables.include?('Tactics') # add back in tactics
     echo("  @aiming_trainables: #{@aiming_trainables}") if $debug_mode_ct
 
     @using_light_crossbow = settings.using_light_crossbow
@@ -3133,7 +3151,7 @@ class GameState
     @whirlwind_trainables = settings.whirlwind_trainables
     echo("  @whirlwind_trainables: #{@whirlwind_trainables}") if $debug_mode_ct
 
-    if @use_barb_combos
+    if @use_analyze_combos && DRStats.barbarian?
       Flags.add('ct-accuracy-ready', 'You sense your combat accuracy decrease')
       Flags['ct-accuracy-ready'] = true
       Flags.add('ct-damage-ready', 'You sense your ability to land deadly blows decrease')
@@ -3240,7 +3258,7 @@ class GameState
     return if skill.eql?'Brawling'
     return if skill.eql?'Tactics'
 
-    @equipment_manager.wield_weapon_offhand(weapon_training[skill])
+    @equipment_manager.wield_weapon_offhand(weapon_training[skill], skill)
     weapon_training[skill]
   end
 
@@ -3266,7 +3284,7 @@ class GameState
       'whirlwind'
     else
       action_reduce if npcs.length > 2
-      %w[jab bob feint].sample
+      %w[jab feint].sample
     end
   end
 
@@ -3383,11 +3401,11 @@ class GameState
   def use_stealth_attack?
     @use_stealth_attacks && use_stealth?
   end
-  
-  def use_stealth_ranged? #new
-    @use_stealth_ranged && use_stealth? #new
+
+  def use_stealth_ranged? # new
+    @use_stealth_ranged && use_stealth? # new
   end
-  
+
   def ambush?
     @ambush && DRSkill.getxp('Backstab') < 34 && !brawling?
   end
@@ -3545,7 +3563,7 @@ class GameState
   end
 
   def stop_analyze_combo
-    @use_barb_combos = false
+    @use_analyze_combos = false
   end
 
   def set_barb_accuracy_flag
@@ -3563,7 +3581,9 @@ class GameState
       attack_override
     elsif @use_weak_attacks
       brawling? ? 'gouge' : 'jab'
-    elsif @use_barb_combos && !offhand? && !brawling?
+    # !offhand & !brawling are there because you can't use a weapon for brawling commands
+    # This issue will cause problems with the combo array system
+    elsif @use_analyze_combos && !offhand? && !brawling?
       update_analyze_array(false) if @analyze_combo_array.empty?
       @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     else
@@ -3609,7 +3629,7 @@ class GameState
     DRSkill.getxp('Stealth') < @combat_training_abilities_target
   end
 
-  attr_reader :aiming_trainables
+  attr_reader :aiming_trainables, :summoned_weapons
 
   private
 
@@ -3624,16 +3644,20 @@ class GameState
   end
 
   def perform_analyze?(combo_type, expertise_requirement)
-    return false if combo_type != 'flame' && !Flags["ct-#{combo_type}-ready"]
+    return false if combo_type != 'flame' && !Flags["ct-#{combo_type}-ready"] && DRStats.barbarian?
     return false if DRSkill.getrank('Expertise') < expertise_requirement
 
-    result = bput("analyze #{combo_type}", 'cannot repeat', 'Analyze what\?', 'by landing an? .*', 'You need to hold')
+    result = bput("analyze #{combo_type}", 'cannot repeat', 'Analyze what\?', 'by landing an? .*', 'You need to hold', 'You must be closer', 'You fail to find any')
     waitrt?
 
     case result
     when 'cannot repeat'
       Flags.reset("ct-#{combo_type}-ready")
       return false
+    when 'You must be closer'
+      fput('engage')
+    when 'You fail to find any'
+      perform_analyze?(combo_type, expertise_requirement)
     when 'Analyze what?'
       case bput('face next', 'There is nothing else', 'You turn', 'What are you trying')
       when 'You turn'
@@ -3649,9 +3673,13 @@ class GameState
   end
 
   def update_analyze_array(only_accuracy)
-    return perform_analyze?('accuracy', 50) if only_accuracy
-    { 'accuracy' => 50, 'damage' => 125, 'balance' => 600, 'flame' => 0 }.each do |type, expertise|
-      break if perform_analyze?(type, expertise)
+    return perform_analyze?('accuracy', 50) if only_accuracy # Barb only setting
+    if DRStats.barbarian?
+      { 'accuracy' => 50, 'damage' => 125, 'balance' => 600, 'flame' => 0 }.each do |type, expertise|
+        break if perform_analyze?(type, expertise)
+      end
+    else
+      perform_analyze?('', 0)
     end
   end
 
@@ -3664,7 +3692,7 @@ class GameState
   end
 
   attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :summoned_weapons, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_barb_combos, :balance_regen_threshold
+  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_analyze_combos, :balance_regen_threshold
 end
 
 before_dying do
@@ -3694,5 +3722,3 @@ end
 
 $COMBAT_TRAINER = CombatTrainer.new
 $COMBAT_TRAINER.start_combat
-
-

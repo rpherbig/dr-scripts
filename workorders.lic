@@ -42,6 +42,7 @@ class WorkOrders
     @recipe_overrides = @settings.workorder_recipes || {}
     @cash_on_hand = @settings.workorder_cash_on_hand
     @craft_max_mindstate = @settings.craft_max_mindstate
+    @retain_crafting_materials = @settings.retain_crafting_materials
 
     info = crafting_data[discipline][@hometown]
     if discipline == 'weaponsmithing'
@@ -92,7 +93,7 @@ class WorkOrders
         exit
       end
       @outfitting_room = @settings.outfitting_room
-      tools = (@settings.outfitting_tools + @settings.knitting_tools).uniq
+      tools = @settings.outfitting_tools
       @belt = @settings.outfitting_belt
       case item['chapter']
       when 4, 2, 3
@@ -151,13 +152,15 @@ class WorkOrders
     bput("get my #{info['logbook']} logbook", 'You get')
     loop do
       find_npc(info['npc-rooms'], info['npc_last_name'])
-      break if bput("give log to #{info['npc']}", 'You hand', 'You can', 'Apparently the work order time limit has expired', 'The work order isn\'t yet complete') != 'You can'
+      DRC.release_invisibility
+      result = bput("give log to #{info['npc']}", 'You hand', 'You can', 'What were you', 'Apparently the work order time limit has expired', 'The work order isn\'t yet complete')
+      break unless ['What were you', 'You can'].include?(result)
     end
     stow_tool('logbook')
   end
 
   def get_tool(name)
-    get_crafting_item(name, @bag, @bag_items, @belt)
+    get_crafting_item(name, @bag, @bag_items, @belt, true)
   end
 
   def stow_tool(name)
@@ -170,7 +173,8 @@ class WorkOrders
     unless tools.size >= 5
       need_to_repair = tools.find do |tool_name|
         get_tool(tool_name)
-        result = bput("analyze my #{tool_name}", 'practically in mint', 'pristine condition', 'Roundtime')
+        result = bput("analyze my #{tool_name}", 'Analyze what', 'practically in mint', 'pristine condition', 'Roundtime')
+        next if result == 'Analyze what'
         waitrt?
         stow_tool(tool_name)
         /roundtime/i =~ result
@@ -180,18 +184,18 @@ class WorkOrders
 
     tools.each do |tool_name|
       get_tool(tool_name)
-      case bput("give #{info['repair-npc']}", "There isn't a scratch on that", 'Just give it to me again', 'I will not')
+      case bput("give #{info['repair-npc']}", "I don't repair those here", 'What is it', "There isn't a scratch on that", 'Just give it to me again', 'I will not')
       when /scratch/, /I will not/
         stow_tool(tool_name)
       when /give/
-        fput("give #{info['repair-npc']}")
+        bput("give #{info['repair-npc']}", 'repair ticket')
         bput('stow ticket', 'You put')
       end
     end
 
     while bput("get my #{info['repair-npc']} ticket", 'You get', 'What were') == 'You get'
       pause 30 until bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
-      fput("give #{info['repair-npc']}")
+      bput("give #{info['repair-npc']}", 'You hand')
       pause 1
       stow_tool(right_hand) if right_hand
       stow_tool(left_hand) if left_hand
@@ -261,8 +265,12 @@ class WorkOrders
         stow_hands
       end
 
-      bput("get #{info['stock-name']} rock", 'You get', 'What were') unless bone_carving
-      find_shaping_room(@hometown, @engineering_room)
+      if !bone_carving
+        rock_result = bput("get #{info['stock-name']} rock", 'You get', 'What were', 'You are not strong')
+        find_shaping_room(@hometown, @engineering_room) unless rock_result == 'You are not strong'
+      else
+        find_shaping_room(@hometown, @engineering_room)
+      end
 
       wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], info[stock_name], bone_carving ? 'stack' : 'rock', recipe['noun']])
 
@@ -303,7 +311,7 @@ class WorkOrders
       end
 
       wait_for_script_to_complete('shape', ['log', recipe['chapter'], recipe['name'], info['stock-name'], recipe['noun']])
-      case bput('read my logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
+      case bput('read my engineering logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
         break if count + 1 + log_num != quantity
@@ -356,7 +364,7 @@ class WorkOrders
 
     quantity.times do |count|
       wait_for_script_to_complete('sew', ['log', 'sewing', recipe['chapter'], recipe['name'], recipe['noun'], info['sew-stock-name']])
-      case bput('read my logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
+      case bput('read my outfitting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
         break if count + 1 + log_num != quantity
@@ -381,7 +389,7 @@ class WorkOrders
 
     quantity.times do |count|
       wait_for_script_to_complete('sew', ['log', 'knitting', recipe['chapter'], recipe['name'], recipe['noun'], info['knit-stock-name']])
-      case bput('read my logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
+      case bput('read my outfitting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
         break if count + 1 + log_num != quantity
@@ -401,7 +409,7 @@ class WorkOrders
   end
 
   # Function which will attempt to combine any stacks of herbs in your inventory, will count them, and determine if more need to be ordered.
-  def count_combine_rem(stock_room, quantity, herb, herb_stock)
+  def count_combine_rem(stock_room, quantity, herb, herb_stock, is_herb2 = false)
     # Initialize variables
     found_stack = true
     herb_volume_total = 0
@@ -415,8 +423,8 @@ class WorkOrders
     herb_for_tapping = herb.gsub(/\s+/m, ' ').strip.split(' ').last
 
     # Calculate the volume of the herbs that we will be searching our inventory for and/or buying.
-    # Assume that each unit we need to craft will take 25 volumes of our herb.
-    need_herb_volume = (quantity * 25.0)
+    # Assume that each unit we need to craft will take 25 volumes of our herb. If it's a second herb, it requires a minimum of one volume, but may require more.
+    need_herb_volume = is_herb2 ? (quantity * 2) : (quantity * 25)
 
     # Loop through all the stacks of herbs we might have in our backpack and find out how much volume we have total.
     ordinals = $ORDINALS.dup
@@ -567,7 +575,7 @@ class WorkOrders
     if recipe['herb2'].nil?
       herb2_needed = 'na'
     else
-      count_combine_rem(info['stock-room'], quantity, recipe['herb2'], recipe['herb2_stock'])
+      count_combine_rem(info['stock-room'], quantity, recipe['herb2'], recipe['herb2_stock'], true)
     end
 
     walk_to(@alchemy_room)
@@ -587,9 +595,9 @@ class WorkOrders
         bput("Break my #{recipe['noun']}", 'You carefully')
         /(\d+)/ =~ bput("count my first #{recipe['noun']}", 'You count out \d+ uses remaining.')
         if Regexp.last_match(1).to_i == 5
-          bput("stow my second #{recipe['noun']}", 'You put')
+          bput("stow my second #{recipe['noun']}", 'You put', 'You combine')
         else
-          bput("stow my first #{recipe['noun']}", 'You put')
+          bput("stow my first #{recipe['noun']}", 'You put', 'You combine')
         end
         leftovers += 1
         bundle_item(recipe['noun'], info['logbook'])
@@ -597,16 +605,16 @@ class WorkOrders
         bput('stow my logbook', 'You put')
       when 'The work order requires items of a higher quality'
         dispose_trash(recipe['noun'])
-        dispose(recipe['herb1']) while recipe['herb1'] && exists?(recipe['herb1'])
-        dispose(recipe['herb2']) while recipe['herb2'] && exists?(recipe['herb2'])
+        dispose(recipe['herb1']) while recipe['herb1'] && exists?(recipe['herb1']) unless @retain_crafting_materials
+        dispose(recipe['herb2']) while recipe['herb2'] && exists?(recipe['herb2']) unless @retain_crafting_materials
         stow_tool(left_hand)
         stow_tool(right_hand)
         break
       end
     end
     leftovers.times { |_| dispose(recipe['noun']) }
-    dispose(recipe['herb1']) while recipe['herb1'] && exists?(recipe['herb1'])
-    dispose(recipe['herb2']) while recipe['herb2'] && exists?(recipe['herb2'])
+    dispose(recipe['herb1']) while recipe['herb1'] && exists?(recipe['herb1']) unless @retain_crafting_materials
+    dispose(recipe['herb2']) while recipe['herb2'] && exists?(recipe['herb2']) unless @retain_crafting_materials
   end
 
   def forge_items(info, item, quantity)
@@ -721,7 +729,7 @@ class WorkOrders
 
   def request_work_order(recipes, npc_rooms, npc, npc_last_name, discipline, logbook, diff)
     match_names = recipes.map { |x| x['name'] }
-
+    diff ||= 'challenging'
     stow_hands
     500.times do
       find_npc(npc_rooms, npc_last_name)

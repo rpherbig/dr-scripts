@@ -48,8 +48,9 @@ module DRCA
       end
   end
 
-  def activate_khri?(kneel, ability)
+  def activate_khri?(settings_kneel, ability)
     return false if DRSpells.active_spells[ability]
+    kneel = kneel_for_khri?(settings_kneel, ability)
     DRC.retreat if kneel
     DRC.bput('kneel', 'You kneel', 'You are already', 'You rise') if kneel && !kneeling?
     result = DRC.bput(ability, get_data('spells').khri_preps)
@@ -59,13 +60,22 @@ module DRCA
     ['Your body is willing', 'You have not recovered'].include?(result)
   end
 
-  def start_barb_abilities(skills, _settings)
+  def kneel_for_khri?(kneel, ability)
+    if kneel.is_a? Array
+      kneel.map(&:downcase).include? ability.downcase.sub('khri ', '')
+    else
+      kneel
+    end
+  end
+
+  def start_barb_abilities(skills, settings)
     skills
       .reject { |name| DRSpells.active_spells[name] }
       .each do |name|
         activate_barb_buff(name)
         waitrt?
-        pause 6 if get_data('spells').barb_abilities[name]['type'].eql? 'meditation'
+        pause settings.meditation_pause_timer.to_i if get_data('spells').barb_abilities[name]['type'].eql? 'meditation'
+        fix_standing
       end
   end
 
@@ -80,7 +90,6 @@ module DRCA
       fix_standing
       activate_barb_buff(name)
     end
-    fix_standing
   end
 
   def prepare?(abbrev, mana, symbiosis = false, command = 'prepare')
@@ -101,21 +110,25 @@ module DRCA
     match
   end
 
-  def ritual(spell, ignored_npcs)
-    DRC.retreat(ignored_npcs) unless spell['skip_retreat']
+  def ritual(spell, settings)
+    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
     DRC.release_invisibility
-    DRC.bput('stance set 100 0 80', 'Setting your')
+    DRC.set_stance('shield')
 
-    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'])
+    command = 'prepare'
+    command = spell['prep'] if spell['prep']
+    command = spell['prep_type'] if spell['prep_type']
+
+    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'], command)
     find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
 
     invoke(spell['focus'], nil, nil)
     stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
-    DRC.retreat(ignored_npcs) unless spell['skip_retreat']
+    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
 
     waitcastrt?
     return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
-    DRC.retreat(ignored_npcs) unless spell['skip_retreat']
+    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
   end
 
   def cast?(cast_command = 'cast', symbiosis = false, before = [], after = [])
@@ -429,7 +442,7 @@ module DRCA
     DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
 
     if data['ritual']
-      ritual(data, settings.ignored_npcs)
+      ritual(data, settings)
       return
     end
 
@@ -482,7 +495,7 @@ module DRCA
         discern_data['more'] = 0
       end
       calculate_mana(discern_data['min'], discern_data['more'], discern_data, false, settings)
-    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > 24 * 60 * 60 || !discern_data['more'].nil?
+    elsif discern_data.empty? || discern_data['time_stamp'].nil? || Time.now - discern_data['time_stamp'] > settings.check_discern_timer_in_hours * 60 * 60 || !discern_data['more'].nil?
       discern_data['time_stamp'] = Time.now
       DRC.retreat
       case discern = DRC.bput("discern #{data['abbrev']}", 'The spell requires at minimum \d+ mana streams and you think you can reinforce it with \d+ more', 'You don\'t think you are able to cast this spell', 'You have no idea how to cast that spell')
@@ -544,9 +557,7 @@ module DRCA
 
   def check_to_harness(should_harness)
     return false unless should_harness
-    return false if DRSkill.getxp('Attunement') >= DRSkill.getxp('Arcana')
-    return false if DRSkill.getxp('Attunement') >= 30
-
+    return false if DRSkill.getxp('Attunement') > DRSkill.getxp('Arcana')
     true
   end
 
@@ -605,5 +616,27 @@ module DRCA
     command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
     prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
+  end
+
+  def crafting_magic_routine(settings)
+    training_spells = settings.crafting_training_spells
+    return if training_spells.empty?
+    return if mana <= 40
+
+    if !XMLData.prepared_spell.eql?('None') && checkcastrt == 0
+      spell = XMLData.prepared_spell
+      skill = get_data('spells').spell_data[spell]['skill']
+      data = training_spells[skill]
+      crafting_cast_spell(data, settings)
+    end
+
+    return if checkcastrt > 0
+    needs_training = %w[Warding Utility Augmentation]
+                     .select { |skill| training_spells[skill] }
+                     .select { |skill| DRSkill.getxp(skill) < 31 }
+                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    return unless needs_training
+
+    crafting_prepare_spell(training_spells[needs_training], settings)
   end
 end

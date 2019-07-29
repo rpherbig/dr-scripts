@@ -12,15 +12,20 @@ class TestDRCA < Minitest::Test
     sent_messages.clear
   end
 
+  def teardown
+    @test.join if @test
+  end
+
   def test_find_visible_planets_while_indoors
-    # load 'common.lic'
-    # $history = [
-      # 'You get an ivory telescope inlaid with a ruby-eyed golden dragon from inside your hunting pack.',
-      # "That's a bit tough to do when you can't see the sky.",
-      # 'You put your telescope in your hunting pack.'
-    # ]
-    # seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
-    # assert_empty(seen_planets)
+    $history = [
+      'You get an ivory telescope inlaid with a ruby-eyed golden dragon from inside your hunting pack.',
+      "That's a bit tough to do when you can't see the sky.",
+      'You put your telescope in your hunting pack.'
+    ]
+    @test = run_script_with_proc(['common','common-arcana'], proc do
+      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
+      assert_empty(seen_planets)
+    end)
   end
 
   def test_invoke_with_exact_amount
@@ -31,12 +36,11 @@ class TestDRCA < Minitest::Test
       'The nestled armband pulses with Lunar energy.  You reach for its center and forge a magical link to it, readying all of its mana for your use.',
       'Roundtime: 1 sec.'
     ]
-    run_script_with_proc('common-arcana', proc { DRCA.invoke('armband', nil, 32) } )
+    @test = run_script_with_proc(['common','common-arcana'], proc { DRCA.invoke('armband', nil, 32) } )
     assert_sends_messages(['invoke my armband 32'])
   end
 
   def test_ritual_with_skip_retreat
-    
     $test_data = {
       spells: OpenStruct.new(YAML.load_file('data/base-spells.yaml'))
     }
@@ -64,9 +68,10 @@ class TestDRCA < Minitest::Test
       'The mental strain of this pattern is considerably eased by your ritual focus.',
       "At the ritual's peak, your prophetic connection blooms a thousand-fold.  You are alone.  An infinitesimal speck in space and time adrift in an infinite sea of possibility.  The course of your past, present and future are dictated by ceaseless currents beyond any mortal control."
     ]
-    $debug_message_assert = false
-    run_script_with_proc(['common', 'common-arcana', 'common-travel'], proc {DRCA.ritual(spell_data, [])})
+    DRSkill._set_rank('Defending', 60)
+    DRStats._set_guild('Barbarian')
+    DRSpells._set_active_spells({})
+    @test = run_script_with_proc(['common', 'common-arcana', 'common-travel'], proc {DRCA.ritual(spell_data, [])})
     assert_sends_messages(['stance set 100 0 81', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
-    $debug_message_assert = false
   end
 end

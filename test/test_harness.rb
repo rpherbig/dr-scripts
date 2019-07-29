@@ -3,25 +3,55 @@ module Harness
   $_IDLETIMESTAMP_ = Time.now
   # Lich global for the last time a script sent a command to the game
   $_SCRIPTIDLETIMESTAMP_ = Time.now
-  
+
   class DRSpells
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_active_spells(val)
+      @@_data_store['active_spells'] = val
+    end
+
     def self.active_spells
-      {}
+      @@_data_store['active_spells'] || {}
     end
   end
 
   class DRStats
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_guild(val)
+      @@_data_store['guild'] = val
+    end
+
     def self.guild
-      'Barbarian'
+      @@_data_store['guild'] || 'Ranger'
     end
   end
 
   class DRSkill
-    def self.getrank(_)
-      60
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_rank(skillname, val)
+      @@_data_store[skillname] = val
+    end
+
+    def self.getrank(skillname)
+      @@_data_store[skillname] || 100
     end
   end
-  
+
   class Flags
     @@flags = {}
     @@matchers = {}
@@ -56,7 +86,7 @@ module Harness
       @@matchers
     end
   end
-  
+
   class Script
     def gets?
       get?
@@ -249,7 +279,7 @@ module Harness
         script = "#{script}.lic" unless script.end_with?('.lic')
         load script
       end
-      
+
       test.call
     end
     $threads ||= []

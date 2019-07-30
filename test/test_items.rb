@@ -2,7 +2,6 @@ require 'minitest/autorun'
 load 'test/test_harness.rb'
 
 class TestItems < Minitest::Test
-
   def teardown
     @test.join if @test
   end

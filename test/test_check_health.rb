@@ -14,31 +14,31 @@ class TestCheckHealth < Minitest::Test
   end
 
   def assert_wounded
-    proc {|health| assert_equal(false, health['wounds'].empty?, 'Person is wounded but reported as not wounded')}
+    proc { |health| assert_equal(false, health['wounds'].empty?, 'Person is wounded but reported as not wounded') }
   end
 
   def assert_not_wounded
-    proc {|health| assert_empty(health['wounds'], 'Person is not wounded but reported as wounded')}
+    proc { |health| assert_empty(health['wounds'], 'Person is not wounded but reported as wounded') }
   end
 
   def assert_poisoned
-    proc {|health| assert_equal(true, health['poisoned'], 'Person is poisoned but reported as not poisoned')}
+    proc { |health| assert_equal(true, health['poisoned'], 'Person is poisoned but reported as not poisoned') }
   end
 
   def assert_not_poisoned
-    proc {|health| assert_equal(false, health['poisoned'], 'Person is not poisoned but reported as poisoned')}
+    proc { |health| assert_equal(false, health['poisoned'], 'Person is not poisoned but reported as poisoned') }
   end
 
   def assert_diseased
-    proc {|health| assert_equal(true, health['diseased'], 'Person is diseased but reported as not diseased')}
+    proc { |health| assert_equal(true, health['diseased'], 'Person is diseased but reported as not diseased') }
   end
 
   def assert_not_diseased
-    proc {|health| assert_equal(false, health['diseased'], 'Person is not diseased but reported as diseased')}
+    proc { |health| assert_equal(false, health['diseased'], 'Person is not diseased but reported as diseased') }
   end
 
   def assert_no_parasites
-    proc {|health| assert_empty(health['parasites'], 'Person parasite free but is reported as host to parasites')}
+    proc { |health| assert_empty(health['parasites'], 'Person parasite free but is reported as host to parasites') }
   end
 
   def assert_healthy
@@ -50,13 +50,13 @@ class TestCheckHealth < Minitest::Test
     ]
   end
 
-  def check_health_with_buffer(messages, assertions=[])
+  def check_health_with_buffer(messages, assertions = [])
     $server_buffer = messages.dup
     $history = $server_buffer.dup
-    @test = run_script_with_proc(['common','common-healing'], proc do
+    @test = run_script_with_proc(['common', 'common-healing'], proc do
       health_result = DRCH.check_health
-      assertions = [assertions] unless assertions.kind_of?(Array)
-      assertions.each{|assertion| assertion.call(health_result) }
+      assertions = [assertions] unless assertions.is_a?(Array)
+      assertions.each { |assertion| assertion.call(health_result) }
     end)
   end
 
@@ -96,8 +96,7 @@ class TestCheckHealth < Minitest::Test
       'You have some tiny scratches to the neck, minor swelling and bruising around the left arm compounded by cuts and bruises about the left arm, minor swelling and bruising around the right leg compounded by cuts and bruises about the right leg, minor swelling and bruising around the left leg compounded by cuts and bruises about the left leg, some minor abrasions to the left hand, some tiny scratches to the chest, some tiny scratches to the abdomen, some tiny scratches to the back, some minor abrasions to the right eye.',
       'You have a mildly poisoned right leg.'
     ]
-    check_health_with_buffer(messages, [assert_no_parasites,assert_not_diseased,assert_poisoned,assert_wounded])
-
+    check_health_with_buffer(messages, [assert_no_parasites, assert_not_diseased, assert_poisoned, assert_wounded])
   end
 
   def test_that_wounded_person_is_healthy_after_healing

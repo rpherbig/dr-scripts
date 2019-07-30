@@ -211,7 +211,7 @@ module Harness
     $history ? $history.shift : nil
   end
 
-  alias_method('get', 'get?')
+  alias get get?
 
   def reget(*lines)
     lines.flatten!
@@ -274,7 +274,7 @@ module Harness
   def run_script_with_proc(scripts, test)
     # Thread.abort_on_exception=true
     thread = Thread.new do
-      scripts = [scripts] unless scripts.kind_of?(Array)
+      scripts = [scripts] unless scripts.is_a?(Array)
       scripts.each do |script|
         script = "#{script}.lic" unless script.end_with?('.lic')
         load script
@@ -294,7 +294,7 @@ module Harness
         message = sent_messages.pop
         if $debug_message_assert
           puts "message  :  #{message}"
-          puts "expected :#{expected_messages.to_s}"
+          puts "expected :#{expected_messages}"
         end
         expected_messages.delete_at(expected_messages.index(message) || expected_messages.length)
         break if expected_messages.empty?

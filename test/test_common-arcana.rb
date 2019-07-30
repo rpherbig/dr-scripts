@@ -22,7 +22,7 @@ class TestDRCA < Minitest::Test
       "That's a bit tough to do when you can't see the sky.",
       'You put your telescope in your hunting pack.'
     ]
-    @test = run_script_with_proc(['common','common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-arcana'], proc do
       seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
       assert_empty(seen_planets)
     end)
@@ -36,7 +36,7 @@ class TestDRCA < Minitest::Test
       'The nestled armband pulses with Lunar energy.  You reach for its center and forge a magical link to it, readying all of its mana for your use.',
       'Roundtime: 1 sec.'
     ]
-    @test = run_script_with_proc(['common','common-arcana'], proc { DRCA.invoke('armband', nil, 32) } )
+    @test = run_script_with_proc(['common', 'common-arcana'], proc { DRCA.invoke('armband', nil, 32) })
     assert_sends_messages(['invoke my armband 32'])
   end
 
@@ -71,7 +71,7 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Defending', 60)
     DRStats._set_guild('Barbarian')
     DRSpells._set_active_spells({})
-    @test = run_script_with_proc(['common', 'common-arcana', 'common-travel'], proc {DRCA.ritual(spell_data, [])})
+    @test = run_script_with_proc(['common', 'common-arcana', 'common-travel'], proc { DRCA.ritual(spell_data, []) })
     assert_sends_messages(['stance set 100 0 81', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
   end
 end

@@ -279,7 +279,6 @@ module Harness
         script = "#{script}.lic" unless script.end_with?('.lic')
         load script
       end
-
       test.call
     end
     $threads ||= []

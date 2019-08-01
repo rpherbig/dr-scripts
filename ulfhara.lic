@@ -40,7 +40,7 @@ class UlfHara
     @raregemcontainer = @settings['ulfhara']['raregemcontainer'] ||= ""
     @raregem = (get_data('sorting').to_h.keep_if { |key, _value| key =~ /rare gems/ }.values.join('|')).sub(/Summer's /,'')
     @baddies = ['veteran','partisan','mage','monstrosity','golem','warrior','ruffian','cutthroat','footpad','lowlife','fleshreaper', 'lout', 'bandit', 'ghoul', 'Dwarf', 'Prydaen', 'Gor\'Tog', 'Human', 'Elf', 'Elothean', 'Halfling', 'Mur', 'Rakash', 'Gnome', 'Kaldar', 'zombie', 'oaf']
-    @notfoods = ['lockpick', 'flint', 'torch', 'crab', 'fish', 'foot', 'haunch', 'leg', 'mouse', 'rat', 'absinthe', 'aesjaal', 'ale', 'Arrack', 'beer', 'bloodwyne', 'Brandy', 'Brew', 'champagne', 'chocolate', 'cider', 'coffee', 'comfort', 'cream', 'dadanen', 'Delight', 'dream', 'Fluff', 'frappe', 'frostwynne', 'grog', 'Grog', 'haze', 'jaalkwego', 'juice', 'lemonade', 'Liqueur', 'mead', 'milk', 'moonshine', 'ouisque', 'punch', 'sherry', 'springwynne', 'tea', 'Tease', 'tequila', 'water', 'wine']
+    @notfoods = ['lockpick', 'flint', 'torch', 'crab', 'fish', 'foot', 'haunch', 'leg', 'mouse', 'rat', 'absinthe', 'aesjaal', 'ale', 'arrack', 'beer', 'bloodwyne', 'brandy', 'brew', 'champagne', 'chocolate', 'cider', 'coffee', 'comfort', 'cream', 'dadanen', 'delight', 'dream', 'fluff', 'frappe', 'frostwynne', 'grog', 'haze', 'jaalkwego', 'juice', 'lemonade', 'liqueur', 'mead', 'milk', 'moonshine', 'myn\'tanyl', 'ouisque', 'punch', 'sherry', 'springwynne', 'tea', 'tease', 'tequila', 'water', 'wine']
     @notdrinks= ['lockpick', 'flint', 'torch', 'crab', 'fish', 'foot', 'haunch', 'leg', 'mouse', 'rat', 'asparagus', 'broccoli', 'cake', 'cheese', 'cheesecake', 'cupcake', 'lollipop', 'sandwich', 'potato', 'mushrooms', 'tart', 'tarts', 'tenderloin', 'wedges']
     @hunting_cameo = []
     @task_return = 0
@@ -61,6 +61,7 @@ class UlfHara
     Flags.add('maze-reset', 'You can\'t go there', 'You can\'t swim in that direction.')
     Flags.add('cameo-loot', 'You quickly snatch it up!  Zukir will want this right away!')
     Flags.add('missing-found', 'enters, following you')
+    Flags.add('spell-ready', 'You feel fully prepared to cast your spell')
     
     messages = get_data('picking').picking
     @pick_careful = messages['pick_careful']
@@ -122,6 +123,21 @@ class UlfHara
         combo
       when /help any of our wounded you encounter/
         fput("accept task")
+        if DRStats.empath? && !DRSpells.active_spells.include?('Regenerate') && @settings.waggle_sets['healing']['Regenerate']
+          data = check_discern(@settings.waggle_sets['healing']['Regenerate'], @settings) if data['use_auto_mana']
+          release_cyclics
+          DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+          DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
+          Flags.reset('spell-ready')
+          prepare?(data['abbrev'], data['mana'], data['symbiosis'], 'prep')
+        elsif DRStats.empath? && !DRSpells.active_spells.include?('Heal') && @settings.waggle_sets['healing']['Heal']
+          data = check_discern(@settings.waggle_sets['healing']['Heal'], @settings) if data['use_auto_mana']
+          release_cyclics
+          DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+          DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
+          Flags.reset('spell-ready')
+          prepare?(data['abbrev'], data['mana'], data['symbiosis'], 'prep')
+        end
         stow_hands
         bput("get my medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") if right_hand != "medicated cloth"
         if right_hand != "medicated cloth"
@@ -160,10 +176,39 @@ class UlfHara
       task
     end
 
+    def cast
+      if XMLData.prepared_spell.eql?('Regenerate')
+        data = @settings.waggle_sets['healing']['Regenerate']
+      elsif XMLData.prepared_spell.eql?('Heal')
+        data = @settings.waggle_sets['healing']['Heal']
+        unless @settings.cambrinth_items[0]['name']
+          @settings.cambrinth_items = [{
+            'name' => @settings.cambrinth,
+            'cap' => @settings.cambrinth_cap,
+            'stored' => @settings.stored_cambrinth
+          }]
+        end
+        if check_to_harness(@settings.use_harness_when_arcana_locked)
+          harness_mana(data['cambrinth'].flatten)
+        else
+          @settings.cambrinth_items.each_with_index do |item, index|
+            case data['cambrinth'].first
+            when Array
+              find_charge_invoke_stow(item['name'], item['stored'], item['cap'], @settings.dedicated_camb_use, data['cambrinth'][index], @settings.cambrinth_invoke_exact_amount)
+            when Fixnum, Integer
+              find_charge_invoke_stow(item['name'], item['stored'], item['cap'], @settings.dedicated_camb_use, data['cambrinth'], @settings.cambrinth_invoke_exact_amount)
+            end
+          end
+        end
+      end
+      cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+      Flags.reset('spell-ready')
+    end
+
     def supply
       echo "Ally Re-supply Task"
       fput("swap") if right_hand == "dirty sack"
-      temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+      temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'').downcase
       food = list_to_nouns(temp) - @notfoods
       drink = list_to_nouns(temp) - @notdrinks
       if (food.empty? || drink.empty?)
@@ -172,7 +217,7 @@ class UlfHara
         walk_to_special(@rooms[0])
         fput("ask zukir for supplies")
         fput("swap")
-        temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+        temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'').downcase
         food = list_to_nouns(temp) - @notfoods
         drink = list_to_nouns(temp) - @notdrinks
         walk_to_special(temproom)
@@ -192,20 +237,26 @@ class UlfHara
             retreat
           end
           bput("stow my #{right_hand}", "You put", "What were you", "Please rephrase") if right_hand
-          supply = bput("study #{npc}", /need of (.*) to complete.*mission|spare some (.*)|Others will assist|surely a sign of dehydration.|Study what?/i)
+          supply = bput("study #{npc}", /need of (.*) to complete.*mission|spare some (.*)|Others will assist|You give .* a studious look|surely a sign of dehydration.|Study what?/i)
           case supply
           when /need of (.*) to complete.*mission/
             supply = $1.sub(/e?s$/,'')
             case bput("get my #{supply} in my sack", "You get", "What were you referring to", "Please rephrase that")
             when /You get/
-              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
+              case bput("give #{npc}", "You should head back to Zukir", "Roundtime", "What is it you're trying", "Save that for our allies")
+              when /What is it you're trying/
+                fput("put my #{supply} in my sack")
+              when /Save that for our allies/
+                fput("put my #{supply} in my sack")
+                @ignore.push(npc)
+              end
             when /What were you referring to|Please rephrase that/
               fput("drop my sack")
               temproom = Room.current.id
               walk_to_special(@rooms[0])
               fput("ask zukir for supplies")
               fput("swap")
-              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'').downcase
               food = list_to_nouns(temp) - @notfoods
               drink = list_to_nouns(temp) - @notdrinks
               walk_to_special(temproom)
@@ -213,15 +264,22 @@ class UlfHara
           when /spare some (.*)/
             case bput("get my #{food[0]} in my sack", "You get", "What were you referring to", "Please rephrase that")
             when /You get/
-              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
-              food = food.drop(1)
+              case bput("give #{npc}", "You should head back to Zukir", "Roundtime", "What is it you're trying", "Save that for our allies")
+              when /What is it you're trying/
+                fput("put my #{food[0]} in my sack")
+              when /Save that for our allies/
+                fput("put my #{food[0]} in my sack")
+                @ignore.push(npc)
+              else
+                food = food.drop(1)
+              end
             when /What were you referring to|Please rephrase that/
               fput("drop my sack")
               temproom = Room.current.id
               walk_to_special(@rooms[0])
               fput("ask zukir for supplies")
               fput("swap")
-              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'').downcase
               food = list_to_nouns(temp) - @notfoods
               drink = list_to_nouns(temp) - @notdrinks
               walk_to_special(temproom)
@@ -229,20 +287,27 @@ class UlfHara
           when /surely a sign of dehydration/
             case bput("get my #{drink[0]} in my sack", "You get", "What were you referring to", "Please rephrase that")
             when /You get/
-              bput("give #{npc}", "You should head back to Zukir", "Roundtime")
-              drink = drink.drop(1)
+              case bput("give #{npc}", "You should head back to Zukir", "Roundtime", "What is it you're trying", "Save that for our allies")
+              when /What is it you're trying/
+                fput("put my #{drink[0]} in my sack")
+              when /Save that for our allies/
+                fput("put my #{drink[0]} in my sack")
+                @ignore.push(npc)
+              else
+                drink = drink.drop(1)
+              end
             when /What were you referring to|Please rephrase that/
               fput("drop my sack")
               temproom = Room.current.id
               walk_to_special(@rooms[0])
               fput("ask zukir for supplies")
               fput("swap")
-              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'')
+              temp = bput("look in my sack", /In the dirty sack you see (.*)/i).gsub(/In the dirty sack you see |\./,'').downcase
               food = list_to_nouns(temp) - @notfoods
               drink = list_to_nouns(temp) - @notdrinks
               walk_to_special(temproom)
             end
-          when /Others will assist/
+          when /Others will assist|You give .* a studious look/
             @ignore.push(npc)
           end
         }
@@ -294,6 +359,7 @@ class UlfHara
         end
       end
       while !Flags['UlfHara-task-complete']
+        cast if Flags['spell-ready']
         @rooms_count += 1
         walk_to_special(@rooms[@rooms_count])
         @ignore = ['Zukir']
@@ -301,17 +367,19 @@ class UlfHara
           lastroom = Room.current
           npcs = DRRoom.npcs - @baddies - @ignore
             npcs.each{|npc|
+              cast if Flags['spell-ready']
               break if Flags['UlfHara-task-complete']
               if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
                 retreat
               end
-              bput("study #{npc}", "carries some wounds that an Empath or medic", "Others will assist", "Study what?", "You are NOT on this task, you don\'t need")
+              bput("study #{npc}", "carries some wounds that an Empath or medic", "Others will assist", "Study what?", "You are NOT on this task, you don\'t need", /You give .* a studious look/)
               if reget(5, 'carries some wounds that an Empath or medic')
                 if DRStats.empath? && (DRSpells.active_spells.include?('Regenerate') || DRSpells.active_spells.include?('Heal'))
                   fput("touch #{npc}")
                   fput("take #{npc}")
                 end
                 while bput("rub #{npc} with cloth", "Roundtime", "You discard what", "swats at you and shouts","Rub what?", "You should go and report", "That is probably not a good idea") =~ /Roundtime|You discard what/i
+                  cast if Flags['spell-ready']
                   break if Flags['UlfHara-task-complete']
                   if DRRoom.npcs.any?{|x| x =~ /#{@baddies.join('|')}/i}
                     retreat
@@ -321,6 +389,7 @@ class UlfHara
                     temproom = Room.current.id
                     walk_to_special(@rooms[0])
                     while bput("get medi cloth", "You pick", "You get", "What", "Best wait a bit", "Roundtime") =~ /Best wait a bit/
+                      cast if Flags['spell-ready']
                       break if Flags['UlfHara-task-complete']
                     end
                     walk_to_special(temproom)
@@ -328,7 +397,7 @@ class UlfHara
                 end
                 @ignore.push(npc)
                 break if Flags['UlfHara-task-complete']
-              elsif reget(5, 'Others will assist')
+              elsif reget(5, 'Others will assist', /You give .* a studious look/)
                 @ignore.push(npc)
               end
             }
@@ -879,9 +948,16 @@ class MazeRoom
   end
 end
 
-UlfHara.new
-
 before_dying do
   kill_script 'combat-trainer'
   kill_script 'stabbity'
+  Flags.delete('UlfHara-task-complete')
+  Flags.delete('UlfHara-combo-chest')
+  Flags.delete('disarm-more')
+  Flags.delete('maze-reset')
+  Flags.delete('cameo-loot')
+  Flags.delete('missing-found')
+  Flags.delete('spell-ready')
 end
+
+UlfHara.new

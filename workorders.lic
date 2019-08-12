@@ -15,7 +15,7 @@ class WorkOrders
   def initialize
     arg_definitions = [
       [
-        { name: 'discipline', options: %w[blacksmithing weaponsmithing tailoring shaping carving remedies], description: 'What type of workorder to do?' },
+        { name: 'discipline', options: %w[blacksmithing weaponsmithing tailoring shaping carving remedies artificing], description: 'What type of workorder to do?' },
         { name: 'repair', regex: /repair/i, optional: true, description: 'repair tools instead of crafting' }
       ]
     ]
@@ -48,7 +48,7 @@ class WorkOrders
     if discipline == 'weaponsmithing'
       info = crafting_data['blacksmithing'][@hometown]
     end
-
+    
     recipes = if @recipe_overrides[discipline]
                 get_data('recipes').crafting_recipes.select { |recipe| recipe['type'] =~ /#{discipline}/i && @recipe_overrides[discipline].find { |name| recipe['name'] =~ /#{name}/i } }
               else
@@ -133,7 +133,7 @@ class WorkOrders
       tools = @settings.alchemy_tools
       @belt = @settings.alchemy_belt
       craft_method = :remedy_items
-    when 'enchanting'
+    when 'artificing'
       if DRSkill.getxp('Enchanting') > @craft_max_mindstate
         echo("Exiting because your current mindstate is over the set maximum craft_max_mindstate:#{@craft_max_mindstate}")
         exit
@@ -193,8 +193,8 @@ class WorkOrders
 
     tools.each do |tool_name|
       get_tool(tool_name)
-      case bput("give #{info['repair-npc']}", "I don't repair those here", 'What is it', "There isn't a scratch on that", 'Just give it to me again', 'I will not')
-      when /scratch/, /I will not/
+      case bput("give #{info['repair-npc']}", "I don't repair those here", 'What is it', "There isn't a scratch on that", 'Just give it to me again', 'I will not', "I can't fix those.  They only have so many uses and then you must buy another.")
+      when /scratch/, /I will not/, /They only have so many uses/
         stow_tool(tool_name)
       when /give/
         bput("give #{info['repair-npc']}", 'repair ticket')
@@ -728,8 +728,62 @@ class WorkOrders
     fput('stow deed')
   end
 
-  def enchanting_items(info, item, quantity)
+  def order_enchant(stock_room, stock_needed, stock_number)
+    stock_needed.times do
+      order_item(stock_room, stock_number)
+      stow_tool(left_hand)
+      stow_tool(right_hand)
+      next unless left_hand && right_hand
+    end
+  end
+
+  def enchanting_items(info, recipe, quantity)
+    ensure_copper_on_hand(@cash_on_hand || 20000, @settings)
+    # Enchant Sigil #1
+    order_enchant(info['stock-room'], quantity, recipe['enchant_stock1'])
     
+    # Enchant Sigil #2
+    order_enchant(info['stock-room'], quantity, recipe['enchant_stock2']) unless recipe['enchant_stock2'].nil?
+    
+    # Sigil 3
+    order_enchant(info['stock-room'], quantity, recipe['enchant_stock3']) unless recipe['enchant_stock3'].nil?
+    
+    # Enchant component #1
+    order_enchant(info['stock-room'], quantity, recipe['item']) unless recipe['item'].nil?
+
+    # Parts #
+    order_parts(recipe['part'], quantity) if recipe['part']
+
+    # Check for fount #
+    if search?('fount')
+      waitrt?
+    case bput('get my fount', 'You get', 'What were you referring to')
+      when 'You get'
+        /(\d+)/ =~ bput('focus my fount', 'Judging from the intensity of the glow within you estimate it has \d+ uses remaining')
+        if Regexp.last_match(1).to_i < quantity
+          dispose('fount')
+          stow_hands
+          order_enchant(info['tool-room'], 1, info['fount'])
+        end
+      when 'What were you referring to'
+        /(\d+)/ =~ bput('focus my fount on my brazier', 'Judging from the intensity of the glow within you estimate it has \d+ uses remaining')
+        if Regexp.last_match(1).to_i < quantity
+          stow_hands
+          order_enchant(info['tool-room'], 1, info['fount'])
+        end
+    end
+    else
+      order_enchant(info['tool-room'], 1, info['fount'])
+    end
+    stow_hands
+
+    # Start crafting #
+    find_enchanting_room(@hometown, @enchanting_room)
+
+    quantity.times do
+      wait_for_script_to_complete('enchant', [recipe['chapter'], recipe['name'], recipe['noun']])
+      bundle_item(recipe['noun'], info['logbook'])
+    end
   end
 
   def bundle_item(noun, logbook)

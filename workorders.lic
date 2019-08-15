@@ -221,7 +221,8 @@ class WorkOrders
   def carve_items(info, item, quantity)
     ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
     recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
-
+    material_noun = %w[deed pebble stone rock rock boulder]
+    material_volume = 0
     bone_carving = recipe['material'] == 'bone'
 
     if bone_carving
@@ -233,7 +234,7 @@ class WorkOrders
     end
 
     if search?('surface polish')
-      fput('get my surface polish')
+      bput('get my surface polish', 'You get')
       /(\d+)/ =~ bput('count my polish', 'The surface polish has \d+ uses remaining')
       if Regexp.last_match(1).to_i < 3
         stow_hands
@@ -246,6 +247,7 @@ class WorkOrders
     stow_hands
 
     quantity.times do |count|
+      dispose("#{info['stock-name']} #{material_noun[material_volume]}") if (count > 0 && spare_stock)
       if items_per_stock.zero? || (count % items_per_stock).zero?
         if count > 0
           go_door
@@ -258,21 +260,29 @@ class WorkOrders
             bput('combine', 'combine')
           end
         else
-          dispose("#{info['stock-name']} stone") if count > 0 && spare_stock
           order_item(info['stock-room'], info[stock_number])
-          fput('tap my deed')
+          if @engineering_room
+            fput('tap my deed')
+            material_volume = info['stock-volume']
+          else
+            material_volume = 0
+          end
         end
         stow_hands
       end
 
       if !bone_carving
-        rock_result = bput("get #{info['stock-name']} rock", 'You get', 'What were', 'You are not strong')
-        find_shaping_room(@hometown, @engineering_room) unless rock_result == 'You are not strong'
+        rock_result = bput("get #{info['stock-name']} #{material_noun[material_volume]}", 'You get', 'What were', 'You are not strong', 'You pick up', 'but can\'t quite lift it')
+        find_shaping_room(@hometown, @engineering_room) unless rock_result =~ /You are not strong|but can\'t quite lift it/i
       else
         find_shaping_room(@hometown, @engineering_room)
       end
+      bput('swap', 'You move') if right_hand =~ /#{@noun}/i
 
-      wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], info[stock_name], bone_carving ? 'stack' : 'rock', recipe['noun']])
+      wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], info[stock_name], bone_carving ? 'stack' : material_noun[material_volume], recipe['noun']])
+      
+      material_volume = info['stock-volume'] if material_volume == 0
+      material_volume -= recipe['volume']
 
       bundle_item(recipe['noun'], info['logbook'])
     end
@@ -280,10 +290,10 @@ class WorkOrders
       fput("get my #{info[stock_name]} stack")
       if checkleft || checkright
         stow_hands
-        dispose("#{info[stock_name]} stack")
+        dispose("#{info[stock_name]} stack") unless @retain_crafting_materials
       end
     elsif scrap
-      dispose("#{info['stock-name']} stone")
+      dispose("#{info['stock-name']} #{material_noun[material_volume]}")
     end
     go_door if XMLData.room_title.include?('Workshop')
   end
@@ -294,7 +304,17 @@ class WorkOrders
 
     quantity.times do |count|
       if items_per_stock.zero? || (count % items_per_stock).zero?
-        dispose("#{info['stock-name']} lumber") if count > 0 && spare_stock
+        if count > 0 && spare_stock && !@retain_crafting_materials
+          dispose("#{info['stock-name']} lumber")
+        elsif count > 0 && spare_stock && @retain_crafting_materials
+          bput("stow feet", "You put", "What", "Stow what?")
+          bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
+          bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
+          bput('combine', 'combine')
+          stow_tool(left_hand)
+          stow_tool(right_hand)
+        end
+        
         if count > 0
           go_door
           pause 0.5 until Room.current.id
@@ -318,7 +338,19 @@ class WorkOrders
       end
     end
 
-    dispose("#{info['stock-name']} lumber") if scrap
+    dispose("#{info['stock-name']} lumber") if scrap && !@retain_crafting_materials
+    if @retain_crafting_materials
+      stow_tool(left_hand)
+      stow_tool(right_hand)
+      if scrap
+        bput("stow feet", "You put", "What", "Stow what?")
+        bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
+        bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
+        bput('combine', 'combine')
+        stow_tool(left_hand)
+        stow_tool(right_hand)
+      end
+    end
     go_door if XMLData.room_title.include?('Workshop')
   end
 
@@ -355,8 +387,13 @@ class WorkOrders
   def sew_items(info, recipe, quantity)
     ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
 
-    stock_needed = ((quantity * recipe['volume']) / 10.0).ceil
-    order_fabric(info['stock-room'], stock_needed, info['sew-stock-number'], 'cloth')
+    existing = if bput("get #{info['sew-stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'What were'
+                 0
+               else
+                 bput("count my #{info['sew-stock-name']} cloth", 'You count out \d+ yards').scan(/\d+/).first.to_i
+               end
+    stock_needed = ((quantity * recipe['volume'] - existing) / 10.0).ceil
+    order_fabric(info['stock-room'], stock_needed, info['sew-stock-number'], "#{info['sew-stock-name']} cloth")
 
     order_parts(recipe['part'], quantity) if recipe['part']
 
@@ -371,7 +408,9 @@ class WorkOrders
       end
     end
     leftover = (quantity * recipe['volume']) % 10 != 0
-    dispose("#{info['sew-stock-name']} cloth") if leftover
+    dispose("#{info['sew-stock-name']} cloth") if leftover && !@retain_crafting_materials
+    stow_tool(left_hand) if @retain_crafting_materials
+    stow_tool(right_hand) if @retain_crafting_materials
   end
 
   def knit_items(info, recipe, quantity)
@@ -395,8 +434,10 @@ class WorkOrders
         break if count + 1 + log_num != quantity
       end
     end
-    #    leftover = (quantity * recipe['volume']) % 10 != 0
-    dispose("#{info['knit-stock-name']} yarn") # if leftover
+    leftover = (quantity * recipe['volume']) % 10 != 0
+    dispose("#{info['knit-stock-name']} yarn") if leftover && !@retain_crafting_materials
+    stow_tool(left_hand) if @retain_crafting_materials
+    stow_tool(right_hand) if @retain_crafting_materials
   end
 
   def order_rem(stock_room, stock_needed, stock_number)

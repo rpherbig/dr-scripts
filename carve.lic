@@ -23,6 +23,11 @@ class Carve
         { name: 'material', regex: /\w+/i, variable: true, description: 'Type of stone/bone to use.' },
         { name: 'type', options: %w[stack rock stone pebble boulder deed], description: 'What material noun you are using.' },
         { name: 'noun', regex: /\w+/i, variable: true }
+      ],
+      [
+        { name: 'resume', regex: /resume/i },
+        { name: 'type', options: %w[bone stone], description: 'Which material type the item is.' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item to resume.' }
       ]
     ]
 
@@ -35,7 +40,7 @@ class Carve
     @noun = args.noun
     @training_spells = @settings.crafting_training_spells
 
-    @main_tool = if @type == 'stack'
+    @main_tool = if @type == 'stack' || @type == 'bone'
                    'saw'
                  else
                    'chisel'
@@ -43,9 +48,12 @@ class Carve
 
     wait_for_script_to_complete('buff', ['carve'])
     Flags.add('carve-assembly', 'another finished wooden (hilt|haft)', 'another finished (long|short) wooden (pole)', 'another finished (long|short) leather (cord)')
-    Flags.add('carve-magic-ready', 'You feel fully prepared to cast your spell.')
 
-    carve_item
+    if args.resume
+      resume
+    else
+      carve_item
+    end
   end
 
   def get_item(name)
@@ -67,7 +75,7 @@ class Carve
   end
 
   def carve_item
-    magic_routine
+    crafting_magic_routine(@settings)
     get_item('carving book')
     echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Engineering') == 175
     turn_to("chapter #{@chapter}")
@@ -76,8 +84,16 @@ class Carve
     stow_item('book')
     get_item(@main_tool)
     if @type != 'boulder'
-      get_item("#{@material} #{@type}")
-      @my = 'my'
+      case DRC.bput("get #{@material} #{@type}", '^You get', '^You are already', '^What do you', '^What were you', 'You pick up', "can't quite lift it")
+      when 'What do you', 'What were you'
+        beep
+        echo("You seem to be missing: #{name}")
+        exit
+      when /can\'t quite lift it/
+        @my = ''
+      when /^You get|You pick up|^You are already/
+        @my = 'my '
+      end
       if @type == 'deed'
         /(\w+) onto/ =~ bput('tap deed', '\w+ onto a sled')
         @type = checkleft || Regexp.last_match(1)
@@ -86,7 +102,7 @@ class Carve
     else
       @my = ''
     end
-    carve("cut #{@my} #{@type} with my #{@main_tool}")
+    carve("cut #{@my}#{@type} with my #{@main_tool}")
   end
 
   def assemble_part
@@ -97,13 +113,13 @@ class Carve
     part = Flags['carve-assembly'][1..-1].join('.')
     Flags.reset('carve-assembly')
     get_item(part)
-    bput("assemble #{@my} #{@noun} with my #{part}", 'affix it securely in place', 'carefully mark where it will attach when you continue crafting', 'add several marks indicating optimal locations')
+    bput("assemble #{@my}#{@noun} with my #{part}", 'affix it securely in place', 'carefully mark where it will attach when you continue crafting', 'add several marks indicating optimal locations')
     get_item(tool)
   end
 
   def carve(command)
     waitrt?
-    magic_routine
+    crafting_magic_routine(@settings)
     assemble_part
     case bput(command,
               'rough, jagged',
@@ -116,17 +132,17 @@ class Carve
       waitrt?
       stow_item(right_hand)
       get_item('rifflers')
-      command = "rub #{@my} #{@noun} with my rifflers"
+      command = "rub #{@my}#{@noun} with my rifflers"
     when 'determine', 'developed an uneven texture along its surface'
       waitrt?
       stow_item(right_hand)
       get_item('rasp')
-      command = "rub #{@my} #{@noun} with my rasp"
+      command = "rub #{@my}#{@noun} with my rasp"
     when 'you see some discolored areas'
       waitrt?
       stow_item(right_hand)
       get_item('polish')
-      command = "apply my polish to #{@my} #{@noun}"
+      command = "apply my polish to #{@my}#{@noun}"
     when 'You cannot figure out how to do that.'
       finish
     else
@@ -135,33 +151,63 @@ class Carve
         stow_item(right_hand)
         get_item(@main_tool)
       end
-      command = "cut #{@my} #{@noun} with my #{@main_tool}"
+      command = "cut #{@my}#{@noun} with my #{@main_tool}"
     end
     waitrt?
-    magic_routine
+    crafting_magic_routine(@settings)
     carve(command)
   end
 
-  def magic_routine
-    return if @training_spells.empty?
+  def resume
+    waitrt?
 
-    needs_training = %w[Warding Utility Augmentation]
-                     .select { |skill| @training_spells[skill] }
-                     .select { |skill| DRSkill.getxp(skill) < 31 }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
-    return unless needs_training
-
-    data = @training_spells[needs_training]
-
-    if Flags['carve-magic-ready'] && mana > 40
-      crafting_cast_spell(data, @settings)
-      Flags.reset('carve-magic-ready')
-      @preparing = false
+    case bput("get #{@noun}", /You get/, /You are already holding/, /You pick up/, /You are not strong enough/, /What were you referring to/)
+    when /You get/, /You are already holding/, /You pick up/
+      @my = 'my '
+      DRC.bput('swap', /to your left hand/) unless left_hand.include?(@noun)
+    when /You are not strong enough/
+      @my = ''
+    else
+      echo '*** ITEM NOT FOUND ***'
+      exit
     end
 
-    return if @preparing
-    crafting_prepare_spell(data, @settings)
-    @preparing = true
+    stow_item(right_hand) if right_hand
+
+    case bput("analyze my #{@noun}",
+              /You do not see anything that would (prevent|obstruct) carving/,
+              /free of defects that would impede further carving/,
+              /ready for further carving/,
+              /corrected by rubbing the .* with a riffler set/,
+              /corrected by scraping the .* with a rasp/,
+              'angle of cut will improve if scraped with a rasp',
+              'by applying some polish to',
+              'This appears to be a type of finished',
+              'Roundtime')
+    when /You do not see anything that would (prevent|obstruct) carving|free of defects that would impede further carving|ready for further carving/
+      waitrt?
+      get_item(@main_tool)
+      command = "cut #{@my}#{@noun} with my #{@main_tool}"
+    when /corrected by rubbing the .* with a riffler set/
+      waitrt?
+      get_item('rifflers')
+      command = "rub #{@my}#{@noun} with my rifflers"
+    when /corrected by scraping the .* with a rasp/, 'angle of cut will improve if scraped with a rasp'
+      waitrt?
+      get_item('rasp')
+      command = "rub #{@my}#{@noun} with my rasp"
+    when 'by applying some polish to'
+      waitrt?
+      get_item('polish')
+      command = "apply my polish to #{@my}#{@noun}"
+    when 'This appears to be a type of finished'
+      echo '*** THIS ITEM IS ALREADY FINISHED ***'
+      exit
+    else
+      echo '*** UNKNOWN NEXT COMMAND WHEN TRYING TO RESUME ***'
+      exit
+    end
+    carve(command)
   end
 
   def magic_cleanup
@@ -176,7 +222,7 @@ class Carve
     stow_item(right_hand)
     if @stamp
       get_item('stamp')
-      fput("mark #{@my} #{@noun} with my stamp")
+      fput("mark #{@my}#{@noun} with my stamp")
       pause
       waitrt?
       stow_item('stamp')
@@ -190,7 +236,6 @@ end
 
 before_dying do
   Flags.delete('carve-assembly')
-  Flags.delete('carve-magic-ready')
 end
 
 Carve.new

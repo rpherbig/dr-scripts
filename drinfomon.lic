@@ -392,6 +392,10 @@ class DRRoom
   @@pcs_sitting ||= []
   @@dead_npcs ||= []
   @@room_objs ||= []
+  @@exits ||= []
+  @@title = ''
+  @@description = ''
+
   def self.npcs
     @@npcs
   end
@@ -406,6 +410,30 @@ class DRRoom
 
   def self.pcs=(val)
     @@pcs = val
+  end
+
+  def self.exits
+    @@exits
+  end
+
+  def self.exits=(val)
+    @@exits = val
+  end
+
+  def self.title
+    @@title
+  end
+
+  def self.title=(val)
+    @@title = val
+  end
+
+  def self.description
+    @@description
+  end
+
+  def self.description=(val)
+    @@description = val
   end
 
   def self.group_members
@@ -696,7 +724,12 @@ status_action = proc do |server_string|
     DRRoom.group_members = []
   elsif server_string =~ %r{<pushStream id="group"/>  (\w+): <popStream/>}
     DRRoom.group_members << Regexp.last_match(1)
+  elsif server_string =~ /Obvious exits:/ || server_string =~ /Obvious paths:/
+    exit_string = server_string.gsub('<d>', '').gsub('</d>', '').gsub('Obvious exits: ', '').gsub('Obvious paths: ', '').delete('.').gsub("\r\n", '')
+    DRRoom.exits = exit_string.split(', ') - ['none']
   end
+  DRRoom.title = XMLData.room_title
+  DRRoom.description = XMLData.room_description.strip
   server_string
 end
 DownstreamHook.remove('status_action')
@@ -725,6 +758,7 @@ before_dying do
   UpstreamHook.remove('drinfomon')
   DownstreamHook.remove('xp_action')
   DownstreamHook.remove('status_action')
+  DownstreamHook.remove('premiumcheck_silence')
 end
 
 put('exp all')
@@ -735,6 +769,33 @@ unless dead?
   info_check_time = Time.now
   pause 1
 end
+
+def premiumcheck
+  silence = proc do |server_string|
+    if server_string.strip.length == 0
+      nil
+      next
+    end
+    if server_string =~ /Your premium service has been.*/
+      UserVars.premium = "true"
+      nil
+    elsif server_string =~ /You are not currently a Premium or Platinum subscriber.*/
+      UserVars.premium = nil
+      nil
+    elsif server_string =~ /For more information on LTBs.*/
+      DownstreamHook.remove("premiumcheck_silence")
+      nil
+    elsif server_string =~ /As of your last logon:|Premium: http:\/\/www.play.net\/dr\/premium\/|Platinum: http:\/\/www.play.net\/dr\/platinum\/|You have a cumulative Premium time of .* months.|Premium Points Earned: .*|Platinum Points Earned: .*|Total Points Earned: .*|Total Points Spent: .*|Unfinished Scroll Points: .*|Available Points to Spend: .*/
+      nil
+    else
+      server_string
+    end
+  end
+  DownstreamHook.add("premiumcheck_silence", silence)
+  fput 'ltb info'
+end
+
+premiumcheck
 
 while line = script.gets
   begin
@@ -750,22 +811,22 @@ while line = script.gets
         CharSettings['bank_accounts'].each do |town, amount|
           respond "#{town.rjust(27)}: #{amount.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(amount).to_s
         end
-        respond '                      ------------------------------------------------------------------------------------------'
+        respond '              ------------------------------------------------------------------------------------------'
         total = 0
         kronar_banks
           .select { |city| CharSettings['bank_accounts'][city] }
           .each { |city| total += CharSettings['bank_accounts'].fetch(city) }
-        respond "                     Kronar Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
+        respond "               Kronar Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
         total = 0
         lirum_banks
           .select { |city| CharSettings['bank_accounts'][city] }
           .each { |city| total += CharSettings['bank_accounts'].fetch(city) }
-        respond "                     Lirum Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
+        respond "                Lirum Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
         total = 0
         dokora_banks
           .select { |city| CharSettings['bank_accounts'][city] }
           .each { |city| total += CharSettings['bank_accounts'].fetch(city) }
-        respond "                     Dokora Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
+        respond "               Dokora Total: #{total.to_s.reverse.scan(/(?:\d*\.)?\d{1,3}-?/).join(',').reverse.rjust(13)}" + ' or ' + convert2plats(total).to_s
       end
     elsif line =~ /^#{$lich_char}vault$/
       respond
@@ -782,14 +843,14 @@ while line = script.gets
         .select { |_town, titles| titles.include?(checkroom) }
         .each do |_town, _titles|
           contents = Regexp.last_match(1)
-          if line =~ /a (\w+ shelf|rack|box|case|tree) with some stuff (on|in) it/
-            fput 'look ' + Regexp.last_match(2) + ' ' + Regexp.last_match(1)
+           line.scan(/a.*?(?:(\w+ (?:shelf|rack|box|case|tree))) with some stuff (on|in) it/).each{|noun,location|
+            fput 'look ' + location + ' ' + noun
             if get =~ /(?:On|In) the \w+ (?:shelf|rack|box|case|tree) you see(.*)\./
-              contents += Regexp.last_match(1)
+              contents += Regexp.last_match(1).sub(/ and(.*)/,',\1,')
             end
-          end
+          }
           CharSettings['vault_info']['location'] = checkarea.slice(/\w+/)
-          CharSettings['vault_info']['contents'] = contents
+          CharSettings['vault_info']['contents'] = contents.sub(/,$/,'')
         end
     elsif line =~ /^Circle: (\d+)/
       DRStats.circle = Regexp.last_match(1).to_i

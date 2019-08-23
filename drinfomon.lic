@@ -608,7 +608,6 @@ action = proc do |client_string|
     client_string # didnt find a command we should watch for send the string as normal
   end
 end
-UpstreamHook.remove('drinfomon')
 UpstreamHook.add('drinfomon', action)
 # End Register commands
 xp_pools = ['clear', 'dabbling', 'perusing', 'learning', 'thoughtful', 'thinking', 'considering', 'pondering', 'ruminating',
@@ -689,10 +688,33 @@ xp_action = proc do |server_string|
       DRSkill.new(skill, rank, xp, perc)
     end
   end
-  server_string
+  
+  if UserVars.XPSquelch
+    UserVars.XPSquelch = nil if server_string =~ /EXP HELP for more information/
+    nil
+  else
+    server_string
+  end
 end
-DownstreamHook.remove('xp_action')
+UserVars.XPSquelch = true unless UserVars.drinfomon_debug
 DownstreamHook.add('xp_action', xp_action)
+
+info_silence = proc do |server_string|
+  if server_string.strip.length == 0
+    nil
+    next
+  end
+  
+  if server_string =~ /You owe|No debt/
+    DownstreamHook.remove('info_silence')
+    nil
+  elsif server_string =~ /Name: .*|Gender:.*|You were born.*|Your birthday.*|Strength.*|Agility.*|Discipline.*|Intelligence.*|Concentration.*|Favors.*|TDPs.*|Encumbrance.*|Luck.*|Wealth:.*|Kronars.*|Lirums.*|Dokoras.*|Debt:.*/
+    nil
+  else
+    server_string
+  end
+end
+DownstreamHook.add('info_silence', info_silence) unless UserVars.drinfomon_debug
 
 status_action = proc do |server_string|
   if server_string =~ /<progressBar id='mana' value='(\d+)'/
@@ -732,7 +754,6 @@ status_action = proc do |server_string|
   DRRoom.description = XMLData.room_description.strip
   server_string
 end
-DownstreamHook.remove('status_action')
 DownstreamHook.add('status_action', status_action)
 
 save_proc = proc do
@@ -759,47 +780,46 @@ before_dying do
   DownstreamHook.remove('xp_action')
   DownstreamHook.remove('status_action')
   DownstreamHook.remove('premiumcheck_silence')
+  DownstreamHook.remove('info_silence')
 end
 
 put('exp all')
-pause 1
+pause 0.25
 info_check_time = Time.now - 30
 unless dead?
   put('info')
   info_check_time = Time.now
-  pause 1
+  pause 0.25
 end
 
-def premiumcheck
-  silence = proc do |server_string|
-    if server_string.strip.length == 0
-      nil
-      next
-    end
-    if server_string =~ /Your premium service has been.*/
-      UserVars.premium = "true"
-      nil
-    elsif server_string =~ /You are not currently a Premium or Platinum subscriber.*/
-      UserVars.premium = nil
-      nil
-    elsif server_string =~ /For more information on LTBs.*/
-      DownstreamHook.remove("premiumcheck_silence")
-      nil
-    elsif server_string =~ /As of your last logon:|Premium: http:\/\/www.play.net\/dr\/premium\/|Platinum: http:\/\/www.play.net\/dr\/platinum\/|You have a cumulative Premium time of .* months.|Premium Points Earned: .*|Platinum Points Earned: .*|Total Points Earned: .*|Total Points Spent: .*|Unfinished Scroll Points: .*|Available Points to Spend: .*/
-      nil
-    else
-      server_string
-    end
+premiumcheck_silence = proc do |server_string|
+  if server_string.strip.length == 0
+    nil
+    next
   end
-  DownstreamHook.add("premiumcheck_silence", silence)
-  fput 'ltb info'
+  if server_string =~ /Your premium service has been.*/
+    UserVars.premium = "true"
+    nil
+  elsif server_string =~ /You are not currently a Premium or Platinum subscriber.*/
+    UserVars.premium = nil
+    nil
+  elsif server_string =~ /For more information on LTBs.*/
+    DownstreamHook.remove("premiumcheck_silence")
+    nil
+  elsif server_string =~ /As of your last logon:|Premium: http:\/\/www.play.net\/dr\/premium\/|Platinum: http:\/\/www.play.net\/dr\/platinum\/|You have a cumulative Premium time of .* months.|Premium Points Earned: .*|Platinum Points Earned: .*|Total Points Earned: .*|Total Points Spent: .*|Unfinished Scroll Points: .*|Available Points to Spend: .*/
+    nil
+  else
+    server_string
+  end
 end
 
-premiumcheck
+DownstreamHook.add("premiumcheck_silence", premiumcheck_silence)
+fput 'ltb info'
 
 while line = script.gets
   begin
     if line =~ /^\* Log-on system converted \d+% of your character/
+      UserVars.XPSquelch = true unless UserVars.drinfomon_debug
       put('exp all')
     elsif line =~ /^#{$lich_char}banks$/
       if CharSettings['bank_accounts'].empty?
@@ -944,11 +964,13 @@ while line = script.gets
       end
     end
     if DRStats.guild.nil? && !dead? && Time.now - info_check_time > 30
+      UserVars.XPSquelch = true unless UserVars.drinfomon_debug
+      DownstreamHook.add('info_silence', info_silence) unless UserVars.drinfomon_debug
       put('exp all')
-      pause 1
+      pause 0.25
       put('info')
       info_check_time = Time.now
-      pause 1
+      pause 0.25
     end
   rescue
     echo $ERROR_INFO

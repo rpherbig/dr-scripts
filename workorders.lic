@@ -44,11 +44,13 @@ class WorkOrders
     @craft_max_mindstate = @settings.craft_max_mindstate
     @retain_crafting_materials = @settings.retain_crafting_materials
 
+    wait_for_script_to_complete('safe-room', ['force']) if @settings.workorders_force_heal
+
     info = crafting_data[discipline][@hometown]
     if discipline == 'weaponsmithing'
       info = crafting_data['blacksmithing'][@hometown]
     end
-    
+
     recipes = if @recipe_overrides[discipline]
                 get_data('recipes').crafting_recipes.select { |recipe| recipe['type'] =~ /#{discipline}/i && @recipe_overrides[discipline].find { |name| recipe['name'] =~ /#{name}/i } }
               else
@@ -158,9 +160,9 @@ class WorkOrders
 
   def complete_work_order(info)
     stow_hands
-    bput("get my #{info['logbook']} logbook", 'You get')
     loop do
       find_npc(info['npc-rooms'], info['npc_last_name'])
+      bput("get my #{info['logbook']} logbook", 'You get')
       DRC.release_invisibility
       result = bput("give log to #{info['npc']}", 'You hand', 'You can', 'What were you', 'Apparently the work order time limit has expired', 'The work order isn\'t yet complete')
       break unless ['What were you', 'You can'].include?(result)
@@ -255,6 +257,8 @@ class WorkOrders
     end
     stow_hands
 
+    order_parts(recipe['part'], quantity) if recipe['part']
+
     quantity.times do |count|
       dispose("#{info['stock-name']} #{material_noun[material_volume]}") if (count > 0 && spare_stock)
       if items_per_stock.zero? || (count % items_per_stock).zero?
@@ -289,7 +293,7 @@ class WorkOrders
       bput('swap', 'You move') if right_hand =~ /#{@noun}/i
 
       wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], info[stock_name], bone_carving ? 'stack' : material_noun[material_volume], recipe['noun']])
-      
+
       material_volume = info['stock-volume'] if material_volume == 0
       material_volume -= recipe['volume']
 
@@ -323,7 +327,7 @@ class WorkOrders
           stow_tool(left_hand)
           stow_tool(right_hand)
         end
-        
+
         if count > 0
           go_door
           pause 0.5 until Room.current.id
@@ -333,8 +337,40 @@ class WorkOrders
           order_item(info['stock-room'], info['stock-number'])
           bput('combine', 'combine')
         end
+        stow_tool('lumber')
 
-        stow_hands
+        if search?('glue')
+          bput('get my glue', 'You get')
+          /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
+          if Regexp.last_match(1).to_i < quantity
+            stow_tool('glue')
+            dispose('glue')
+            order_item(info['tool-room'], info['glue-number'])
+          end
+        else
+          order_item(info['tool-room'], info['glue-number'])
+        end
+        stow_tool('glue')
+
+        if search?('stain')
+          bput('get my stain', 'What were', 'You get')
+          /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
+          if Regexp.last_match(1).to_i < quantity
+            stow_tool('stain')
+            dispose('stain')
+            order_item(info['tool-room'], info['stain-number'])
+          end
+        else
+          order_item(info['tool-room'], info['stain-number'])
+        end
+        stow_tool('stain')
+
+        case bput("get my clamps", 'What were', 'You get')
+          when 'What were'
+            order_item(info['tool-room'], info['clamps-number'])
+        end
+        stow_tool('clamps')
+
         buy_parts(recipe['part'], info['part-room'])
         find_shaping_room(@hometown, @engineering_room)
       end
@@ -387,6 +423,7 @@ class WorkOrders
   def order_fabric(stock_room, stock_needed, stock_number, type)
     stock_needed.times do
       order_item(stock_room, stock_number)
+      bput("get my #{type} from my #{@bag}", 'What were', 'You get')
       next unless left_hand && right_hand
       bput("combine #{type} with #{type}", 'You combine')
     end
@@ -399,11 +436,13 @@ class WorkOrders
     existing = if bput("get #{info['sew-stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'What were'
                  0
                else
+                 while bput("get #{info['sew-stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'You get'
+                   bput("combine #{info['sew-stock-name']} cloth with #{info['sew-stock-name']} cloth", 'You combine')
+                 end
                  bput("count my #{info['sew-stock-name']} cloth", 'You count out \d+ yards').scan(/\d+/).first.to_i
                end
     stock_needed = ((quantity * recipe['volume'] - existing) / 10.0).ceil
     order_fabric(info['stock-room'], stock_needed, info['sew-stock-number'], "#{info['sew-stock-name']} cloth")
-
     order_parts(recipe['part'], quantity) if recipe['part']
 
     find_sewing_room(@hometown, @outfitting_room)
@@ -428,6 +467,9 @@ class WorkOrders
     existing = if bput("get yarn from my #{@bag}", 'What were', 'You get') == 'What were'
                  0
                else
+                 while bput("get yarn from my #{@bag}", 'What were', 'You get') == 'You get'
+                   bput("combine #{info['sew-stock-name']} yarn with #{info['sew-stock-name']} yarn", 'You combine')
+                 end
                  bput('count my yarn', 'You count out \d+ yards').scan(/\d+/).first.to_i
                end
     stock_needed = ((quantity * recipe['volume'] - existing) / 100.0).ceil
@@ -782,13 +824,13 @@ class WorkOrders
     ensure_copper_on_hand(@cash_on_hand || 20000, @settings)
     # Enchant Sigil #1
     order_enchant(info['stock-room'], quantity, recipe['enchant_stock1'])
-    
+
     # Enchant Sigil #2
     order_enchant(info['stock-room'], quantity, recipe['enchant_stock2']) unless recipe['enchant_stock2'].nil?
-    
+
     # Sigil 3
     order_enchant(info['stock-room'], quantity, recipe['enchant_stock3']) unless recipe['enchant_stock3'].nil?
-    
+
     # Enchant component #1
     order_enchant(info['stock-room'], quantity, recipe['item']) unless recipe['item'].nil?
 
@@ -827,6 +869,11 @@ class WorkOrders
     quantity.times do
       wait_for_script_to_complete('enchant', [recipe['chapter'], recipe['name'], recipe['noun']])
       bundle_item(recipe['noun'], info['logbook'])
+      case bput('read my enchanting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
+      when /You must bundle and deliver \d+ more /
+        log_num = Regexp.last_match(1).to_i
+        break if count + 1 + log_num != quantity
+      end
     end
   end
 

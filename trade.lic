@@ -247,7 +247,6 @@ class Trade
   end
 
   def closest_town
-    echo find_town(find_closest_id('trader_outpost'))
     find_town(find_closest_id('trader_outpost'))
   end
 
@@ -542,7 +541,7 @@ class Trade
     return unless @caravan_being_led
     return if @no_ride_rooms.any? { |name| XMLData.room_title.include?(name) } # Don't do this on ferrys - you can't tell when you've arrived.
     track_caravan
-    bput('go caravan', 'You open the door')
+    bput("go #{@caravan.adjective} #{@caravan.noun}", 'You open the door')
   end
 
   def be_outside_caravan # call whenever you need to be outside the caravan
@@ -587,10 +586,9 @@ class Trade
       true
     when /You recall that your (?<description>.*) (?<name>.*) should be located in/
       /You recall that your (?<description>.*) (?<name>.*) should be located in/ =~ response
-      @caravan.noun = name
+      @caravan.noun ||= name
       echo "@caravan.noun: #{@caravan.noun}" if debugging?
-      @caravan.adjective = description
-      
+      @caravan.adjective ||= description
       echo "@caravan.adjective #{@caravan.adjective}" if debugging?
       false
     when /You are far too occupied/
@@ -970,7 +968,8 @@ class Trade
       /The minister reminds you that you still owe (?<dues_amt>.*) (?<dues_currency>Kronars|Lirums|Dokoras) in dues to (?:The )?(?<outpost>.*) and asks that you pay the clerk before s?he issues you a new contract\./ =~ response
       echo "Need to pay #{dues_amt} #{dues_currency} to #{outpost}" if debugging?
       if wealth(@settings.hometown) < dues_amt.to_i
-        room = Room.current.id  # POTENTIAL TO CHANGE HOMETOWN?
+        # If you've run out of money, it will run to your hometown to get more.  Potential to pull from drinfomon for nearest savings account?
+        room = Room.current.id
         ensure_copper_on_hand(@caravan_coins_on_hand + dues_amt.to_i, @settings)
         walk_to(room)
       end
@@ -1111,10 +1110,9 @@ class Trade
     Flags.delete('caravan-upgrade')
   end
 
-  def deposit_coins(withdraw_amt, return_to_id)
+  def deposit_coins(withdraw_amt)
     return if wealth(@settings.hometown) < withdraw_amt
     near_town = closest_town
-    echo "deposit coins #{near_town} and #{@trading_towns['near_town']['deposit']}"
 
     return unless @bank_towns.include?(near_town)
     return unless @trading_towns[near_town]['deposit']
@@ -1123,13 +1121,18 @@ class Trade
     walk_to(@town_data[near_town]['deposit']['id'])
     case bput('deposit all', 'you drop all your', 'You hand the clerk some coins', "You don't have any", 'There is no teller here', 'reached the maximum balance I can permit')
     when 'There is no teller here'
-      walk_to(return_to_id)
       return
     end
-    settings = @settings.dup
-    settings.hometown = near_town
-    minimize_coins(withdraw_amt).each { |amount| withdraw_exact_amount?(amount, settings) }
-    walk_to(return_to_id)
+  end
+  
+  def withdraw_coins(withdraw_amt)
+    near_town = closest_town
+    return unless @bank_towns.include?(near_town)
+    return unless @trading_towns[near_town]['deposit']
+    return unless time_to_room(Room.current.id, @trading_towns[near_town]['deposit']['id']) < 20.0
+
+    walk_to(@town_data[near_town]['deposit']['id'])
+    minimize_coins(withdraw_amt).each { |amount| get_money_from_specific_bank?(amount, near_town) }
   end
 
   def debugging?
@@ -1282,7 +1285,7 @@ class Trade
   def check_training_token
     return unless @training_token
     @cooldown_timers[@training_token] ||= Time.now
-    if DRSkill.getxp(@training_token) > 32 || Time.now - @cooldown_timers[@training_token] > 240
+    if DRSkill.getxp(@training_token) > 30 || Time.now - @cooldown_timers[@training_token] > 240
       training_cleanup
       @cooldown_timers[@training_token] = Time.now
     end
@@ -1726,8 +1729,9 @@ class Trade
 
   def town_business # run every time it delivers/picks up a contract from Crossing/another hub. Replenishes resources and stocks coins
     return if time_to_room(Room.current.id, find_closest_id('trader_outpost')) > 5.0
-    deposit_coins(@caravan_coins_on_hand, Room.current.id)
     room = Room.current.id
+    deposit_coins(@caravan_coins_on_hand)
+    withdraw_coins(@caravan_coins_on_hand)
     check_hunting
     check_forging
     count_materials('wool yarn') if @caravan_training_skills.include?('Outfitting')

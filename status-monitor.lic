@@ -22,15 +22,23 @@ class GameFilter
 
   def initialize
     @seen_cache_name = "seen_messages_#{checkname}.dat"
+    @seen_backup_name = "backup/seen_messages_#{checkname}.bak"
     @seen_lines = if File.exist?(@seen_cache_name)
-                    Marshal.load(File.open(@seen_cache_name, 'rb'))
+                    begin
+                      loaded = Marshal.load(File.open(@seen_cache_name, 'rb'))
+                      save_backup
+                      loaded
+                    rescue => e
+                      echo "Error loading seen_messages: #{e}"
+                      restore_backup
+                    end
                   else
                     {}
                   end
     @recent_seen_lines = {}
     @valid_commands = %w[ACTION ADVICE AFT AGREE ANSWER APPLAUD ASK AVOID AWAKEN BABBLE BALANCE BANDAGE BARK BARTER BASK BAWL BEAM BEARD BECKON BELCH BITE BLAME BLANCH BLAZE BLINK BLOCK BLUFF BLUSH BONDED BOO BOP BOUNCE BOW BRAWL BREAK BREATHE BRUSH BUTT BUY CACKLE CARDS CARVE CENTER CHANT CHAT CHECK CHEER CHIRR CHOKE CHOOSE CHOP CHORTLE CHORUS CHUCKLE CLAIM CLAP CLEAN CLENCH CLIMB CLOSE CLUTCH COIN COLLECT COMBAT COMPARE CONCENTRATE CONTACT COUGH COUNT COVER COWER CRAWL CRINGE CRUSH CRY CURSE CURTSY CUT DANCE DANCE FLOOR DAYDREAM DEAD DESCRIBE DRAG DRINK DROOL DROP DUCK DUMP EAR EAT ELBOW EMAIL EMPTY ENCUMBRANCE ENGAGE EXAMINE EXCHANGE EXHALE EXPRESS FACE FAINT FALL FATIGUE FEED FEMALE FIDGET FIGURE FIND FIRE FIT FIX FLAGS FLAIL FLAP FLETCH FLINCH FLIRT FLUSTER FLY FOCUS FOLLOW FORAGE FRET FROWN FURROW GASP GAWK GAZE GEM GET GIGGLE GLANCE GLARE GLOWER GNASH GO GOBBLE GRIEVE GRIMACE GRIN GRIND GROAN GROVEL GROWL GRUMBLE GRUNT GUARD GULP GUZZLE HACK HAIL HAIR HANGBACK HELLO HICCUP HIDE HISS HOLD HOME HOOT HOWL HUG HUM HUZZAH IGNORE INFAMY INFO INFUSE INHALE INSTRUCT INSULT INTELLIGENCE INVENTORY INVFIX JAB JOIN JUGGLE JUMP KHRI KICK KILL KISS KNEE KNEEL KNOCK LANGUAGE LATCH LAUGH LEAD LEAN LEAP LEAVE LECTURE LICK LIE LIGHT LINK LISTEN LOAD LOAN LOCK LOOK LOWER LUNGE MAKE MALE MANA MARCH MARK MEDITATE MEETING MENU MEOW MESSAGE MIND MIX MOAN MOCK MONEY MOOR MORE MOTION MOUNT MUMBLE MUSS MUTTER NAG NAME NIBBLE NOCK NOD NOTE NUDGE OBSERVE OFFER OPEN ORDER PACE PANIC PANT PARRY PAT PATHWAY PAY PEER PERCEIVE PET PICK PIN PINCH PLANT PLAY PLAYACT POACH POINT POKE POLICY PONDER PORT PORTRAIT POSE POUND POUR POUT PRACTICE PRAISE PRAY PREACH PREDICT PREEN PREMIUM PREPARE PROCRASTINATE PROD PROTECT PUCKER PULL PUMMEL PUNCH PUNISH PURR PUSH PUT PUZZLE QUEST QUEUE QUIT RAISE RASPBERRY READ RECALL RECITE REFER REFLEX REFUSE RELEASE REMOVE REPAIR REPENT REROLL RETREAT RETURN RING ROAR ROFL ROLL ROSHAMBO ROW RPA RUB RUMMAGE SALUTE SCOFF SCOUT SCOWL SCRAPE SCRATCH SCREAM SCRIBE SEARCH SELL SHAKE SHAPE SHARE SHEATHE SHIFT SHIP SHIVER SHOOT SHOVE SHOW SHRIEK SHRUG SHUDDER SHUFFLE SHUN SIGH SIGN SIGNAL SIGNATURE SING SIT SKATE SKILLS SKIN SLAP SLEEP SLICE SLINK SLIP SMELL SMILE SMIRK SMOOCH SNAP SNARL SNEAK SNEER SNEEZE SNICKER SNIFFLE SNORE SNORT SNUFF SNUGGLE SOB SONG SORT SPECULATE SPELLS SPIT SPLASH SPLUTTER SPRINKLE SQUINT SQUIRM STABLE STALK STAMINA STANCE STAND STARBOARD STARE STATUS STEAL STIR STITCH STOMP STOP STOW STRENGTH STRETCH STRING STUBBLE STUDY SULK SUMMON SURPRISE SURRENDER SURVEY SWAP SWEAR SWEAT SWEEP SWIM SWIMMING SWING TACKLE TAG TAIL TAKE TALK TAP TARGET TEACH TEASE TELL TEND THINK THROW THRUST THUMP TICKLE TIE TILT TIME TIP TITLE TOSS TOUCH TRACE TRACK TRAIN TRANSFER TRILL TUNE TURN TYPO UNBRAID UNBUNDLE UNCOIL UNHIDE UNLATCH UNLOAD UNLOCK UNTIE UNWRAP VAULT VOTE WAIL WAIT WAKE WARN WATCH WAVE WEALTH WEAR WEAVE WEDDING WEEP WHEEZE WHIMPER WHINE WHIRLWIND WHISTLE WHO WIELD WINCE WINK WIPE WITHDRAW WOBBLE WRING WRITE YANK YAWN YELP]
     @room_players = []
-    @filter_strings = get_data('filters')['filter_strings'].map { |string| /#{string}/ }
+    @filter_strings = get_data('filters')['filter_strings'].map { |string| /#{string}/ } until !@filter_strings.nil?
     @non_useful_tags = [
       /<preset id='roomDesc'>/i,
       /pushStream id="assess"/i,
@@ -83,6 +91,19 @@ class GameFilter
     clean_seen_with_filters
     File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(@seen_lines, file) }
   end
+  
+  def save_backup
+    loaded_file = Marshal.load(File.open(@seen_cache_name, 'rb'))
+    File.open(@seen_backup_name, 'wb') { |file| Marshal.dump(loaded_file, file) }
+  end
+  
+  def restore_backup
+    echo "The marshal data was corrupted!  Restoring from backup."
+    return {} unless File.exist?(@seen_backup_name)
+    loaded_file = Marshal.load(File.open(@seen_backup_name, 'rb'))
+    File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(loaded_file, file) }
+    Marshal.load(File.open(@seen_cache_name, 'rb'))
+  end
 
   def migrate_recent
     save_required = false
@@ -126,15 +147,20 @@ class GameFilter
   end
 
   def spam_check(line)
-    @frequency_buffer << Time.now
-    @frequency_buffer.delete_if{|x| (Time.now - x) > 60}
-    if @frequency_buffer.size >= @line_frequency_threshold
-      return spam_alert(line)
-    end
+    return if @recent_seen.include?(line)
     @recent_seen << line
-    @recent_seen = @recent_seen[1..10] if @recent_seen.length > 10
+    @recent_seen = @recent_seen[1..50] if @recent_seen.length > 50
     counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
     if counts.values.max > @unique_line_threshold
+      echo "Passed unique line threshold #{@recent_seen}"
+      return spam_alert(line)
+    end
+
+    return unless check_distance?(line)
+    @frequency_buffer.delete_if{|x| (Time.now - x) > 60}
+    @frequency_buffer << Time.now
+    if @frequency_buffer.size >= @line_frequency_threshold
+      echo "Passed freq_buffer size"
       return spam_alert(line)
     end
   end
@@ -156,6 +182,39 @@ class GameFilter
     pause 2
     @recent_seen = []
   end
+  
+  def check_distance?(line)
+    @recent_seen.each do |seen|
+      size_of_string = line.length
+      return true if levenshtein_distance(seen, line) < size_of_string * ((100 - @line_similarity_percentage.to_f) / 100) && levenshtein_distance(seen, line) > 0
+    end
+    false
+  end
+  
+  def levenshtein_distance(s, t)
+    m = s.length
+    n = t.length
+    return m if n == 0
+    return n if m == 0
+    d = Array.new(m+1) {Array.new(n+1)}
+
+    (0..m).each {|i| d[i][0] = i}
+    (0..n).each {|j| d[0][j] = j}
+    (1..n).each do |j|
+      (1..m).each do |i|
+        d[i][j] = if s[i-1] == t[j-1]  # adjust index into string
+                    d[i-1][j-1]       # no operation required
+                  else
+                    [ d[i-1][j]+1,    # deletion
+                      d[i][j-1]+1,    # insertion
+                      d[i-1][j-1]+1,  # substitution
+                    ].min
+                  end
+      end
+    end
+    d[m][n]
+  end
+
 
   def command_check(line)
     line.gsub(/_|~|-|=|\./, '')

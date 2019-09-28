@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#astrology
 =end
 
-custom_require.call(%w[common common-arcana common-travel drinfomon equipmanager spellmonitor events])
+custom_require.call(%w[common common-arcana common-travel common-moonmage drinfomon equipmanager spellmonitor events])
 
 class Astrology
   include DRC
@@ -24,14 +24,12 @@ class Astrology
 
     @equipment_manager = EquipmentManager.new
     @constellations = get_data('constellations').constellations
-    @divination_tool = settings.divination_tool['name']
-    @divination_tool_container = settings.divination_tool['container']
-    @divination_tool_tied = settings.divination_tool['tied']
-    @divination_tool_worn = settings.divination_tool['worn']
-    @have_divination_bones = settings.have_divination_bones
-    @divination_bones_container = settings.divination_bones_storage['container']
-    @divination_bones_tied = settings.divination_bones_storage['tied']
+    @finished_messages = get_data('constellations').observe_finished_messages
+    @success_messages = get_data('constellations').observe_success_messages
+    @divination_tool = settings.divination_tool
+    @div_bones_storage = settings.divination_bones_storage
     @have_telescope = settings.have_telescope
+    @tele_storage = settings.telescope_storage
     @ap_source = settings.astral_plane_training['train_source']
     @ap_destination = settings.astral_plane_training['train_destination']
     @prediction_pool_target = settings.astrology_use_full_pools ? 10 : settings.astrology_pool_target
@@ -75,9 +73,9 @@ class Astrology
   def visible_bodies
     result = []
     all_bodies = @constellations
-    case bput('observe heavens', 'The following heavenly bodies are visible:', "That's a bit hard to do while inside")
+    case DRCMM.observe('heavens')
     when "That's a bit hard to do while inside"
-      echo('Must be outdoors to observe sky')
+      message('Must be outdoors to observe sky')
       exit
     end
 
@@ -117,7 +115,7 @@ class Astrology
       /You have a powerful understanding of the celestial influences over/ => 9,
       /You have a complete understanding of the celestial influences over/ => 10
     }
-    bput('predict state all', 'roundtime')
+    DRCMM.predict('all')
     lines = reget(50).reverse
     lines.select! { |line| line =~ /celestial influences/ }
     pools.select! { |name, _level| pools[name] = lines.find { |line| line =~ /#{name}/ } }
@@ -132,7 +130,7 @@ class Astrology
     prev_size = pools['future events']
     result = nil
     until ['You are unable to sense additional information'].include? result
-      result = bput('study sky', 'You feel a lingering sense', 'You feel it is too soon', 'Roundtime', 'You are unable to sense additional information', 'detect any portents')
+      result = DRCMM.study_sky
       waitrt?
       return if ['detect any portents'].include? result
       pools = check_pools
@@ -140,12 +138,12 @@ class Astrology
       break if pools['future events'] == 10
       prev_size = pools['future events']
     end
-    bput('predict event', 'You focus inwardly')
+    DRCMM.predict('event')
   end
 
   def check_weather
     echo 'Checking the weather' if UserVars.astrology_debug
-    bput('predict weather', 'roundtime', 'You gaze')
+    DRCMM.predict('weather')
     waitrt?
   end
 
@@ -167,6 +165,7 @@ class Astrology
     cast_spell(@rtr_data, settings)
     perc_time = Time.now - 61
     Flags.add('rtr-expire', get_data('spells').spell_data['Read the Ripples']['expire']) if rtr_active?
+    DRCMM.get_telescope(@tele_storage) if @have_telescope
     while rtr_active?
       line = get?
       if perc_time + 60 < Time.now
@@ -174,8 +173,9 @@ class Astrology
         perc_time = Time.now
       end
       res = @constellations.find { |body| /As your consciousness drifts amongst the currents of Fate, .* #{body['name']}/i =~ line }
-      observe(res['name']) unless res.nil?
+      observe_routine(res['name']) unless res.nil?
     end
+    DRCMM.store_telescope(@tele_storage) if @have_telescope
     nil
   end
 
@@ -204,7 +204,7 @@ class Astrology
     pools.reject { |_skill, size| (size < @prediction_pool_target) }
          .each_key do |skill|
       break if DRSkill.getxp('Astrology') > 30
-      align(skillset_to_pool[skill])
+      align_routine(skillset_to_pool[skill])
     end
   end
 
@@ -239,15 +239,20 @@ class Astrology
 
       things_to_try.find do |data|
         result = nil
-        until ['Roundtime', 'You peer aimlessly through your telescope'].include?(result)
+        DRCMM.get_telescope(@tele_storage) if @have_telescope
+        
+        until @finished_messages.include?(result)
           return check_heavens if Flags['bad-search'] == 'is foiled by the daylight'
           next if Flags['bad-search'] == 'turns up fruitless'
-          result = observe(data['name'])
+          result = observe_routine(data['name'])
         end
-        result == 'Roundtime'
+        
+        @success_messages.include?(result)
       end
+
+      DRCMM.store_telescope(@tele_storage) if @have_telescope
     else
-      until observe(best_eye_data['name'])
+      until observe_routine(best_eye_data['name'])
         if Flags['bad-search']
           check_heavens
           return
@@ -260,104 +265,56 @@ class Astrology
   end
 
   def get_healed
-    @equipment_manager.empty_hands
+    DRCMM.store_telescope(@tele_storage) if @have_telescope
     snapshot = Room.current.id
     wait_for_script_to_complete('safe-room', ['force'])
     walk_to(snapshot)
     settings = get_settings
     do_buffs(settings)
+    DRCMM.get_telescope(@tele_storage) if @have_telescope
   end
 
-  def observe(body)
+  def observe_routine(body)
     Flags.add('bad-search', 'is foiled by the (daylight|darkness)', 'turns up fruitless')
 
     if @have_telescope
-      bput('get telescope', 'you get', 'You are already', "That can't be picked up")
-      case bput("center telescope on #{body}", 'You put your eye', 'open it to make any use of it', 'The pain is too much')
+      case DRCMM.center_telescope(body)
       when /open it/
         bput('open my telescope', 'extend your telescope')
-        return observe(body)
+        return observe_routine(body)
       when /The pain is too much/
         get_healed
-        return observe(body)
+        return observe_routine(body)
       end
-      result = bput('peer telescope', 'You peer aimlessly through your telescope', 'open it to make any use of it', 'You see nothing regarding the future', 'The pain is too much', 'Roundtime')
+      result = DRCMM.peer_telescope
       case result
       when /The pain is too much/
         get_healed
-        return observe(body)
+        return observe_routine(body)
       when /open it/
         bput('open my telescope', 'extend your telescope')
-        return observe(body)
+        return observe_routine(body)
       end
-      @equipment_manager.empty_hands
+
       result
     else
-      ['Roundtime', 'Clouds obscure'].include? bput("observe #{body} in heavens", 'Your search for', 'You see nothing regarding the future', 'Clouds obscure', 'Roundtime')
+      ['Roundtime', 'Clouds obscure'].include?(DRCMM.observe(body))
     end
   end
 
-  def roll_bones
-    if @divination_bones_tied
-      bput("untie bones from my #{@divination_bones_container}", 'divination bones')
-    else
-      bput("get bones from my #{@divination_bones_container}", 'divination bones', 'you get')
-    end
-    bput('roll my bones', 'roundtime')
-    waitrt?
-    if @divination_bones_tied
-      bput("tie bones to my #{@divination_bones_container}", 'divination bones')
-    else
-      bput("put bones in my #{@divination_bones_container}", 'divination bones', 'you put')
-    end
-  end
-
-  def execute_tool
-    verbs = {
-      'charts' => 'review',
-      'bones' => 'roll',
-      'mirror' => 'gaze',
-      'bowl' => 'gaze',
-      'prism' => 'raise'
-    }
-
-    if @divination_tool_tied
-      bput("untie #{@divination_tool} from my #{@divination_tool_container}", @divination_tool)
-    elsif @divination_tool_worn
-      bput("remove my #{@divination_tool}", @divination_tool)
-    else
-      bput("get my #{@divination_tool} from my #{@divination_tool_container}", @divination_tool, 'you get')
-    end
-
-    verbs.each do |tool, verb|
-      next unless @divination_tool.include? tool
-      bput("#{verb} my #{@divination_tool}", 'roundtime')
-      waitrt?
-      break
-    end
-
-    if @divination_tool_tied
-      bput("tie #{@divination_tool} to my #{@divination_tool_container}", @divination_tool)
-    elsif @divination_tool_worn
-      bput("wear my #{@divination_tool}", @divination_tool)
-    else
-      bput("put #{@divination_tool} in my #{@divination_tool_container}", @divination_tool, 'you put')
-    end
-  end
-
-  def align(skill)
+  def align_routine(skill)
     if skill == 'future events'
-      bput('predict event', 'You focus inwardly')
+      DRCMM.predict('event')
       return
     end
-    bput("align #{skill}", 'You focus internally')
+    DRCMM.align(skill)
     waitrt?
-    if @have_divination_bones
-      roll_bones
-    elsif @divination_tool
-      execute_tool
+    if !@div_bones_storage.empty?
+      DRCMM.roll_bones(@div_bones_storage)
+    elsif !@divination_tool.empty?
+      DRCMM.use_div_tool(@divination_tool)
     else
-      bput('predict future', 'roundtime')
+      DRCMM.predict('future')
     end
     waitrt?
     pause
@@ -383,15 +340,12 @@ class Astrology
         check_weather
       when 'events'
         check_events(check_pools)
-      when 'moons' # deprecated - left for backwards compat. only
-        echo '- Moons is deprecated and will be removed soon. Please use - attunement instead'
-        check_attunement
       when 'attunement'
         check_attunement
       end
     end
     predict_all(check_pools)
-    bput('predict analyze', 'Roundtime')
+    DRCMM.predict('analyze')
     waitrt?
   end
 end

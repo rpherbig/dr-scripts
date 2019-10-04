@@ -91,12 +91,12 @@ class GameFilter
     clean_seen_with_filters
     File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(@seen_lines, file) }
   end
-  
+
   def save_backup
     loaded_file = Marshal.load(File.open(@seen_cache_name, 'rb'))
     File.open(@seen_backup_name, 'wb') { |file| Marshal.dump(loaded_file, file) }
   end
-  
+
   def restore_backup
     echo "The marshal data was corrupted!  Restoring from backup."
     return {} unless File.exist?(@seen_backup_name)
@@ -147,25 +147,25 @@ class GameFilter
   end
 
   def spam_check(line)
-    return if @recent_seen.include?(line)
     @recent_seen << line
     @recent_seen = @recent_seen[1..20] if @recent_seen.length > 20
     counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
     if counts.values.max > @unique_line_threshold
-      echo "Passed unique line threshold #{@recent_seen}"
-      return spam_alert(line)
+      echo "Passed unique line threshold #{counts.inspect}"
+      return spam_alert(line, counts.inspect)
     end
 
+    return if counts[line] > 1
     return unless check_distance?(line)
     @frequency_buffer.delete_if{|x| (Time.now - x) > 90}
     @frequency_buffer << Time.now
     if @frequency_buffer.size >= @line_frequency_threshold
       echo "Passed freq_buffer size"
-      return spam_alert(line)
+      return spam_alert(line, counts.inspect)
     end
   end
 
-  def spam_alert(line)
+  def spam_alert(line, counts)
     echo("\a")
     pause 0.25
     echo("\a")
@@ -175,7 +175,7 @@ class GameFilter
     command_check(line)
     fput @responses.first if @settings.status_monitor_respond
     echo(line)
-    send_slackbot_message(line)
+    send_slackbot_message(counts)
     fput('exit') if @quit_on_flag
     @responses.rotate!
     @spam_line = line
@@ -183,22 +183,24 @@ class GameFilter
     @recent_seen = []
     @frequency_buffer = []
   end
-  
+
   def check_distance?(line)
+    scrubbed_line = similarity_scrub(line)
     @recent_seen.each do |seen|
-      size_of_string = line.length
-      return true if levenshtein_distance(seen, line) < size_of_string * ((100 - @line_similarity_percentage.to_f) / 100) && levenshtein_distance(seen, line) > 0
+      seen = similarity_scrub(seen)
+      size_of_string = scrubbed_line.length
+      return true if levenshtein_distance(seen, scrubbed_line) < size_of_string * ((100 - @line_similarity_percentage.to_f) / 100) && levenshtein_distance(seen, scrubbed_line) > 0
     end
     false
   end
-  
+
   def levenshtein_distance(source, compare)
     # Calculates minimum required edits to change one string into another
-    # For an understanding of the concept, look at http://devnull.absolventa.de/2015/11/24/exploring-levenshtein-algorithm-with-ruby/ 
+    # For an understanding of the concept, look at http://devnull.absolventa.de/2015/11/24/exploring-levenshtein-algorithm-with-ruby/
     source_length = source.length
     compare_length = compare.length
     return source_length if compare_length == 0
-    return compare_length if source_length == 0                                                                                      
+    return compare_length if source_length == 0
     lev_array = Array.new(source_length + 1) { Array.new(compare_length + 1) } # create a 2D array with the dimensions of both string lengths
 
     (0..source_length).each { |i| lev_array[i][0] = i }
@@ -253,6 +255,16 @@ class GameFilter
       return nil if players_to_check.find { |name| line.include?(name) }
     end
     line.gsub!(/<[^>]+>/, '')
+    line
+  end
+
+  def similarity_scrub(line)
+    # pulls items from the line that are likely to be variable, and unlikely to be indicative of a hit
+    # currently, numerals, currency names, npc names.
+    sub_array = [ /[0-9]+/, /(kronars|lirums|dokoras)/i ]
+    sub_array.each { |reg_ex| line = line.gsub(reg_ex, '') }
+
+    UserVars.npcs.find { |name| line = line.gsub(name, '') }
     line
   end
 end

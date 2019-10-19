@@ -1,0 +1,282 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#safe-room
+=end
+
+custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel common-validation drinfomon events])
+
+class SafeRoom
+  include DRC
+  include DRCH
+  include DRCI
+  include DRCM
+  include DRCT
+  include DRCA
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'skip', regex: /(s|skip)/i, optional: true, description: 'Skip running to the safe room, useful for Empaths and Necros.' },
+        { name: 'force', regex: /(f|force)/i, optional: true, description: 'Run healing logic even if there are no visible wounds.' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    settings = get_settings
+    @health_threshold = settings.saferoom_health_threshold
+
+    return unless args.force || need_healing?
+
+    @validator = CharacterValidator.new(false, false, false, '')
+    pc_empaths = settings.safe_room_empaths || []
+    if settings.safe_room_id && settings.safe_room_empath
+      # Add to pc_empaths list if its not in there already
+      pc_empaths << { 'name' => settings.safe_room_empath, 'id' => settings.safe_room_id } unless pc_empaths.any? { |empath| empath['name'] == settings.safe_room_empath && empath['id'] == settings.safe_room_id }
+    end
+
+    if use_pc_empaths?(pc_empaths, settings)
+      # If the player is healed via use_pc_empaths? then no further action is needed
+    elsif DRStats.empath?
+      walk_to(settings.safe_room) unless args.skip
+      wait_for_script_to_complete('healme')
+    elsif !DRStats.necromancer? || settings.necro_force_safe_room
+      ensure_copper_on_hand(4_000, settings)
+
+      Flags.add('npc-idle', '^Dokt glances around the room')
+      Flags.add('healthy', 'do anything more for you now', 'Dokt waves a large hand at you', 'Dokt gives you a quick glance', 'go have yourself a birthday party', 'you are well', 'have other patients', 'you look fine and healthy', 'A little rest and exercise', 'There is nothing I can do for you', 'Up and out', 'What are you doing lying there with the wounded', 'Come along.  Leave room for the others.', "I think you don't really need healing")
+      Flags.add('moved', 'grabs you and drags you', 'grabs your arm and drags you .* with')
+      Flags.add('idle', 'you have been idle too long')
+
+      town_data = get_data('town')
+      hometown = if settings.force_healer_town
+                   town_data[settings.force_healer_town]
+                 else
+                   town_data[settings.hometown]
+                 end
+      wait_at_empath(hometown['npc_empath']['id'])
+      fix_standing
+    elsif settings.necro_safe_room_use_devour
+      @health_threshold = 0 if args.force
+      devour_healing(settings, args.skip)
+    end
+
+    give_and_take(settings.safe_room_id, settings.safe_room_give, settings.safe_room_take)
+  end
+
+  def need_healing?
+    health = check_health
+    if bleeding? || health['poisoned']
+      echo "***STATUS*** Bleeding: #{bleeding?}, poison: #{health['poisoned']}"
+      return true
+    end
+
+    unless health['wounds'].any?
+      echo '***STATUS*** No wounds, skipping healing'
+      return false
+    end
+
+    score = health['wounds'].map { |k, v| (k**2) * v.count }.reduce(:+)
+    echo "***STATUS*** Current health score is #{score}, threshold is #{@health_threshold}"
+
+    score > @health_threshold
+  end
+
+  def devour_healing(settings, skip = false)
+    return unless settings.necromancer_healing['Devour']
+    return unless settings.thanatology['harvest_container']
+
+    walk_to(settings.safe_room) unless skip
+    release_invisibility
+    devours = count_items_in_container('material', settings.thanatology['harvest_container'])
+    return if devours.zero?
+
+    stow_hands
+    return if right_hand
+
+    while need_healing? && devours > 0
+      while mana < 40
+        echo('Waiting on mana...')
+        pause 10
+      end
+
+      result = bput("get material in my #{settings.thanatology['harvest_container']}", 'You get', 'You are already', 'What were you') unless right_hand
+      break if result =~ /^What were you/
+      unless DRSpells.active_spells['Devour']
+        cast_spell(settings.necromancer_healing['Devour'], settings)
+        devours -= 1 unless right_hand
+      end
+      pause 5
+    end
+
+    bput("put my material in my #{settings.thanatology['harvest_container']}", 'You put', 'What were') if right_hand
+  end
+
+  def check_idle
+    return unless Flags['idle']
+
+    Flags.reset('idle')
+    fput('tdp')
+  end
+
+  def wait_for_healing
+    Flags.reset('healthy')
+    Flags.reset('moved')
+
+    lie_down
+    start_script('tendme')
+    
+    fput "join list" if Room.current.id == 8393 #Fang Cove Healer fix
+
+    until Flags['healthy'] || Flags['moved']
+      lie_down
+      pause 1
+      check_idle
+    end
+    wait_for_healing if Flags['moved']
+    stop_script('tendme') if Script.running?('tendme')
+  end
+
+  def wait_at_empath(room_id)
+    walk_to room_id
+    unless Room.current.id == room_id
+      beep
+      beep
+      echo 'ERROR Navigating to safe room'
+      return
+    end
+
+    release_invisibility
+
+    if DRRoom.pcs.empty? || DRRoom.pcs_prone.empty?
+      wait_for_healing
+      return
+    end
+
+    people_in_front = DRRoom.pcs - DRRoom.pcs_sitting
+    echo "people_in_front: #{people_in_front}" if UserVars.safe_room_debug
+
+    while bleeding?
+      lie_down
+      pause 10
+    end
+
+    fix_standing
+
+    counter = 0
+    while counter < 10
+      pause 1
+      if DRRoom.pcs_prone.empty? || (DRRoom.pcs_prone & people_in_front).empty?
+        counter += 1
+      else
+        counter = 0
+      end
+      check_idle
+      if Flags['npc-idle'] && DRRoom.pcs_prone
+        people_in_front -= DRRoom.pcs_prone
+        Flags.reset('npc-idle')
+      end
+      break if ((DRRoom.pcs - DRRoom.pcs_sitting) & people_in_front).empty?
+    end
+
+    wait_for_healing
+  end
+
+  def lie_down
+    bput('lie', 'You lie') if standing?
+  end
+
+  def use_pc_empaths?(pc_empaths, settings)
+    return false if pc_empaths.empty?
+    # Sort pc empaths list by nearest first
+    sort_destinations(pc_empaths.map { |empath| empath['id'] })
+      .map { |room| pc_empaths.select { |empath| empath['id'] == room } }
+      .flatten
+      .each do |empath|
+      next unless DRRoom.pcs.include?(empath['name'].capitalize!) || @validator.in_game?(empath['name'])
+      next unless use_pc_empath?(empath['id'], empath['name'])
+      ensure_copper_on_hand(settings.safe_room_tip_threshold || 0, settings)
+      tip(settings.safe_room_tip_threshold, settings.safe_room_tip_amount, empath['name'], settings.hometown)
+      return true
+    end
+    false
+  end
+
+  def use_pc_empath?(room_id, empath)
+    return false unless room_id
+    return false unless empath
+
+    walk_to room_id
+    return false unless DRRoom.pcs.include?(empath)
+
+    fput("whisper #{empath} heal")
+    fput("listen to #{empath}")
+    Flags.add('doneheal', '"Done!"', 'All set', 'not even injured')
+    24.times do
+      pause 5
+      break if Flags['doneheal']
+    end
+    Flags.delete('doneheal')
+
+    !need_healing?
+  end
+
+  def give_and_take(room_id, give_items, take_items)
+    return unless room_id
+    return unless give_items || take_items
+
+    walk_to room_id
+    give(give_items)
+    take(take_items)
+  end
+
+  def tip(tip_threshold, tip_amount, empath, hometown)
+    return unless tip_threshold
+    return unless DRCM.wealth(hometown) > tip_threshold
+    return unless tip_amount
+    return unless empath
+
+    minimize_coins(tip_amount).each do |amount|
+      fput "give #{empath} #{amount}"
+    end
+  end
+
+  def give(items)
+    items.each do |item|
+      loop do
+        case bput("get my #{item}", 'You get', 'What were you referring')
+        when 'You get'
+          fput "drop #{item}"
+        else
+          break
+        end
+      end
+    end
+  end
+
+  def take(items)
+    items.each do |item|
+      break unless stow?(item)
+    end
+  end
+
+  def stow?(item)
+    DRRoom.room_objs.grep(/#{item}/).each do |_|
+      fput "stow #{item}"
+      pause 1
+      next unless [right_hand, left_hand].grep(/#{item}/i)
+      fput "drop #{item}"
+      pause 1
+      return false
+    end
+
+    true
+  end
+end
+
+before_dying do
+  Flags.delete('npc-idle')
+  Flags.delete('healthy')
+  Flags.delete('moved')
+  Flags.delete('idle')
+end
+
+SafeRoom.new

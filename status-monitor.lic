@@ -22,15 +22,23 @@ class GameFilter
 
   def initialize
     @seen_cache_name = "seen_messages_#{checkname}.dat"
+    @seen_backup_name = "backup/seen_messages_#{checkname}.bak"
     @seen_lines = if File.exist?(@seen_cache_name)
-                    Marshal.load(File.open(@seen_cache_name, 'rb'))
+                    begin
+                      loaded = Marshal.load(File.open(@seen_cache_name, 'rb'))
+                      save_backup
+                      loaded
+                    rescue => e
+                      echo "Error loading seen_messages: #{e}"
+                      restore_backup
+                    end
                   else
                     {}
                   end
     @recent_seen_lines = {}
     @valid_commands = %w[ACTION ADVICE AFT AGREE ANSWER APPLAUD ASK AVOID AWAKEN BABBLE BALANCE BANDAGE BARK BARTER BASK BAWL BEAM BEARD BECKON BELCH BITE BLAME BLANCH BLAZE BLINK BLOCK BLUFF BLUSH BONDED BOO BOP BOUNCE BOW BRAWL BREAK BREATHE BRUSH BUTT BUY CACKLE CARDS CARVE CENTER CHANT CHAT CHECK CHEER CHIRR CHOKE CHOOSE CHOP CHORTLE CHORUS CHUCKLE CLAIM CLAP CLEAN CLENCH CLIMB CLOSE CLUTCH COIN COLLECT COMBAT COMPARE CONCENTRATE CONTACT COUGH COUNT COVER COWER CRAWL CRINGE CRUSH CRY CURSE CURTSY CUT DANCE DANCE FLOOR DAYDREAM DEAD DESCRIBE DRAG DRINK DROOL DROP DUCK DUMP EAR EAT ELBOW EMAIL EMPTY ENCUMBRANCE ENGAGE EXAMINE EXCHANGE EXHALE EXPRESS FACE FAINT FALL FATIGUE FEED FEMALE FIDGET FIGURE FIND FIRE FIT FIX FLAGS FLAIL FLAP FLETCH FLINCH FLIRT FLUSTER FLY FOCUS FOLLOW FORAGE FRET FROWN FURROW GASP GAWK GAZE GEM GET GIGGLE GLANCE GLARE GLOWER GNASH GO GOBBLE GRIEVE GRIMACE GRIN GRIND GROAN GROVEL GROWL GRUMBLE GRUNT GUARD GULP GUZZLE HACK HAIL HAIR HANGBACK HELLO HICCUP HIDE HISS HOLD HOME HOOT HOWL HUG HUM HUZZAH IGNORE INFAMY INFO INFUSE INHALE INSTRUCT INSULT INTELLIGENCE INVENTORY INVFIX JAB JOIN JUGGLE JUMP KHRI KICK KILL KISS KNEE KNEEL KNOCK LANGUAGE LATCH LAUGH LEAD LEAN LEAP LEAVE LECTURE LICK LIE LIGHT LINK LISTEN LOAD LOAN LOCK LOOK LOWER LUNGE MAKE MALE MANA MARCH MARK MEDITATE MEETING MENU MEOW MESSAGE MIND MIX MOAN MOCK MONEY MOOR MORE MOTION MOUNT MUMBLE MUSS MUTTER NAG NAME NIBBLE NOCK NOD NOTE NUDGE OBSERVE OFFER OPEN ORDER PACE PANIC PANT PARRY PAT PATHWAY PAY PEER PERCEIVE PET PICK PIN PINCH PLANT PLAY PLAYACT POACH POINT POKE POLICY PONDER PORT PORTRAIT POSE POUND POUR POUT PRACTICE PRAISE PRAY PREACH PREDICT PREEN PREMIUM PREPARE PROCRASTINATE PROD PROTECT PUCKER PULL PUMMEL PUNCH PUNISH PURR PUSH PUT PUZZLE QUEST QUEUE QUIT RAISE RASPBERRY READ RECALL RECITE REFER REFLEX REFUSE RELEASE REMOVE REPAIR REPENT REROLL RETREAT RETURN RING ROAR ROFL ROLL ROSHAMBO ROW RPA RUB RUMMAGE SALUTE SCOFF SCOUT SCOWL SCRAPE SCRATCH SCREAM SCRIBE SEARCH SELL SHAKE SHAPE SHARE SHEATHE SHIFT SHIP SHIVER SHOOT SHOVE SHOW SHRIEK SHRUG SHUDDER SHUFFLE SHUN SIGH SIGN SIGNAL SIGNATURE SING SIT SKATE SKILLS SKIN SLAP SLEEP SLICE SLINK SLIP SMELL SMILE SMIRK SMOOCH SNAP SNARL SNEAK SNEER SNEEZE SNICKER SNIFFLE SNORE SNORT SNUFF SNUGGLE SOB SONG SORT SPECULATE SPELLS SPIT SPLASH SPLUTTER SPRINKLE SQUINT SQUIRM STABLE STALK STAMINA STANCE STAND STARBOARD STARE STATUS STEAL STIR STITCH STOMP STOP STOW STRENGTH STRETCH STRING STUBBLE STUDY SULK SUMMON SURPRISE SURRENDER SURVEY SWAP SWEAR SWEAT SWEEP SWIM SWIMMING SWING TACKLE TAG TAIL TAKE TALK TAP TARGET TEACH TEASE TELL TEND THINK THROW THRUST THUMP TICKLE TIE TILT TIME TIP TITLE TOSS TOUCH TRACE TRACK TRAIN TRANSFER TRILL TUNE TURN TYPO UNBRAID UNBUNDLE UNCOIL UNHIDE UNLATCH UNLOAD UNLOCK UNTIE UNWRAP VAULT VOTE WAIL WAIT WAKE WARN WATCH WAVE WEALTH WEAR WEAVE WEDDING WEEP WHEEZE WHIMPER WHINE WHIRLWIND WHISTLE WHO WIELD WINCE WINK WIPE WITHDRAW WOBBLE WRING WRITE YANK YAWN YELP]
     @room_players = []
-    @filter_strings = get_data('filters')['filter_strings'].map { |string| /#{string}/ }
+    @filter_strings = get_data('filters')['filter_strings'].map { |string| /#{string}/ } while @filter_strings.nil?
     @non_useful_tags = [
       /<preset id='roomDesc'>/i,
       /pushStream id="assess"/i,
@@ -84,6 +92,19 @@ class GameFilter
     File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(@seen_lines, file) }
   end
 
+  def save_backup
+    loaded_file = Marshal.load(File.open(@seen_cache_name, 'rb'))
+    File.open(@seen_backup_name, 'wb') { |file| Marshal.dump(loaded_file, file) }
+  end
+
+  def restore_backup
+    echo 'The marshal data was corrupted!  Restoring from backup.'
+    return {} unless File.exist?(@seen_backup_name)
+    loaded_file = Marshal.load(File.open(@seen_backup_name, 'rb'))
+    File.open(@seen_cache_name, 'wb') { |file| Marshal.dump(loaded_file, file) }
+    Marshal.load(File.open(@seen_cache_name, 'rb'))
+  end
+
   def migrate_recent
     save_required = false
     @recent_seen_lines.select { |_, timestamp| Time.now - timestamp > 600 }.each_key do |line|
@@ -102,6 +123,7 @@ class GameFilter
   def unseen?(line)
     return nil if line.nil? || line.empty?
     return nil if @filter_strings.find { |regex| line =~ regex }
+    line = similarity_scrub(line)
     return nil if @seen_lines[line]
     spam_check(line)
     return nil if @recent_seen_lines[line]
@@ -126,20 +148,26 @@ class GameFilter
   end
 
   def spam_check(line)
-    @frequency_buffer << Time.now
-    @frequency_buffer.delete_if{|x| (Time.now - x) > 60}
-    if @frequency_buffer.size >= @line_frequency_threshold
-      return spam_alert(line)
-    end
     @recent_seen << line
-    @recent_seen = @recent_seen[1..10] if @recent_seen.length > 10
+    @recent_seen = @recent_seen[1..20] if @recent_seen.length > 20
     counts = @recent_seen.each_with_object(Hash.new(0)) { |phrase, count| count[phrase] += 1 }
     if counts.values.max > @unique_line_threshold
-      return spam_alert(line)
+      echo "Passed unique line threshold #{counts.inspect}"
+      return spam_alert(line, counts.inspect)
+    end
+
+    return if counts[line] > 1
+    return unless check_distance?(line)
+    return if @frequency_buffer.any? { |x| (Time.now - x) < 0.5 }
+    @frequency_buffer.delete_if { |x| (Time.now - x) > 90 }
+    @frequency_buffer << Time.now
+    if @frequency_buffer.size >= @line_frequency_threshold
+      echo 'Passed freq_buffer size'
+      return spam_alert(line, counts.inspect)
     end
   end
 
-  def spam_alert(line)
+  def spam_alert(line, counts)
     echo("\a")
     pause 0.25
     echo("\a")
@@ -149,12 +177,49 @@ class GameFilter
     command_check(line)
     fput @responses.first if @settings.status_monitor_respond
     echo(line)
-    send_slackbot_message(line)
+    send_slackbot_message(counts)
     fput('exit') if @quit_on_flag
     @responses.rotate!
     @spam_line = line
     pause 2
     @recent_seen = []
+    @frequency_buffer = []
+  end
+
+  def check_distance?(line)
+    @recent_seen.each do |seen|
+      size_of_string = line.length
+      return true if levenshtein_distance(seen, line) < size_of_string * ((100 - @line_similarity_percentage.to_f) / 100) && levenshtein_distance(seen, line) > 0
+    end
+    false
+  end
+
+  def levenshtein_distance(source, compare)
+    # Calculates minimum required edits to change one string into another
+    # For an understanding of the concept, look at http://devnull.absolventa.de/2015/11/24/exploring-levenshtein-algorithm-with-ruby/
+    source_length = source.length
+    compare_length = compare.length
+    return source_length if compare_length == 0
+    return compare_length if source_length == 0
+    lev_array = Array.new(source_length + 1) { Array.new(compare_length + 1) } # create a 2D array with the dimensions of both string lengths
+
+    (0..source_length).each { |i| lev_array[i][0] = i }
+    (0..compare_length).each { |j| lev_array[0][j] = j }
+
+    # Work through the two strings to determine the various ways to adjust each string by propogating costs forward until it reaches the final element.
+    (1..compare_length).each do |j|
+      (1..source_length).each do |i|
+        lev_array[i][j] = if source[i - 1] == compare[j - 1] # What's the minimum cost to adjust nearby characters
+                            lev_array[i - 1][j - 1] # The same. No operation required
+                          else
+                            [lev_array[i - 1][j] + 1, # Look left in the matrix. This would be a "deletion". It costs + 1 more than d[i-1][j]]
+                             lev_array[i][j - 1] + 1, # Look directly above the current entry in matrix. This would correspond to an insertion which costs +1 additionally
+                             lev_array[i - 1][j - 1] + 1, # Completely substitute the character, this also costs +1 more  than d[j-1, i-1]
+                            ].min
+                  end
+      end
+    end
+    lev_array[source_length][compare_length]
   end
 
   def command_check(line)
@@ -189,6 +254,14 @@ class GameFilter
       return nil if players_to_check.find { |name| line.include?(name) }
     end
     line.gsub!(/<[^>]+>/, '')
+    line
+  end
+
+  def similarity_scrub(line)
+    # pulls items from the line that are likely to be variable, and unlikely to be indicative of a hit
+    # currently, numerals, currency names
+    sub_array = [/[0-9]+/, /(kronars|lirums|dokoras)/i]
+    sub_array.each { |reg_ex| line.gsub!(reg_ex, '') }
     line
   end
 end

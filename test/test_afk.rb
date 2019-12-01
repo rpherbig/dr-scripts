@@ -21,7 +21,7 @@ class Map
 end
 
 class XMLData
-  def room_title
+  def self.room_title
     'Middle of Nowhere'
   end
 end

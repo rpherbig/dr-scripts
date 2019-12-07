@@ -120,9 +120,10 @@ class SetupProcess
   def armor_hysteresis?
     return false unless @armor_hysteresis
     return false if @cycle_armors.keys.any? { |skill| DRSkill.getxp(skill) < 25 }
+    all_swap_pieces = @cycle_armors.keys.map { |armortype| @cycle_armors[armortype] }.flatten
     if @cycle_armors.keys.all? { |skill| DRSkill.getxp(skill) > 32 }
       if @last_worn_type != @default_armor && @cycle_armors.keys.include?(@default_armor)
-        @equipment_manager.worn_items(@all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
+        @equipment_manager.worn_items(all_swap_pieces).each { |item| @equipment_manager.remove_item(item) }
         @equipment_manager.wear_items(@equipment_manager.desc_to_items(@cycle_armors[@default_armor]))
         @last_worn_type = @default_armor
       end
@@ -1007,6 +1008,7 @@ class SpellProcess
 
     @perc_health_timer = Time.now
     @aura_timer = 0
+    @avtalia_timer = Time.now - 290
 
     @symbiosis_learning_threshold = settings.symbiosis_learning_threshold
     echo(" @symbiosis_learning_threshold: #{@symbiosis_learning_threshold}") if $debug_mode_ct
@@ -1083,6 +1085,7 @@ class SpellProcess
     check_rutilors_edge(game_state)
     check_health(game_state)
     check_starlight(game_state)
+    check_avtalia(game_state)
     check_buffs(game_state)
     check_training(game_state)
     check_offensive(game_state)
@@ -1144,6 +1147,15 @@ class SpellProcess
       bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
     game_state.casting = false
+  end
+
+  def check_avtalia(game_state)
+    return if @settings.avtalia_array.empty?
+    return unless Time.now - @avtalia_timer > 360
+    return unless DRStats.mana < 90
+    return if game_state.casting
+    DRCA.update_avtalia
+    @avtalia_timer = Time.now
   end
 
   def check_regalia(game_state) # designed to catch a signal from SetupProcess and prep regalia
@@ -1210,6 +1222,7 @@ class SpellProcess
   def check_current(game_state)
     return unless game_state.casting
 
+    game_state.avtalia_cyclic(@mana) if game_state.casting_cyclic
     if @should_invoke
       return if game_state.check_charging? && game_state.check_charging?
     end
@@ -1222,6 +1235,7 @@ class SpellProcess
 
   def check_invoke(game_state)
     return unless @should_invoke
+    return if @cambrinth_invoke_exact_amount && game_state.charges_total.zero?
     find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
     @should_invoke = nil
     invoke_amount = @cambrinth_invoke_exact_amount ? game_state.charges_total : nil
@@ -1283,6 +1297,7 @@ class SpellProcess
     game_state.casting_weapon_buff = false
     game_state.casting_consume = false
     game_state.casting_cfb = false
+    game_state.casting_cyclic = false
     if game_state.casting_sorcery
       game_state.casting_sorcery = false
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
@@ -1559,7 +1574,10 @@ class SpellProcess
       echo("  Target found: #{data['target_enemy']}") if $debug_mode_ct
       fput("face #{data['target_enemy']}")
     end
-    release_cyclics if data['cyclic']
+    if data['cyclic']
+      release_cyclics
+      game_state.casting_cyclic = true
+    end
     command = 'prep'
     command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
@@ -1618,6 +1636,7 @@ class SpellProcess
     @after = data['after']
     @skill = data['skill']
     @prep = data['prep']
+    @mana = data['mana']
     @command = data['command']
     @reset_expire = data['expire'] ? data['abbrev'] : nil
     Flags.reset('ct-spellcast')
@@ -1915,7 +1934,7 @@ class TrainerProcess
                    'Stealth' => 'Stealth', 'Ambush Stun' => settings.stun_skill, 'Ambush Choke' => 'Debilitation', 'App Pouch' => 'Appraisal',
                    'Favor Orb' => 'Anything', 'Charged Maneuver' => 'Expertise', 'Meraud' => 'Theurgy', 'Recall' => 'Scholarship',
                    'Barb Research Warding' => 'Warding', 'Barb Research Augmentation' => 'Augmentation',
-                   'Barb Research Debilitation' => 'Debilitation', 'Collect' => 'Outdoorsmanship', 'Smite' => 'Conviction', 'Locks' => 'Locksmithing' }
+                   'Barb Research Debilitation' => 'Debilitation', 'Collect' => 'Outdoorsmanship', 'Smite' => 'Conviction', 'Locks' => 'Locksmithing', 'Tessera' => 'Trading' }
 
     @skill_map['Hunt'] = %w[Perception Scouting] if DRStats.ranger?
     @favor_god = settings.favor_god
@@ -2097,6 +2116,8 @@ class TrainerProcess
       else
         wait_for_script_to_complete('heal-remedy', %w[quick nohands])
       end
+    when 'Tessera'
+      invoke_tessera(game_state)
     end
     waitrt?
     false
@@ -2467,6 +2488,19 @@ class TrainerProcess
     end
   end
 
+  def invoke_tessera(game_state)
+    return unless DRStats.trader?
+    return if game_state.retreating?
+    return if game_state.loaded || game_state.offhand?
+    DRC.retreat
+    return unless /inside your (.*)\./ =~ DRC.bput("get my tessera", 'You get a .+ tessera from inside your (.*).', 'What were you')
+    container = DRC.get_noun(Regexp.last_match(1))
+    game_state.starlight_values['level'] = 0 if bput('invoke my tessera', '^The .+ tessera has already been invoked', 'You send your') == 'You send your'
+    bput("put my tessera in my #{container}", 'You put', 'What were you')
+    DRCI.stow_hand('left') if DRC.left_hand.include?('tessera')
+    DRCI.stow_hand('right') if DRC.right_hand.include?('tessera')
+  end
+
   def reset_ability(game_state, ability_name, offset = 0)
     ability_info = @training_abilities.find { |name, _| name == ability_name }.last
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
@@ -2667,10 +2701,10 @@ class AttackProcess
   end
 
   def shoot_aimed(command, game_state)
-    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|crumb|spine|mantrap spike|dragon|icicle|fang|scale).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
+    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|crumb|spine|mantrap spike|dragon|icicle|fang|scale|grey-black spike|strip|page).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
     when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
-    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|dragon|icicle|fang|scale).* at/i
+    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|dragon|icicle|fang|scale|grey-black spike|strip|page).* at/i
       game_state.action_taken
       ammo = Regexp.last_match(2)
       bput("stow my #{ammo}", 'You pick up', 'Stow what')
@@ -2978,7 +3012,7 @@ class GameState
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia, :starlight_values
+  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :selected_maneuver, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia, :starlight_values, :casting_cyclic
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -2997,6 +3031,7 @@ class GameState
     @cast_timer = nil
     @casting_moonblade = false
     @casting_sorcery = false
+    @casting_cyclic = false
     @hide_on_cast = false
     @casting_regalia = false
     @regalia_cancel = false
@@ -3028,6 +3063,7 @@ class GameState
     @dance_queue = []
     @analyze_combo_array = []
     @currently_whirlwinding = false
+    @avtalia_cambrinth = {}
 
     @dynamic_dance_skill = settings.dynamic_dance_skill
     echo("  @dynamic_dance_skill: #{@dynamic_dance_skill}") if $debug_mode_ct
@@ -3156,6 +3192,12 @@ class GameState
 
     @whirlwind_trainables = settings.whirlwind_trainables
     echo("  @whirlwind_trainables: #{@whirlwind_trainables}") if $debug_mode_ct
+
+    @avtalia_array = settings.avtalia_array
+    echo("  @avtalia_array: #{@avtalia_array}") if $debug_mode_ct
+
+    @cambrinth_invoke_exact_amount = settings.cambrinth_invoke_exact_amount
+    echo("  @cambrinth_invoke_exact_amount: #{@cambrinth_invoke_exact_amount}") if $debug_mode_ct
 
     if @use_analyze_combos && DRStats.barbarian?
       Flags.add('ct-accuracy-ready', 'You sense your combat accuracy decrease')
@@ -3511,16 +3553,64 @@ class GameState
       return false
     end
 
-    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
-
     next_charge = @charges.pop
+    next_charge = avtalia_charge(next_charge)
+    
     echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
+    return true if next_charge.zero?
+    find_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
     @charges = [] unless charge?(@cambrinth, next_charge)
 
     stow_cambrinth(@cambrinth, @stored_cambrinth, @cambrinth_cap)
 
     true
+  end
+
+  def avtalia_charge(charge_num) # sources mana from filled avtalia cambrinth, then returns the amount left uncharged
+    return charge_num unless DRStats.trader?
+    return charge_num unless @cambrinth_invoke_exact_amount
+    return charge_num if @avtalia_array.empty?
+    return charge_num unless DRStats.mana < 80
+
+    remaining_charge = @charges.inject(0, :+) + charge_num
+    @avtalia_cambrinth = find_avtalia(remaining_charge) if @avtalia_cambrinth.empty?
+    return charge_num if @avtalia_cambrinth.empty?
+
+    # unwrap the charges for the spell. Keep pulling in more cambrinth mana entries until it either hits the camb cap or gets all of it.
+    return avtalia_charge(charge_num + @charges.pop) if charge_num < [@avtalia_cambrinth.last['mana'], remaining_charge].min
+    # how much will be invoked from the camb, either all the charges of the spell, or the cambrinth cap
+    charge_avta = [charge_num, @avtalia_cambrinth.last['mana']].min
+    DRCA.invoke_avtalia(@avtalia_cambrinth.first, @dedicated_camb_use, charge_avta)
+    # charges_total subtracts what we got from avtalia array, and invokes the rest from normal cambrinth
+    @charges_total -= charge_avta
+    @avtalia_cambrinth = {}
+
+    echo("avtalia_charge: pulled #{charge_avta} mana from #{@avtalia_cambrinth.first}") if $debug_mode_ct
+    return charge_num - charge_avta
+  end
+
+  def avtalia_cyclic(prep_mana)
+    return unless DRStats.trader?
+    return unless @dedicated_camb_use == 'spell'
+    return if @avtalia_array.empty?
+
+    @avtalia_cambrinth = find_avtalia(prep_mana * 10) if @avtalia_cambrinth.empty?
+    return if @avtalia_cambrinth.empty?
+
+    DRCA.invoke_avtalia(@avtalia_cambrinth.first, 'cyclic', @avtalia_cambrinth.last['cap'])
+    @avtalia_cambrinth = {}
+  end
+
+  def find_avtalia(charge_needed)
+    case DRStats.mana
+    when 0..60
+      DRCA.choose_avtalia(charge_needed, 0)
+    when 60..80
+      DRCA.choose_avtalia(charge_needed, 80)
+    when 80..100
+      {}
+    end
   end
 
   def check_harness

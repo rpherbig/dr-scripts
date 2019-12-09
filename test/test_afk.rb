@@ -20,6 +20,12 @@ class Map
   end
 end
 
+class XMLData
+  def self.room_title
+    'Middle of Nowhere'
+  end
+end
+
 class TestAfk < Minitest::Test
   def setup
     $history.clear

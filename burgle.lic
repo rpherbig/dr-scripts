@@ -1,0 +1,178 @@
+=begin
+
+Very simple Breaking and Entering script.  Use at your own risk - there are VERY high fines if you get caught
+
+Documentation: https://elanthipedia.play.net/Lich_script_repository#burgle
+
+=end
+
+custom_require.call(%w[common common-travel common-items])
+
+class Burgle
+  include DRC
+  include DRCT
+  include DRCI
+
+
+  def initialize
+
+    arg_definitions = [
+      [
+        { name: 'start', regex: /start/i, description: 'Required: prevents accidentally running burgle and protects against burgle typo for starting script' },
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    start_script('jail-buddy') unless Script.running?('jail-buddy')
+    @settings = get_settings
+    @burgle_settings = @settings.burgle_settings
+
+    if !valid_burgle_settings?
+      message("Invalid burgle_settings.  Chcek the documenatation before running, this is a dangerous script to run if it's not understood.")
+      message("Very high fines, and loss of all your items if you can't pay your debt are possible.")
+      pause 10
+      exit
+    end
+
+    burgle
+  end
+
+  def valid_burgle_settings?
+    return false if @burgle_settings.empty?
+    return false if @burgle_settings['room'] == nil or @burgle_settings['room'] =~ /\D/
+    return false if @burgle_settings['entry_type'] == nil or @burgle_settings['entry_type'] !~ /lockpick|rope/i
+    if @burgle_settings['max_search_count'] > 0
+      return false if /(That is already open|You open your)/ !~ bput("open my #{@settings.stealing_bag}", 'That is already open', 'You open your', 'Please rephrase that command', 'What were you referring')
+    end
+
+    return true
+  end
+
+  def burgle
+    #check to make sure you aren't under cool down
+    return unless /The heat has died down from your last caper/ =~ bput('burgle recall', '^You should wait at least \d+ roisaen for the heat to die down', '^The heat has died down from your last caper')
+
+    #get to your defined room:
+    walk_to(@burgle_settings['room'])
+
+    #stow any items in hands before begining - entry method must be in right hand, or a worn lockpick ring
+    #right hand takes priority
+    stow_hands
+
+    #check for entry method
+    case @burgle_settings['entry_type']
+    when /rope/i
+      if bput('get my heavy rope', 'You get', 'You are already holding' ,'What were you') =~ /What were you/
+        message("Couldn't find entry item: heavy rope")
+        return
+      end
+    when /lockpick/i
+      if @settings.use_lockpick_ring
+        if !exists?("#{@settings.lockpick_container}")
+          message("Couldn't find entry item: #{@settings.lockpick_container}")
+          return
+        end
+      elsif bput('get my lockpick', 'You get', 'You are already holding' ,'What were you') =~ /What were you/
+        message("Couldn't find entry item: lockpick")
+        return
+      end
+    else
+      message("Unknown entry method: #{@burgle_settings['entry_type']}")
+      return
+    end
+
+    #setup your buffs for burgle
+    wait_for_script_to_complete('buff', ['burgle']) if @settings.waggle_sets['burgle']
+
+    #ensure you're in hiding or invis before starting
+    if !invisible?
+      hide_attemps = 3
+      until hide?
+        hide_attemps -= 1
+        if hide_attemps <= 0
+          message("Couldn't hide.  Find a better room.")
+          return
+        end
+      end
+    end
+
+    bput('burgle', 'You make short work of the lock', 'You scale up the side of a wall')
+
+    #TODO:  Define list of room types, and searchable objects to search for loot (https://elanthipedia.play.net/Breaking_and_Entering#Rooms)
+    #       Write movement and get out routines
+    if @burgle_settings['max_search_count'] > 0
+      search_for_loot('counter')
+    end
+
+    bput('go window', 'You take a moment to reflect on the caper')
+
+    #likely to have invisibility up if you have access to it.
+    #be sure to release it since it breaks a lot of things
+    release_invisibility
+
+    #make hands empty again, as they likely have loot/entry method in them
+    stow_hands
+  end
+
+  def search_for_loot(target)
+    if /It looks valuable/ =~ bput("search #{target}",'It looks valuable','Roundtime','I could not')
+      if @burgle_settings['loot'] == "drop"
+        drop_item(DRC.right_hand)
+      else
+        put_item?(DRC.right_hand)
+      end
+    end
+  end
+
+  def put_item?(item)
+    case bput("put my #{item} in my #{@settings.stealing_bag}", 'What were you', 'You put', "You can't do that", 'no matter how you arrange it', 'The .* is *.* too \w+ to fit in', 'There isn\'t any more room', 'perhaps try doing that again')
+    when 'perhaps try doing that again'
+      return put_item?(item)
+    when 'You put'
+      return true
+    when 'What were you'
+      handheld = held_item(item)
+      drop_item(held_item(item)) if handheld
+      return false
+    end
+
+    false
+  end
+
+  def drop_item(item)
+    case bput("drop my #{item}", 'You drop', 'would damage it', 'smashing it to bits', 'Something appears different about', 'What were you')
+    when 'would damage it', 'Something appears different about'
+      drop_item(item)
+    when 'What were you'
+      handheld = held_item(item)
+      return drop_item(held_item(item)) if handheld
+    end
+  end
+
+  def held_item(item)
+    [DRC.right_hand, DRC.left_hand].each do |hand_item|
+      hand_item.split.each do |item_word|
+        return hand_item if item.include?(item_word)
+      end
+    end
+
+    return nil
+  end
+
+end
+
+before_dying do
+  #unpause the previously paused scripts
+  Script.running.find_all { |s| s.paused? && !s.no_pause_all && $scripts_to_unpause.include?(s.name) }.each(&:unpause)
+end
+
+#Pause all running scripts, that do not have no_pause_all flag set
+#Do not use pause_all/unpause_all, as when unpausing this could unpause scripts that were not paused by burgle
+$scripts_to_unpause = []
+Script.running.find_all { |s| !s.paused? && !s.no_pause_all && s.name != Script.self.name}.each do  |s|
+  s.pause
+  $scripts_to_unpause << s.name
+end
+
+Burgle.new

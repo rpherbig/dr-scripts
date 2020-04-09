@@ -411,8 +411,9 @@ class LootProcess
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
 
-    @loot_delay = 5 # in seconds
+    @loot_delay = 5 || settings.loot_delay # in seconds
     @loot_timer = Time.now - @loot_delay
+    echo("  @loot_delay: #{@loot_delay}") if $debug_mode_ct
     echo("  @loot_timer: #{@loot_timer}") if $debug_mode_ct
 
     @loot_bodies = settings.loot_bodies
@@ -2119,7 +2120,7 @@ class TrainerProcess
   end
 
   private
-  
+
   def hide_action(game_state)
     if hide?(@hide_type) && !@dont_stalk && !game_state.npcs.empty? && @hide_type == 'hide'
       stalked = bput('stalk', 'Stalk what',
@@ -2575,9 +2576,14 @@ class AttackProcess
 
     @use_overrides_for_aiming_trainables = settings.use_overrides_for_aiming_trainables
     echo(" @use_overrides_for_aiming_trainables: #{@use_overrides_for_aiming_trainables}") if $debug_mode_ct
-    
+
+    @firing_delay = settings.firing_delay || 15 # Delay for shooting aimed weapons.
+    @firing_timer = Time.now - @firing_delay
+    echo(" @firing_delay: #{@firing_delay}") if $debug_mode_ct
+    @firing_check = 0
+
     Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
-    Flags.add('ct-ranged-ready', 'You think you have your best shot possible now')
+    Flags.add('ct-ranged-ready', 'You think you have your best shot possible now.')
     Flags.add('ct-face-what', 'Face what')
   end
 
@@ -2713,12 +2719,16 @@ class AttackProcess
   end
 
   def shoot_aimed(command, game_state)
+    echo("Time now: #{Time.now.to_i}") if $debug_mode_ct
+    echo("@firing_timer: #{@firing_timer}") if $debug_mode_ct
+    echo("@firing_delay: #{@firing_delay}") if $debug_mode_ct
     case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|crumb|spine|mantrap spike|dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
     when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
     when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn).* at/i
       game_state.action_taken
       ammo = Regexp.last_match(2)
+      @firing_check = 0
       bput("stow my #{ammo}", 'You pick up', 'Stow what')
       bput("stow my #{ammo}", 'You pick up', 'Stow what') if game_state.dual_load?
     when 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire'
@@ -2737,7 +2747,7 @@ class AttackProcess
       Flags.reset('ct-aim-failed')
     end
 
-    if game_state.loaded && game_state.done_aiming?
+    if game_state.loaded && (game_state.done_aiming? || (Time.now - @firing_timer).to_i >= @firing_delay)
       if game_state.selected_maneuver
         use_charged_maneuver(game_state.selected_maneuver, game_state)
         game_state.action_taken
@@ -2753,7 +2763,7 @@ class AttackProcess
       end
       game_state.loaded = false
       waitrt?
-    elsif game_state.loaded && !game_state.aiming_trainables.empty?
+    elsif game_state.loaded && !game_state.aiming_trainables.empty? #&& (Time.now - @firing_timer).to_i < @firing_delay
       skill = game_state.determine_aiming_skill
       echo "attack_aimed::aiming_trainables:skill: #{skill}" if $debug_mode_ct
       return unless skill
@@ -2787,7 +2797,7 @@ class AttackProcess
       end
 
       game_state.sheath_offhand_weapon(skill)
-    elsif game_state.loaded
+    elsif game_state.loaded && (Time.now - @firing_timer).to_i < @firing_delay
       actions = game_state.next_aim_action.split(';')
       actions.each do |action|
         first_word = action.split(' ')[0].downcase
@@ -2801,12 +2811,12 @@ class AttackProcess
       end
     else
       if game_state.dual_load?
-        pause 0.5 until (load_return = bput('load arrows', 'You reach into', 'already loaded', 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands')) != ''
+        pause 0.5 until (load_return = bput('load arrows', 'You reach into', 'already loaded', 'in your hand', 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands', 'Your .* makes the task more difficult')) != ''
         if ['but are unable to draw upon its majesty', 'without steadier hands', 'Such a feat would be impossible without the winds to guide'].include?(load_return)
-          pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded') != ''
+          pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand') != ''
         end
       else
-        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded') != ''
+        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand') != ''
       end
 
       waitrt?
@@ -2831,10 +2841,19 @@ class AttackProcess
     true
   end
 
+  def check_firing_time
+    @firing_check += 1
+    echo("@firing_check: #{@firing_check}") if $debug_mode_ct
+    echo("@firing_timer: #{@firing_timer}") if $debug_mode_ct
+    @firing_timer = Time.now if @firing_check = 1
+    echo("Check after test - @firing_timer: #{@firing_timer}") if $debug_mode_ct
+  end
+
   def aim(game_state)
     case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment', "isn't loaded")
     when 'You are already', 'You begin to target'
       game_state.loaded = true
+      check_firing_time
     when 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your riot crossbow'
       case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow')
       when 'A rapid series of clicks'
@@ -3572,7 +3591,7 @@ class GameState
 
     next_charge = @charges.pop
     next_charge = avtalia_charge(next_charge)
-    
+
     echo("check_charging?: #{next_charge}") if $debug_mode_ct
 
     return true if next_charge.zero?
@@ -3707,7 +3726,7 @@ class GameState
 
   def thrown_attack_verb
     if attack_override
-      attack_override 
+      attack_override
     elsif bound_weapon? && !@use_weak_attacks
       'hurl'
     elsif @use_weak_attacks || lodging_weapon?

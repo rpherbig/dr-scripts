@@ -15,9 +15,10 @@ class EquipmentManager
   def items(settings = nil)
     return @items if @items
     settings ||= get_settings
-    @gear_sets = settings.gear_sets
+    @gear_sets = {}
+    settings.gear_sets.each { |set_name, gear_list| @gear_sets[set_name] = gear_list.flatten.uniq }
     @sort_head = settings.sort_auto_head
-    @items = settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges], skip_repair: item[:skip_repair]) }
+    @items = settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges], skip_repair: item[:skip_repair], container: item[:container]) }
   end
 
   def remove_gear_by(&_block)
@@ -103,15 +104,15 @@ class EquipmentManager
   end
 
   def get_combat_items
-    bput('inv combat', 'Type INVENTORY HELP for more options')
+    bput('inv combat', 'Use INVENTORY HELP for more options')
     snapshot = reget(40)
     if snapshot.grep(/All of your combat|You aren't wearing anything like that/).any? &&
-       snapshot.grep(/Type INVENTORY HELP/).any?
+       snapshot.grep(/Use INVENTORY HELP/).any?
       snapshot
         .map(&:strip)
         .reverse
         .take_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
-        .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
+        .drop_while { |item| item != '[Use INVENTORY HELP for more options.]' }
         .drop(1)
         .reverse
     else
@@ -126,9 +127,9 @@ class EquipmentManager
   end
 
   def remove_item(item)
-    bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide')
+    bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide', 'Without any effort')
     waitrt?
-    if /more room/ =~ bput("stow my #{item.short_name}", 'You put', 'You easily strap', 'There isn\'t any more room')
+    if /more room/ =~ bput("stow my #{item.short_name}", 'You put', 'You easily strap', 'There isn\'t any more room', 'straps have all been used')
       bput("wear my #{item.short_name}", 'You ')
     end
     waitrt?
@@ -141,17 +142,17 @@ class EquipmentManager
     end
     case bput("get my #{item.short_name}", item.short_regex, '^You get ', '^What were you referring')
     when item.short_regex
-      fput("wear my #{item.short_name}")
+      bput("wear my #{item.short_name}", 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', 'You put', 'You carefully loop', 'slide effortlessly onto your', 'You slip', "^You .* #{item.short_regex}")
       waitrt?
       return true
     when /^You get /
-      fput("stow my #{item.short_name}")
+      bput("stow my #{item.short_name}", "You put .*#{item.name}", 'You .* unload', 'close the fan', 'You easily strap', "You don't seem to be able to move", 'You secure', 'is too small to hold that', 'You hang', '^The .* slides easily', "^You .* #{item.short_regex}")
     else
       return false
     end
   end
 
-  def wield_weapon_offhand(description)
+  def wield_weapon_offhand(description, skill = nil)
     return if description.empty?
 
     weapon = item_by_desc(description)
@@ -161,6 +162,7 @@ class EquipmentManager
     end
 
     get_item?(weapon)
+    swap_to_skill(weapon.name, skill) if skill && weapon.swappable
   end
 
   def wield_weapon(description, skill = nil)
@@ -186,7 +188,7 @@ class EquipmentManager
 
   def get_item?(item)
     if item.wield
-      bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'Wield what') != 'Wield what'
+      bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'Wield what', 'With a flick of your wrist you stealthily unsheathe') != 'Wield what'
     elsif item.transforms_to
       item = item_by_desc(item.transforms_to)
       item.worn ? get_item_helper(item, :worn) : get_item_helper(item, :stowed)
@@ -211,13 +213,15 @@ class EquipmentManager
 
     todo.all? do |held_item|
       if info = worn_items.find { |item| item.short_regex =~ held_item }
-        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your')
+        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your', 'You slip')
         true
       elsif info = items.find { |item| item.short_regex =~ held_item }
         if info.tie_to
-          stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy')
+          stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
         elsif info.wield
           stow_helper("sheath my #{info.short_name}", info.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap')
+        elsif info.container
+          stow_helper("put my #{info.short_name} into #{info.container}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
         else
           stow_helper("stow my #{info.short_name}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
         end
@@ -243,12 +247,15 @@ class EquipmentManager
       },
       tied: {
         verb: 'untie',
-        matches: [/^You .*#{item.short_regex}/, "^You remove.*#{item.name}", /^.*you untie your .*#{item.short_regex} from it./, '^What were you referring', '^Untie what', '^You are a little too busy'],
-        failures: ['You remove', /^You are a little too busy/],
+        matches: [/^You .*#{item.short_regex}/, "^You remove.*#{item.name}", /^.*you untie your .*#{item.short_regex} from it./, '^What were you referring', '^Untie what', '^You are a little too busy', '^You are a bit too busy'],
+        failures: ['You remove', /^You are a little too busy/, /^You are a bit too busy/],
         failure_recovery: proc { |_noun, item, *matches|
                             case matches
                             when ['You are a little too busy']
                               retreat
+                              get_item?(item)
+                            when ['You are a bit too busy']
+                              DRC.stop_playing
                               get_item?(item)
                             else
                               stow_weapon
@@ -258,7 +265,7 @@ class EquipmentManager
       },
       stowed: {
         verb: 'get',
-        matches: [/^You .*#{item.short_regex}/, "^You get.*#{item.name}", '^What were you referring', 'But that is already', 'You are already'],
+        matches: [/^You .*#{item.short_regex}/, "^You .*#{item.name}", '^The.* slides easily out', '^What were you referring', 'But that is already', 'You are already'],
         failures: ['You get', /But that is already/],
         failure_recovery: proc { |noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
         exhausted: ['What were you referring']
@@ -352,16 +359,16 @@ class EquipmentManager
     weapon = item_by_desc(description)
     return unless weapon
     if weapon.wield
-      stow_helper("sheath my #{weapon.short_name}", weapon.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'close the fan', 'You secure your', 'You slip', 'You hang', 'You strap', "You don't seem to be able to move", 'You easily strap', 'is too small to hold that')
+      stow_helper("sheath my #{weapon.short_name}", weapon.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'close the fan', 'You secure your', 'You slip', 'You hang', 'You strap', "You don't seem to be able to move", 'You easily strap', 'is too small to hold that', 'With a flick of your wrist you stealthily sheathe', '^The .* slides easily')
     elsif weapon.worn
-      stow_helper("wear my #{weapon.short_name}", weapon.short_name, 'You sling', 'You attach', 'You .* unload', 'You slide', 'You place', 'close the fan', 'You hang', 'You spin', 'You strap', 'You carefully loop', "You don't seem to be able to move")
+      stow_helper("wear my #{weapon.short_name}", weapon.short_name, 'You sling', 'You attach', 'You .* unload', 'You slide', 'You place', 'close the fan', 'You hang', 'You spin', 'You strap', 'You put', 'You carefully loop', "You don't seem to be able to move")
     elsif !weapon.tie_to.nil?
-      stow_helper("tie my #{weapon.short_name} to #{weapon.tie_to}", weapon.short_name, 'You attach', 'close the fan', 'you tie', 'You are a little too busy', "You don't seem to be able to move")
+      stow_helper("tie my #{weapon.short_name} to #{weapon.tie_to}", weapon.short_name, 'You attach', 'close the fan', 'you tie', 'You are a little too busy', "You don't seem to be able to move", 'Your wounds hinder your ability to do that')
     elsif weapon.transforms_to
       stow_helper("#{weapon.transform_verb} my #{weapon.short_name}", weapon.short_name, weapon.transform_text)
       stow_weapon(weapon.transforms_to)
     else
-      stow_helper("stow my #{weapon.short_name}", weapon.short_name, "You put .*#{weapon.name}", 'You .* unload', 'close the fan', 'You easily strap', "You don't seem to be able to move", 'You secure', 'is too small to hold that', 'You hang')
+      stow_helper("stow my #{weapon.short_name}", weapon.short_name, "You put .*#{weapon.name}", 'You .* unload', 'close the fan', 'You easily strap', "You don't seem to be able to move", 'You secure', 'is too small to hold that', 'You hang', '^The .* slides easily')
     end
   end
 
@@ -382,6 +389,8 @@ class EquipmentManager
     when /is too small to hold that/
       fput("swap my #{weapon_name}")
       stow_helper(action, weapon_name, accept_strings)
+    when /Your wounds hinder your ability to do that/
+      stow_helper("stow my #{weapon_name}", weapon_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
     end
   end
 end

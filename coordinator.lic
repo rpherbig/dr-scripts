@@ -1,0 +1,494 @@
+custom_require.call(%w[common drinfomon common-travel common-items common-arcana common-money])
+
+class Coordinator
+  include DRC
+  include DRCT
+  include DRCA
+  include DRCM
+
+  def initialize(debug)
+    UserVars.coordinator_timers ||= {}
+
+    @debug = debug
+    @settings = get_settings
+    @hunting_tasks = @settings.coordinator_hunting_tasks
+    @hunting_tasks.each { |task| task[:type] = :hunting }
+    @town_tasks = @settings.coordinator_town_tasks
+    @town_tasks.each { |task| task[:type] = :town }
+    @cleanup_tasks = @settings.coordinator_hunting_cleanup
+    @cleanup_tasks.each { |task| task[:type] = :cleanup }
+
+    @song_list = get_data('perform').perform_options
+
+    prepare_tasks
+
+    Flags.add('coord-song', 'you finish playing')
+    release_cyclics
+    loop do
+      break unless run_next_task
+    end
+  end
+
+  def run_next_task
+    return unless task = get_next_task
+    echo("Found task to execute: #{task}") if @debug
+    case task[:type]
+    when :hunting
+      run_hunting_task(task)
+    when :town
+      run_town_task(task)
+    when :idle
+      run_idle_task
+    end
+    update_predicates_for_completed_task(task)
+    true
+  end
+
+  def get_next_task
+    [@cleanup_tasks, @hunting_tasks, @town_tasks].each do |task_list|
+      task_list.reject! { |task| task[:deleted] }
+    end
+    cleanup_task || town_task || hunting_task || default_hunting_task || idle_task
+  end
+
+  def cleanup_task
+    @cleanup_tasks.select { |task| task[:marked] }.find { |task| predicate_met?(task) }
+  end
+
+  def hunting_task
+    @hunting_tasks.find { |task| predicate_met?(task) }
+  end
+
+  def town_task
+    @town_tasks.find { |task| predicate_met?(task) }
+  end
+
+  def default_hunting_task
+    @hunting_tasks.find { |task| task[:default] }
+  end
+
+  def idle_task
+    { type: :idle }
+  end
+
+  def predicate_met?(task)
+    echo("Checking predicates for task: #{task}") if @debug
+    start = evaluate_predicate?(task[:start_on])
+    if start && !(task[:stop_on].nil? || task[:stop_on].empty?)
+      start = !evaluate_predicate?(task[:stop_on])
+    end
+    start
+  end
+
+  def evaluate_predicate?(predicate)
+    return true if predicate.nil? || predicate.empty?
+    unless predicate.size == 1
+      raise ArgumentError, "Predicate with multiple keys: #{predicate}"
+    end
+
+    key = predicate.keys.first
+    value = predicate[key]
+
+    case key
+    when 'or'
+      value.any? { |member| evaluate_predicate?(member) }
+    when 'and'
+      value.all? { |member| evaluate_predicate?(member) }
+    when 'skill_less_than', 'skill_under'
+      echo("Checking skill #{value['skill']} < #{value['target']}") if @debug
+      skill_less_than?(value['skill'], value['target'])
+    when 'skill_over'
+      echo("Checking skill #{value['skill']} > #{value['target']}") if @debug
+      skill_greater_than?(value['skill'], value['target'])
+    when 'any_skill_less_than', 'any_skill_under'
+      echo("Checking skills #{value['skills']} < #{value['target']}") if @debug
+      value['skills'].any? { |skill| skill_less_than?(skill, value['target']) }
+    when 'after_every_hunt'
+      echo("Checking hunt counter #{value['key']}: #{@hunt_counters[value['key']]}") if @debug
+      @hunt_counters[value['key']] > 0
+    when 'on_first_run'
+      echo("Checking first-run counter #{value['key']}: #{@first_run_counters[value['key']]}") if @debug
+      @first_run_counters[value['key']]
+    when 'boxes_over'
+      @num_boxes > value
+    when 'boxes_under'
+      @num_boxes < value
+    when 'encumbrance_over'
+      check_encumbrance > value
+    when 'timer'
+      Time.now > get_time(value)
+    when 'predicate'
+      unless all_predicates.include? value
+        raise ArgumentError, "Predicate not in whitelist: #{value}"
+      end
+      send(value)
+    else
+      raise ArgumentError, "Unknown predicate type: #{key}"
+    end
+  end
+
+  def prepare_tasks
+    update_box_count
+    @local_timers = {}
+    @cleanup_tasks.each { |task| task[:marked] = !task[:skip_first_run] }
+  end
+
+  def terminal_predicates(task)
+    predicates = []
+    (predicates << task[:start_on]) if task[:start_on]
+    (predicates << task[:stop_on]) if task[:stop_on]
+    predicates.map { |pred| terminal_predicates_helper(pred) }.flatten
+  end
+
+  def terminal_predicates_helper(predicate)
+    return [] if predicate.nil? || predicate.empty?
+    unless predicate.size == 1
+      raise ArgumentError, "Predicate with multiple keys: #{predicate}"
+    end
+
+    key = predicate.keys.first
+    value = predicate[key]
+    case key
+    when 'or', 'and'
+      value.map { |member| terminal_predicates_helper(member) }.flatten
+    else
+      [predicate]
+    end
+  end
+
+  def get_timers(task)
+    terminal_predicates(task).select { |pred| pred.keys.first == 'timer' }
+                             .map { |pred| pred['timer'] }
+  end
+
+  def update_predicates_for_completed_task(task)
+    if task[:type] == :cleanup
+      task[:marked] = false
+    elsif task[:type] == :hunting && !task[:no_cleanup]
+      @cleanup_tasks.each { |task| task[:marked] = true }
+    end
+    get_timers(task).each { |timer| reset_timer(timer) }
+  end
+
+  def reset_timer(timer)
+    reset_time = Time.now + timer['time']
+    if timer['global']
+      echo("Resetting global timer: #{timer}") if @debug
+      UserVars.coordinator_timers[timer['key']] = reset_time
+    else
+      echo("Resetting local timer: #{timer}") if @debug
+      @local_timers[timer['key']] = reset_time
+    end
+  end
+
+  def get_time(timer)
+    if timer['global']
+      UserVars.coordinator_timers[timer['key']] || (Time.now - 1)
+    else
+      @local_timers[timer['key']] || (Time.now - 1)
+    end
+  end
+
+  def skill_less_than?(skill, target)
+    echo("Skill level is #{DRSkill.getxp(skill)}") if @debug
+    DRSkill.getxp(skill) < target
+  end
+
+  def skill_greater_than?(skill, target)
+    echo("Skill level is #{DRSkill.getxp(skill)}") if @debug
+    DRSkill.getxp(skill) > target
+  end
+
+  def update_box_count
+    @num_boxes = (get_boxes(@settings.picking_box_source) || []).size
+    @num_pet_boxes = (get_boxes(@settings.picking_pet_box_source) || []).size
+  end
+
+  def run_idle_task
+    walk_to @settings.safe_room
+    start_script('afk') unless Script.running? 'afk'
+    pause 60
+  end
+
+  def run_town_task(task)
+    echo("Running town task #{task}") if @debug
+    safe_room = @settings.safe_room
+    pause_script('sanowret-crystal') if task[:pause_sanowret]
+    if task[:walk_to]
+      case task[:walk_to]
+      when 'safe_room'
+        walk_to(safe_room)
+      else
+        walk_to(task[:walk_to])
+      end
+    end
+    wait_for_script_to_complete('buff', [task[:buff]]) if task[:buff]
+    if task[:town] && DRStats.necromancer?
+      wait_for_script_to_complete('release-necro')
+    end
+    if action = task[:action]
+      unless all_actions.include? action
+        raise ArgumentError, "Action not in whitelist: #{action}"
+      end
+      send(action, task)
+    elsif script = task[:script]
+      play_song?(false) if task[:play_song]
+      wait_for_script_to_complete(script, task[:args])
+      stop_play if task[:play_song]
+    else
+      raise ArgumentError, "Expected action or script: #{task}"
+    end
+    unpause_script('sanowret-crystal') if task[:pause_sanowret]
+  end
+
+  def run_hunting_task(task)
+    file = task[:file]
+    echo("Starting hunting-buddy with file #{file}") if @debug
+    pause_script('sanowret-crystal') if task[:pause_sanowret]
+    start_script('hunting-buddy', [file])
+    pause 5
+    next_check = Time.now + 60
+    while Script.running?('hunting-buddy')
+      if Time.now > next_check
+        $HUNTING_BUDDY.stop_hunting if task[:stop_on] && evaluate_predicate?(task[:stop_on])
+        next_check = Time.now + 60
+      end
+      pause 5
+    end
+    update_box_count
+    safe_room = @settings.safe_room
+    safe_room = task[:safe_room]['id'] if task[:safe_room]
+    walk_to(safe_room)
+    unpause_script('sanowret-crystal') if task[:pause_sanowret]
+  end
+
+  #
+  # Predicates
+  #
+
+  def all_predicates
+    [
+      'hunt_done?',
+      'run_crossing_training?',
+      'pet_boxes?'
+    ]
+  end
+
+  def hunt_done?
+    # TODO: would be nice to not have to double-check predicates here.
+    !hunting_task
+  end
+
+  def run_crossing_training?
+    @settings.crossing_training.any? { |skill| DRSkill.getxp(skill) < 28 }
+  end
+
+  def pet_boxes?
+    @num_pet_boxes > 0
+  end
+
+  #
+  # Actions
+  #
+  def all_actions
+    %w[
+      pick_boxes
+      train_performance
+      train_outfitting
+      train_engineering
+      train_forging
+      train_alchemy
+      crossing_training
+      infuse_osrel
+      check_favors
+    ]
+  end
+
+  def pick_boxes(_task)
+    walk_to(@settings.lockpick_room_id) if @settings.lockpick_room_id
+    if @settings.waggle_sets['locksmithing']
+      wait_for_script_to_complete('buff', ['locksmithing'])
+    end
+    wait_for_script_to_complete('pick')
+    update_box_count
+  end
+
+  def infuse_osrel(task)
+    if @settings.osrel_amount && DRSpells.active_spells['Osrel Meraud']
+      infuse_om(!@settings.osrel_no_harness, @settings.osrel_amount)
+    else
+      echo '***OM IS DOWN OR NO osrel_amount***'
+      task[:deleted] = true
+    end
+  end
+
+  def check_favors(_task)
+    return unless @settings.favor_goal
+    /(\d+)/ =~ bput('favor', 'You currently have \d+', 'You are not currently')
+    favor_count = Regexp.last_match(1).to_i
+    return if favor_count >= @settings.favor_goal
+
+    if /could not/ =~ bput("tap my #{@settings.favor_god} orb", 'The orb is delicate', 'I could not find')
+      wait_for_script_to_complete('favor')
+      fput('stow my orb')
+    elsif rub_orb?
+      walk_to(5865)
+      fput("get my #{@settings.favor_god} orb")
+      fput('put my orb on altar')
+      if favor_count + 1 < @settings.favor_goal
+        wait_for_script_to_complete('favor')
+        fput('stow my orb')
+      end
+    end
+  end
+
+  def rub_orb?
+    case bput("rub my #{@settings.favor_god} orb", 'not yet fully prepared', 'lacking in the type of sacrifice the orb requires', 'your sacrifice is properly prepared')
+    when 'not yet fully prepared'
+      false
+    when 'lacking in the type of sacrifice the orb requires'
+      false
+    when 'your sacrifice is properly prepared'
+      true
+    end
+  end
+
+  def train_performance(task)
+    return if play_song?(true)
+
+    echo '***UNABLE TO TRAIN PERFORMANCE, REMOVING IT FROM THE TRAINING LIST***'
+    task[:deleted] = true
+  end
+
+  def train_outfitting(_task)
+    wait_for_script_to_complete('workorders', ['Tailoring'])
+    wait_for_script_to_complete('sell-loot')
+  end
+
+  def train_alchemy(_task)
+    wait_for_script_to_complete('workorders', ['Remedies'])
+    wait_for_script_to_complete('sell-loot')
+  end
+
+  def train_engineering(_task)
+    wait_for_script_to_complete('workorders', ['Shaping'])
+    wait_for_script_to_complete('sell-loot')
+  end
+
+  def train_forging(_task)
+    wait_for_script_to_complete('workorders', ['Blacksmithing'])
+    wait_for_script_to_complete('sell-loot')
+  end
+
+  def crossing_training(_task)
+    start_script('crossing-training')
+    pause 5
+
+    target_skills = @settings.crossing_training.dup
+    while $CROSSING_TRAINER.running
+      target_skills.reject! { |skill| DRSkill.getxp(skill) >= 28 }
+      $CROSSING_TRAINER.stop if target_skills.empty?
+      pause 5
+    end
+  end
+
+  # Harvested wholesale from crossing-training
+
+  def play_song?(blocking = false)
+    return false if @no_instrument
+    return true if DRSkill.getxp('Performance') >= 28
+
+    UserVars.song = @song_list.first.first unless UserVars.song
+    @did_play = true
+    case bput("play #{UserVars.song}",
+              'dirtiness may affect your performance',
+              'slightest hint of difficulty',
+              'You begin a', 'You struggle to begin',
+              'You\'re already playing a song',
+              'You effortlessly begin', 'You begin some',
+              'You cannot play', 'Play on what instrument',
+              'now isn\'t the best time to be playing',
+              'Perhaps you should find somewhere drier before trying to play')
+    when 'Play on what instrument'
+      @no_instrument = true
+      return false
+    when 'now isn\'t the best time to be playing',
+         'Perhaps you should find somewhere drier before trying to play'
+      return true
+    when 'You cannot play'
+      wait_for_script_to_complete('safe-room')
+    when 'dirtiness may affect your performance'
+      if DRSkill.getrank('Performance') < 20
+        echo "Skipping cleaning of zills due to low rank of Performance: #{DRSkill.getrank('Performance')}"
+        return true
+      end
+      stop_play
+      clean_zills
+      return play_song?
+    when 'You begin a', 'You effortlessly begin', 'You begin some'
+      stop_play
+      UserVars.song = @song_list[UserVars.song] || @song_list.first.first
+      return play_song?
+    when 'You struggle to begin'
+      if UserVars.song != @song_list.first.first
+        stop_play
+        UserVars.song = @song_list.first.first
+        return play_song?
+      end
+    end
+
+    return true unless blocking
+
+    Flags.reset('coord-song')
+    pause 1 until Flags['coord-song']
+    true
+  end
+
+  def stop_play
+    return unless @did_play
+    return if @no_instrument
+    @did_play = false
+    bput('stop play', 'You stop playing your song',
+         'In the name of', "But you're not performing")
+    Flags['coord-song'] = true
+  end
+
+  def clean_zills
+    cloth = @settings.cleaning_cloth
+    bput('remove my zills', 'You slide')
+    bput("get my #{cloth}", 'You get')
+
+    loop do
+      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
+      when 'not in need of drying'
+        break
+      when 'You should be sitting up'
+        fix_standing
+        next
+      end
+      pause 1
+      waitrt?
+
+      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
+        pause 1
+        waitrt?
+      end
+    end
+
+    until /not in need of cleaning/i =~ bput("clean my zills with my #{cloth}", 'Roundtime', 'not in need of cleaning')
+      pause 1
+      waitrt?
+    end
+
+    bput('wear my zills', 'You slide')
+    bput("stow my #{cloth}", 'You put')
+  end
+end
+
+before_dying do
+  ['hunting-buddy', 'crossing-training'].each do |script_name|
+    stop_script(script_name) if Script.running?(script_name)
+  end
+end
+
+Coordinator.new(true)

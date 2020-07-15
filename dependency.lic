@@ -116,7 +116,7 @@ arg_definitions = [
 
 args = parse_args(arg_definitions)
 
-debug = args.debug
+debug = args.debug || UserVars.debug_dependency
 install = args.install
 
 class OpenStruct
@@ -311,6 +311,8 @@ class ScriptManager
   end
 
   def download_lich
+    return if @developer
+
     lich_data = make_request(@lich_url)['tree'].find { |data| data['path'] == 'lich.rbw' }
     if LICH_VERSION =~ /f/ && Settings['lich_fork_sha'] == lich_data['sha']
       echo('latest version of lich fork already downloaded.')
@@ -463,6 +465,8 @@ class ScriptManager
 
     old_data = update_local_stealing_yaml(id, update)
 
+    return
+
     data = get_current_stealing_data(id)
 
     update.delete_if do |key, value|
@@ -552,6 +556,8 @@ class ScriptManager
     message_body += "Ruby Version: #{RUBY_VERSION}p#{RUBY_PATCHLEVEL} #{RUBY_PLATFORM}"
     message_body += "\n"
     message_body += "Dependency Version: #{$DEPENDENCY_VERSION}"
+    message_body += "\n"
+    message_body += "Game Client: #{$frontend}"
     message_body += "\n"
 
     Dir['./scripts/profiles/*.yaml'].map { |item| File.path(item) }.select { |path| path.include?("#{checkname}-") }.each do |path|
@@ -843,6 +849,19 @@ class SetupFiles
         end
       end
     end
+
+    #get includes from main file and store in a separate variable, so you can't load
+    #includes from includes: prevents circular logic/infinite loops
+    include_list = settings[:include]
+
+    include_list.each do |include_file|
+      filepath = "./scripts/profiles/include-#{include_file}.yaml"
+      if File.exists?(filepath)
+        settings.merge!(safe_load_yaml(filepath))
+      else
+        echo("Tried to include an include file that doesn't exist '#{filepath}'")
+      end
+    end
     @settings = transform_settings(settings)
     @load = false
   end
@@ -919,6 +938,8 @@ class SetupFiles
     s.bankbot_name ||= UserVars.bankbot_name
     s.bankbot_room_id ||= UserVars.bankbot_room_id
     s.prehunt_buffs ||= UserVars.prehunt_buffs
+    s.hometown ||= UserVars.hometown
+    s.hometown = $HOMETOWN if $HOMETOWN
 
     # Pull town-specific room_ids iff defined
     s.safe_room = s.safe_room[s.hometown] if s.safe_room.is_a?(Hash) && s.safe_room[s.hometown]
@@ -948,7 +969,7 @@ class SetupFiles
     s
   rescue => e
     respond('*** ERROR MODIFYING DATA IN DEPENDENCY ***')
-    respond('*** Commonly this is malformed spell entries in your yaml file ***')
+    respond('*** Commonly this is malformed spell or loot entries in your yaml file ***')
     respond(e.message)
     e.backtrace.each { |msg| respond(msg) }
     @settings = {}
@@ -962,6 +983,8 @@ class MoonWatch
   def initialize(debug)
     @debug = debug
     @moon_data = {}
+    UserVars.moons = { 'katamba' => {}, 'yavash' => {}, 'xibar' => {}, 'visible' => [] }
+    UserVars.sun = {}
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
     @queue = []
     load_moon_data
@@ -978,8 +1001,9 @@ class MoonWatch
 
   def load_moon_data
     @last_connect = Time.now
-
-    uri = URI.parse("#{@firebase_url}/moon_data.json")
+    @data_delay = nil
+    echo("retrieving moon data") if @debug
+    uri = URI.parse("#{@firebase_url}/moon_data_v2.json")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -1001,8 +1025,18 @@ class MoonWatch
     @queue << [moon, data]
   end
 
+  def snapshot_seconds_until_load
+    return 60 unless UserVars.moons.reject { |m| m == 'visible' }.values.first['timer'] && UserVars.sun['timer']
+    return @data_delay if @data_delay
+    echo("calculting next moon data request") if @debug
+    all_timers = UserVars.moons.reject { |m| m == 'visible' }.values.map{|data| data['timer']} + [UserVars.sun['timer']]
+    @data_delay = ([all_timers.min*0.8, 1].max * 60).to_i
+    echo("Next request in #{@data_delay} seconds") if @debug
+    @data_delay
+  end
+
   def run_queue
-    load_moon_data if Time.now - @last_connect > 60
+    load_moon_data if Time.now - @last_connect > snapshot_seconds_until_load
     return if @queue.empty?
     item = @queue.shift
     update_moon(item.first, item.last)
@@ -1010,9 +1044,9 @@ class MoonWatch
 
   private
 
-  def update_moon(moon, data)
-    echo("updating #{moon} with #{data}") if @debug
-    uri = URI.parse("#{@firebase_url}/moon_data/#{moon}.json")
+  def update_moon(body_name, data)
+    echo("updating #{body_name} with #{data}") if @debug
+    uri = URI.parse("#{@firebase_url}/moon_data_v2/#{body_name}.json")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
@@ -1092,14 +1126,14 @@ end
 def custom_require
   lambda do |script_names|
     script_names = [script_names] unless script_names.is_a?(Array)
-    before = Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
-    respond("CR:#{before}:#{script_names}") if UserVars.bootstrap_debug
-    force_start_script('bootstrap', script_names)
-    until before >= Script.running.find_all { |s| s.name =~ /bootstrap/ }.length
+    respond("CR - starting:#{script_names}") if UserVars.bootstrap_debug
+    bootstrapper = force_start_script('bootstrap', script_names)
+    pause 0.05
+    while Script.running.include?(bootstrapper)
+      respond("CR:waiting:#{script_names}") if UserVars.bootstrap_debug
       pause 0.05
-      respond("CR:waiting #{before}:#{script_names}") if UserVars.bootstrap_debug
     end
-    respond("CR:done #{before}:#{script_names}") if UserVars.bootstrap_debug
+    respond("CR:done:#{script_names}") if UserVars.bootstrap_debug
   end
 end
 
@@ -1261,6 +1295,14 @@ end
 
 def update_moon_data(moon, data)
   $moon_watch.queue_update(moon, data)
+end
+
+def shift_hometown(town_name)
+  $HOMETOWN = town_name
+end
+
+def clear_hometown
+  $HOMETOWN = nil
 end
 
 full_install if install

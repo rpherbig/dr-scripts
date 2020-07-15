@@ -5,13 +5,15 @@
 # ;remedy remedies 2 "blister cream" "red flower" nemoih bar mortar cream
 # ;remedy remedies 2 "blister cream" nemoih "not used" bar mortar cream  - for when only herb is required
 
-custom_require.call(%w[common common-arcana common-crafting common-items events])
+custom_require.call(%w[common common-arcana common-crafting common-items common-travel common-money events])
 
 class Remedy
   include DRC
   include DRCC
   include DRCI
   include DRCA
+  include DRCT
+  include DRCM
 
   def initialize
     @settings = get_settings
@@ -19,6 +21,7 @@ class Remedy
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.alchemy_belt
     @training_spells = @settings.crafting_training_spells
+    @stock = get_data('crafting')['remedies'][@settings.hometown]
 
     arg_definitions = [
       [
@@ -30,10 +33,25 @@ class Remedy
         { name: 'catalyst', regex: /\w+/i, variable: true, description: 'Type of catalyst.' },
         { name: 'container', regex: /\w+/i, variable: true, description: 'Type of container for creating.' },
         { name: 'noun', regex: /\w+/i, variable: true, options: %w[cream salve wash balm ungent potion tonic ointment elixir poultices draught], description: 'End product' }
+      ],
+      [
+        { name: 'continue', regex: /continue/i, variable: true },
+        { name: 'herb2', regex: /\w+/i, variable: true, description: 'Prepared herb, wrap in double quotes if this is multiple words. Put none for none.' },
+        { name: 'catalyst', regex: /\w+/i, variable: true, description: 'Type of catalyst.' },
+        { name: 'container', regex: /\w+/i, variable: true, description: 'Type of container for creating.' },
+        { name: 'noun', regex: /\w+/i, variable: true, options: %w[cream salve wash balm ungent potion tonic ointment elixir poultices draught], description: 'End product' }
       ]
     ]
 
     args = parse_args(arg_definitions)
+
+    Flags.add('remedy-water', 'You need another splash of water')
+    Flags.add('remedy-alcohol', 'You need another splash of alcohol')
+    Flags.add('remedy-catalyst', 'You need another catalyst material')
+    Flags.add('remedy-herb', 'You need another prepared herb')
+    Flags.add('remedy-turn', 'Clumps of material stick to the sides', 'Once finished you notice clumps of material')
+    Flags.add('remedy-smell', 'begins to transition colors', 'you should smell the mixture', 'smell the mixture')
+    Flags.add('remedy-sieve', 'Upon completion you see some particulate clouding up the mixture.', 'with a sieve')
 
     @book_type = args.book_type
     @chapter = args.chapter
@@ -41,21 +59,96 @@ class Remedy
     @herb1 = args.herb1
     @herb2 = args.herb2
     @catalyst = args.catalyst
-    @container = args.container
+    @container = @settings.alchemy_tools.find { |tool| /#{args.container}/ =~ tool } || args.container 
+    @pestle = @settings.alchemy_tools.find { |tool| /pestle/ =~ tool } || 'pestle'
+    @verb = 'crush'
     @noun = args.noun
+    @count = 0
+    @herb_container = @settings.herb_container # normal container or special herb container both work
 
+    # determine water and alcohol container and check if water or alcohol is in container
+    @water = 'water'     # added for special containers that generate water/alcohol
+    @waterVerb = 'put'   # changed to pour when using a container
+    if @settings.water_container
+      get_item(@settings.water_container)
+      if bput("count water in my #{@settings.water_container}", 'parts left of the', 'part left of the', 'I could not find what you were referring to.') != 'I could not find what you were referring to.'
+        @water = @settings.water_container
+        @waterVerb = 'pour'
+      else # else (not elsif) needed to rub special container for water before checking again, uses defaults if container doesn't have water
+        fput("rub my #{@settings.water_container}")
+        fput("get water from #{@bag}") # added this part just in case water is in another bag, get water doesn't work, and container cannot create water
+        fput("put water in my #{@settings.water_container}")
+        if bput("count water in my #{@settings.water_container}", 'parts left of the', 'part left of the', 'I could not find what you were referring to.') != 'I could not find what you were referring to.'
+          @water = @settings.water_container
+          @waterVerb = 'pour'
+        end
+      end
+      stow_item(@water)
+    end
+    @alcohol = 'alcohol' # same as water
+    @alcoholVerb = 'put' # same as water
+    if @settings.alcohol_container
+      get_item(@settings.alcohol_container)
+      if bput("count alcohol in my #{@settings.alcohol_container}", 'parts left of the', 'part left of the', 'I could not find what you were referring to.') != 'I could not find what you were referring to.'
+        @alcohol = @settings.alcohol_container
+        @alcoholVerb = 'pour'
+      else # else (not elsif) needed to rub special container for alcohol before checking again, uses defaults if container doesn't have alcohol
+        fput("rub my #{@settings.alcohol_container}")
+        fput("get alcohol from #{@bag}") # added this part just in case alcohol is in another bag, get alcohol doesn't work, and container cannot create alcohol
+        fput("put alcohol in my #{@settings.alcohol_container}")
+        if bput("count alcohol in my #{@settings.alcohol_container}", 'parts left of the', 'part left of the', 'I could not find what you were referring to.') != 'I could not find what you were referring to.'
+          @alcohol = @settings.alcohol_container
+          @alcoholVerb = 'pour'
+        end
+      end
+      stow_item(@alcohol)
+    end
+
+    # buy ingredients if missing
+    if @water == 'water' && bput("tap my #{@water}", 'You tap', 'I could not find what you were referring to.') == 'I could not find what you were referring to.'
+      buy_item('water')
+    end
+    if @alcohol == 'alcohol' && bput("tap my #{@alcohol}", 'You tap', 'I could not find what you were referring to.') == 'I could not find what you were referring to.'
+      buy_item('alcohol')
+    end
+    if ['coal nugget', 'nugget'].include?(@catalyst) && bput("tap my #{@catalyst}", 'You tap', 'I could not find what you were referring to.') == 'I could not find what you were referring to.'
+      buy_item('coal')
+    end
     wait_for_script_to_complete('buff', ['remedy'])
-    Flags.add('remedy-magic-ready', 'You feel fully prepared to cast your spell.')
+
+    # used for internal remedies (this section is needed for CONTINUE arg to work)
+    if /mort/ !~ @container
+      @pestle = 'mixing stick'
+      @verb = 'mix'
+    end
+
+    get_item(@pestle) if args.continue
+    work("analyze my #{@noun}") if args.continue
 
     create_item
   end
 
   def get_item(name)
-    get_crafting_item(name, @bag, @bag_items, @belt)
+    # added to check for herbs in special herb container, then check if herbs in crafting container, otherwise get normally
+    # this is to prevent issues getting herbs if someone has less than 25 in @herb_container
+    # there are still issues when herbs are in a different container (not @bag or @herb_container), script will still run fine
+
+    if (name == @herb1 || name == @herb2) && @settings.herb_container && bput("tap #{name} in #{@herb_container}", 'You tap', 'I could not find what you were referring to.', 'You lightly tap') == 'You tap'
+      get_crafting_item(name, @herb_container, true, @belt) # bag_items is TRUE to look for herbs in herb_container
+    elsif (name == @herb1 || name == @herb2) && bput("tap #{name} in #{@bag}", 'You tap', 'I could not find what you were referring to.', 'You lightly tap') == 'You tap'
+      get_crafting_item(name, @bag, true, @belt) # bag_items is TRUE to look for herbs in bag
+    else
+      get_crafting_item(name, @bag, @bag_items, @belt) # bag_items is FALSE to GET HERB without specifying a bag
+      'none' # return specified to handle herbs differently for this option (to prevent a bug)
+    end
   end
 
   def stow_item(name)
-    stow_crafting_item(name, @bag, @belt)
+    if (name == @herb1 || name == @herb2) && @settings.herb_container
+      stow_crafting_item(name, @herb_container, @belt) # try to put herbs in herb container first
+    else
+      stow_crafting_item(name, @bag, @belt)
+    end
   end
 
   def turn_to(section)
@@ -69,23 +162,57 @@ class Remedy
   end
 
   def create_item
-    magic_routine
+    @count = 0
+    crafting_magic_routine(@settings)
     stow_item(left_hand)
     stow_item(right_hand)
+    pause 0.2 # to prevent issues with lag during the stow commands
     bput('get remed book', 'What were', 'You get')
     echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Alchemy') == 175
     turn_to("page #{find_recipe(@chapter, @recipe_name)}")
     bput('study my book', 'Roundtime')
     stow_item('book')
 
-    get_item(@container)
     if ['red flowers', 'blue flowers'].include?(@herb1)
       @herb1 = 'dried flowers' unless exists?('red flowers') || exists?('blue flowers')
     end
-    get_item(@herb1)
+    get_item(@container)
+    bput("lower #{@container} ground", 'You lower') # lower to count and combine herbs
 
-    case bput("put #{@herb1} in my #{@container}", 'You put', 'already has something', 'can only hold', 'You realize the')
-    when 'You put', 'can only hold'
+    # count herb, less than 25 get more herbs, otherwise stow and continue
+    # added to handle herb containers, and modified to combine up to 25
+    while @count < 25
+      case get_item(@herb1) # returns 'none' to handle getting herbs differently, see comment under when 'none'
+      when 'none'
+        # this part is to avoid the message "You are already holding that."
+        # in cases where it won't get more herbs, it takes a longer route to get herbs from other bags (not @bag nor @herb_container)
+        @count = Integer(bput("count my #{@herb1}", '\d+'))
+        while @count < 25
+          bput("put my #{@herb1} in my #{@container}", 'You put', 'already has something in it.', 'you count off and place only that many inside')
+          fput("stow my #{@herb1}") #in case there are extra
+          bput("get my #{@container}", 'You pick up', 'You get')
+          # stow then get, to prevent getting herbs from container (i.e. mortar)
+          stow_item(@container)
+          bput("get my #{@herb1}", 'You get', 'What were you referring to?', 'You are already holding that.') # using bput instead of get_item to keep script running when it cannot get the herb
+          get_item(@container)
+          bput("lower #{@container} ground", 'You lower')
+          bput("get #{@herb1} from #{@container}", 'You get', 'What were you referring to?')
+          if bput("combine my #{@herb1}", 'You combine', 'too large to add', 'You must be holding both') == 'You must be holding both'
+            @count = 25 # 25 used to break loops
+          else
+            @count += Integer(bput("count my #{@herb1}", '\d+')) #increment to run again
+          end
+        end
+      else
+        @count += Integer(bput("count my #{@herb1}", '\d+'))
+        if bput("combine my #{@herb1}", 'You combine', 'too large to add', 'You must be holding both') == 'too large to add'
+          stow_item(@herb1)
+        end
+      end
+    end
+
+    case bput("put #{@herb1} in my #{@container}", 'You put', 'already has something', 'can only hold', 'You realize the', 'You vigorously rub')
+    when 'You put', 'can only hold', 'You vigorously rub'
       stow_item(@herb1) # Added for when the herb is larger than 25 pieces
     when 'already has something', 'You realize the'
       bput("tilt my #{@container}", 'You grab')
@@ -94,298 +221,157 @@ class Remedy
       stow_item(@herb1) # Added for when the herb is larger than 25 pieces
     end
 
-    if @container == 'mortar'
-      get_item('pestle')
-      crush("crush my #{@herb1} with my pestle")
+    get_item(@container) # pickup off ground
+    get_item(@pestle)
+
+    if /mort/ =~ @container
+      work("#{@verb} my #{@herb1} with my #{@pestle}")
     else
-      get_item('mixing stick')
-      mix("mix my #{@container} with my mixing stick")
+      work("#{@verb} my #{@container} with my #{@pestle}")
     end
   end
 
-  def crush(command)
+  def work(command)
     waitrt?
-    magic_routine
-    case bput(command,
-              'You need another splash of water',
-              'You need another splash of alcohol',
-              'You toss the',
-              'Upon completion you see some particulate clouding up the mixture.',
-              'You need another prepared herb',
-              'begins to transition colors',
-              'You need another catalyst material',
-              'Once finished you notice clumps of material',
-              'With wide strokes you mix',
-              'Applying the final touches',
-              'That tool does not seem suitable for that task.',
-              'You vigorously rub',
-              'Patiently you wait a few moments and then proceed',
-              'Interesting thought really... but no.',
-              'You need to be holding the pestle first.',
-              'The mortar can only hold 25 pieces of material.',
-              'You spin your',
-              'You slowly filter',
-              'To avoid a problem',
-              'Roundtime:')
-    when 'You need another splash of water'
-      waitrt?
-      stow_item(left_hand)
-      get_item('water')
-      command = "put water in my #{@container}"
-    when 'You need another splash of alcohol'
-      waitrt?
-      stow_item(left_hand)
-      get_item('alcohol')
-      command = "put alcohol in my #{@container}"
-    when 'You toss the'
-      stow_item(left_hand)
-      get_item('pestle')
-      command = "crush my #{@noun} with my pestle"
-    when 'You slowly filter', 'You spin your'
-      stow_item(left_hand)
-      get_item('pestle')
-      command = "crush my #{@noun} with my pestle"
-    when 'Upon completion you see some particulate clouding up the mixture.'
-      waitrt?
-      stow_item(left_hand)
-      get_item('sieve')
-      command = "push my #{@noun} with my sieve"
-    when 'Once finished you notice clumps of material'
-      waitrt?
-      command = "turn my #{@container} with my pestle"
-    when 'Patiently you wait a few moments and then proceed'
-      waitrt?
-      command = "crush my #{@noun} with my pestle"
-    when 'Interesting thought really... but no.'
-      finish
-    when 'With short strokes you crush'
-      waitrt?
-      command = "crush my #{@noun} with my pestle"
-    when 'Roundtime:'
-      waitrt?
-      command = "crush my #{@noun} with my pestle"
-    when 'To avoid a problem'
-      analyze_crush
-    when 'You need another prepared herb'
-      waitrt?
-      stow_item(left_hand)
-      get_item(@herb2)
-      command = "put my #{@herb2} in my #{@container}"
-    when 'You need another catalyst material'
-      waitrt?
-      stow_item(left_hand)
-      get_item(@catalyst)
-      command = "put my #{@catalyst} in my #{@container}"
-    when 'begins to transition colors'
-      waitrt?
-      command = "smell my #{@noun}"
-    when 'Applying the final touches', 'This appears to be a type'
-      finish
-    when 'You vigorously rub'
-      waitrt?
-      stow_item(left_hand)
-      get_item('pestle')
-      command = "crush my #{@noun} with my pestle"
-    when 'You need to be holding the pestle first.'
-      waitrt?
-      stow_item(left_hand)
-      get_item('pestle')
-      command = "crush my #{@noun} with my pestle"
-    when 'That tool does not seem suitable for that task.'
-      analyze_crush
+    crafting_magic_routine(@settings)
+    if Flags['remedy-water']
+      add_water
+    elsif Flags['remedy-alcohol']
+      add_alcohol
+    elsif Flags['remedy-catalyst']
+      add_catalyst
+    elsif Flags['remedy-herb']
+      add_herb
+    elsif Flags['remedy-sieve']
+      sieve
+    elsif Flags['remedy-turn']
+      turn
+    elsif Flags['remedy-smell']
+      smell
+    else
+      case bput(command,
+                'Applying the final touches',
+                'Interesting thought really... but no.',
+                'you just can\'t mix',
+                'Try as you might',
+                'Roundtime:')
+      when 'Applying the final touches', 'Interesting thought really... but no.', 'you just can\'t mix', 'Try as you might'
+        finish
+      when 'Roundtime:'
+        waitrt?
+        command = if /mort/ =~ @container
+                    "#{@verb} my #{@noun} with my #{@pestle}"
+                  else
+                    "#{@verb} my #{@container} with my #{@pestle}"
+                  end
+      end
     end
     waitrt?
-    magic_routine
-    crush(command)
+    crafting_magic_routine(@settings)
+    work(command)
   end
 
-  def analyze_crush
-    case bput("analyze my #{@noun}",
-              'appears free of defects that would impede further preparation.',
-              'composition looks accurate and ready for continued preparation',
-              'smell the mixture', 'You need to be holding the pestle first.',
-              'You do not see anything that would prevent preparing',
-              'with a sieve',
-              'Clumps of material stick to the sides',
-              'Applying the final touches',
-              'Interesting thought really... but no.',
-              'easy piece to make',
-              'You try to analyze',
-              'Once finished you notice clumps of material',
-              'This appears to be a type',
-              'appears free of defects that would impede further preparation.',
-              'composition looks accurate and ready for continued preparation.',
-              'You do not see anything that would prevent preparing',
-              'smell the mixture',
-              'You need to be holding the pestle first.',
-              'with a sieve',
-              'You try to analyze')
-    when 'You do not see anything that would prevent preparing', 'You try to analyze', 'appears free of defects that would impede further preparation.', 'You do not see anything that would prevent preparing', 'composition looks accurate and ready for continued preparation.', 'You try to analyze', 'You need to be holding the pestle first', 'appears free of defects that would impede further preparation.', 'composition looks accurate and ready for continued preparation'
-      stow_item(left_hand)
-      get_item('pestle')
-      command = "crush my #{@noun} with my pestle"
-    when 'smell the mixture'
-      command = "smell my #{@noun}"
-    when 'Clumps of material stick to the sides', 'Once finished you notice clumps of material'
-      waitrt?
-      command = "turn my #{@container} with my pestle"
-    when 'Applying the final touches', 'Interesting thought really... but no.', 'easy piece to make'
-      finish
-    when 'with a sieve'
-      stow_item(left_hand)
-      get_item('sieve')
-      command = "push my #{@noun} with my sieve"
-    end
-  end
-
-  def mix(command)
+  def add_water
     waitrt?
-    magic_routine
-    case bput(command,
-              'You need another splash of water',
-              'You need another splash of alcohol',
-              'You toss the',
-              'Upon completion you see some particulate clouding up the mixture.',
-              'You need another prepared herb',
-              'begins to transition colors',
-              'You need another catalyst material',
-              'Once finished you notice clumps of material',
-              'Applying the final touches',
-              'That tool does not seem suitable for that task.',
-              'You vigorously rub',
-              'Patiently you wait a few moments and then proceed',
-              'Interesting thought really... but no.',
-              'You need to be holding the mixing stick first.',
-              'The mortar can only hold 25 pieces of material.',
-              'You slowly filter',
-              'You filter',
-              'Try as you might',
-              'You spin',
-              'To avoid a problem',
-              'Roundtime:')
-    when 'You need another splash of water'
-      waitrt?
+    stow_item(left_hand)
+    get_item(@water)
+    Flags.reset('remedy-water')
+    if bput("#{@waterVerb} #{@water} in my #{@container}", 'Roundtime', 'You toss', 'You cannot find a way to add that as an ingredient') == 'You cannot find a way to add that as an ingredient'
       stow_item(left_hand)
-      get_item('water')
-      command = "put water in my #{@container}"
-    when 'You need another splash of alcohol'
+      if bput("get water from #{@water}", 'You get', 'What were you referring to') == 'What were you referring to'
+        get_item('water')
+      end
+      bput("put water in my #{@container}", 'Roundtime', 'You toss', 'You cannot find a way to add that as an ingredient')
       waitrt?
-      stow_item(left_hand)
-      get_item('alcohol')
-      command = "put alcohol in my #{@container}"
-    when 'You toss the', 'You slowly filter', 'You filter', 'You spin'
-      stow_item(left_hand)
-      get_item('mixing stick')
-      command = "mix my #{@container} with my mixing stick"
-    when 'Upon completion you see some particulate clouding up the mixture.'
-      waitrt?
-      stow_item(left_hand)
-      get_item('sieve')
-      command = "push my #{@noun} with my sieve"
-    when 'Once finished you notice clumps of material'
-      waitrt?
-      command = "turn my #{@container} with my mixing stick"
-    when 'Patiently you wait a few moments and then proceed'
-      waitrt?
-      command = "mix my #{@container} with my mixing stick"
-    when 'Applying the final touches', 'Interesting thought really... but no.', 'Try as you might'
-      finish
-    when 'Roundtime:'
-      waitrt?
-      command = "mix my #{@container} with my mixing stick"
-    when 'To avoid a problem', 'That tool does not seem suitable for that task.'
-      analyze_mix
-    when 'You need another prepared herb'
-      waitrt?
-      stow_item(left_hand)
-      get_item(@herb2)
-      command = "put my #{@herb2} in my #{@container}"
-    when 'You need another catalyst material'
-      waitrt?
-      stow_item(left_hand)
-      get_item(@catalyst)
-      command = "put my #{@catalyst} in my #{@container}"
-    when 'begins to transition colors'
-      waitrt?
-      command = "smell my #{@noun}"
-    when 'You vigorously rub'
-      waitrt?
-      stow_item(left_hand)
-      get_item('mixing stick')
-      command = "mix my #{@container} with my mixing stick"
-    when 'You need to be holding the mixing stick first.'
-      waitrt?
-      stow_item(left_hand)
-      get_item('mixing stick')
-      command = "mix my #{@container} with my mixing stick"
+      fput("put water in my #{@water}")
     end
     waitrt?
-    magic_routine
-    mix(command)
+    stow_item(left_hand)
+    get_item(@pestle)
   end
 
-  def analyze_mix
-    case bput("analyze my #{@noun}",
-              'appears free of defects that would impede further preparation.',
-              'composition looks accurate and ready for continued preparation.',
-              'smell the mixture',
-              'You need to be holding the mixing stick first.',
-              'with a sieve',
-              'You try to analyze',
-              'appears free of defects that would impede further preparation.',
-              'composition looks accurate and ready for continued preparation',
-              'smell the mixture',
-              'You need to be holding the mixing stick first.',
-              'You do not see anything that would prevent preparing',
-              'with a sieve',
-              'Clumps of material stick to the sides',
-              'Applying the final touches',
-              'Interesting thought really... but no.',
-              'easy piece to make',
-              'basic piece to make',
-              'simple piece to make',
-              'You try to analyze',
-              'You filter',
-              'Try as you might',
-              'You spin')
-    when 'You do not see anything that would prevent preparing', 'appears free of defects that would impede further preparation.', 'composition looks accurate and ready for continued preparation', 'You try to analyze', 'You filter', 'You spin', 'You need to be holding the mixing stick first'
+  def add_alcohol
+    waitrt?
+    stow_item(left_hand)
+    get_item(@alcohol)
+    Flags.reset('remedy-alcohol')
+    if bput("#{@alcoholVerb} #{@alcohol} in my #{@container}", 'Roundtime', 'You toss', 'You cannot find a way to add that as an ingredient') == 'You cannot find a way to add that as an ingredient'
       stow_item(left_hand)
-      get_item('mixing stick')
-      command = "mix my #{@container} with my mixing stick"
-    when 'smell the mixture'
-      command = "smell my #{@noun}"
-    when 'Clumps of material stick to the sides'
+      if bput("get alcohol from #{@alcohol}", 'You get', 'What were you referring to') == 'What were you referring to'
+        get_item('alcohol')
+      end
+      bput("put alcohol in my #{@container}", 'Roundtime', 'You toss', 'You cannot find a way to add that as an ingredient')
       waitrt?
-      command = "turn my #{@container} with my mixing stick"
-    when 'Applying the final touches', 'Interesting thought really... but no.', 'easy piece to make', 'basic piece to make', 'simple piece to make', 'Try as you might'
-      finish
-    when 'with a sieve'
-      stow_item(left_hand)
-      get_item('sieve')
-      command = "push my #{@noun} with my sieve"
+      fput("put alcohol in my #{@alcohol}")
     end
+    waitrt?
+    stow_item(left_hand)
+    get_item(@pestle)
   end
 
-  def magic_routine
-    return if @training_spells.empty?
+  def add_catalyst
+    waitrt?
+    stow_item(left_hand)
+    get_item(@catalyst)
+    Flags.reset('remedy-catalyst')
+    bput("put my #{@catalyst} in my #{@container}", 'Roundtime', 'You vigorously')
+    waitrt?
+    stow_item(left_hand)
+    get_item(@pestle)
+  end
 
-    needs_training = %w[Warding Utility Augmentation]
-                     .select { |skill| @training_spells[skill] }
-                     .select { |skill| DRSkill.getxp(skill) < 31 }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
-    return unless needs_training
+  def add_herb
+    waitrt?
+    stow_item(left_hand)
+    get_item(@herb2)
+    Flags.reset('remedy-herb')
+    bput("put my #{@herb2} in my #{@container}", 'Roundtime', 'You vigorously')
+    waitrt?
+    stow_item(left_hand)
+    get_item(@pestle)
+  end
 
-    data = @training_spells[needs_training]
+  def sieve
+    waitrt?
+    stow_item(left_hand)
+    get_item('sieve')
+    Flags.reset('remedy-sieve')
+    bput("push my #{@noun} with my sieve", 'Roundtime')
+    waitrt?
+    stow_item(left_hand)
+    get_item(@pestle)
+  end
 
-    if Flags['remedy-magic-ready'] && mana > 40
-      crafting_cast_spell(data, @settings)
-      Flags.reset('remedy-magic-ready')
-      @preparing = false
+  def turn
+    waitrt?
+    Flags.reset('remedy-turn')
+    bput("turn my #{@container}", 'Roundtime')
+    waitrt?
+  end
+
+  def smell
+    waitrt?
+    Flags.reset('remedy-smell')
+    bput("smell my #{@noun}", 'Roundtime')
+    waitrt?
+  end
+
+  def buy_item(name)
+    get_money_from_bank('5 silver', @settings)
+
+    case name
+    when 'coal'
+      order_item(@stock['catalyst-room'], @stock['catalyst_number'])
+      stow_item('coal nugget')
+    when 'water'
+      order_item(@stock['stock-room'], @stock['stock-number'])
+      stow_item('water')
+    when 'alcohol'
+      order_item(@stock['stock-room'], @stock['stock-number-a'])
+      stow_item('alcohol')
     end
 
-    return if @preparing
-    crafting_prepare_spell(data, @settings)
-    @preparing = true
+    walk_to(@settings.alchemy_room)
   end
 
   def magic_cleanup
@@ -407,7 +393,13 @@ class Remedy
 end
 
 before_dying do
-  Flags.delete('remedy-magic-ready')
+  Flags.delete('remedy-water')
+  Flags.delete('remedy-alcohol')
+  Flags.delete('remedy-catalyst')
+  Flags.delete('remedy-herb')
+  Flags.delete('remedy-sieve')
+  Flags.delete('remedy-turn')
+  Flags.delete('remedy-smell')
 end
 
 Remedy.new

@@ -12,11 +12,15 @@ class Athletics
   def initialize
     @settings = get_settings
     @athletics_options = get_data('athletics').athletics_options
+    @performance_pause = @settings.performance_pause
 
     @climbing_target = get_data('athletics').practice_options[@settings.climbing_target]
     @swimming_target = get_data('athletics').swimming_options[@settings.swimming_target]
     have_climbing_rope = get_settings.have_climbing_rope
     @outdoorsmanship_rooms = get_settings.athletics_outdoorsmanship_rooms
+
+    get_athletics_items
+
     start_exp = DRSkill.getxp('Athletics')
     @end_exp = [start_exp + 15, 29].min
 
@@ -24,7 +28,9 @@ class Athletics
       [
         { name: 'wyvern', regex: /^wy.*/i, optional: true, description: 'Climb both undergondola and wyvern cliffs' },
         { name: 'undergondola', regex: /^un.*/i, optional: true, description: 'Climb branch etc undergondola' },
-        { name: 'xalas', regex: /^xala.*/i, optional: true, description: 'Climb xalas in zoluren in instead of undergondola' }
+        { name: 'xalas', regex: /^xala.*/i, optional: true, description: 'Climb xalas in zoluren in instead of undergondola' },
+        { name: 'stationary', regex: /^stat.*/i, optional: true, description: 'Stand still and use a climbing rope' },
+        { name: 'cliffs', regex: /^cliff.*/i, optional: true, description: 'Climb undergondola without attempting branch' }
       ]
     ]
 
@@ -37,8 +43,10 @@ class Athletics
       climb_branch
     elsif args.xalas
       climb_xalas
+    elsif args.cliffs
+      climb_cliffs  
     elsif have_climbing_rope
-      train_with_rope
+      train_with_rope(args.stationary)
     elsif @swimming_target
       swim_loop(@swimming_target['rooms'])
     elsif @climbing_target
@@ -54,6 +62,20 @@ class Athletics
     elsif @settings.hometown == 'Ratha'
       ratha_athletics
     end
+
+    stow_athletics_items
+  end
+
+  def get_athletics_items
+    return if @settings.held_athletics_items.empty?
+
+    @settings.held_athletics_items.each { |item| bput("get my #{item}", 'You', 'What were') }
+  end
+
+  def stow_athletics_items
+    return if @settings.held_athletics_items.empty?
+
+    @settings.held_athletics_items.each { |item| bput("stow my #{item}", 'You', 'Stow what?') }
   end
 
   def override_location_and_practice(place)
@@ -70,80 +92,6 @@ class Athletics
     DRSkill.getxp('Athletics') >= @end_exp
   end
 
-  def stop_play
-    bput('stop play', 'You stop playing your song', 'In the name of', "But you're not performing")
-  end
-
-  def clean_zills
-    cloth = @settings.cleaning_cloth
-    stow_hands
-    bput('remove my zills', 'You slide')
-    bput("get my #{cloth}", 'You get')
-
-    loop do
-      case bput("wipe my zills with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
-      when 'not in need of drying'
-        break
-      when 'You should be sitting up'
-        fix_standing
-        next
-      end
-      pause 1
-      waitrt?
-
-      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
-        pause 1
-        waitrt?
-      end
-    end
-
-    until /not in need of cleaning/i =~ bput("clean my zills with my #{cloth}", 'Roundtime', 'not in need of cleaning')
-      pause 1
-      waitrt?
-    end
-
-    bput('wear my zills', 'You slide')
-    bput("stow my #{cloth}", 'You put')
-  end
-
-  def play_climbing_song?
-    UserVars.climbing_song = @song_list.first.first unless UserVars.climbing_song
-    case bput("play #{UserVars.climbing_song}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play')
-    when 'Play on what instrument'
-      return false
-    when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play'
-      return false
-    when 'You cannot play'
-      wait_for_script_to_complete('safe-room')
-      return false
-    when 'dirtiness may affect your performance'
-      if DRSkill.getrank('Performance') < 20
-        echo "Skipping cleaning of zills due to low rank of Performance: #{DRSkill.getrank('Performance')}" if UserVars.athletics_debug
-        return true
-      end
-      stop_play
-      clean_zills
-      return play_climbing_song?
-    when 'You begin a', 'You effortlessly begin', 'You begin some'
-      # Ignore difficulty messages if we have an offset
-      return true if UserVars.climbing_song_offset
-
-      stop_play
-      UserVars.climbing_song = @song_list[UserVars.climbing_song] || @song_list.first.first
-      return play_climbing_song?
-    when 'You struggle to begin'
-      # Ignore difficulty message if we have an offset
-      return true if UserVars.climbing_song_offset
-      return true if UserVars.climbing_song == @song_list.first.first
-
-      stop_play
-      UserVars.climbing_song = @song_list.first.first
-      return play_climbing_song?
-    end
-
-    true
-  end
-
   def offset_climbing_song(direction)
     return unless UserVars.climbing_song_offset
     return unless @song_list
@@ -157,11 +105,11 @@ class Athletics
     end
   end
 
-  def train_with_rope
+  def train_with_rope(stationary)
     return unless exists?("#{@settings.climbing_rope_adjective} rope")
-    return unless exists?('zills')
+    return unless exists?(@settings.worn_instrument)
 
-    UserVars.climbing_song ||= UserVars.song
+    UserVars.climbing_song ||= pick_climbing_song
     echo "UserVars.climbing_song: #{UserVars.climbing_song}" if UserVars.athletics_debug
 
     @song_list = get_data('perform').perform_options
@@ -170,20 +118,24 @@ class Athletics
     Flags.add('climbing-finished', 'You finish practicing your climbing', 'The rope\'s will quickly fades away', 'Your focus diverts away from the rope')
     Flags.add('climbing-too-hard', 'This climb is too difficult')
     Flags.add('climbing-too-easy', 'This climb is no challenge at all, so you stop practicing')
+    Flags.add('climbing-dead-rope', '^You believe you can use it for \d+ minutes per day\.', '^You finish practicing your climbing skill just as your rope begins to slacken')
+    Flags.add('climbing-live-rope', '^You believe you haven\'t yet used it today')
 
     stow_hands
-    walk_to @settings.safe_room
+    walk_to @settings.safe_room unless stationary
     case bput("get #{@settings.climbing_rope_adjective} rope", 'You are already holding that', 'You get', 'What were you', 'But that is already')
     when 'But that is already'
       bput("remove my #{@settings.climbing_rope_adjective} rope", 'You remove')
     end
-    until done_training?
+    Flags['climbing-dead-rope'] = !check_rope?
+    until done_training? || Flags['climbing-dead-rope']
       fix_standing
       Flags.reset('climbing-finished')
-      break unless play_climbing_song?
+      break unless DRC.play_song?(@settings, @song_list, true, true, true)
       case bput("climb practice #{@settings.climbing_rope_adjective} rope", 'You begin to practice ', 'you mime a convincing climb while pulling the rope hand over hand', 'Directing your attention toward your rope', 'Allows you to climb various things like a tree', 'But you aren\'t holding', 'You should stop practicing')
       when /you mime/
-        break unless play_climbing_song?
+        break unless check_rope?
+        break unless DRC.play_song?(@settings, @song_list, true, true, true)
       when /Directing your/, /You should stop practicing/
         loop do
           pause 1
@@ -191,15 +143,18 @@ class Athletics
           if Flags['climbing-too-hard']
             Flags.reset('climbing-too-hard')
             UserVars.climbing_song_offset = true
-            stop_play
+            DRC.stop_playing
             offset_climbing_song(-1)
             break
           elsif Flags['climbing-too-easy']
             Flags.reset('climbing-too-easy')
             UserVars.climbing_song_offset = true
-            stop_play
+            DRC.stop_playing
             offset_climbing_song(1)
             break
+          elsif Flags['dead-rope']
+            break unless check_rope?
+            break unless DRC.play_song?(@settings, @song_list, true, true, true)
           end
         end
       when /Allows you to climb various things like a tree/
@@ -212,9 +167,38 @@ class Athletics
     Flags.delete('climbing-finished')
     Flags.delete('climbing-too-easy')
     Flags.delete('climbing-too-hard')
+    Flags.delete('climbing-dead-rope')
     bput('stop climb', 'You stop practicing your climbing skills.', "You weren't practicing your climbing skills anyway.")
+    DRC.stop_playing
     fix_standing
     stow_hands
+  end
+
+  def check_rope?
+    bput("study #{@settings.climbing_rope_adjective} rope", 'You\'re certain you can')
+    pause 1
+    if Flags['climbing-dead-rope'] && !Flags['climbing-live-rope']
+      DRC.message('Your rope is dead tired! Get a better one, you poor slob!')
+      false
+    else
+      true
+    end
+  end
+
+  def pick_climbing_song
+    # start at a high difficulty guess and work downwards
+    case DRSkill.getrank('Athletics')
+    when 0..100
+      'lament'
+    when 100..250
+      'psalm'
+    when 250..350
+      'tarantella'
+    when 350..450
+      'rondo'
+    when 450..1750
+      'concerto masterful'
+    end
   end
 
   def crossing_athletics
@@ -222,7 +206,7 @@ class Athletics
       swim_loop(get_data('athletics').swimming_options['arthe_dale']['rooms'])
     elsif UserVars.athletics < 290
       waitrt?
-      pause 3 # to give performance time to complete before_dying if stopped from the previous script
+      pause @performance_pause # to give performance time to complete before_dying if stopped from the previous script
       start_script('performance') unless Script.running?('performance')
       until done_training?
         @athletics_options
@@ -244,7 +228,7 @@ class Athletics
     until done_training?
       if UserVars.athletics > 20 && UserVars.athletics <= 90
         swim_zaldeni
-      elsif UserVars.athletics < 250
+      elsif UserVars.athletics < 240
         override_location_and_practice('shard_embrasure')
       elsif UserVars.athletics < 540
         climb_cliffs
@@ -307,7 +291,7 @@ class Athletics
         return if remaining_attempts.zero?
       else
         start_script('performance', ['noclean']) unless Script.running?('performance')
-        pause 2 # make sure you are playing before starting climb practice
+        pause @performance_pause # make sure you are playing before starting climb practice
       end
       Flags.add('ct-climbing-finished', 'You finish practicing your climbing')
       Flags.add('ct-climbing-combat', 'You are engaged in combat')
@@ -350,7 +334,9 @@ class Athletics
         walk_to(19_464)
         break if done_training?
         walk_to(@outdoorsmanship_rooms.sample) unless @outdoorsmanship_rooms.empty?
+        stow_athletics_items
         wait_for_script_to_complete('outdoorsmanship', ['4'])
+        get_athletics_items
       end
     else
       climb_wyvern
@@ -365,7 +351,9 @@ class Athletics
       walk_to(2900)
       break if done_training?
       walk_to(@outdoorsmanship_rooms.sample) unless @outdoorsmanship_rooms.empty?
+      stow_athletics_items
       wait_for_script_to_complete('outdoorsmanship', ['4'])
+      get_athletics_items
     end
   end
 
@@ -382,7 +370,9 @@ class Athletics
       walk_to(6443)
       break if done_training?
       walk_to(@outdoorsmanship_rooms.sample) unless @outdoorsmanship_rooms.empty?
+      stow_athletics_items
       wait_for_script_to_complete('outdoorsmanship', ['3'])
+      get_athletics_items
     end
   end
 
@@ -393,7 +383,9 @@ class Athletics
       walk_to(6154)
       break if done_training?
       walk_to(@outdoorsmanship_rooms.sample) unless @outdoorsmanship_rooms.empty?
+      stow_athletics_items
       wait_for_script_to_complete('outdoorsmanship', ['4'])
+      get_athletics_items
     end
   end
 end

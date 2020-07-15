@@ -58,7 +58,6 @@ class Sew
 
     Flags.add('sew-assembly', 'another finished \S+ shield (handle)', 'another finished wooden (hilt|haft)', 'another finished (long|short|small|large) leather (cord|backing)', 'another finished (small|large) cloth (padding)', 'another finished (long|short) wooden (pole)')
     Flags.add('sew-pins', 'The pins is all used up, so you toss it away.')
-    Flags.add('sew-magic-ready', 'You feel fully prepared to cast your spell.')
 
     if args.type == 'knitting'
       knit
@@ -89,9 +88,11 @@ class Sew
 
   def check_thread
     return if exists?('cotton thread')
+    room = Room.current.id
     ensure_copper_on_hand(1000, @settings)
     order_item(@hometown_data['stock-room'], 6)
     stow_item('cotton thread')
+    walk_to(room)
   end
 
   def check_pins
@@ -99,8 +100,10 @@ class Sew
     ensure_copper_on_hand(125, @settings)
     item = left_hand
     stow_item(item)
+    room = Room.current.id
     order_item(@hometown_data['tool-room'], 5)
     stow_item('pin')
+    walk_to(room)
     get_item(item)
     Flags.reset('sew-pins')
   end
@@ -120,7 +123,7 @@ class Sew
 
   def leather
     check_thread
-    magic_routine
+    crafting_magic_routine(@settings)
     study_tailoring(@chapter, @recipe_name)
     get_item("#{@mat_type} leather")
     do_sew("cut my #{@mat_type} leather with my scissors", 'scissors')
@@ -128,14 +131,14 @@ class Sew
 
   def sew
     check_thread
-    magic_routine
+    crafting_magic_routine(@settings)
     study_tailoring(@chapter, @recipe_name)
     get_item("#{@mat_type} cloth")
     do_sew("cut my #{@mat_type} cloth with my scissors", 'scissors')
   end
 
   def knit
-    magic_routine
+    crafting_magic_routine(@settings)
     study_tailoring(@chapter, @recipe_name)
     get_item('knitting needle')
     pause 1
@@ -146,13 +149,13 @@ class Sew
 
   def seal
     Flags.add('sealing-done', 'shows improved signs of durability and wear resistance from the successful sealing process')
-    study_tailoring(1, ': tailored armor sealing')
+    study_tailoring(1, 'tailored armor sealing')
     do_seal(true)
   end
 
   def lighten
     check_thread
-    study_tailoring(1, ': tailored armor lightening')
+    study_tailoring(1, 'tailored armor lightening')
     get_item('scissors')
     @noun = GameObj.right_hand.noun
     do_sew("cut my #{@noun} with my scissors", 'scissors', true)
@@ -160,7 +163,7 @@ class Sew
 
   def reinforce
     check_thread
-    study_tailoring(1, ': tailored armor reinforcing')
+    study_tailoring(1, 'tailored armor reinforcing')
     get_item('scissors')
     @noun = GameObj.right_hand.noun
     do_sew("cut my #{@noun} with my scissors", 'scissors')
@@ -196,20 +199,44 @@ class Sew
     do_seal !wax
   end
 
+  def resume_knit
+    bput('analyze my knitting needles',
+         /You analyze both the needles and (?:some|an?) unfinished knitted .+ (.+) on them/,
+         'This appears to be a crafting tool',
+         'Roundtime')
+    pause 1
+    results = reget(40)
+    unless results.to_s =~ /You analyze both the needles and (?:some|an?) unfinished knitted .+ (.+) on them/
+      echo 'Nothing found on the needles.  Exiting'
+      exit
+    end
+    @noun = Regexp.last_match(1).to_s
+    echo "Found an unfinished #{@noun} on the needles."
+    do_knit('push my knitting needles') if results.to_s.include?('purl stitching')
+    do_knit('knit my knitting needles') if results.to_s.include?('more knitting')
+    do_knit('turn my knitting needles') if results.to_s.include?('need to be turned')
+    cast_and_finish if results.to_s.include?('must be cast')
+    exit
+  end
+
   def resume
     waitrt?
+    resume_knit if @noun.include?('needle') || right_hand.include?('knitting needles') || left_hand.include?('knitting needles')
+
     case bput("analyze my #{@noun}",
               'dimensions changed while working on it',
               'is in need of pinning to help arrange the material for further sewing',
               'pushing it with a needle and thread',
               'Deep creases and wrinkles in the fabric',
+              'scissor cuts',
+              'cutting with some scissors',
               'Roundtime')
     when 'dimensions changed while working on it'
       tool = 'yardstick'
       next_command = "measure my #{@noun} with my yardstick"
-    # when 'With the measuring complete, now it is time to cut away more'
-    #   tool = 'scissors'
-    #   next_command = "cut my #{@noun} with my scissors"
+    when 'scissor cuts', 'cutting with some scissors'
+      tool = 'scissors'
+      next_command = "cut my #{@noun} with my scissors"
     when 'is in need of pinning to help arrange the material for further sewing'
       tool = 'pins'
       next_command = "poke my #{@noun} with my pins"
@@ -234,7 +261,7 @@ class Sew
 
   def do_sew(command, tool, lighten = false)
     waitrt?
-    magic_routine
+    crafting_magic_routine(@settings)
     stow_item(left_hand) if checkleft
     if @last_command == "cut my #{@mat_type} cloth with my scissors"
       fput("stow my #{@mat_type} cloth")
@@ -243,7 +270,6 @@ class Sew
     end
     get_item(tool)
     @last_command = command
-    check_pins
     assemble_part
     next_command = "push my #{@noun} with my needles"
     case bput(command,
@@ -266,6 +292,7 @@ class Sew
     when 'and could use some pins to'
       tool = 'pins'
       next_command = "poke my #{@noun} with my pins"
+      check_pins
     when 'deep crease develops along', 'wrinkles from all the handling and could use'
       tool = 'slickstone'
       next_command = "scrape my #{@noun} with my slickstone"
@@ -311,30 +338,8 @@ class Sew
         tool = 'sewing needles'
       end
     end
-    magic_routine
+    crafting_magic_routine(@settings)
     do_sew(next_command, tool, lighten)
-  end
-
-  def magic_routine
-    return if @training_spells.empty?
-
-    needs_training = %w[Warding Utility Augmentation]
-                     .select { |skill| @training_spells[skill] }
-                     .select { |skill| DRSkill.getxp(skill) < 31 }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
-    return unless needs_training
-
-    data = @training_spells[needs_training]
-
-    if Flags['sew-magic-ready'] && mana > 40
-      crafting_cast_spell(data, @settings)
-      Flags.reset('sew-magic-ready')
-      @preparing = false
-    end
-
-    return if @preparing
-    crafting_prepare_spell(data, @settings)
-    @preparing = true
   end
 
   def magic_cleanup
@@ -347,7 +352,7 @@ class Sew
 
   def do_knit(command)
     waitrt?
-    magic_routine
+    crafting_magic_routine(@settings)
     next_command = 'knit my needles'
     case bput(command,
               'Now the needles must be turned', 'Some ribbing should be added',
@@ -356,7 +361,8 @@ class Sew
               'You are already knitting',
               'Roundtime',
               'That tool does not seem suitable for that task.',
-              'You need a larger amount of material')
+              'You need a larger amount of material',
+              'is not here!')
     when 'Now the needles must be turned', 'Some ribbing should be added'
       next_command = 'turn my needles'
     when 'Next the needles must be pushed', 'ready to be pushed'
@@ -368,6 +374,8 @@ class Sew
       bput('pull my needles', 'You untie and discard')
       do_knit(command)
       next_command = ''
+    when 'is not here!'
+      do_knit(command.sub(' my', ''))
     when 'That tool does not seem suitable for that task.'
       case bput('analyze my needles', 'is in need of more knitting.', 'The needles need to be turned', 'Some purl stitching is', 'needles must be cast')
       when 'is in need of more knitting.'
@@ -385,7 +393,7 @@ class Sew
     end
     waitrt?
     stow_item('yarn') if left_hand =~ /yarn/i
-    magic_routine
+    crafting_magic_routine(@settings)
     do_knit(next_command)
   end
 
@@ -422,7 +430,6 @@ before_dying do
   Flags.delete('sew-assembly')
   Flags.delete('sew-pins')
   Flags.delete('sealing-done')
-  Flags.delete('sew-magic-ready')
 end
 
 Sew.new

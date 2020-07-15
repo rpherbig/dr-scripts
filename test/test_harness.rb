@@ -4,6 +4,89 @@ module Harness
   # Lich global for the last time a script sent a command to the game
   $_SCRIPTIDLETIMESTAMP_ = Time.now
 
+  class DRSpells
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_active_spells(val)
+      @@_data_store['active_spells'] = val
+    end
+
+    def self.active_spells
+      @@_data_store['active_spells'] || {}
+    end
+  end
+
+  class DRStats
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_guild(val)
+      @@_data_store['guild'] = val
+    end
+
+    def self.guild
+      @@_data_store['guild'] || 'Ranger'
+    end
+  end
+
+  class DRSkill
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self._set_rank(skillname, val)
+      @@_data_store[skillname] = val
+    end
+
+    def self.getrank(skillname)
+      @@_data_store[skillname] || 100
+    end
+  end
+
+  class Flags
+    @@flags = {}
+    @@matchers = {}
+
+    def self.[](key)
+      @@flags[key]
+    end
+
+    def self.[]=(key, value)
+      @@flags[key] = value
+    end
+
+    def self.add(key, *matchers)
+      @@flags[key] = false
+      @@matchers[key] = matchers.map { |item| item.is_a?(Regexp) ? item : /#{item}/i }
+    end
+
+    def self.reset(key)
+      @@flags[key] = false
+    end
+
+    def self.delete(key)
+      @@matchers.delete key
+      @@flags.delete key
+    end
+
+    def self.flags
+      @@flags
+    end
+
+    def self.matchers
+      @@matchers
+    end
+  end
+
   class Script
     def gets?
       get?
@@ -128,7 +211,7 @@ module Harness
     $history ? $history.shift : nil
   end
 
-  alias_method('get', 'get?')
+  alias get get?
 
   def reget(*lines)
     lines.flatten!
@@ -188,11 +271,14 @@ module Harness
     thread
   end
 
-  def run_script_with_proc(script, test)
+  def run_script_with_proc(scripts, test)
     # Thread.abort_on_exception=true
     thread = Thread.new do
-      script = "#{script}.lic" unless script.end_with?('.lic')
-      load script
+      scripts = [scripts] unless scripts.is_a?(Array)
+      scripts.each do |script|
+        script = "#{script}.lic" unless script.end_with?('.lic')
+        load script
+      end
       test.call
     end
     $threads ||= []
@@ -207,8 +293,8 @@ module Harness
       loop do
         message = sent_messages.pop
         if $debug_message_assert
-          puts message
-          puts expected_messages.to_s
+          puts "message  :  #{message}"
+          puts "expected :#{expected_messages}"
         end
         expected_messages.delete_at(expected_messages.index(message) || expected_messages.length)
         break if expected_messages.empty?
@@ -220,7 +306,7 @@ module Harness
       sleep 0.1 if consumer.alive?
     end
 
-    $threads.last.kill
+    $threads.last.kill if $threads
 
     $debug_message_assert = false
     assert_empty expected_messages, 'Expected script to send messages'

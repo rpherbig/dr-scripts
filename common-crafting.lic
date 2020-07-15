@@ -88,6 +88,16 @@ module DRCC
     end
   end
 
+  def find_enchanting_room(hometown, override = nil)
+    if override
+      DRCT.walk_to(override)
+    else
+      enchanting_rooms = get_data('crafting')['artificing'][hometown]['brazier-rooms']
+      idle_room = get_data('crafting')['artificing'][hometown]['idle-room']
+      DRCT.find_sorted_empty_room(enchanting_rooms, idle_room)
+    end
+  end
+
   def recipe_lookup(recipes, item_name)
     match_names = recipes.map { |x| x['name'] }.select { |x| x =~ /#{item_name}/i }
     case match_names.length
@@ -112,7 +122,8 @@ module DRCC
       fput('look')
       fput('exit')
     end
-    recipe = DRC.bput('read my book', "Page \\d+.*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
+
+    recipe = DRC.bput('read my book', "Page \\d+:\\s(?:some|a|an)?\\s*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
     recipe =~ /(\d+):/
     Regexp.last_match(1)
   end
@@ -120,14 +131,21 @@ module DRCC
   def get_crafting_item(name, bag, bag_items, belt, skip_exit = false)
     waitrt?
     if belt && belt['items'].find { |item| /\b#{name}/i =~ item || /\b#{item}/i =~ name }
-      if DRC.bput("untie my #{name} from my #{belt['name']}", 'You (remove|untie)', 'Untie what') =~ /You (remove|untie)/
+      if DRC.bput("untie my #{name} from my #{belt['name']}", 'You (remove|untie)', 'Untie what', 'Your wounds hinder your ability to do that.') =~ /You (remove|untie)/
         return
+      elsif DRC.bput("untie my #{name} from my #{belt['name']}", 'You (remove|untie)', 'Untie what', 'Your wounds hinder your ability to do that.') =~ /Your wounds hinder your ability to do that./
+        craft_room = Room.current.id
+        wait_for_script_to_complete('safe-room', ['force'])
+        DRCT.walk_to(craft_room)
+        return get_crafting_item(name, bag, bag_items, belt)
       end
     end
     command = "get my #{name}"
     command += " from my #{bag}" if bag_items && bag_items.include?(name)
     case DRC.bput(command, '^You get', '^You are already', '^What do you', '^What were you', 'You pick up', "can't quite lift it")
     when 'What do you', 'What were you'
+      pause 2
+      return if DRCI.in_hands?(name)
       beep
       echo("You seem to be missing: #{name}")
       exit unless skip_exit
@@ -141,10 +159,18 @@ module DRCC
 
     waitrt?
     if belt && belt['items'].find { |item| /\b#{name}/i =~ item || /\b#{item}/i =~ name }
-      DRC.bput("tie my #{name} to my #{belt['name']}", 'you attach')
+      case DRC.bput("tie my #{name} to my #{belt['name']}", 'you attach', 'Your wounds hinder')
+      when 'Your wounds hinder'
+        craft_room = Room.current.id
+        wait_for_script_to_complete('safe-room', ['force'])
+        DRCT.walk_to(craft_room)
+        return stow_crafting_item(name, bag, belt)
+      end
     else
-      case DRC.bput("put my #{name} in my #{bag}", 'You put your', 'What were you referring to', 'is too \w+ to fit', 'You can\'t put that there', 'You combine')
-      when /is too \w+ to fit/
+      case DRC.bput("put my #{name} in my #{bag}", 'You put your', 'What were you referring to', 'is too \w+ to fit', 'Weirdly, you can\'t manage', 'There\'s no room', 'You can\'t put that there', 'You combine')
+      when /is too \w+ to fit/, 'Weirdly, you can\'t manage', 'There\'s no room'
+        fput("stow my #{name}")
+      when 'Weirdly, you can\'t manage'
         fput("stow my #{name}")
       when 'You can\'t put that there'
         fput("put my #{name} in my other #{bag}")
@@ -156,13 +182,46 @@ module DRCC
 
   def logbook_item(logbook, noun, container)
     DRC.bput("get my #{logbook} logbook", 'You get')
-    case bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.')
+    case DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.')
     when 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.'
       dispose_trash(noun)
     end
     case DRC.bput("put my #{logbook} logbook in my #{container}", 'You put', 'What were you referring to')
     when 'What were you referring to'
       DRC.bput("stow my #{logbook} logbook", 'You put', 'What were you referring to')
+    end
+  end
+
+  def order_enchant(stock_room, stock_needed, stock_number, bag, belt)
+    stock_needed.times do
+      order_item(stock_room, stock_number)
+      stow_crafting_item(left_hand, bag, belt)
+      stow_crafting_item(right_hand, bag, belt)
+      next unless left_hand && right_hand
+    end
+  end
+
+  def fount(stock_room, stock_needed, stock_number, quantity, bag, bag_items, belt)
+    case bput('tap my fount', /You tap .* inside your .*/, /You tap .*your .*/, /I could not find what you were referring to./)
+    when /You tap (.*) inside your (.*)/, /You tap (.*) your (.*)/
+      /(\d+)/ =~ bput('analyze my fount', 'This appears to be a crafting tool and it has approximately \d+ uses remaining')
+      if Regexp.last_match(1).to_i < (quantity + 1)
+        get_crafting_item('fount', bag, bag_items, belt)
+        dispose('fount')
+        stow_hands
+        order_enchant(stock_room, stock_needed, stock_number, bag, belt)
+      end
+    when /I could not find what you were referring to./
+      case bput('tap my fount on my brazier', 'You tap .* atop a brazier.', 'I could not find what you were referring to.')
+      when /You tap (.*) atop a brazier./
+        /(\d+)/ =~ bput('analyze my fount on my brazier', 'This appears to be a crafting tool and it has approximately \d+ uses remaining')
+        if Regexp.last_match(1).to_i < quantity
+          stow_hands
+          order_enchant(stock_room, stock_needed, stock_number, bag, belt)
+        end
+      when /I could not find what you were referring to./
+        order_enchant(stock_room, stock_needed, stock_number, bag, belt)
+      end
     end
   end
 end

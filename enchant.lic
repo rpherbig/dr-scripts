@@ -2,13 +2,12 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#enchant
 =end
 
-custom_require.call(%w[common common-arcana events common-crafting common-travel equipmanager])
+custom_require.call(%w[common common-arcana events common-crafting equipmanager])
 
 class Enchant
   include DRC
   include DRCC
   include DRCA
-  include DRCT
 
   def initialize
     @settings = get_settings
@@ -16,6 +15,8 @@ class Enchant
     @bag = @settings.crafting_container
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.enchanting_belt
+    @bag = @settings.crafting_container
+    @stamp = @settings.mark_crafted_goods
 
     arg_definitions = [
       [
@@ -30,7 +31,7 @@ class Enchant
     Flags.add('enchant-imbue', 'Once finished you sense an imbue spell will be required to continue enchanting')
     Flags.add('enchant-push', 'You notice many of the scribed sigils are slowly merging back')
     Flags.add('enchant-sigil', /You need another ([\w ]*)(primary|secondary) sigil to continue the enchanting process/)
-    Flags.add('enchant-complete', 'With the enchanting process completed, you believe it is safe to collect your things once more.', 'With the enchantment complete')
+    Flags.add('enchant-complete', 'With the enchanting process completed, you believe it is safe to collect your things once more.', 'With the enchantment complete', 'With enchanting complete')
     Flags.add('imbue-failed', 'The streams collide, rending the space before you and disrupting the enchantment')
     Flags.add('imbue-backlash', 'Suddenly the streams slip through your grasp and cascade violently against each other')
 
@@ -58,15 +59,24 @@ class Enchant
 
     @equipment_manager = EquipmentManager.new
     @equipment_manager.empty_hands
-
-    if @use_own_brazier
-      walk_to(@settings.enchanting_room) if @settings.enchanting_room
-    end
-
+    wait_for_script_to_complete('buff', ['enchant'])
     study_recipe
-
-    get_item(@fount)
-    bput("wave #{@fount} at #{@item} on #{@brazier}", 'You slowly wave')
+    @item = 'fount' if @item == 'small sphere'
+    if @item != 'fount'
+      case bput("tap my #{@fount}", /You tap an unfinished .* atop your brazier./, /You tap .*your .*/, /What were/)
+        # when /You tap an unfinished (.*) atop your brazier./
+        # fput("get my #{@fount} from my #{@bag}")
+      when /You tap (.*) your (.*)/
+        get_item(@fount)
+      when /What were/
+        cleanup
+        exit
+      end
+      case bput("wave my #{@fount} at #{@item} on #{@brazier}", 'You slowly wave', 'The fragile mana fount is not required')
+      when 'The fragile mana fount is not required'
+        stow_item(@fount)
+      end
+    end
 
     imbue
 
@@ -78,26 +88,33 @@ class Enchant
     get_item("#{@book_type} book")
     turn_to("page #{find_recipe(@chapter, @recipe)}")
     bput("study my #{@book_type} book", 'You scan', 'You review')
-
-    @equipment_manager.empty_hands
+    stow_item("#{@book_type} book")
     get_item(@brazier) if @use_own_brazier
 
-    case bput("get my #{@item}", 'You get a', 'That is far too dangerous')
+    case bput("get my #{@item} from my #{@bag}", 'You get a', 'That is far too dangerous')
     when 'That is far too dangerous'
       clean_brazier
       empty_brazier
-      bput("get my #{@item}", 'You get a')
+      bput("get my #{@item} from my #{@bag}", 'You get a')
     end
     2.times do
       case bput("put my #{@item} on #{@brazier}", 'You glance down', 'With a flick', 'You must first clean', 'You put')
       when 'With a flick', 'You put'
+        waitrt?
         break
       when 'You must first clean'
         clean_brazier
         empty_brazier
+        bput("get my #{@item} from my #{@bag}", 'You get a')
+        2.times do
+          case bput("put my #{@item} on #{@brazier}", 'You glance down', 'With a flick', 'You put')
+          when 'With a flick', 'You put'
+            waitrt?
+            break
+          end
+        end
       end
     end
-    waitrt?
   end
 
   def imbue
@@ -124,20 +141,23 @@ class Enchant
   end
 
   def clean_brazier
-    case bput("clean #{@brazier}", 'You prepare to clean off the brazier', 'There is nothing')
+    case bput("clean #{@brazier}", 'You prepare to clean off the brazier', 'There is nothing', 'The brazier is not currently lit')
     when 'You prepare to clean off the brazier'
       bput("clean #{@brazier}", 'a massive ball of flame jets forward and singes everything nearby')
+    when 'The brazier is not currently lit'
+      stow_item(left_hand) if left_hand
     end
   end
 
   def empty_brazier
-    case bput("look on #{@brazier}", /On the brazier you see (.*)./, 'There is nothing')
-    when /On the brazier you see (.*)./
-      items = Regexp.last_match(1)
+    stow_item(left_hand) if left_hand
+    case bput("look on #{@brazier}", /On the (.*)brazier you see (.*)./, 'There is nothing')
+    when /On the (.*)brazier you see (.*)./
+      items = Regexp.last_match(2)
       items = items.split(' and ')
       items.each do |item|
         item = item.split.last
-        get_item(item)
+        bput("get #{item} from brazier",'You get')
         stow_crafting_item(item, @bag, @belt)
       end
     end
@@ -152,7 +172,7 @@ class Enchant
 
   def scribe
     if Flags['enchant-sigil']
-      sigil_type = Flags['enchant-sigil'][1]
+      sigil_type = Flags['enchant-sigil'][1].delete(' ')
       Flags.reset('enchant-sigil')
       sigil_type = 'induction' if sigil_type == ''
       stow_item(@burin)
@@ -166,7 +186,7 @@ class Enchant
       scribe
     elsif Flags['enchant-meditate']
       Flags.reset('enchant-meditate')
-      bput('meditate fount', 'Roundtime')
+      bput("meditate fount on #{@brazier}", 'Roundtime')
       waitrt?
       scribe
     elsif Flags['enchant-push']
@@ -194,6 +214,7 @@ class Enchant
       stow_item(right_hand) if right_hand
       stow_item(left_hand) if left_hand
       cleanup
+      stamp_item
       exit
     else
       bput("scribe #{@item} on #{@brazier} with my #{@burin}", 'Roundtime')
@@ -201,12 +222,22 @@ class Enchant
     end
   end
 
+  def stamp_item
+    if @stamp
+      get_item('stamp')
+      fput("mark my #{@item} with my stamp")
+      pause
+      waitrt?
+      stow_item('stamp')
+    end
+  end
+
   def cleanup
     stow_item(right_hand) if right_hand
     stow_item(left_hand) if left_hand
-    get_item(@fount)
-    stow_item(@fount)
-    get_item(@item)
+    get_item(@fount) unless @item == 'fount'
+    stow_item(@fount) unless @item == 'fount'
+    bput("get my #{@item}", 'You', 'What')
   end
 
   def get_item(name)

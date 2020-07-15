@@ -75,7 +75,7 @@ module DRCA
         activate_barb_buff(name)
         waitrt?
         pause settings.meditation_pause_timer.to_i if get_data('spells').barb_abilities[name]['type'].eql? 'meditation'
-        fix_standing
+        DRC.fix_standing
       end
   end
 
@@ -87,7 +87,7 @@ module DRCA
       DRC.bput('sit', 'You sit', 'You are already', 'You rise')
       activate_barb_buff(name)
     when 'You should stand'
-      fix_standing
+      DRC.fix_standing
       activate_barb_buff(name)
     end
   end
@@ -120,10 +120,10 @@ module DRCA
     command = spell['prep_type'] if spell['prep_type']
 
     return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'], command)
-    find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
+    find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'], spell['sheathed_focus'])
 
     invoke(spell['focus'], nil, nil)
-    stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'])
+    stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'], spell['sheathed_focus'])
     DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
 
     waitcastrt?
@@ -171,19 +171,21 @@ module DRCA
     stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
   end
 
-  def find_focus(focus, worn, tied)
+  def find_focus(focus, worn, tied, sheathed)
     return unless focus
 
     if worn
       DRC.bput("remove my #{focus}", 'You remove', 'You slide', 'You sling', 'You take')
     elsif tied
       DRC.bput("untie my #{focus} from my #{tied}", 'You remove', '[Y|y]ou untie')
+    elsif sheathed
+      DRC.bput("wield my #{focus}", 'You draw out your')
     else
       DRC.bput("get my #{focus}", 'You get')
     end
   end
 
-  def stow_focus(focus, worn, tied)
+  def stow_focus(focus, worn, tied, sheathed)
     return unless focus
 
     if worn
@@ -192,8 +194,10 @@ module DRCA
       case DRC.bput("tie my #{focus} to my #{tied}", 'You attach', '[Y|y]ou tie', 'You are a little too busy to be worrying')
       when 'You are a little too busy to be worrying'
         DRC.retreat
-        stow_focus(focus, worn, tied)
+        stow_focus(focus, worn, tied, sheathed)
       end
+    elsif sheathed
+      DRC.bput("sheathe #{focus}", "You sheathe")
     else
       DRC.bput("stow my #{focus}", 'You put', 'You easily strap your')
     end
@@ -201,17 +205,17 @@ module DRCA
 
   def find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("get my #{cambrinth}", 'You get')
+      DRC.bput("get my #{cambrinth}", 'You get', 'You are already holding that')
     elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach')
+      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach', 'You aren\'t wearing that.', 'You grab your','You clutch')
     end
   end
 
   def stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("stow my #{cambrinth}", 'You put')
+      DRC.bput("stow my #{cambrinth}", 'You put', 'Stow what')
     elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place')
+      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place', 'You gently suspend','You slip')
     end
   end
 
@@ -229,13 +233,13 @@ module DRCA
   def invoke(cambrinth, dedicated_camb_use, invoke_amount)
     return unless cambrinth
 
-    DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages)
+    DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages, 'Invoke what?')
     pause
     waitrt?
   end
 
   def charge?(cambrinth, mana)
-    result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages)
+    result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages, 'I could not find')
     pause
     waitrt?
     result =~ /absorbs? all of the energy/
@@ -252,14 +256,14 @@ module DRCA
 
   def parse_regalia # generates an array of currently-worn regalia armor nouns
     return unless DRStats.trader?
-    DRC.bput('inv armor', 'Type INVENTORY HELP for more options')
+    DRC.bput('inv armor', 'Use INVENTORY HELP for more options')
     snapshot = reget(40)
-    if snapshot.grep(/All of your armor|You aren't wearing anything like that/).any? && snapshot.grep(/Type INVENTORY HELP/).any?
+    if snapshot.grep(/All of your armor|You aren't wearing anything like that/).any? && snapshot.grep(/Use INVENTORY HELP/).any?
       snapshot
         .map(&:strip)
         .reverse
         .take_while { |item| !['All of your armor:', "You aren't wearing anything like that."].include?(item) }
-        .drop_while { |item| item != '[Type INVENTORY HELP for more options]' }
+        .drop_while { |item| item != '[Use INVENTORY HELP for more options.]' }
         .drop(1)
         .select { |item| item.include?('rough-cut crystal') || item.include?('faceted crystal') || item.include?('resplendent crystal') }
         .map { |item| DRC.get_noun(item) }
@@ -328,7 +332,8 @@ module DRCA
       'A steady pulse of starlight runs through your aura',
       'Starlight dances vividly across the confines of your aura',
       'Strong pulses of starlight flare within your aura',
-      'Your aura seethes with brilliant starlight'
+      'Your aura seethes with brilliant starlight',
+      'Your aura is blinding'
     ]
     Flags.add('aura-level', Regexp.union(starlight_messages))
     Flags.add('aura-capped?', 'Your aura contains as much starlight as you can safely handle')
@@ -348,8 +353,8 @@ module DRCA
     infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
     spells.each do |name, data|
       next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
-      while mana < 40
-        echo('Waiting on mana...')
+      while (mana < settings.waggle_spells_mana_threshold || DRStats.concentration < settings.waggle_spells_concentration_threshold)
+        echo("Waiting on mana over #{settings.waggle_spells_mana_threshold} or concentration over #{settings.waggle_spells_concentration_threshold}...")
         pause 15
       end
 
@@ -638,5 +643,64 @@ module DRCA
     return unless needs_training
 
     crafting_prepare_spell(training_spells[needs_training], settings)
+  end
+
+  def do_buffs(settings, set_name)
+    # takes a waggle and sends it to the appropriate helper
+    return unless settings.waggle_sets[set_name]
+
+    spells = settings.waggle_sets[set_name]
+
+    if DRStats.barbarian?
+      start_barb_abilities(spells, settings)
+    elsif DRStats.thief?
+      start_khris(spells, settings)
+    else
+      spells.values
+            .select { |spell| spell['use_auto_mana'] }
+            .each { |spell| check_discern(spell, settings) }
+      cast_spells(spells, settings, settings.waggle_force_cambrinth)
+    end
+  end
+
+  def update_avtalia
+    DRC.bput("focus cambrinth", /^The .+ pulses? .+ (\d+)/, 'dim, almost magically null', '^You let your magical senses wander')
+    waitrt?
+  end
+
+  def invoke_avtalia(cambrinth, dedicated_camb_use, invoke_amount)
+    return unless cambrinth
+    return unless Script.running?('avtalia')
+
+    invoke(cambrinth, dedicated_camb_use, invoke_amount)
+    UserVars.avtalia[cambrinth]['mana'] -= [mana, invoke_amount].min
+  end
+
+  def charge_avtalia(cambrinth, charge_amount)
+    return unless cambrinth
+    return unless Script.running?('avtalia')
+
+    if !charge?(cambrinth, charge_amount)
+      UserVars.avtalia[cambrinth]['mana'] = UserVars.avtalia[cambrinth]['cap']
+    else
+      # Experiments show very roughly 10% falloff regardless of cap every 10 minutes
+      # Assume 10% every 5 minutes.  No falloff in starlight, but that's not tracked ATM.
+      time_diff = Time.now - UserVars.avtalia[cambrinth]['time_seen']
+      time_mod = (time_diff / 300.0).floor
+      time_adjust = 1 - [time_mod * 0.10, 1.0].min
+      assumed_reserve = (UserVars.avtalia[cambrinth]['mana'] * time_adjust).floor + charge_amount
+      UserVars.avtalia[cambrinth]['mana'] = [assumed_reserve, UserVars.avtalia[cambrinth]['cap']].min
+    end
+    UserVars.avtalia[cambrinth]['time_seen'] = Time.now
+  end
+
+  def choose_avtalia(charge_needed, mana_percentage)
+    camb_to_use = UserVars.avtalia.select { |camb, data| data['time_seen'] && data['cap'] && data['mana'] }
+                                  .select { |camb, data| Time.now - data['time_seen'] < 600.0 }
+                                  .select { |camb, data| (data['mana'].to_f / data['cap'].to_f) * 100 >= mana_percentage }
+                                  .select { |camb, data| data['mana'] > charge_needed / 10 }
+                                  .max_by { |camb, data| data['mana'] }
+
+    return camb_to_use ? camb_to_use : {}
   end
 end

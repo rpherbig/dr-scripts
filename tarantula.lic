@@ -1,0 +1,140 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#tarantula
+=end
+
+custom_require.call(%w(common drinfomon))
+
+class Tarantula
+  include DRC
+  
+  def initialize
+    settings = get_settings
+    @tarantula = settings.tarantula
+    @tarantula_noun = settings.tarantula_noun.nil? ? 'biomechanical tarantula' : settings.tarantula_noun
+    @exclude = settings.tarantula_excluded_skills
+    UserVars.tarantula_last_use ||= Time.now - 600
+    @last = UserVars.tarantula_last_skillset
+    @last ||= check_last
+    @no_use_scripts = settings.tarantula_no_use_scripts
+    @debug = settings.tarantula_debug.nil? ? false : settings.tarantula_debug
+    @all_skills = { 
+      "Armor" => ['Shield Usage', 'Light Armor', 'Chain Armor', 'Brigandine', 'Plate Armor', 'Defending', 'Conviction'],
+      "Weapon" => ['Parry Ability', 'Small Edged', 'Large Edged', 'Twohanded Edged', 'Small Blunt', 'Large Blunt', 'Twohanded Blunt', 'Slings', 'Bow', 'Crossbow', 'Staves', 'Polearms', 'Light Thrown', 'Heavy Thrown', 'Brawling', 'Offhand Weapon', 'Melee Mastery', 'Missile Mastery', 'Expertise'],
+      "Magic" => ['Lunar Magic', 'Holy Magic', 'Life Magic', 'Elemental Magic', 'Arcane Magic', 'Inner Magic', 'Inner Fire', 'Attunement', 'Arcana', 'Targeted Magic', 'Augmentation', 'Debilitation', 'Utility', 'Warding', 'Sorcery', 'Astrology', 'Summoning', 'Theurgy'],
+      "Survival" =>  ['Evasion', 'Athletics', 'Perception', 'Scouting', 'Stealth', 'Locksmithing', 'Thievery', 'First Aid', 'Outdoorsmanship', 'Skinning', 'Backstab', 'Thanatology'],
+      "Lore" => ['Forging', 'Engineering', 'Outfitting', 'Alchemy', 'Enchanting', 'Scholarship', 'Appraisal', 'Bardic Lore', 'Trading', 'Performance', 'Tactics', 'Empathy'] }
+    
+    passive_loop
+  end
+  
+  def check_last
+    _respond( bold("*** Checking last skillset used ***") ) if @debug
+    bput("study #{@tarantula_noun}", /knowledge of (.*) techniques/, /current set to consume .* experience\./) =~ /knowledge of (.*) techniques/
+    @last = Regexp.last_match(1)
+    @last = @last.sub(/s$/, '')
+    UserVars.tarantula_last_skillset = @last
+  end
+  
+  def choose_skill
+    _respond( bold("*** Choosing skill ***") ) if @debug
+    skills = []
+    if Script.running?('combat-trainer')|| Script.running?('hunting-buddy')
+      @tarantula.each.reject{ |k,_| k == @last }.each{ |k,v| skills << v["combat"] if v["combat"] }
+    else
+      @tarantula.each.reject{ |k,_| k == @last }.each{ |k,v| skills << v["non_combat"] if v["non_combat"] }
+    end
+    skill = skills.flatten
+                  .reject{ |s| DRSkill.getrank(s) == 1750 }
+                  .reject{ |s| DRSkill.getrank(s) == 0 }
+                  .reject{ |s| DRSkill.getxp(s) < 27 }
+    return skill.sample
+  end
+  
+  def choose_alternate
+    selected = []
+    @all_skills.each.reject{ |k,_| k == @last }.each{ |k,v| selected << v }
+    skill = selected.flatten
+                    .reject{ |s| DRSkill.getrank(s) == 1750 }
+                    .reject{ |s| DRSkill.getrank(s) == 0 }
+                    .reject{ |s| DRSkill.getxp(s) < 30 }
+    skill = skill - @exclude if @exclude
+    return skill.sample
+  end
+  
+  def turn_tarantula?(skill)
+    name = skill
+    if skill =~ /(Lunar|Holy|Elemental|Life|Arcane|Inner) (Magic|Fire)/i
+      skill = 'Magic'
+    end
+    case bput("turn my #{@tarantula_noun} to #{skill}", /your changes snap into place/, /You need to vary which skillset/, /You should stop practicing your Athletics/)
+    when /your changes snap into place/
+      _respond( bold("*** Tarantula will now consume #{name} knowledge ***") ) if @debug
+      return true
+    when /You need to vary which skillset/
+      _respond( bold("*** Error, wrong skillset chosen. ***") ) if @debug
+      check_last
+      use_tarantula
+      return false
+    when /You should stop practicing your Athletics/
+      return false
+    end
+  end
+
+  def use_tarantula
+    return if Time.now - UserVars.tarantula_last_use < 600
+    return if @no_use_scripts.any? { |name| Script.running?(name) }
+    
+    skill = choose_skill
+    if skill
+      return unless turn_tarantula?(skill)
+    else
+      _respond( bold("*** No preferred skills available.  Trying others. ***") ) if @debug
+      alt = choose_alternate
+      if alt
+        skill = alt
+        return unless turn_tarantula?(alt)
+      else
+        _respond( bold("*** No alternative skill available.  ***") ) if @debug
+        return
+      end
+    end
+    field = DRSkill.getxp(skill)
+    
+    case bput("rub my #{@tarantula_noun}", /The .* comes alive in your hand/, /(\d+) roisae?n to generate enough venom/, /But you currently aren.t learning any/, /You need to vary which skillset/, /You should stop practicing your Athletics/)
+    when /The .* comes alive in your hand/
+      atmo( bold("Tarantula successfully sacrificed #{field}/34 of #{skill} at #{Time.now.strftime("%T on %m/%d/%Y")}") )
+      UserVars.tarantula_last_use = Time.now
+      @last = @all_skills.select{ |k,v| v.include?(skill) }.keys[0]
+      UserVars.tarantula_last_skillset = @last
+      DRSkill.clear_mind(skill)
+    when /(\d+) roisae?n to generate enough venom/
+      _respond( bold("*** Tarantula not ready yet. ***") ) if @debug
+      mins = Regexp.last_match(1).to_i
+      UserVars.tarantula_last_use = Time.now - ((10 - mins)*60) + 40
+    when /But you currently aren.t learning any/
+      _respond( bold("*** No field exp in chosen skill!  This shouldn't happen! ***") ) if @debug
+      DRSkill.clear_mind(skill)
+    when /You should stop practicing your Athletics/
+      _respond( bold("*** Tarantula can't be used while using climb practice. ***") ) if @debug
+    end
+  end
+  
+  def atmo(message)
+    str = "<pushStream id=\"atmospherics\"/>" + message
+    _respond(str, "<popStream id=\"atmospherics\" /><prompt time =\"#{Time.now.to_i}\">&gt;</prompt>")
+  end
+  
+  def bold(message)
+    str = "<pushBold/>#{message}<popBold/>"
+  end
+
+  def passive_loop
+    loop do
+      use_tarantula
+      pause 20
+    end
+  end
+  
+end
+
+Tarantula.new

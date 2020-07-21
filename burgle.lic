@@ -18,10 +18,11 @@ class Burgle
     arg_definitions = [
       [
         { name: 'start', regex: /start/,optional: false, description: 'Required: prevents accidentally running burgle and protects against burgle typo for starting script' },
-        { name: 'entry', options: %w[lockpick rope cycle], optional: true, description: 'Override yaml setting for entry_type.' },
+        { name: 'entry', options: %w[lockpick rope cycle prioritylockpick priorityrope], optional: true, description: 'Override yaml setting for entry_type.' },
         { name: 'roomid', regex: /\d+/, optional: true, description: 'Override yaml setting and go to room id (#) specified.  The room should be chosen VERY carefully.'},
         { name: 'loot_type', options: %w[drop keep pawn bin], optional: true, description: 'Override yaml setting for loot. (items on item_whitelist are always kept.)' },
-        { name: 'hometown', options: $HOMETOWN_LIST, optional: true, description: 'Override yaml hometown settings for bin and pawn.  If no bin or pawnshop in that hometown, loot_type will revert to drop.'}
+        { name: 'hometown', options: $HOMETOWN_LIST, optional: true, description: 'Override yaml hometown settings for bin and pawn.  If no bin or pawnshop in that hometown, loot_type will revert to drop.'},
+        { name: 'follow', options: %w[follow], optional: true, description: "Follow another player, don't actually burgle.  You must group with them first."}
       ]
     ]
 
@@ -31,6 +32,8 @@ class Burgle
     args.hometown = args.hometown.gsub(/\b('?[a-z])/) { $1.capitalize } if args.hometown
     #kludge fix for Mer'Kresh
     args.hometown = "Mer'Kresh" if args.hometown == "Mer'kresh"
+    @follow = false
+    @follow = true if args.follow
 
     #hash which maps directions to their reverse, for backing out of the house
     @reverse_direction_map = {
@@ -61,6 +64,7 @@ class Burgle
     @loot_container = @burgle_settings['loot_container']
     @use_lockpick_ring =  @burgle_settings['use_lockpick_ring']
     @lockpick_container =  @burgle_settings['lockpick_container']
+    @max_priority_mindstate = @burgle_settings['max_priority_mindstate'] || 26
     @loot_room_id = nil
 
     #set yaml settings unless being overridden from the command line arguments
@@ -114,7 +118,7 @@ class Burgle
       message("Invalid burgle_settings:room setting.  This must be room id of the room you want to burgle from.")
       return false
     end
-    if @entry_type == nil or @entry_type !~ /lockpick|rope|cycle/i
+    if @entry_type == nil or @entry_type !~ /lockpick|rope|cycle|prioritylockpick|priorityrope/i
       message("Invalid burgle_settings:entry_type setting.")
       return false
     end
@@ -170,38 +174,53 @@ class Burgle
     #check to make sure you aren't under cooldown.  If you are, you will be instantly arrested, so return from script if this is the case
     return unless /The heat has died down from your last caper/ =~ bput('burgle recall', '^You should wait at least \d+ roisaen for the heat to die down', '^The heat has died down from your last caper')
 
-    #check for entry method, and ensure you have the required items
-    case @entry_type
-    when /rope/i
-      if !check_entry?(@entry_type)
-        message("Couldn't find entry item: heavy rope")
-        exit
-      end
-    when /lockpick/i
-      if !check_entry?(@entry_type)
-        if @use_lockpick_ring
-          message("Couldn't find entry item: #{@lockpick_container}")
+    #don't bother with entry type checks if following
+    if !@follow
+      #check for entry method, and ensure you have the required items
+      case @entry_type
+      when /priorityrope/
+        if DRSkill.getxp('Athletics') <= @max_priority_mindstate || DRSkill.getxp('Athletics') < DRSkill.getxp('Locksmithing')
+          check_cycle_priority('rope')
         else
-          message("Couldn't find entry item: lockpick")
+          check_cycle_priority('lockpick')
         end
-        exit
-      end
-    when /cycle/i
-      case DRSkill.getxp('Athletics') <=> DRSkill.getxp('Locksmithing')
-      when -1
-        check_cycle_priority("rope")
-      when 0
-        if DRSkill.getxp('Athletics') > DRSkill.getxp('Locksmithing')
-          check_cycle_priority("rope")
+      when /prioritylockpick/
+        if DRSkill.getxp('Locksmithing') <= @max_priority_mindstate || DRSkill.getxp('Locksmithing') < DRSkill.getxp('Athletics')
+          check_cycle_priority('lockpick')
         else
+          check_cycle_priority('rope')
+        end
+      when /rope/i
+        if !check_entry?(@entry_type)
+          message("Couldn't find entry item: heavy rope")
+          exit
+        end
+      when /lockpick/i
+        if !check_entry?(@entry_type)
+          if @use_lockpick_ring
+            message("Couldn't find entry item: #{@lockpick_container}")
+          else
+            message("Couldn't find entry item: lockpick")
+          end
+          exit
+        end
+      when /cycle/i
+        case DRSkill.getxp('Athletics') <=> DRSkill.getxp('Locksmithing')
+        when -1
+          check_cycle_priority("rope")
+        when 0
+          if DRSkill.getrank('Athletics') < DRSkill.getrank('Locksmithing')
+            check_cycle_priority("rope")
+          else
+            check_cycle_priority("lockpick")
+          end
+        when 1
           check_cycle_priority("lockpick")
         end
-      when 1
-        check_cycle_priority("lockpick")
+      else
+        message("Unknown entry method: #{@entry_type}")
+        return
       end
-    else
-      message("Unknown entry method: #{@entry_type}")
-      return
     end
 
     #entry method must be in your right hand, or have a worn lockpick ring
@@ -212,13 +231,16 @@ class Burgle
       exit
     end
 
-    if !walk_to(@burgle_room)
-      message("Unable to get to your burgle room.  Exiting to prevent errors.")
-      exit
+    #don't bother heading to the right area, if following
+    if !@follow
+      if !walk_to(@burgle_room)
+        message("Unable to get to your burgle room.  Exiting to prevent errors.")
+        exit
+      end
     end
 
     execute_extra_scripts(@burgle_before_scripts)
-    get_entry(@entry_type)
+    get_entry(@entry_type) unless @follow
     wait_for_script_to_complete('buff', ['burgle']) if @settings.waggle_sets['burgle']
 
     fix_standing
@@ -234,8 +256,24 @@ class Burgle
       end
     end
 
+    #setup flags for group burgle here
+    Flags.add('group-burgle-disband','With aid from your group')
+    Flags.add('group-burgle-leave','With aid from his group','With aid from her group')
+
     #match is for room title, so that in rob_the_place the XMLData.room_title is already properly set
-    bput('burgle',"Someone Else's Home")
+    if @follow
+      waitfor("Someone Else's Home")
+    else
+      bput('burgle',"Someone Else's Home")
+    end
+
+    #leave the group/disband so you aren't carried around
+    if Flags['group-burgle-disband']
+      fput('disband stalk')
+      fput('disband group')
+    end
+    fput('leave') if Flags['group-burgle-leave']
+
 
     if @burgle_settings['max_search_count'] > 0
       @search_count = 0
@@ -283,7 +321,7 @@ class Burgle
           message("Couldn't find any entry method.")
           exit
         else
-          message("Set to cycle, but could only find lockpick.")  #warn user that they are missing an entry method. cycle requires presence of both to work right
+          message("Set to cycle or priority, but could only find lockpick.")  #warn user that they are missing an entry method. cycle requires presence of both to work right
         end
         @entry_type = "lockpick"
       else
@@ -295,7 +333,7 @@ class Burgle
           message("Couldn't find any entry method.")
           exit
         else
-          message("Set to cycle, but could only find rope.")    #warn user that they are missing an entry method. cycle requires presence of both to work right
+          message("Set to cycle or priority, but could only find rope.")    #warn user that they are missing an entry method. cycle requires presence of both to work right
         end
         @entry_type = "rope"
       else
@@ -409,7 +447,7 @@ class Burgle
       result = bput("sneak #{direction}","Someone Else's Home",'Sneaking is an',"You can't",'In YOUR condition')
       return if /Someone Else's Home/ =~ result
     end
-    move(direction)
+    bput(direction,"Someone Else's Home")   #don't use move as it can cause a race condition with invisibility and blacklisting kitchen
   end
 
   #ripped out of steal.lic
@@ -458,7 +496,8 @@ class Burgle
       'You sell your',                        # success
       /shakes (his|her) head and says/,       # not worth enough (generic)
       'Relf briefly glances at your',         # not worth enough (hib - special messaging)
-      "There's folk around here that'd slit") # Too expensive (Shard)
+      "There's folk around here that'd slit", # Too expensive (Shard, Crossing)
+      "but it's much too fine for me.")       # Too expensive (Riverhaven, Theren)
     when 'You sell your'
       return
     else

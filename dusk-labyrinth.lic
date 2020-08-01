@@ -7,74 +7,208 @@ custom_require.call %w[common common-items events]
 class DuskLab
   include DRC
   include DRCI
+
   def initialize
+
+    arg_definitions = [
+      [
+        { name: 'debug', regex: /debug/i, optional: true, description: 'Enable debug output' },
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    $debug_mode_dl = UserVars.dusk_labyrinth_debug || args.debug || false
+
     @settings = get_settings
     @labyrinth_data = @settings.duskruin['labyrinth']
+
     loot_container = @labyrinth_data['loot_container']
     pet_noun = @labyrinth_data['pet_noun']
     redeem_scrip = @labyrinth_data['redeem_scrip']
+
+    # Map of directions to help know where we've come from and how to go back.
+    @reverse_direction_map = {
+      'e' => 'w',
+      'w' => 'e',
+      's' => 'n',
+      'n' => 's',
+      'ne' => 'sw',
+      'sw' => 'ne',
+      'nw' => 'se',
+      'se' => 'nw',
+      'east' => 'west',
+      'west' => 'east',
+      'south' => 'north',
+      'north' => 'south',
+      'northeast' => 'southwest',
+      'southwest' => 'northeast',
+      'northwest' => 'southeast',
+      'southeast' => 'northwest'
+    }
+
+    # Be notified when certain events happen, such as seeing a pet move or the maze reshuffle.
     Flags.add('five-minute-warning', 'You only have about 5 minutes left in the labyrinth!')
     Flags.add('done', 'A surly Dwarf stomps in and glowers at you in the dim gloom')
     Flags.add('no-pet', "A small #{pet_noun} scurries #{Regexp.new('(?<pet_dir>\w+)')}!")
     Flags.add('pet', "You notice a small #{pet_noun} scurrying around the area")
     Flags.add('caught', 'You pick them both up, claiming your new pet')
-    @prev_dir = nil
-    @dir_to_prev_dir = {
-      'northeast' => 'southwest',
-      'southwest' => 'northeast',
-      'northwest' => 'southeast',
-      'southeast' => 'northwest',
-      'north' => 'south',
-      'south' => 'north',
-      'east' => 'west',
-      'west' => 'east',
-      'up' => 'down', # up and down dont appear in the maze, but are used for testing
-      'down' => 'up'
-    }
+    Flags.add('maze-shuffled', 'no longer certain of your directions')
+
+    # Let's do this!
+    init_maze
     stow_hands
     main(loot_container) until done?
     redeem if redeem_scrip
   end
 
-  def redeem
-    while bput('get my bloodscrip', 'You get', 'What were') == 'You get'
-      bput('redeem my bloodscrip', 'You quickly pocket')
-    end
+  # Used at beginning of script and any time the maze shuffles.
+  def init_maze
+    echo("*** initializing map data") if $debug_mode_dl
+    # Maze data for the current room.
+    @current_room = nil
+    # Maze data for the previous room.
+    @previous_room = nil
+    # Direction we last moved to go from "previous_room" to "current_room".
+    @forward_move = nil
+    @reverse_move = nil
   end
 
+  # Main loop to check our room, search, or wander the maze.
+  # Repeatedly invoked until the maze event ends.
   def main(loot_container)
-    # search
-    @pause_timer = Time.now
-    pause 1 until Flags['no-pet'] || Flags['pet'] || Flags['caught']
+    if @previous_room && @previous_room['exits'][@forward_move]['count'] > 1 && !Flags['caught'] && !Flags['maze-shuffled'] && !Flags['five-minute-warning']
+      echo("*** Been here before, moving to another room") if $debug_mode_dl
+      wander unless done?
+      return
+    end
+    echo("Checking room...") if $debug_mode_dl
+    # Wait until we determine that this room either
+    # doesn't have a pet, has a pet, we caught the pet, or the maze reshuffeld.
+    pause 1 until Flags['no-pet'] || Flags['pet'] || Flags['caught'] || Flags['maze-shuffled']
+    # Maze changed, forget everything we knew.
+    if Flags['maze-shuffled']
+      echo("maze reshuffled") if $debug_mode_dl
+      init_maze
+      wander_randomly
+      Flags.reset('maze-shuffled')
+      return
+    end
     if Flags['no-pet'] && Flags['five-minute-warning']
+      echo("*** No pet in this room and we're running out of time. Searching to find loot.") if $debug_mode_dl
       search
       Flags.reset('no-pet')
     elsif Flags['no-pet']
+      echo("*** No pet in this room. Will wander to another room.") if $debug_mode_dl
       Flags.reset('no-pet')
     elsif Flags['pet']
+      echo("*** Searching for a pet!") if $debug_mode_dl
       search
       Flags.reset('pet')
-    elsif Flags['five-minute-warning'] || Flags['caught']
+    elsif Flags['five-minute-warning']
+      echo("*** Running out of time. Searching to find loot.") if $debug_mode_dl
+      search
+    elsif Flags['caught']
+      echo("*** We already caught a pet. Searching to find loot.") if $debug_mode_dl
       search
     end
+    # Put the goods away.
     stow_loot(loot_container)
+    # Move to another room.
     wander unless done?
   end
 
-  def next_move(exits)
-    if exits.count > 1 && !@prev_dir.nil?
-      exits.delete(@dir_to_prev_dir[@prev_dir.to_s])
+  # When the maze reshuffles then the room exits change.
+  # The XMLData.room_exits data is not refreshed so we
+  # literally don't know where we we can move to.
+  # Randomly move in directions until one works.
+  def wander_randomly
+    message("Maze reshuffled, trying to find a direction to move to")
+    ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'].each do |dir|
+      if move(dir)
+        return
+      end
     end
-    exits.sample
+    message('Unable to move to another room after maze shuffled')
+    message('Try to move yourself to another room then restart script')
+    exit
   end
 
+  # Moves to a nearby room in the maze.
+  # Prioritizes rooms we have not been in yet.
+  # Skips over rooms we've been in before if looking for a pet.
   def wander
     waitrt?
-    next_dir = next_move(XMLData.room_exits)
-    @dir_to_prev_dir.each_key { |dir| break if move(dir) } unless move(next_dir)
-    @prev_dir = next_dir
+
+    @current_room = create_room if @current_room.nil?
+    echo("*** [wander] @current_room: #{@current_room}") if $debug_mode_dl
+
+    @forward_move = choose_next_move(@current_room['exits'])
+    @reverse_move = @reverse_direction_map[@forward_move]
+
+    echo("*** [wander] forward_move: #{@forward_move}") if $debug_mode_dl
+    echo("*** [wander] reverse_move: #{@reverse_move}") if $debug_mode_dl
+
+    move(@forward_move)
+
+    # Since rooms in the maze don't have ids, we build
+    # a bi-directional graph where each vertex (room)
+    # points to another vertex (room) and vice versa.
+    @previous_room = @current_room
+    @current_room = @current_room['exits'][@forward_move]['room'] || create_room
+
+    @previous_room['exits'][@forward_move]['room'] = @current_room
+    @current_room['exits'][@reverse_move]['room'] = @previous_room
+
+    # Increment the count of us having moved between these two rooms.
+    # In graph algorithms, this is known as a weighted graph so that
+    # when we pick the "next best move" to go down we choose paths
+    # with the least count (weight) thereby prioritizing paths we
+    # have not visited before spending time visiting rooms we've been to.
+    @previous_room['exits'][@forward_move]['count'] = @previous_room['exits'][@forward_move]['count'] + 1
+    @current_room['exits'][@reverse_move]['count'] = @current_room['exits'][@reverse_move]['count'] + 1
+
   end
 
+  def create_room
+    new_room = {
+      'exits' => {}
+    }
+    # Initialize weights of each path out of this room.
+    checkpaths.each do |dir|
+      new_room['exits'][dir] = {
+        # How many times we've traversed this path.
+        'count' => 0,
+        # Which room this path moves you to.
+        # If not null then this room has an exit
+        # in the reverse direction that points back
+        # to this room we are creating.
+        # In this manner two rooms have bi-directional
+        # edges to the other room.
+        # This is critical to the maze mapping algorithm
+        # because each room has no roomid in the labyrinth
+        # so this is how we keep track in memory of which
+        # rooms we have visited.
+        'room' => nil
+      }
+    end
+    return new_room
+  end
+
+  # Returns a direction to move in.
+  # Prioritizes rooms we've not visited before.
+  def choose_next_move(exits)
+    # https://medium.com/@florenceliang/some-notes-about-using-hash-sort-by-in-ruby-f4b3a700fc33
+    sorted_exits = exits.sort_by { |k, v| v['count'] }
+    echo("*** [choose_next_move] sorted_exits: #{sorted_exits}") if $debug_mode_dl
+    # The returned sorted exits is an array of arrays.
+    # The first entry is the top sorted hash entry, which is now an array of [key, value].
+    # Return the first entry of the inner array which is the direction to move in.
+    next_move = sorted_exits[0][0]
+    echo("*** [choose_next_move] next_move: #{next_move}") if $debug_mode_dl
+    return next_move
+  end
+
+  # Stow whatever bloodscrip or items are in our hands into the given container.
   def stow_loot(loot_container)
     if loot_container
       fput("put my #{DRC.left_hand} in my #{loot_container}") if DRC.left_hand
@@ -84,23 +218,36 @@ class DuskLab
     end
   end
 
+  # Perform a search, hopefully catching a pet, but otherwise
+  # grabbing up some bloodscrip or other loot.
   def search
     bput('search', 'You search around', "You've recently searched this area", 'As you begin to search')
     waitrt?
     fix_standing
   end
 
+  # Check if we've ran out of time and are now outside the maze.
   def done?
     XMLData.room_title == '[[Duskruin, Darkened Antichamber]]' || Flags['done']
   end
+
+  # Redeem bloodscrip for tickets.
+  def redeem
+    while bput('get my bloodscrip', 'You get', 'What were') == 'You get'
+      bput('redeem my bloodscrip', 'You quickly pocket')
+    end
+  end
+
 end
 
+# Remove flag variables when script ends.
 before_dying do
   Flags.delete('five-minute-warning')
   Flags.delete('done')
   Flags.delete('no-pet')
   Flags.delete('pet')
   Flags.delete('caught')
+  Flags.delete('maze-shuffled')
 end
 
 DuskLab.new

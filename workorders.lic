@@ -1,4 +1,3 @@
-# quiet
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_repository#workorders
 =end
@@ -212,6 +211,11 @@ class WorkOrders
     [recipe, items_per_stock, spare_stock, scrap]
   end
 
+  def find_stock_needed(recipe, quantity)
+    stock_needed = recipe['volume'] * quantity
+    return stock_needed
+  end
+
   def go_door
     fput('open door')
     fix_standing
@@ -301,70 +305,64 @@ class WorkOrders
   end
 
   def shape_items(info, item, quantity)
-    ensure_copper_on_hand(@cash_on_hand || 10_000, @settings)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    ensure_copper_on_hand(@cash_on_hand || 10_000, @settings, @hometown)
+
+    stock_needed = find_stock_needed(item, quantity)
+
+    #make sure all lumber is combined and figure out how much yotu have
+    count_items_in_container("#{info['stock-name']} lumber", @bag).times do |count|
+      break if get_item("#{info['stock-name']} lumber", @bag) == false
+      bput('combine', 'combine') if count > 0
+    end
+    stock_on_hand = bput("count my #{info['stock-name']} lumber", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i
+
+    #buy stock if needed
+    while stock_on_hand < stock_needed
+      order_item(info['stock-room'], info['stock-number'])
+      bput('combine', 'combine')
+      stock_on_hand+= info['stock-volume']
+    end
+
+    #buy parts if needed
+    quantity.times do |count|
+      buy_parts(item['part'], info['part-room'])
+    end
+
+    if search?('glue')
+      bput('get my glue', 'You get')
+      /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
+      if Regexp.last_match(1).to_i < quantity
+        stow_tool('glue')
+        dispose('glue')
+        order_item(info['tool-room'], info['glue-number'])
+      end
+    else
+      order_item(info['tool-room'], info['glue-number'])
+    end
+    stow_tool('glue')
+
+    if search?('wood stain')
+      bput('get my wood stain', 'What were', 'You get')
+      /(\d+)/ =~ bput('count my wood stain', 'The wood stain has *\d+ uses remaining')
+      if Regexp.last_match(1).to_i < quantity
+        stow_tool('wood stain')
+        dispose('wood stain')
+        order_item(info['tool-room'], info['stain-number'])
+      end
+    else
+      order_item(info['tool-room'], info['stain-number'])
+    end
+    stow_tool('wood stain')
+
+    case bput('get my clamps', 'What were', 'You get')
+    when 'What were'
+      order_item(info['tool-room'], info['clamps-number'])
+    end
+    stow_tool('clamps')
 
     quantity.times do |count|
-      if items_per_stock.zero? || (count % items_per_stock).zero?
-        if count > 0 && spare_stock && !@retain_crafting_materials
-          dispose("#{info['stock-name']} lumber")
-        elsif count > 0 && spare_stock && @retain_crafting_materials
-          bput('stow feet', 'You put', 'What', 'Stow what?')
-          bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-          bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
-          bput('combine', 'combine')
-          stow_tool(left_hand)
-          stow_tool(right_hand)
-        end
-
-        if count > 0
-          go_door
-          pause 0.5 until Room.current.id
-        end
-        bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-        while bput("count my #{info['stock-name']} lumber", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
-          order_item(info['stock-room'], info['stock-number'])
-          bput('combine', 'combine')
-        end
-        stow_tool('lumber')
-
-        if search?('glue')
-          bput('get my glue', 'You get')
-          /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
-          if Regexp.last_match(1).to_i < quantity
-            stow_tool('glue')
-            dispose('glue')
-            order_item(info['tool-room'], info['glue-number'])
-          end
-        else
-          order_item(info['tool-room'], info['glue-number'])
-        end
-        stow_tool('glue')
-
-        if search?('wood stain')
-          bput('get my wood stain', 'What were', 'You get')
-          /(\d+)/ =~ bput('count my wood stain', 'The wood stain has *\d+ uses remaining')
-          if Regexp.last_match(1).to_i < quantity
-            stow_tool('wood stain')
-            dispose('wood stain')
-            order_item(info['tool-room'], info['stain-number'])
-          end
-        else
-          order_item(info['tool-room'], info['stain-number'])
-        end
-        stow_tool('wood stain')
-
-        case bput('get my clamps', 'What were', 'You get')
-        when 'What were'
-          order_item(info['tool-room'], info['clamps-number'])
-        end
-        stow_tool('clamps')
-
-        buy_parts(recipe['part'], info['part-room'])
-        find_shaping_room(@hometown, @engineering_room)
-      end
-
-      wait_for_script_to_complete('shape', ['log', recipe['chapter'], recipe['name'], info['stock-name'], recipe['noun']])
+      find_shaping_room(@hometown, @engineering_room)
+      wait_for_script_to_complete('shape', ['log', item['chapter'], item['name'], info['stock-name'], item['noun']])
       case bput('read my engineering logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
@@ -372,18 +370,16 @@ class WorkOrders
       end
     end
 
-    dispose("#{info['stock-name']} lumber") if scrap && !@retain_crafting_materials
+    dispose("#{info['stock-name']} lumber") if !@retain_crafting_materials
     if @retain_crafting_materials
       stow_tool(left_hand)
       stow_tool(right_hand)
-      if scrap
-        bput('stow feet', 'You put', 'What', 'Stow what?')
-        bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-        bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
-        bput('combine', 'combine')
-        stow_tool(left_hand)
-        stow_tool(right_hand)
-      end
+      bput('stow feet', 'You put', 'What', 'Stow what?')
+      bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
+      bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
+      bput('combine', 'combine')
+      stow_tool(left_hand)
+      stow_tool(right_hand)
     end
     go_door if XMLData.room_title.include?('Workshop')
   end

@@ -20,8 +20,9 @@ class Buffother
     @recipient = args.recipient.capitalize
     @waggle = args.waggle
     @room = args.room
+    
     move_to_room
-    cast_buff_spells
+    do_buffs
   end
 
   def move_to_room
@@ -29,16 +30,81 @@ class Buffother
     pause 1
   end
 
-  def cast_buff_spells
-    data = @settings.waggle_sets["#{@waggle}"].values.each do |data|
-      data['cast'] = "cast #{@recipient}"
-      DRCA.do_buffs(@settings, @waggle)
+  def do_buffs
+    # takes a waggle and sends it to the appropriate helper
+    return unless @settings.waggle_sets["#{@waggle}"]
+    spells = @settings.waggle_sets["#{@waggle}"]
+
+    spells.values
+          .select { |spell| spell['use_auto_mana'] }
+          .each { |spell| check_discern(spell, settings) }
+    cast_spells(spells, @settings, @settings.waggle_force_cambrinth)
+  end
+
+  def cast_spells(spells, settings, force_cambrinth = false)
+    spells.each do |name, data|
+      next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
+      while (mana < settings.waggle_spells_mana_threshold || DRStats.concentration < settings.waggle_spells_concentration_threshold)
+        echo("Waiting on mana over #{settings.waggle_spells_mana_threshold} or concentration over #{settings.waggle_spells_concentration_threshold}...")
+        pause 15
+      end
+
+      cast_spell(data, settings, force_cambrinth)
     end
   end
+
+def cast_spell(data, settings, force_cambrinth = false)
+    return unless data
+    return unless settings
+
+    data = update_astral_data(data)
+    data['cast'] = "cast #{@recipient}"
+    return unless data # update_astral_data returns nil on failure
+
+    release_cyclics if data['cyclic']
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
+
+    if data['ritual']
+      ritual(data, settings)
+      return
+    end
+
+    command = 'prep'
+    command = data['prep'] if data['prep']
+    command = data['prep_type'] if data['prep_type']
+
+    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
+    prepare_time = Time.now
+
+    unless settings.cambrinth_items[0]['name']
+      settings.cambrinth_items = [{
+        'name' => settings.cambrinth,
+        'cap' => settings.cambrinth_cap,
+        'stored' => settings.stored_cambrinth
+      }]
+    end
+    settings.cambrinth_items.each_with_index do |item, index|
+      case data['cambrinth'].first
+      when Array
+        find_charge_invoke_stow(item['name'], item['stored'], item['cap'], settings.dedicated_camb_use, data['cambrinth'][index], settings.cambrinth_invoke_exact_amount)
+      when Fixnum, Integer
+        find_charge_invoke_stow(item['name'], item['stored'], item['cap'], settings.dedicated_camb_use, data['cambrinth'], settings.cambrinth_invoke_exact_amount)
+      end
+    end
+
+    if data['prep_time']
+      pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
+    else
+      waitcastrt?
+    end
+    cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+  end
+
 end
 
 before_dying do
-    fput("release mana")
+  fput("release mana")
 end
 
 Buffother.new

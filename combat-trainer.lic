@@ -56,7 +56,7 @@ class SetupProcess
       retreat
       if game_state.summoned_info(game_state.weapon_skill)
         if DRStats.moon_mage?
-          bput('wear moon', 'telekinetic')
+          DRCMM.wear_moon_weapon?
         else
           break_summoned_weapon(game_state.weapon_name)
         end
@@ -266,9 +266,7 @@ class SetupProcess
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
-      if right_hand =~ /moon/ || left_hand =~ /moon/
-        bput('wear moon', 'telekinetic')
-      end
+      DRCMM.wear_moon_weapon?
     end
 
     # Prepare the next weapon
@@ -331,6 +329,7 @@ class LootProcess
   include DRCI
   include DRCS
   include DRCH
+  include DRCMM
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -837,7 +836,7 @@ class LootProcess
     waitrt?
     if game_state.need_bundle && snap != [left_hand, right_hand]
       stored_moon = false
-      if DRStats.moon_mage? && bput('wear moon', 'suspend', 'already telekinetic', 'wear what') == 'suspend'
+      if DRStats.moon_mage? && DRCMM.wear_moon_weapon?
         stored_moon = true
       elsif summoned = game_state.summoned_info(game_state.weapon_skill)
         break_summoned_weapon(game_state.weapon_name)
@@ -926,6 +925,7 @@ class SpellProcess
   include DRCS
   include DRCH
   include DRCT
+  include DRCMM
 
   $weapon_buffs = ['Ignite', 'Rutilor\'s Edge', 'Resonance']
 
@@ -1131,22 +1131,43 @@ class SpellProcess
   private
 
   def check_slivers(game_state)
+    return unless DRStats.moon_mage?
     return if game_state.casting
     return if @tk_ammo
     return unless @tk_spell
     return if DRSpells.slivers
     return if UserVars.moons['visible'].empty?
-
-    fput('prep moonblade')
-    if DRSkill.getrank('Lunar Magic') < 300
-      pause 3
-    elsif DRSkill.getrank('Lunar Magic') < 400
-      pause 2
-    else
-      pause
+    # With low skill you may fail to create the slivers
+    # when breaking your moonblade. If so, keep retrying.
+    retry_count = 0
+    max_retries = 3
+    created_slivers = false
+    # We don't need to cast the spell a fancy way
+    # so rather than asking users to define a new waggle
+    # then simply cast the spell at minimum prep.
+    moonblade_spell = get_data('spells').spell_data['Moonblade'].dup
+    # Minimally prepare the spell so we can cast it quickly.
+    moonblade_spell['mana'] = 1
+    # Try, try, try to break moonblade into slivers.
+    # For novices, this may fail a couple times.
+    while !created_slivers && retry_count < max_retries
+      # For skilled mages, try to snap cast
+      # unless we failed the first time.
+      if retry_count == 0
+        case DRSkill.getrank('Lunar Magic')
+        when 200..299
+          moonblade_spell['prep_time'] = 3
+        when 300..399
+          moonblade_spell['prep_time'] = 2
+        when 400..Float::INFINITY
+          moonblade_spell['prep_time'] = 1
+        end
+      end
+      DRCA.cast_spell(moonblade_spell, @settings)
+      created_slivers = bput("break moonblade", "The slivers drift about", "dissipate without any benefit", "Break what?") == "The slivers drift about"
+      retry_count = retry_count + 1
     end
-    fput("cast #{UserVars.moons['visible'].first}")
-    fput('break moonblade')
+    DRC.message("Failed to create slivers for telekinetic ammo after #{retry_count} attempts") unless created_slivers
   end
 
   def check_osrel(game_state)
@@ -1325,7 +1346,7 @@ class SpellProcess
     if game_state.casting_moonblade
       if left_hand =~ /moon/ || game_state.brawling? || game_state.offhand?
         # The moonblade was summoned or refreshed while training something else
-        bput('wear moon', 'telekinetic')
+        DRCMM.wear_moon_weapon?
       end
 
       game_state.casting_moonblade = false
@@ -1628,12 +1649,11 @@ class SpellProcess
       if data['abbrev'] == 'moonblade'
         game_state.casting_moonblade = true
         last_moon = moon_used_to_summon_weapon
-        data['before'] = [{ 'message' => 'get moon', 'matches' => ['already holding that', 'You grab', 'referring to'] }]
-        if UserVars.moons['visible'].include?(last_moon) && UserVars.moons[last_moon]['timer'] >= 4
+        if DRCMM.hold_moon_weapon? && UserVars.moons['visible'].include?(last_moon) && UserVars.moons[last_moon]['timer'] >= 4
           moon = last_moon
           data['cast'] = "cast #{moon} refresh"
         else
-          data['before'] << { 'message' => 'drop moon', 'matches' => ['open your hand', 'referring to'] }
+          DRCMM.drop_moon_weapon?
           data['cast'] = "cast #{moon}"
         end
       else

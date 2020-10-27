@@ -16,7 +16,7 @@ class TestValidYaml < Minitest::Test
     base += YAML.load_file('./profiles/base-empty.yaml')['empty_values'].keys
 
     # Profiles using non-repo settings
-    custom_profiles = %w[Chuno Jardani Sseng Vuulag Zamecki Erendel Shagium Crannach Dankmar Melborne Paeriluno Valkiss Ssarek Qetu Ugsy Valkiss Dartellum Leustyin Dijkstra Quillith Kyrtoth]
+    custom_profiles = %w[Moza Foedari Mozof Paven Rizzoli Chuno Jardani Sseng Vuulag Zamecki Erendel Shagium Crannach Dankmar Melborne Paeriluno Valkiss Ssarek Qetu Ugsy Valkiss Dartellum Leustyin Dijkstra Quillith Kyrtoth]
 
     nonbase = Dir.glob('./profiles/*.yaml')
                  .reject { |item| item == '.' }

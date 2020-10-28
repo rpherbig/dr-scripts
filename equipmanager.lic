@@ -9,6 +9,8 @@ class EquipmentManager
   include DRCI
 
   def initialize(settings = nil)
+    @debug_mode_em = UserVars.equipmanager_debug.to_s == 'true' # you opt in to debug mode
+    @check_item_matches_regex = UserVars.equipmanager_check_item_matches_regex.to_s != 'false' # you opt out of regex validation
     items(settings)
   end
 
@@ -61,7 +63,7 @@ class EquipmentManager
   end
 
   def item_by_desc(description)
-    items.find { |item| item.short_regex =~ description }
+    items.find { |item| item_matches_desc?(item, description) }
   end
 
   def notify_missing(lost_items)
@@ -83,7 +85,7 @@ class EquipmentManager
     end
 
     missing_items = worn_items
-                    .reject { |item| combat_items.find { |c_item| item.short_regex =~ c_item } }
+                    .reject { |item| combat_items.find { |c_item| item_matches_desc?(item, c_item) } }
                     .reject { |item| [right_hand, left_hand].grep(item.short_regex).any? ? (stow_weapon(item.short_name) || true) : false }
 
     echo("wear missing items #{missing_items}") if !missing_items.empty? && UserVars.equipmanager_debug
@@ -97,8 +99,8 @@ class EquipmentManager
       echo(worn_items.map(&:short_name).join(',').to_s)
     end
     combat_items
-      .reject { |description| worn_items.find { |item| item.short_regex =~ description } }
-      .map { |description| items.find { |item| item.short_regex =~ description } }
+      .reject { |description| worn_items.find { |item| item_matches_desc?(item, description) } }
+      .map { |description| item_by_desc(description) }
       .compact
       .each { |item| remove_item(item) }
   end
@@ -204,20 +206,20 @@ class EquipmentManager
   end
 
   def is_listed_item?(desc)
-    items.find { |item| item.short_regex =~ desc }
+    items.any? { |item| item_matches_desc?(item, desc) }
   end
 
   def return_held_gear(gear_set = 'standard')
     return unless right_hand || left_hand
-    todo = [left_hand, right_hand].compact
+    held_items = [left_hand, right_hand].compact
 
     worn_items = desc_to_items(@gear_sets[gear_set])
 
-    todo.all? do |held_item|
-      if info = worn_items.find { |item| item.short_regex =~ held_item }
+    held_items.all? do |held_item|
+      if info = worn_items.find { |item| item_matches_desc?(item, held_item) }
         stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your', 'You slip')
         true
-      elsif info = items.find { |item| item.short_regex =~ held_item }
+      elsif info = item_by_desc(held_item)
         if info.tie_to
           stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
         elsif info.wield
@@ -395,4 +397,82 @@ class EquipmentManager
       stow_helper("stow my #{weapon_name}", weapon_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
     end
   end
+
+  # Given an item and a description (ajd + noun or just noun)
+  # then returns true if the item matches, else false.
+  def item_matches_desc?(item, desc)
+    return false unless item && desc
+    check_item_matches_regex_pr4484?(item, desc)
+    return (item.short_regex =~ desc) != nil
+  end
+
+  # ---------------------------------------------------------------
+
+  private
+
+  # Given an item object and a description text
+  # then returns true or false if the item's short_regex matches.
+  # This is a precursor to https://github.com/rpherbig/dr-scripts/pull/4484
+  # to begin checking if user's config for items need to be
+  # updated before that pull request is merged.
+  # If yes then we alert the user via this method.
+  # This method should not be used outside this class
+  # as it is intended to be removed once PR#4484 is merged.
+  def check_item_matches_regex_pr4484?(item, name_to_match)
+
+    # The old regex matches words that start with the adj/noun
+    # The issue is that can lead to false positives where "black book" matches "blackened bookshelf"
+    old_regex = item.short_regex
+    old_matches = (old_regex =~ name_to_match) != nil
+
+    # The new regex matches words exactly in the config
+    # by adding `\b` word boundary token around the words.
+    # Assuming `name_to_match` comes from DRC.left_hand or DRC.right_hand
+    # then the new regex requires the YAML config to match the adj/noun
+    # as it's known by the game, not shorthand words that infer a match.
+    new_regex = item.adjective ? /\b#{item.adjective}\b.*\b#{item.name}\b/i : /\b#{item.name}\b/i
+    new_matches = (new_regex =~ name_to_match) != nil
+
+    # Remove leading article and help text for closed containers.
+    name_to_match = name_to_match.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '')
+
+    if @debug_mode_em
+      echo "check_item_matches_regex: #{@check_item_matches_regex}"
+      echo "item: #{name_to_match}"
+      echo "old regex: #{old_regex}"
+      echo "old matches? #{old_matches}"
+      echo "new regex: #{new_regex}"
+      echo "new matches? #{new_matches}"
+    end
+
+    # If the old regex matches but the new regex doesn't then
+    # notify user of the discrepancy.
+    if @check_item_matches_regex && old_matches && !new_matches
+      DRC.message("************************************************")
+      DRC.message("***                                             ")
+      DRC.message("*** IMPORTANT: Your gear YAML does not match    ")
+      DRC.message("*** this item's 'adjective' and 'noun' exactly. ")
+      DRC.message("***                                             ")
+      DRC.message("*** In a future Lich update, this may cause     ")
+      DRC.message("*** scripts to not work as expected or desired. ")
+      DRC.message("***                                             ")
+      DRC.message("*** To reduce chances that scripts grab or trash")
+      DRC.message("*** the wrong items, please make the following  ")
+      DRC.message("*** corrections to your gear YAML settings.     ")
+      DRC.message("***                                             ")
+      DRC.message("*** WHAT YOU HAVE:                              ")
+      DRC.message("***      :adjective: #{item.adjective}          ")
+      DRC.message("***      :name: #{item.name}                    ")
+      DRC.message("***                                             ")
+      DRC.message("*** ITEM TO MATCH:                              ")
+      DRC.message("***       #{name_to_match}                      ")
+      DRC.message("***                                             ")
+      DRC.message("*** To disable these warnings, run vars script: ")
+      DRC.message("*** vars set equipmanager_check_item_matches_regex=false")
+      DRC.message("************************************************")
+    end
+
+    return new_matches
+  end
+
 end

@@ -2,80 +2,122 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#dice-game
 =end
 
-arg_definitions = [
-  [
-    { name: 'bet', regex: /\d+/, optional: true, description: 'Optional override for betting amount.' }
-  ]
-]
+custom_require.call(%w[events common-travel common common-items common-money])
 
-custom_require.call(%w[events common-travel common])
+class Dice
+  include DRC
+  include DRCI
+  include DRCM
+  include DRCT
 
-settings = get_settings
-junk_list = settings.darkbox_junk.map { |x| /#{x}/i }
-dice_bet_amount = settings.dice_bet_amount || args.bet
+  def initialize
+    arg_definitions = [
+    [
+      { name: 'bet', regex: /\d+/, optional: true, description: 'Optional override for betting amount.' }
+    ]
+    ]
 
-dice = ["anchor", "crown", "heart", "lightning", "ship", "trident"]
+    settings = get_settings
+    #@junk_list = settings.darkbox_junk.map { |x| /#{x}/i }
+    @trash_items = settings.darkbox_junk
+    @dice_bet_amount = settings.dice_bet_amount || args.bet
+    @dice_money_on_hand = settings.dice_money_on_hand
+    @withdraw = settings.dice_withdraw
 
-Flags.add('bet', /"Place your bets!  Place your bets!"/)
-Flags.add('no_more_bets', "The libik yells")
+    @dice = ["anchor", "crown", "heart", "lightning", "ship", "trident"]
 
-DRCT.walk_to(16306) unless (DRRoom.title.include?("Crown and Anchor, Table"))
+    Flags.add('bet', /"Place your bets!  Place your bets!"/)
+    Flags.add('no_more_bets', "The libik yells")
 
-loop do
-  break if (DRRoom.title.include?("Crown and Anchor, Table"))
-  case DRC.bput("go cerulean curtain", "Reflecting", "As you peer")
-  when "Reflecting"
-    break
-  when "As you peer"
-    case DRC.bput("go carmine curtain", "Reflecting", "As you peer")
-    when "Reflecting"
-      break
-    when "As you peer"
-      pause 30
+    dice_game
+  end
+
+  def dice_game
+    loop do
+      check_money
+      walk_to_table
+      play_dice
+      check_prize
     end
   end
-end
 
-loop do
-  count = 0
-  dice.each do |id|
-    case DRC.bput("bet #{dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./, /You don't have that many kronars!/)
-    when /You don't have that many kronars!/
-      DRC.message("******* Out of money! ********")
+  def check_money
+    get_money if check_wealth('kronars') < 200 && @withdraw
+  end
+
+  def get_money
+    DRC.message("*** Heading to bank to money! ***")
+    DRCT.walk_to(16_315)
+    case DRC.bput("withdraw #{@dice_money_on_hand} platinum", 'we are not lending money at this time', 'The clerk counts out')
+    when 'we are not lending money at this time'
       exit
-    when /You bet/
-      count += 1
-    when /You can't bet right now./
-      pause 2 until Flags['bet']
-      Flags.reset('bet')
-      case DRC.bput("bet #{dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./)
-      when /You bet/
-        count += 1
-      when /You can't bet right now./
-        pause 2 until Flags['bet']
-        Flags.reset('bet')
-        DRC.bput("bet #{dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./)
+    end
+    fput('balance')
+  end
+
+  def walk_to_table
+    DRC.message("*** Heading to Dice Table! ***")
+    DRCT.walk_to(16306) unless (DRRoom.title.include?("Crown and Anchor, Table"))
+
+    loop do
+      break if (DRRoom.title.include?("Crown and Anchor, Table"))
+      case DRC.bput("go cerulean curtain", "Reflecting", "As you peer")
+      when "Reflecting"
+        break
+      when "As you peer"
+        case DRC.bput("go carmine curtain", "Reflecting", "As you peer")
+        when "Reflecting"
+          break
+        when "As you peer"
+          DRC.message("*** Waiting for table to open! ***")
+          pause 30
+        end
       end
     end
   end
 
-  if count = 6
-    pause 1 until Flags['no_more_bets']
-    Flags.reset('no_more_bets')
+  def play_dice
+    loop do
+      count = 0
+      @dice.each do |id|
+        case DRC.bput("bet #{@dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./, /You don't have that many kronars!/)
+        when /You don't have that many kronars!/
+          DRC.message("******* Out of money! ********")
+          exit
+        when /You bet/
+          count += 1
+        when /You can't bet right now./
+          pause 2 until Flags['bet']
+          Flags.reset('bet')
+          case DRC.bput("bet #{@dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./)
+          when /You bet/
+            count += 1
+          when /You can't bet right now./
+            pause 2 until Flags['bet']
+            Flags.reset('bet')
+            DRC.bput("bet #{@dice_bet_amount} on #{id}", /You bet/, /You can't bet right now./)
+          end
+        end
+      end
+      if count = 6
+        pause 2 until Flags['no_more_bets']
+        Flags.reset('no_more_bets')
+        break
+      end
+    end
   end
 
-  while thing = DRC.left_hand || DRC.right_hand
-    case thing
-    when *junk_list
-      DRC.bput("put #{thing} in bucket", 'You drop')
+  def check_prize
+    if @trash_items.any? { |item| Regexp.new(item) =~ right_hand }
+      bput("put my #{righthand} in bucket", 'You put', 'You drop')
     else
-      case DRC.bput("stow #{thing}", 'You put', 'to fit in the')
+      case bput("stow #{righthand}", 'You put', 'to fit in the', 'What were')
       when 'to fit in the'
-        DRC.message("*** Item is too big to fit in your stow container! ***")
+        message("*** Item is too big to fit in your stow container! ***")
         exit
       end
+      pause
     end
-    pause
   end
 end
 
@@ -83,3 +125,5 @@ before_dying do
   Flags.delete('bet')
   Flags.delete('no_more_bets')
 end
+
+Dice.new

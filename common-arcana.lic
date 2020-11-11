@@ -365,41 +365,81 @@ module DRCA
     end
   end
 
-  def update_astral_data(data)
+  def update_astral_data(data, settings)
     if data['moon']
       data = set_moon_data(data)
     elsif data['stats']
-      data = set_planet_data(data)
+      data = set_planet_data(data, settings)
     end
     data
   end
 
-  def find_visible_planets(planets)
-    return if DRC.bput('get my telescope', 'You get', 'What were you', 'You are already') == 'What were you'
+  def find_visible_planets(planets, settings)
+
+    telescope_available = false
+    if settings.have_telescope
+      telescope_available = true
+    end
+
+    # TODO: respect YAML telescope_storage container
+    if telescope_available
+      case DRC.bput('get my telescope', 'You get', 'What were you', 'You are already', 'need a free hand')
+      when 'What were you'
+        telescope_available = false
+      # TODO: put stuff away instead?
+      when 'need a free hand'
+        telescope_available = false
+      end
+    end
 
     Flags.add('planet-not-visible', 'turns up fruitless')
     observed_planets = []
 
     planets.each do |planet|
-      case DRC.bput("center telescope on #{planet}", 'You put your eye', 'The pain is too much', "That's a bit tough to do when you can't see the sky")
-      when 'The pain is too much', "That's a bit tough to do when you can't see the sky"
-        break
+      if telescope_available
+        case DRC.bput("center telescope on #{planet}", 'You put your eye', 'The pain is too much', 'That\'s a bit tough to do when you can\'t see the sky', 'need to open it', 'must have both hands free', 'Center what?')
+        when 'The pain is too much'
+          telescope_available = false
+          DRC.bput('stow telescope', 'You put')
+          redo
+        when 'need to open it'
+          DRC.bput('open my telescope', 'You extend your telescope.')
+          redo
+        # TODO: put stuff away instead?
+        when 'must have both hands free'
+          telescope_available = false
+          DRC.bput('stow telescope', 'You put')
+          redo
+        when 'Center what?'
+          telescope_available = false
+          redo
+        when 'That\'s a bit tough to do when you can\'t see the sky'
+          echo('ERROR: find_visible_planets failed: go outside!')
+          break
+        end
+      elsif !telescope_available
+        case DRC.bput("observe #{planet}", 'The planet', 'Your search for the planet #{planet} turns up fruitless.', 'The planet #{planet} is too faint for you to pick out with your naked eye.', 'That\'s a bit tough to do when you can\'t see the sky', 'You scan the skies')
+        when 'That\'s a bit tough to do when you can\'t see the sky'
+          echo('ERROR: find_visible_planets failed: go outside!')
+          break
+        end
       end
       observed_planets << planet unless Flags['planet-not-visible']
       Flags.reset('planet-not-visible')
     end
 
+    DRC.bput('stow telescope', 'You put') if telescope_available
     Flags.delete('planet-not-visible')
-    DRC.bput('stow telescope', 'You put')
+
     observed_planets
   end
 
-  def set_planet_data(data)
+  def set_planet_data(data, settings)
     return data unless data['stats']
 
     planets = get_data('constellations')[:constellations].select { |planet| planet['stats'] }
     planet_names = planets.map { |planet| planet['name'] }
-    visible_planets = find_visible_planets(planet_names)
+    visible_planets = find_visible_planets(planet_names, settings)
     data['stats'].each do |stat|
       cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
       next unless cast_on
@@ -438,7 +478,7 @@ module DRCA
     return unless data
     return unless settings
 
-    data = update_astral_data(data)
+    data = update_astral_data(data, settings)
     return unless data # update_astral_data returns nil on failure
 
     if (data['abbrev'] =~ /locat/i) && !DRSpells.active_spells['Clear Vision']

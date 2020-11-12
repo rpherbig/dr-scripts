@@ -12,6 +12,15 @@ class TestDRCA < Minitest::Test
     sent_messages.clear
   end
 
+class Settings
+  def initialize
+    @have_telescope = false
+  end
+  def have_telescope
+    @have_telescope
+  end
+end
+
   def teardown
     @test.join if @test
   end
@@ -23,7 +32,9 @@ class TestDRCA < Minitest::Test
       'You put your telescope in your hunting pack.'
     ]
     @test = run_script_with_proc(['common', 'common-arcana'], proc do
-      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
+      settings = Settings.new
+
+      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'], settings)
       assert_empty(seen_planets)
     end)
   end

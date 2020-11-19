@@ -56,7 +56,7 @@ class SetupProcess
       retreat
       if game_state.summoned_info(game_state.weapon_skill)
         if DRStats.moon_mage?
-          bput('wear moon', 'telekinetic')
+          DRCMM.wear_moon_weapon?
         else
           break_summoned_weapon(game_state.weapon_name)
         end
@@ -266,9 +266,7 @@ class SetupProcess
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
-      if right_hand =~ /moon/ || left_hand =~ /moon/
-        bput('wear moon', 'telekinetic')
-      end
+      DRCMM.wear_moon_weapon?
     end
 
     # Prepare the next weapon
@@ -331,6 +329,7 @@ class LootProcess
   include DRCI
   include DRCS
   include DRCH
+  include DRCMM
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -805,7 +804,7 @@ class LootProcess
     pause 0.25
     waitrt?
     if game_state.need_bundle
-      case bput('tap my bundle', 'You tap a \w+ bundle that you are wearing', 'I could not find what you were referring to')
+      case bput('tap my bundle', 'You tap a \w+ bundle that you are wearing', 'I could not find what you were referring to', 'You tap a tight bundle inside')
       when /lumpy/
         if @tie_bundle
           bput('tie my bundle', 'TIE the bundle again')
@@ -837,7 +836,7 @@ class LootProcess
     waitrt?
     if game_state.need_bundle && snap != [left_hand, right_hand]
       stored_moon = false
-      if DRStats.moon_mage? && bput('wear moon', 'suspend', 'already telekinetic', 'wear what') == 'suspend'
+      if DRStats.moon_mage? && DRCMM.wear_moon_weapon?
         stored_moon = true
       elsif summoned = game_state.summoned_info(game_state.weapon_skill)
         break_summoned_weapon(game_state.weapon_name)
@@ -879,6 +878,7 @@ class SafetyProcess
     echo('New SafetyProcess') if $debug_mode_ct
     Flags.add('ct-engaged', 'closes to pole weapon range on you', 'closes to melee range on you')
     Flags.add('ct-lodged', 'from the .* lodged in your (.*)\.')
+    Flags.add('active-mitigation', 'You believe you could \b(\w+) out of the way of the \b(\w+)')
 
     @health_threshold = settings.health_threshold
     echo("  @health_threshold: #{@health_threshold}") if $debug_mode_ct
@@ -889,6 +889,7 @@ class SafetyProcess
     fput 'exit' if health < @health_threshold
     fix_standing
     tend_lodged
+    active_mitigation
     game_state.danger = in_danger?(game_state.danger)
     keep_away if !game_state.danger && game_state.retreating?
   end
@@ -907,6 +908,11 @@ class SafetyProcess
     retreat
   end
 
+  def active_mitigation
+    return unless Flags['active-mitigation']
+    bput("#{Flags['active-mitigation'][1]} #{Flags['active-mitigation'][2]}", 'You manage to', "You've got to", 'Please rephrase', 'You jump back', "You can't do")
+    Flags.reset('active-mitigation')
+  end
   def in_danger?(danger)
     return false if health >= 75
 
@@ -926,6 +932,7 @@ class SpellProcess
   include DRCS
   include DRCH
   include DRCT
+  include DRCMM
 
   $weapon_buffs = ['Ignite', 'Rutilor\'s Edge', 'Resonance']
 
@@ -1024,6 +1031,9 @@ class SpellProcess
 
     @aura_frequency = settings.aura_frequency
     echo("  @aura_frequency: #{@aura_frequency}") if $debug_mode_ct
+
+    @barb_healing = settings.barb_famine_healing
+    echo("  @barb_healing: #{@barb_healing}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
     @aura_timer = 0
@@ -1131,22 +1141,43 @@ class SpellProcess
   private
 
   def check_slivers(game_state)
+    return unless DRStats.moon_mage?
     return if game_state.casting
     return if @tk_ammo
     return unless @tk_spell
     return if DRSpells.slivers
     return if UserVars.moons['visible'].empty?
-
-    fput('prep moonblade')
-    if DRSkill.getrank('Lunar Magic') < 300
-      pause 3
-    elsif DRSkill.getrank('Lunar Magic') < 400
-      pause 2
-    else
-      pause
+    # With low skill you may fail to create the slivers
+    # when breaking your moonblade. If so, keep retrying.
+    retry_count = 0
+    max_retries = 3
+    created_slivers = false
+    # We don't need to cast the spell a fancy way
+    # so rather than asking users to define a new waggle
+    # then simply cast the spell at minimum prep.
+    moonblade_spell = get_data('spells').spell_data['Moonblade'].dup
+    # Minimally prepare the spell so we can cast it quickly.
+    moonblade_spell['mana'] = 1
+    # Try, try, try to break moonblade into slivers.
+    # For novices, this may fail a couple times.
+    while !created_slivers && retry_count < max_retries
+      # For skilled mages, try to snap cast
+      # unless we failed the first time.
+      if retry_count == 0
+        case DRSkill.getrank('Lunar Magic')
+        when 200..299
+          moonblade_spell['prep_time'] = 3
+        when 300..399
+          moonblade_spell['prep_time'] = 2
+        when 400..Float::INFINITY
+          moonblade_spell['prep_time'] = 1
+        end
+      end
+      DRCA.cast_spell(moonblade_spell, @settings)
+      created_slivers = bput("break moonblade", "The slivers drift about", "dissipate without any benefit", "Break what?") == "The slivers drift about"
+      retry_count = retry_count + 1
     end
-    fput("cast #{UserVars.moons['visible'].first}")
-    fput('break moonblade')
+    DRC.message("Failed to create slivers for telekinetic ammo after #{retry_count} attempts") unless created_slivers
   end
 
   def check_osrel(game_state)
@@ -1325,7 +1356,7 @@ class SpellProcess
     if game_state.casting_moonblade
       if left_hand =~ /moon/ || game_state.brawling? || game_state.offhand?
         # The moonblade was summoned or refreshed while training something else
-        bput('wear moon', 'telekinetic')
+        DRCMM.wear_moon_weapon?
       end
 
       game_state.casting_moonblade = false
@@ -1426,7 +1457,24 @@ class SpellProcess
 
   def check_health(game_state)
     return if game_state.casting
-    return unless DRStats.empath?
+    return unless DRStats.empath? || DRStats.barbarian?
+    
+    if DRStats.barbarian? && !@barb_healing.empty?
+      return if DRSpells.active_spells['Famine']
+      return if health > @barb_healing['health_threshold']
+      # Mana is the stat used by IF for Barbs...
+      return if mana < @barb_healing['inner_fire_threshold']
+      
+      DRC.bput('bers famine', 'you feel yourself growing healthier',
+                              'But you are already',\
+                              'Your inner fire lacks',\
+                              'find yourself lacking the inner fire',\
+                              'You should stand',\
+                              'You must be sitting')
+      message("Activating FAMINE as your health has dropped below the specified threshold!")
+      return
+    end
+
     return if health > 95 && @wounds.empty?
 
     if DRSpells.active_spells['Regeneration']
@@ -1628,12 +1676,11 @@ class SpellProcess
       if data['abbrev'] == 'moonblade'
         game_state.casting_moonblade = true
         last_moon = moon_used_to_summon_weapon
-        data['before'] = [{ 'message' => 'get moon', 'matches' => ['already holding that', 'You grab', 'referring to'] }]
-        if UserVars.moons['visible'].include?(last_moon) && UserVars.moons[last_moon]['timer'] >= 4
+        if DRCMM.hold_moon_weapon? && UserVars.moons['visible'].include?(last_moon) && UserVars.moons[last_moon]['timer'] >= 4
           moon = last_moon
           data['cast'] = "cast #{moon} refresh"
         else
-          data['before'] << { 'message' => 'drop moon', 'matches' => ['open your hand', 'referring to'] }
+          DRCMM.drop_moon_weapon?
           data['cast'] = "cast #{moon}"
         end
       else
@@ -1643,7 +1690,7 @@ class SpellProcess
 
     game_state.casting_regalia = data['abbrev'].casecmp('REGAL').zero?
 
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'])
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     if data['cambrinth']
@@ -2170,7 +2217,7 @@ class TrainerProcess
     end
     bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what')
     waitrt?
-    bput("stow my #{@almanac}", 'You put', 'Stow what')
+    bput("stow my #{@almanac}", 'You put', 'Stow what','You hold out')
     UserVars.almanac_last_use = Time.now
     game_state.wield_whirlwind_offhand if game_state.currently_whirlwinding
   end
@@ -2180,7 +2227,7 @@ class TrainerProcess
     return if game_state.brawling? || game_state.offhand? || game_state.aimed_skill?
     return if right_hand.nil?
 
-    bput('smite', 'Drawing strength from your conviction', 'You aren\'t close enough')
+    bput("smite", "Drawing strength from your conviction", "You aren't close enough", "What are you trying to attack")
   end
 
   def meraud_commune(game_state)
@@ -2748,8 +2795,8 @@ class AttackProcess
       game_state.action_taken
       ammo = Regexp.last_match(2)
       @firing_check = 0
-      bput("stow my #{ammo}", 'You pick up', 'Stow what')
-      bput("stow my #{ammo}", 'You pick up', 'Stow what') if game_state.dual_load?
+      quantity = game_state.dual_load? ? 2 : 1
+      stow_ammo(ammo, quantity)
     when 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire'
       pause 1
       shoot_aimed(command, game_state)
@@ -2932,6 +2979,21 @@ class AttackProcess
     pause 7
     waitrt?
     game_state.use_charged_maneuvers = false
+  end
+
+  def stow_ammo(ammo = nil, quantity = 1)
+    return unless ammo
+    return unless quantity > 0
+    case bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what')
+    when 'You pick up', 'You put your'
+      stow_ammo(ammo, quantity - 1)
+    when 'Stow what'
+      # Bug fix for typo with burgled arrows.
+      # Messaging will say "you fire a blunt-tipped arrows" (note the trailing 's')
+      # when you actually only shot a singular arrow and the item itself
+      # only responds to 'stow arrow' (no 's').
+      stow_ammo(ammo.slice(0..-2), quantity) if ammo.end_with?('s')
+    end
   end
 end
 
@@ -3862,6 +3924,7 @@ before_dying do
   Flags.delete('container-full')
   Flags.delete('ct-lodged')
   Flags.delete('ct-engaged')
+  Flags.delete('active-mitigation')
   Flags.delete('ct-spelllost')
   Flags.delete('need-tkt-ammo')
   Flags.delete('ct-spellcast')

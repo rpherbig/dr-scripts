@@ -5,16 +5,19 @@
 
 $TRASH_STORAGE = %w[basket bin gloop barrel bucket urn log arms stump tree statue chamberpot]
 
-$PUT_AWAY_ITEM_SUCCESS_PATTERNS = [/^You put your .* in/]
+$PUT_AWAY_ITEM_SUCCESS_PATTERNS = [/^You put your .* in/,
+                                   /^You hold out/]
 $PUT_AWAY_ITEM_OPEN_PATTERNS = [/^But that's closed/]
-$PUT_AWAY_ITEM_FAILURE_PATTERNS = [/^What were you referring to/]
+$PUT_AWAY_ITEM_FAILURE_PATTERNS = [/^What were you referring to/,
+                                   /to fit in the/,
+                                  /^There isn't any more room in/]
 
-$OPEN_CONTAINER_SUCCESS_PATTERNS = [/^You open/, 
+$OPEN_CONTAINER_SUCCESS_PATTERNS = [/^You open/,
                                     /^That is already open/]
 $OPEN_CONTAINER_FAILURE_PATTERNS = [/^What were you referring to/]
 
 
-$CLOSE_CONTAINER_SUCCESS_PATTERNS = [/^You close/, 
+$CLOSE_CONTAINER_SUCCESS_PATTERNS = [/^You close/,
                                      /^That is already closed/]
 $CLOSE_CONTAINER_FAILURE_PATTERNS = [/^What were you referring to/]
 
@@ -120,8 +123,72 @@ module DRCI
   end
 
   def in_hands?(item)
-    item_regex = item.split.size > 1 ? /.*\b#{item.split.first}.*\b#{item.split.last}/i : /\b#{item}/i
-    item_regex =~ "#{DRC.right_hand}#{DRC.left_hand}"
+    in_hand?(item, 'either')
+  end
+
+  def in_left_hand?(item)
+    in_hand?(item, 'left')
+  end
+
+  def in_right_hand?(item)
+    in_hand?(item, 'right')
+  end
+
+  # Checks if the item is in one or more hands.
+  # Hand options are: left, right, either, both.
+  def in_hand?(item, which_hand = 'either')
+    return false unless item
+    if item.is_a?(String)
+      if item.split.size > 1
+        item = DRC::Item.new(adjective: item.split.first, name: item.split.last)
+      else
+        item = DRC::Item.new(name: item)
+      end
+    end
+    case which_hand.downcase
+    when 'left'
+      DRC.left_hand =~ item.short_regex
+    when 'right'
+      DRC.right_hand =~ item.short_regex
+    when 'either'
+      in_left_hand?(item) || in_right_hand?(item)
+    when 'both'
+      in_left_hand?(item) && in_right_hand?(item)
+    else
+      DRC.message("Unknown hand: #{which_hand}. Valid options are: left, right, either, both")
+      false
+    end
+  end
+
+  # Returns a list of item descriptions from the `INVENTORY <type|slot>` verb output.
+  # Where <type> can be armor, weapon, fluff, container, or combat.
+  # Where <slot> can be any phrase from INV SLOTS LIST command.
+  def get_inventory_by_type(type = 'combat', line_count = 40)
+    case DRC.bput("inventory #{type}", "Use INVENTORY HELP for more options.", "The INVENTORY command is the best way")
+    when "The INVENTORY command is the best way"
+      DRC.message("Unrecognized inventory type: #{type}. Valid options are ARMOR, WEAPON, FLUFF, CONTAINER, COMBAT, or any slot from INVENTORY SLOTS LIST.")
+      return []
+    end
+    # Multiple lines may have been printed to the game window,
+    # grab the last several lines for analysis.
+    snapshot = reget(line_count)
+    # Unless you're looking for items at your feet, this is noise.
+    items_at_feet = snapshot.grep(/(^Lying at your feet)/).any?
+    # If the snapshot found all the inventory then begin processing.
+    if snapshot.grep(/^All of your (#{type}|items)|^You aren't wearing anything like that|Both of your hands are empty/).any? && snapshot.grep(/Use INVENTORY HELP/).any?
+      snapshot
+      .map(&:strip)
+      .reverse
+      .take_while { |line| [/^All of your (#{type}|items)/, /^You aren't wearing anything like that/, /Both of your hands are empty/].none? { |phrase| phrase =~ line } }
+      .drop_while { |line| !line.start_with?('[Use INVENTORY HELP for more options.]') }
+      .drop(1)
+      .reverse
+      .take_while { |line| !items_at_feet || !line.start_with?('Lying at your feet') }
+      .map { |item| item.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '') }
+    else
+      # Otherwise, retry the command. Other actions may have flooded the game window.
+      get_inventory_by_type(type, line_count + 40)
+    end
   end
 
   def exists?(description)
@@ -209,7 +276,7 @@ module DRCI
 
   def stow_hand(hand)
     braid_regex = /The braided (.+) is too long/
-    result = DRC.bput("stow #{hand}", 'You put', braid_regex, 'is too long', '^As you open your hand to release the', 'You easily strap')
+    result = DRC.bput("stow #{hand}", 'You put', braid_regex, 'is too long', '^As you open your hand to release the', 'You easily strap','You hold out')
     dispose_trash(DRC.get_noun(Regexp.last_match(1))) if braid_regex.match(result)
   end
 
@@ -219,16 +286,24 @@ module DRCI
   end
 
   def get_item_list(container)
-    container_contents = DRC.bput("look in #{container}",'In the .* you see (.*)\.').match(/In the .* you see (?:a|an|some) (?<items>.*)\./)[:items].split(/(?:, | and )?(?:a|an|some) /)
+    DRC.bput("look in #{container}", 'In the .* you see (.*)\.', 'There is nothing')
+      .match(/In the .* you see (?:a|an|some) (?<items>.*)\./)[:items]
+      .split(/(?:, | and )?(?:a|an|some) /)
   end
 
   def put_away_item?(item, container)
-    result = put_away_item_safe?(item, container)
+    if container.is_a?(Array)
+        container.each do |c|
+            return true if put_away_item_safe?(item, c)
+        end
+        return false
+    end
+    put_away_item_safe?(item, container)
   end
 
   def put_away_item_safe?(item, container)
-    container = "my " + container
-    result = put_away_item_unsafe?(item, container)
+    container = "my #{container}" unless container =~ /^my /i
+    put_away_item_unsafe?(item, container)
   end
 
   def put_away_item_unsafe?(item, container)

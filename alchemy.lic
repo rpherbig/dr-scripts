@@ -1,0 +1,149 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#alchemy
+=end
+
+custom_require.call(%w[common common-crafting common-items common-travel common-arcana])
+
+class Alchemy
+  include DRC
+  include DRCC
+  include DRCI
+  include DRCT
+  include DRCA
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'target', regex: /\w+/, description: 'Ingredient or recipe.' },
+        { name: 'forage', regex: /forage/i, optional: true },
+        { name: 'prepare', regex: /prepare/i, optional: true },
+        { name: 'craft', regex: /craft/i, optional: true },
+        { name: 'herb_quantity_needed', regex: /\d+/, optional: true, description: 'Used to calculate required herbs to forage and process.' },
+        { name: 'debug', regex: /debug/i, optional: true }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    echo "*** incorrect arguments ***" if args.craft && (args.forage || args.prepare)
+    exit if args.craft && (args.forage || args.prepare)
+
+    settings = get_settings
+    @hometown = settings.hometown
+    @alchemy_herb_quantity = settings.alchemy_herb_quantity
+    @alchemy_herb_storage = settings.alchemy_herb_storage
+    @herb_container = settings.herb_container
+    @alchemy_prep_quantity = settings.alchemy_prep_quantity
+    @alchemy_forage_type = settings.alchemy_forage_type
+    @forage_override_room = settings.forage_override_room
+    @forage_override_town = settings.forage_override_town
+    @debug = args.debug
+    @herb_quantity_needed = args.herb_quantity_needed.to_i
+
+    ingredient = get_data('ingredients').ingredients.find{ |ingredient| ingredient['name'] =~ /#{args.target}/i } unless args.craft
+    # Set town for foraging
+    @forage_location = ingredient[@forage_override_room] || @forage_override_room || ingredient[@hometown]
+    echo ("@forage_location = #{@forage_location}") if @debug
+    # Set press and grinder location
+    @press_location = @forage_override_town || @hometown
+    echo ("@press_location = #{@press_location}") if @debug
+    # Forage call section
+    forage_ingredient(ingredient) if args.forage
+    # Prepare call section
+    prepare_ingredient(ingredient) if args.prepare
+  end
+
+  def forage_ingredient(ingredient)
+    #check for sufficient ranks
+    echo "insufficient ranks to forage #{ingredient['name']}" if DRSkill.getrank('Outdoorsmanship') < ingredient['ranks']
+    exit if DRSkill.getrank('Outdoorsmanship') < ingredient['ranks']
+    # Echo variables coming into script
+    echo ("herb_quantity_needed = #{@herb_quantity_needed}") if @debug
+    echo ("alchemy_herb_quantity = #{@alchemy_herb_quantity}") if @debug
+    # Temporary variable to use in calculation for amount to gather.
+    t_quantity = (@herb_quantity_needed if @herb_quantity_needed > 0) || @alchemy_herb_quantity
+    echo ("t_quantity = #{t_quantity}") if @debug
+    # Set this variable to help with counting past 120 = 20 * 6.
+    quantity_needed = (t_quantity - count(ingredient['name'],@alchemy_herb_storage))
+    echo ("count(ingredient['name'],@alchemy_herb_storage) = #{count(ingredient['name'],@alchemy_herb_storage)}") if @debug
+    echo ("quantity_needed = #{quantity_needed}") if @debug
+    return if quantity_needed <= 0
+    stow_hands
+    walk_to(@forage_location)
+    while quantity_needed >= 0
+      snapshot = "#{right_hand}#{left_hand}"
+      while snapshot == "#{right_hand}#{left_hand}"
+        case bput("forage #{ingredient['name']} #{@alchemy_forage_type}", 'Roundtime', 'The room is too cluttered to find anything here', 'You really need to have at least one hand free to forage properly', 'You survey the area and realize that any foraging efforts would be futile')
+        when 'The room is too cluttered to find anything here'
+          return false unless kick_pile?
+        when 'You survey the area and realize that any foraging efforts would be futile'
+          return false
+        when 'You really need to have at least one hand free to forage properly'
+          echo 'WARNING: hands not emptied properly. Stowing...'
+          fput('stow right')
+        end
+        waitrt?
+      end
+      quantity_needed -= 6 # Forage forages 6 units.
+      fput("put my #{ingredient['name']} in my #{@alchemy_herb_storage}")
+      # Track the count down to make sure it stops when enough foraged.
+      echo ("quantity_needed = #{quantity_needed}") if @debug
+    end
+  end
+
+  def prepare_ingredient(ingredient)
+    #dry? crush?
+    stow_hands
+    exit if @alchemy_prep_quantity <= count(ingredient['output'],@herb_container)
+    DRCC.find_press_grinder_room(@press_location)
+    while 0 < count(ingredient['name'],@alchemy_herb_storage)
+      case bput("get my #{ingredient['name']} from my #{@alchemy_herb_storage}", 'You get', 'What were you referring to?')
+      when 'You get'
+        if ingredient['output'].include?  "dried"
+          fput("put my #{ingredient['name']} in press")
+        else
+          fput("put my #{ingredient['name']} in grinder")
+        end
+        waitrt?
+        case bput("get my #{ingredient['output']} from my #{@herb_container}", 'You get', 'What were you referring to?')
+        when 'You get'
+          case bput("combine #{ingredient['output']} with #{ingredient['output']}", "You combine", "That stack of", "You must be")
+          when "You combine", "That stack of"
+            f_stack = bput("count my first #{ingredient['output']}", 'You count out \d+ pieces').scan(/\d+/).first.to_i
+            s_stack = bput("count my second #{ingredient['output']}", 'I could not find', 'You count out \d+ pieces').scan(/\d+/).first.to_i
+            if f_stack == 75
+              bput("stow my first #{ingredient['output']}", "You put")
+            elsif s_stack == 75
+              bput("stow my second #{ingredient['output']}", "You put", "Stow what?")
+            end
+          end
+        end
+        fput("put my #{ingredient['output']} in my #{@alchemy_herb_storage}")
+      when 'What were you referring to?'
+        return
+      end
+    end
+  end
+
+  def count(item,container)
+    count = 0
+    $ORDINALS.each do |ordinal|
+      count_msg = bput("count my #{ordinal} #{item} in my #{container}", 'I could not find what you were referring to.', 'tell you much of anything.', 'There is only one part', 'You count out (.+) pieces of material there.')
+      case count_msg
+      when 'I could not find what you were referring to.'
+        break
+      when 'tell you much of anything.'
+        echo "#{item} is marked as stackable but is not!"
+        break
+      when 'There is only one part'
+        count += 1
+      else
+        count += count_msg.scan(/\d+/).first.to_i
+      end
+      waitrt?
+    end
+    count
+  end
+end
+
+Alchemy.new

@@ -30,7 +30,7 @@ class TestItems < Minitest::Test
   def test_short_regex
     @test = run_script_with_proc('common', proc do
       actual = DRC::Item.new(name: 'sword', adjective: 'steel')
-      assert_equal(/#{'steel'}.*\b#{'sword'}/i, actual.short_regex)
+      assert_equal(/\b#{'steel'}.*\b#{'sword'}/i, actual.short_regex)
     end)
   end
 end

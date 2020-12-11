@@ -32,7 +32,7 @@ $HOMETOWN_LIST = ["Arthe Dale",
                   "Ain Ghazal"
                 ]
 
-$ORDINALS = %w[first second third fourth fifth sixth seventh eighth ninth tenth eleventh]
+$ORDINALS = %w[first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth twentieth]
 
 $CURRENCIES = %w[Kronars Lirums Dokoras]
 
@@ -82,6 +82,8 @@ $NUM_MAP = {
   'ninety' => 90
 }
 
+$box_regex = /((?:brass|copper|deobar|driftwood|iron|ironwood|mahogany|oaken|pine|steel|wooden) (?:box|caddy|casket|chest|coffer|crate|skippet|strongbox|trunk))/
+
 custom_require.call(%w[spellmonitor drinfomon])
 
 module DRC
@@ -89,7 +91,17 @@ module DRC
 
   module_function
 
+  # Like `fput` but better because will wait for RT
+  # before performing command and do smart retries.
+  # Will wait for matching text up to 15 seconds then timeout.
   def bput(message, *matches)
+    wput(message, 15, matches)
+  end
+
+  # Like `fput` but better because will wait for RT
+  # before performing command and do smart retries.
+  # Will wait for matching text up til the given timeout in seconds.
+  def wput(message, timeout, *matches)
     waitrt?
     log = []
     matches.flatten!
@@ -97,7 +109,7 @@ module DRC
     clear
     put message
     timer = Time.now
-    while (response = get?) || (Time.now - timer < 15)
+    while (response = get?) || (Time.now - timer < timeout)
 
       if response.nil?
         pause 0.1
@@ -142,7 +154,7 @@ module DRC
         end
       end
     end
-    echo '*** No match was found after 15 seconds, dumping info'
+    echo "*** No match was found after #{timeout} seconds, dumping info"
     echo "messages seen length: #{log.length}"
     log.reverse.each { |logged_response| echo "message: #{logged_response}" }
     echo "checked against #{matches}"
@@ -158,6 +170,17 @@ module DRC
       pause 0.5 while Script.running.include?(script_handle)
     end
     script_handle
+  end
+
+  def can_see_sky?
+    # If you are indoors and not able to see the sky.
+    inside_no_sky = "That's a bit hard to do while inside."
+    # If you are indoors but able to see the sky (e.g. a window or skylight).
+    inside_yes_sky = "You glance outside"
+    # If you are outdoors.
+    outside = "You glance up at the sky"
+    # Can we see the sky?
+    bput("weather", inside_no_sky, inside_yes_sky, outside) != inside_no_sky
   end
 
   def forage?(item, tries=5)
@@ -179,7 +202,24 @@ module DRC
   end
 
   def collect(item)
-    case bput("collect #{item}", 'You manage to collect a pile', 'The room is too cluttered', 'believe you would probably have better luck trying to find a dragon', 'if you had a bit more luck.', 'You cannot collect anything', 'You forage around but are unable to find anything', 'You wander around and poke your fingers', 'You survey the area and realize that any collecting efforts would be futile', 'You are sure you knew', 'You begin to forage around,')
+    messages = [
+        'As you rummage around',
+        'believe you would probably have better luck trying to find a dragon',
+        'if you had a bit more luck',
+        'The room is too cluttered',
+        'one hand free to properly collect',
+        'You are sure you knew',
+        'You begin to forage around,',
+        'You begin scanning the area before you',
+        'You find something dead and lifeless',
+        'You cannot collect anything',
+        'you fail to find anything',
+        'You forage around but are unable to find anything',
+        'You manage to collect a pile',
+        'You survey the area and realize that any collecting efforts would be futile',
+        'You wander around and poke your fingers'
+    ]
+    case bput("collect #{item}", messages)
     when 'The room is too cluttered'
       return unless kick_pile?
       collect(item)
@@ -204,8 +244,12 @@ module DRC
     end
 
     text = result.match(/looking for .* and see (.*)\.$/).to_a[1]
-
-    list_to_nouns(text)
+    case parameter
+    when 'B'
+      box_list_to_adj_and_noun(text)
+    else
+      list_to_nouns(text)
+    end
   end
 
   def get_boxes(container)
@@ -237,6 +281,12 @@ module DRC
   # is this ever useful compared to the list_to_nouns?
   def list_to_array(list)
     list.strip.split(/(?:,|(?:, |\s)?and\s?)(?:\s?<pushBold\/>\s?)?(?=\s\ba\b|\s\ban\b|\s\bsome\b|\s\bthe\b)/i).reject(&:empty?)
+  end
+
+  # Take a game formated list of boxes "a reinforced wooden strongbox and a plain ironwood crate"
+  # And return an array ["wooden strongbox", "ironwood crate"]
+  def box_list_to_adj_and_noun(list)
+    list.strip.split($box_regex).reject(&:empty?).select{ |item| item =~ $box_regex}
   end
 
   # Take a game formatted list "an arrow, silver coins and a deobar strongbox"
@@ -286,7 +336,7 @@ module DRC
     end
 
     def short_regex
-      @adjective ? /#{adjective}.*\b#{@name}/i : /\b#{@name}/i
+      @adjective ? /\b#{adjective}.*\b#{@name}/i : /\b#{@name}/i
     end
   end
 
@@ -437,8 +487,12 @@ module DRC
     UserVars.song = song_list.first.first unless UserVars.song
     UserVars.climbing_song = song_list.first.first unless UserVars.climbing_song
     song_to_play = climbing ? UserVars.climbing_song : UserVars.song
+    play_command = "play #{song_to_play}"
+    if instrument
+      play_command = play_command + " on my #{instrument}"
+    end
     fput('release ecry') if DRSpells.active_spells["Eillie's Cry"].to_i > 0
-    result = bput("play #{song_to_play}", 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing')
+    result = bput(play_command, 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing')
     case result
     when 'Play on what instrument'
       snapshot = "#{right_hand}#{left_hand}"
@@ -557,6 +611,19 @@ module DRC
     $pause_all_lock.unlock
 
     true
+  end
+
+  def smart_pause_all
+    paused_script_list = []
+    Script.running.find_all { |s| !s.paused? && !s.no_pause_all && s.name != Script.self.name}.each do  |s|
+      s.pause
+      paused_script_list << s.name
+    end
+    return paused_script_list
+  end
+
+  def unpause_all_list(scripts_to_unpause)
+    Script.running.find_all { |s| s.paused? && !s.no_pause_all && scripts_to_unpause.include?(s.name) }.each(&:unpause)
   end
 
   def set_stance(skill)

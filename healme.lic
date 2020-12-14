@@ -2,13 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#healme
 =end
 
-# ***BEGIN USER CONFIG***
-
-UserVars.healme_debug ||= false # turn on echos in the script
-
-# ***END USER CONFIG***
-
-custom_require.call(%w[common common-arcana common-healing events])
+custom_require.call(%w[common common-arcana common-healing events spellmonitor])
 
 class HealMe
   include DRC
@@ -16,184 +10,270 @@ class HealMe
   include DRCH
 
   def initialize
-    @deadly_wounds = %w[SKIN HEAD NECK CHEST ABDOMEN BACK]
     @settings = get_settings
-
     arg_definitions = [
       [
-        { name: 'bleeders', regex: /^[\w\s,]+$/i, variable: true, optional: true, description: 'comma separated list of bleeders to keep. "right arm, chest, back"' }
+        { name: 'debug', regex: /debug/i, optional: true, description: 'Enable debug output' },
+        { name: 'keep', regex: /^[\w\s,]+$/i, variable: true, optional: true, description: 'Comma separated list of wounds to keep. Example: "right arm, chest, back"' }
       ]
     ]
-
     args = parse_args(arg_definitions)
-    @using_waggle = false
-
-    heal_self(args.bleeders)
+    $debug_mode_hm = UserVars.healme_debug || args.debug
+    @spells = load_healing_waggle_set
+    @body_parts_not_to_heal = args.keep.split(',').map(&:strip) || []
+    heal_self
   end
 
-  def severity(wounds)
-    wounds.map { |wound| wound['level'] }.inject(&:+)
-  end
-
-  def spam_heal(base, camb)
-    loop do
-      unless DRSpells.active_spells['Heal']
-        pause 1 while mana < 25
-        prepare?('heal', base)
-        charge_and_invoke(@settings.cambrinth, @settings.dedicated_camb_use, camb, @settings.cambrinth_invoke_exact_amount) unless camb.empty?
-        waitcastrt?
-        cast?
-        pause 0.5
-      end
-      case bput('perceive health self', '...no injuries to speak of', 'Roundtime')
-      when '...no injuries to speak of'
-        break
-      else
-        pause 1
-        end
-      pause 21
+  # The original version of the 'healme' script used
+  # the 'empath_healing:' setting to configure the spells to cast.
+  # Later, the script added support for waggle sets.
+  # This method checks for how the player has specified their
+  # healing spells, using the waggle set by default if defined.
+  # Returns the spell data in a waggle format, regardless the configuration used.
+  def load_healing_waggle_set
+    waggle_set = @settings.waggle_sets['healing']
+    if empty?(waggle_set) || empty?(@settings.empath_healing)
+      DRC.message("Neither waggle set 'healing' nor setting 'empath_healing:' are configured")
+      DRC.message("See https://elanthipedia.play.net/Lich_script_development#healme")
+      exit
     end
-  end
-
-  def cast_spell(spell, preps, part, internal = false)
-    pause 1 while mana < 25
-    prepare?(spell, preps.first)
-    charge_and_invoke(@settings.cambrinth, @settings.dedicated_camb_use, preps[1..-1], @settings.cambrinth_invoke_exact_amount) unless preps[1..-1].empty?
-    waitcastrt?
-    Flags.reset('hm-partial-heal')
-    cast?("cast #{part} #{internal ? 'internal' : ''}")
-    pause 0.5
-    echo "partial: #{Flags['hm-partial-heal']}" if UserVars.healme_debug
-    Flags['hm-partial-heal']
-  end
-
-  def heal_wound(spells, part, internal)
-    if @using_waggle
-      spells['Heal Wounds']['cast'] = "cast #{part}"
-      spells['Heal Wounds']['cast'] = "cast #{part} internal" if internal
-      check_discern(spells['Heal Wounds'], @settings) if spells['Heal Wounds']['use_auto_mana']
-      loop do
-        Flags.reset('hm-partial-heal')
-        DRCA.cast_spell(spells['Heal Wounds'], @settings, true)
-        echo "partial: #{Flags['hm-partial-heal']}" if UserVars.healme_debug
-        break unless Flags['hm-partial-heal']
-      end
+    if waggle_set
+      echo "Using 'healing' waggle set to define healing spells" if $debug_mode_hm
     else
-      pause 0.5 while cast_spell('HW', @settings.empath_healing['HW'], part, internal)
-    end
-  end
-
-  def heal_scar(spells, part)
-    if @using_waggle
-      spells['Heal Scars']['cast'] = "cast #{part}"
-      check_discern(spells['Heal Scars'], @settings) if spells['Heal Scars']['use_auto_mana']
-      loop do
-        Flags.reset('hm-partial-heal')
-        DRCA.cast_spell(spells['Heal Scars'], @settings, true)
-        echo "partial: #{Flags['hm-partial-heal']}" if UserVars.healme_debug
-        break unless Flags['hm-partial-heal']
+      echo "Using empath_healing setting to define healing spells" if $debug_mode_hm
+      # The 'empath_healing' setting is a map where the keys are spell abbreviations
+      # and the values are a list of mana to use.
+      # For example, definition for Heal Wounds spell with prep of 5 and cambrinth of 10:
+      #   empath_healing:
+      #     'HW':
+      #     - 5
+      #     - 10
+      waggle_set = {}
+      spell_data = get_data('spells')['spell_data']
+      @settings.empath_healing.each do |abbrev, manas|
+        spells = spell_data.select { |name, data| data['abbrev'].downcase == abbrev.downcase }
+        name, data = spells.to_a.first.dup
+        # Modify the base spell data with the user's config.
+        # The first value in the manas list is the prep, rest are for cambrinth.
+        data['mana'] = manas.first if manas.length > 0
+        data['cambrinth'] = manas[1..-1] if manas.length > 1
+        waggle_set[name] = data
       end
-    else
-      pause 0.5 while cast_spell('HS', @settings.empath_healing['HS'], part)
     end
+    echo "Healing spells: #{waggle_set}" if $debug_mode_hm
+    waggle_set
   end
 
-  def heal_wounds(spells, wounds, skip_parts)
-    echo "healing: #{wounds}" if UserVars.healme_debug
-
-    return if skip_parts.include?(wounds.first['part']) && wounds.size == 1
-
-    if wounds.count { |wound| wound['type'] == 'Fresh' } > 0
-      heal_wound(spells, wounds.first['part'], skip_parts.include?(wounds.first['part']))
-    end
-    heal_scar(spells, wounds.first['part'])
-  end
-
-  def cure_disease(spells, health)
-    return unless health['diseased']
-    return unless spells['Cure Disease']
-    Flags.add('hm-disease', 'You feel completely cured of all disease', 'you don.t seem to be so afflicted')
+  # This method triages your wounds and heals the most severe first.
+  # After a round of healing, it rechecks your wounds to determine
+  # which are now the most severe, and then heals them. In this manner,
+  # you're always trying to heal the most severe wounds in the moment.
+  def heal_self
     loop do
-      if Flags['hm-disease']
-        Flags.delete('hm-disease')
-        return
-      else
-        unless DRSpells.active_spells['Cure Disease']
-          DRCA.cast_spell(spells['Cure Disease'], @settings, true)
-        end
+      echo 'Checking health' if $debug_mode_hm
+      # Using these variable names to not conflict with
+      # implicit 'health' variable that tells your vitality.
+      self_health = get_self_health
+      perc_health = get_perc_health
+      break unless wounds_to_heal?(self_health, perc_health)
+      attend_vitals
+      flush_poisons if self_health['poisoned']
+      cure_diseases if self_health['diseased']
+      # Address the most severe wounds for a given category each loop iteration.
+      # This heals the most severe bleeders first, then restarts the loop.
+      # If there are more bleeders, it heals the next severity level, then restarts the loop.
+      # This continues until no more bleeders and then it begins to triage the next wound types.
+      # This ensures minor scratches aren't attended to before bleeders, lodged items, parasites, etc.
+      if self_health['bleeders'].length > 0
+        heal_wounds(self_health['bleeders'])
+      elsif self_health['lodged'].length > 0
+        tend_wounds(self_health['lodged'])
+      elsif self_health['parasites'].length > 0
+        tend_wounds(self_health['parasites'])
+      elsif perc_health['wounds'].length > 0
+        heal_wounds(perc_health['wounds'])
+      elsif self_health['wounds'].length > 0
+        heal_wounds(self_health['wounds'])
       end
     end
   end
 
-  def flush_poisons(spells, health)
-    return unless health['poisoned']
-    return unless spells['Flush Poisons']
-    Flags.add('hm-poison', '^A sudden wave of heat washes over you as your spell attempts to flush poison from your body but finds no toxins', '^A sudden wave of heat washes over you as your spell flushes all poison from your body')
-    loop do
-      if Flags['hm-poison']
-        Flags.delete('hm-poison')
-        return
-      else
-        unless DRSpells.active_spells['Flush Poisons']
-          DRCA.cast_spell(spells['Flush Poisons'], @settings, true)
-        end
+  # Get wounds inferred from HEALTH command.
+  def get_self_health
+    echo 'Checking for visible wounds, bleeders, parasites, and lodged items' if $debug_mode_hm
+    self_health = DRCH.check_health
+    # Exclude bleeders that are '(tended)' because
+    # they aren't causing immediate loss of vitality
+    # and, more technically, once the body part is
+    # healed the wound will still be listed in HEALTH
+    # as '(tended)' giving the impression you have a bleeder
+    # when in reality you don't. We have to wait for the
+    # bandages to fall off or removed explicitly in order
+    # to no longer see a bleeder in the HEALTH output.
+    # Without this workaround, the script loops repeatedly
+    # trying to heal a body part that's not injured.
+    self_health['bleeders'].each do |severity, wounds|
+      wounds.select! { |wound| wound.bleeding_rate != '(tended)' }
+    end
+    # Now, remove any keys from the map if no wounds left after filtering.
+    self_health['bleeders'].select! { |severity, wounds| wounds.length > 0 }
+    remove_wounds_to_keep(self_health)
+  end
+
+  # Get wounds inferred from PERCEIVE HEALTH SELF.
+  def get_perc_health
+    echo 'Perceiving internal and external wounds and scars' if $debug_mode_hm
+    remove_wounds_to_keep(DRCH.perceive_health)
+  end
+
+  # Takes a pulse on vitality then takes action accordingly.
+  # Designed to be called frequently so that low vitality
+  # and bleeding can be addressed immediately.
+  def attend_vitals
+    heal_vitality if health < @settings.health_threshold
+    stop_bleeding if bleeding?
+    regenerate if @spells['Regenerate']
+  end
+
+  # Returns wounds list without the ones
+  # that are for body parts we want to keep.
+  def remove_wounds_to_keep(wounds)
+    echo "All wounds: #{wounds}" if $debug_mode_hm
+    echo "Wounds to keep: #{@body_parts_not_to_heal}" if $debug_mode_hm
+    wounds = wounds.select do |wound|
+      !@body_parts_not_to_heal.any? do |body_part|
+        body_part.downcase ==  wound.body_part.downcase
       end
+    end
+    echo "Wounds to heal: #{wounds}" if $debug_mode_hm
+    wounds
+  end
+
+  # Determines if there are any wounds, poisons, etc to heal.
+  def wounds_to_heal?(health, perceived_health)
+    wounds_to_heal = (
+      !empty?(perceived_health['wounds']) ||
+      !empty?(health['wounds']) ||
+      !empty?(health['bleeders']) ||
+      !empty?(health['parasites']) ||
+      !empty?(health['lodged']) ||
+      health['poisoned'] ||
+      health['diseased']
+    )
+    echo "Wounds to heal? #{wounds_to_heal}" if $debug_mode_hm
+    wounds_to_heal
+  end
+
+  # If your 'healing' waggle set contains 'Vitality Healing' spell
+  # then casts it to try and restore vitality.
+  def heal_vitality
+    cast_spell_or_warn('Vitality Healing', "You're vitality is low!")
+  end
+
+  # If your 'healing' waggle set contains 'Flush Poisons' spell
+  # then casts it to try and remove poisons.
+  def flush_poisons
+    cast_spell_or_warn('Flush Poisons', "You're poisoned!")
+  end
+
+  # If your 'healing' waggle set contains 'Cure Disease' spell
+  # then casts it to try and cure diseases.
+  def cure_diseases
+    cast_spell_or_warn('Cure Disease', "You're diseased!")
+  end
+
+  # If your 'healing' waggle set contains 'Regenerate' spell
+  # then casts it to boost your healing rate.
+  def regenerate
+    cast_spell('Regenerate')
+  end
+
+  # Heal all the wounds of the highest severity, then returns
+  # so that the main healing loop can triage the next wounds to heal.
+  # The 'wounds' argument is a map whose keys are severity numbers (1,2,3...)
+  # and the values are a list of wounds. So this only heals the wounds
+  # for the map key that is the highest severity at the time.
+  def heal_wounds(wounds)
+    wounds.sort_by { |severity, wounds| severity }.reverse.first[1].each do |wound|
+      heal_wound(wound)
+      attend_vitals
     end
   end
 
-  def heal_self(skip_parts)
-    return unless DRStats.empath?
+  # Casts either Heal Wounds or Heal Scars for the given wound.
+  # If it's an internal wound then casts <spell> internal.
+  def heal_wound(wound)
+    echo "Healing wound: #{wound.inspect}" if $debug_mode_hm
+    stop_bleeding(wound) if wound.bleeding?
+    spell_name = wound.scar? ? 'Heal Scars' : 'Heal Wounds'
+    spell_location = wound.internal? ? 'internal' : ''
+    @spells[spell_name]['cast'] = "cast #{wound.body_part} #{spell_location}"
+    cast_spell_or_warn(spell_name)
+  end
 
-    Flags.delete('hm-partial-heal')
-    Flags.add('hm-partial-heal',
-              'appear very slightly improved\.',
-              'appear slightly improved\.',
-              'appear better\.',
-              'appear greatly improved\.',
-              'appear almost completely healed\.',
-              'but it is ineffective\.',
-              'appear somewhat better\.',
-              'appear considerably better\.')
+  # Similar to 'heal_wounds' except instead of casting a spell on the wound
+  # this method tends the wound to remove parasites or lodged items.
+  # This method is not intended for bleeders, use `heal_wound` method for those.
+  def tend_wounds(wounds)
+    wounds.sort_by { |severity, wounds| severity }.reverse.first[1].each do |wound|
+      tend_wound(wound)
+      attend_vitals
+    end
+  end
 
-    wounds = check_perc_health
-    return if wounds.empty?
+  def tend_wound(wound)
+    echo "Tending wound: #{wound.inspect}" if $debug_mode_hm
+    DRCH.bind_wound(wound.body_part)
+  end
 
-    spells = if @settings.waggle_sets['healing']
-               @using_waggle = true
-               @settings.waggle_sets['healing']
-             else
-               @settings.empath_healing
-             end
-    find_cambrinth(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap)
-    health = check_health
-    cure_disease(spells, health)
-    flush_poisons(spells, health)
+  # If your 'healing' waggle set contains 'Blood Staunching' spell
+  # then casts it to stop blood loss.
+  # If given a wound that is a simple enough bleeder, tends it, too.
+  def stop_bleeding(wound = nil)
+    DRCH.bind_wound(wound.body_part) if wound_tendable?(wound)
+    cast_spell_or_warn('Blood Staunching', "You're bleeding!") if bleeding?
+  end
 
-    DRCA.cast_spell(spells['Regenerate'], @settings) if spells['Regenerate'] && !DRSpells.active_spells.include?('Regenerate')
+  # If the wound is an easy to tend external bleeder, then tend it.
+  # May want this to be configurable, also to attempt to tend
+  # more severe wounds based on First Aid skill.
+  def wound_tendable?(wound)
+    return false unless wound
+    tendable = wound.bleeding? && !wound.internal? && DRCH.skilled_to_tend_wound?(wound.severity)
+    echo "Wound tendable? #{tendable} #{wound.inspect}" if $debug_mode_hm
+    tendable
+  end
 
-    if spells['Heal'] && @using_waggle && skip_parts.nil?
-      spam_heal(@settings.waggle_sets['healing']['Heal']['mana'], @settings.waggle_sets['healing']['Heal']['cambrinth'])
-    elsif @settings.empath_healing['HEAL'] && skip_parts.nil?
-      spam_heal(@settings.empath_healing['HEAL'].first, @settings.empath_healing['HEAL'][1..-1])
+  # If the spell is configured in your 'healing' waggle set then casts it.
+  # Otherwise displays a warning message that you're wounded without ability to heal it.
+  def cast_spell_or_warn(spell_name, message = nil)
+    if @spells[spell_name]
+      cast_spell(spell_name)
     else
-
-      skip_parts = skip_parts.split(',').map(&:upcase).map(&:strip)
-
-      echo("skip: #{skip_parts}") if UserVars.healme_debug
-      echo("wounds: #{wounds}") if UserVars.healme_debug
-      echo("dw: #{@deadly_wounds}") if UserVars.healme_debug
-      danger_wounds = wounds.select { |part, _| @deadly_wounds.include?(part) }.sort_by { |_, val| severity(val) }.reverse
-
-      echo("bad wounds: #{danger_wounds}") if UserVars.healme_debug
-
-      danger_wounds.each do |(part, _)|
-        heal_wounds(spells, wounds[part], skip_parts)
-        wounds.delete(part)
-      end
-
-      wounds.sort_by { |_, val| severity(val) }.reverse_each { |_, wound| heal_wounds(spells, wound, skip_parts) }
+      warn_no_spell(spell_name, message)
     end
-    stow_cambrinth(@settings.cambrinth, @settings.stored_cambrinth, @settings.cambrinth_cap)
+  end
+
+  def cast_spell(spell_name)
+    if DRSpells.active_spells[spell_name]
+      echo "Skipping casting spell #{spell_name} because already active" if $debug_mode_hm
+    else
+      echo "Casting spell: #{spell_name}" if $debug_mode_hm
+      DRCA.check_discern(@spells[spell_name], @settings) if @spells[spell_name]['use_auto_mana']
+      DRCA.cast_spells({ spell_name: @spells[spell_name] }, @settings)
+    end
+  end
+
+  def warn_no_spell(spell_name, message = nil)
+    DRC.message(message) if message
+    DRC.message("The spell '#{spell_name}' is neither configured in the 'healing' waggle set nor 'empath_healing:' setting")
+    DRC.message("You may need to seek the help from another healer or remedy")
+  end
+
+  # Returns true if the argument is nil or empty.
+  def empty?(x)
+    x.nil? || x.empty?
   end
 end
+
 HealMe.new

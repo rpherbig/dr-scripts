@@ -1,8 +1,855 @@
-# quiet
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_development#common-healing
 =end
+
 custom_require.call(%w[common common-items])
+
+# Maps bleed rates from `health` command to severity number.
+# A partially tended wound is considered more severe than
+# its non-tended counterpart because once the bandages come off
+# then the wound is much worse so they should be triaged first.
+# https://elanthipedia.play.net/Damage#Bleeding_Levels
+#
+# As of December 2020, the skill needed to tend bleeders are guestimates.
+# I was not aware of any definitive data.
+# A 'nil' value means that can't be tended because already is tended or isn't bleeding.
+# Please adjust skill needed as appropriate, and be conservative.
+$DRCH_BLEED_RATE_TO_SEVERITY_MAP = {
+  'tended' => {
+    severity: 1,            # lower numbers are less severe than higher numbers
+    bleeding: false,        # is it actively bleeding and causing vitality loss?
+    skill_to_tend: nil      # ranks in First Aid needed to tend this wound
+  },
+  '(tended)' => {
+    severity: 1,
+    bleeding: false,
+    skill_to_tend: nil
+  },
+  'clotted' => {
+    severity: 2,
+    bleeding: false,
+    skill_to_tend: nil
+  },
+  'clotted(tended)' => {
+    severity: 3,
+    bleeding: false,
+    skill_to_tend: nil
+  },
+  'slight' => {
+    severity: 3,
+    bleeding: true,
+    skill_to_tend: 25
+  },
+  'slight(tended)' => {
+    severity: 4,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'light' => {
+    severity: 4,
+    bleeding: true,
+    skill_to_tend: 50
+  },
+  'light(tended)' => {
+    severity: 5,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'moderate' => {
+    severity: 5,
+    bleeding: true,
+    skill_to_tend: 75
+  },
+  'moderate(tended)' => {
+    severity: 6,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'bad' => {
+    severity: 6,
+    bleeding: true,
+    skill_to_tend: 100
+  },
+  'bad(tended)' => {
+    severity: 7,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'very bad' => {
+    severity: 7,
+    bleeding: true,
+    skill_to_tend: 200
+  },
+  'very bad(tended)' => {
+    severity: 8,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'heavy' => {
+    severity: 8,
+    bleeding: true,
+    skill_to_tend: 300
+  },
+  'heavy(tended)' => {
+    severity: 9,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'very heavy' => {
+    severity: 9,
+    bleeding: true,
+    skill_to_tend: 400
+  },
+  'very heavy(tended)' => {
+    severity: 10,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'severe' => {
+    severity: 10,
+    bleeding: true,
+    skill_to_tend: 500
+  },
+  'severe(tended)' => {
+    severity: 11,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'very severe' => {
+    severity: 11,
+    bleeding: true,
+    skill_to_tend: 600
+  },
+  'very severe(tended)' => {
+    severity: 12,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'profuse' => {
+    severity: 12,
+    bleeding: true,
+    skill_to_tend: 700
+  },
+  'profuse(tended)' => {
+    severity: 13,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'very profuse' => {
+    severity: 13,
+    bleeding: true,
+    skill_to_tend: 800
+  },
+  'very profuse(tended)' => {
+    severity: 14,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'gushing' => {
+    severity: 14,
+    bleeding: true,
+    skill_to_tend: 900
+  },
+  'gushing(tended)' => {
+    severity: 15,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'massive stream' => {
+    severity: 15,
+    bleeding: true,
+    skill_to_tend: 1000
+  },
+  'massive stream(tended)' => {
+    severity: 16,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'uncontrollable' => {
+    severity: 16,
+    bleeding: true,
+    skill_to_tend: 1100
+  },
+  'uncontrollable(tended)' => {
+    severity: 17,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'unbelievable' => {
+    severity: 17,
+    bleeding: true,
+    skill_to_tend: 1200
+  },
+  'unbelievable(tended)' => {
+    severity: 18,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'beyond measure' => {
+    severity: 18,
+    bleeding: true,
+    skill_to_tend: 1300
+  },
+  'beyond measure(tended)' => {
+    severity: 19,
+    bleeding: true,
+    skill_to_tend: nil
+  },
+  'death awaits' => {
+    severity: 19,
+    bleeding: true,
+    skill_to_tend: 1400
+  },
+}
+
+# https://elanthipedia.play.net/Damage#Lodged_Items
+$DRCH_LODGED_TO_SEVERITY_MAP = {
+  'loosely hanging' => 1,
+  'shallowly' => 2,
+  'firmly' => 3,
+  'deeply' => 4,
+  'savagely' => 5
+}
+
+# https://elanthipedia.play.net/Damage#Wound_Severity_Levels
+$DRCH_WOUND_TO_SEVERITY_MAP = {
+  'insignificant' => 1,
+  'negligible' => 2,
+  'minor' => 3,
+  'more than minor' => 4,
+  'harmful' => 5,
+  'very harmful' => 6,
+  'damaging' => 7,
+  'very damaging' => 8,
+  'severe' => 9,
+  'very severe' => 10,
+  'devastating' => 11,
+  'very devastating' => 12,
+  'useless' => 13
+}
+
+# https://elanthipedia.play.net/Damage#Parasites
+$DRCH_PARASITES_REGEX_LIST = [
+  /(?:small|large) (?:black|red) blood mite/,
+  /(?:black|red|albino) (sand|forest) leech/,
+  /(?:green|red) blood worm/,
+  /retch maggot/
+]
+
+# Parses the severity number out of the wound line from 'perceive health self'.
+# For example, the 'negligible' in "Fresh External:  light scratches -- negligible"
+$DRCH_PERCEIVE_HEALTH_SEVERITY_REGEX = /(?<freshness>Fresh|Scars) (?<location>External|Internal).+--\s+(?<severity>insignificant|negligible|minor|more than minor|harmful|very harmful|damaging|very damaging|severe|very severe|devastating|very devastating|useless)\b/
+
+$DRCH_BODY_PART_REGEX = /(?<part>(?:l\.|r\.|left|right)?\s?(?:\w+))/
+
+# Matches body parts in the `health` line for wounds and bleeders.
+$DRCH_WOUND_BODY_PART_REGEX = /(?:inside)?\s?#{$DRCH_BODY_PART_REGEX}/
+
+# Matches body parts in the `health` line for lodged items.
+$DRCH_LODGED_BODY_PART_REGEX = /lodged .* into your #{$DRCH_BODY_PART_REGEX}/
+
+# Matches body parts in the `health` line for parasites.
+$DRCH_PARASITE_BODY_PART_REGEX = /on your #{$DRCH_BODY_PART_REGEX}/
+
+# https://elanthipedia.play.net/Damage#Wounds
+$DRCH_WOUND_SEVERITY_REGEX_MAP = {
+  # insignificant
+  /minor abrasions to the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 1,
+    internal: false,
+    scar: false
+  },
+  /a few nearly invisible scars along the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 1,
+    internal: false,
+    scar: true
+  },
+  # negligible
+  /some tiny scars (?:across|along) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 2,
+    internal: false,
+    scar: true
+  },
+  /(?:light|tiny) scratches to the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 2,
+    internal: false,
+    scar: false
+  },
+  # minor / more than minor
+  /a bruised (?<part>head)/ => {
+    severity: 3,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>a small skin rash)/ => {
+    severity: 3,
+    internal: false,
+    scar: false
+  },
+  /(?<skin>loss of skin tone)/ => {
+    severity: 3,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>some minor twitching)/ => {
+    severity: 3,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>slight difficulty moving your fingers and toes)/ => {
+    severity: 3,
+    internal: true,
+    scar: true
+  },
+  /cuts and bruises about the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 3,
+    internal: false,
+    scar: false
+  },
+  /minor scar\w+ (?:about|along|across) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 3,
+    internal: false,
+    scar: true
+  },
+  /minor swelling and bruising (?:around|in) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 3,
+    internal: true,
+    scar: false
+  },
+  /occasional twitch\w* (?:on|in) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 3,
+    internal: true,
+    scar: true
+  },
+  /a black and blue #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 3,
+    internal: false,
+    scar: false
+  },
+  # harmful / very harmful
+  /a deeply bruised (?<part>head)/ => {
+    severity: 4,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>a large skin rash)/ => {
+    severity: 4,
+    internal: false,
+    scar: false
+  },
+  /(?<skin>minor skin discoloration)/ => {
+    severity: 4,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>some severe twitching)/ => {
+    severity: 4,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>slight numbness in your arms and legs)/ => {
+    severity: 4,
+    internal: true,
+    scar: true
+  },
+  /deep cuts (?:about|across) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 4,
+    internal: false,
+    scar: false
+  },
+  /severe scarring (?:across|along|about) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 4,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen and\s?(?:deeply)? bruised #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 4,
+    internal: true,
+    scar: false
+  },
+  /(?:occasional|constant) twitch\w* (?:on|in) the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 4,
+    internal: true,
+    scar: true
+  },
+  /a bruised and swollen (?<part>(?:right|left) (?:eye))/ => {
+    severity: 4,
+    internal: false,
+    scar: false
+  },
+  # damaging / very damaging
+  /some deep slashes and cuts about the (?<part>head)/ => {
+    severity: 5,
+    internal: false,
+    scar: false
+  },
+  /severe scarring and ugly gashes about the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: false,
+    scar: true
+  },
+  /major swelling and bruising around the (?<part>head)/ => {
+    severity: 5,
+    internal: true,
+    scar: false
+  },
+  /an occasional twitch on the fore(?<part>head)/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  /a bruised,* swollen and bleeding #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: false,
+    scar: false
+  },
+  /deeply scarred gashes across the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen, bruised and crossed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: true,
+    scar: false
+  },
+  /a constant twitching in the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  /deep slashes across the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: false,
+    scar: false
+  },
+  /a severely swollen and deeply bruised #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: true,
+    scar: false
+  },
+  /severely swollen and bruised #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 5,
+    internal: true,
+    scar: false
+  },
+  /a constant twitching in the (?<part>chest) area and difficulty breathing/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  /(?<abdomen>a somewhat emaciated look)/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  /a constant twitching in the #{$DRCH_WOUND_BODY_PART_REGEX} and difficulty moving in general/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  /(?<skin>a body rash)/ => {
+    severity: 5,
+    internal: false,
+    scar: false
+  },
+  /severe (?<part>skin) discoloration/ => {
+    severity: 5,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>difficulty controlling actions)/ => {
+    severity: 5,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>numbness in your fingers and toes)/ => {
+    severity: 5,
+    internal: true,
+    scar: true
+  },
+  # severe / very severe
+  /(?<head>a cracked skull with deep slashes)/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /missing chunks out of the (?<part>head)/ => {
+    severity: 6,
+    internal: false,
+    scar: true
+  },
+  /a ghastly bloated (?<part>head) with bleeding from the ears/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /a confused look with sporadic twitching of the fore(?<part>head)/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /a bruised, swollen and slashed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /a punctured and shriveled #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen,* bruised and cloudy #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /a clouded #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /gaping holes in the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /a broken #{$DRCH_WOUND_BODY_PART_REGEX} with gaping holes/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /severe scarring and ugly gashes about the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: false,
+    scar: true
+  },
+  /severe scarring and chunks of flesh missing from the #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen and deeply bruised #{$DRCH_WOUND_BODY_PART_REGEX} with odd protrusions under the skin/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /a severely swollen and deeply bruised (?<part>chest) area with odd protrusions under the skin/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /a partially paralyzed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /a painful #{$DRCH_WOUND_BODY_PART_REGEX} and difficulty moving without pain/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /a painful (?<part>chest) area and difficulty getting a breath without pain/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /a severely bloated and discolored #{$DRCH_WOUND_BODY_PART_REGEX} with strange round lumps under the skin/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /(?<abdomen>a definite greenish pallor and emaciated look)/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  /(?<skin>a painful,* inflamed body rash)/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /(?<skin>a painful,* enflamed body rash)/ => {
+    severity: 6,
+    internal: false,
+    scar: false
+  },
+  /some shriveled and oddly folded (?<part>skin)/ => {
+    severity: 6,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>partial paralysis of the entire body)/ => {
+    severity: 6,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>numbness in your arms and legs)/ => {
+    severity: 6,
+    internal: true,
+    scar: true
+  },
+  # devastating / very devastating
+  /(?<head>a crushed skull with horrendous wounds)/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /a mangled and malformed (?<part>head)/ => {
+    severity: 7,
+    internal: false,
+    scar: true
+  },
+  /a ghastly bloated (?<part>head) with bleeding from the ears/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /a confused look with sporadic twitching of the fore(?<part>head)/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /a bruised,* swollen and shattered #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /a painfully mangled and malformed #{$DRCH_WOUND_BODY_PART_REGEX} in a shattered eye socket/ => {
+    severity: 7,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen,* bruised and blind #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /severely scarred,* mangled and malformed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 7,
+    internal: false,
+    scar: true
+  },
+  /a completely clouded #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /a shattered #{$DRCH_WOUND_BODY_PART_REGEX} with gaping wounds/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /shattered (?<part>chest) area with gaping wounds/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /a severely swollen and deeply bruised #{$DRCH_WOUND_BODY_PART_REGEX} with bones protruding out from the skin/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /a severely swollen and deeply bruised #{$DRCH_WOUND_BODY_PART_REGEX} with ribs or vertebrae protruding out from the skin/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /a severely paralyzed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /a severely painful #{$DRCH_WOUND_BODY_PART_REGEX} with significant problems moving/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /a severely painful (?<part>chest) area with significant problems breathing/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /#{$DRCH_WOUND_BODY_PART_REGEX} deeply gouged with gaping wounds/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /a severely bloated and discolored #{$DRCH_WOUND_BODY_PART_REGEX} with strange round lumps under the skin/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /(?<abdomen>a severely yellow pallor and a look of starvation)/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  /a shattered #{$DRCH_WOUND_BODY_PART_REGEX} with gaping wounds/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /boils and sores around the (?<part>skin)/ => {
+    severity: 7,
+    internal: false,
+    scar: false
+  },
+  /severely stiff and shriveled (?<part>skin) that seems to be peeling off the body/ => {
+    severity: 7,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>severe paralysis of the entire body)/ => {
+    severity: 7,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>general numbness all over)/ => {
+    severity: 7,
+    internal: true,
+    scar: true
+  },
+  # useless
+  /pulpy stump for a (?<part>head)/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /a stump for a (?<part>head)/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /an ugly stump for a #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /a grotesquely bloated (?<part>head) with bleeding from the eyes and ears/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /(?<head>a blank stare)/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /a pulpy cavity for a #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /an empty #{$DRCH_WOUND_BODY_PART_REGEX} socket overgrown with bits of odd shaped flesh/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen,* bruised and blind #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /a blind #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /a completely useless #{$DRCH_WOUND_BODY_PART_REGEX} with nearly all flesh and bone torn away/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /a completely destroyed #{$DRCH_WOUND_BODY_PART_REGEX} with nearly all flesh and bone torn away revealing a gaping hole/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /an ugly flesh stump for a #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /an ugly flesh stump for a #{$DRCH_WOUND_BODY_PART_REGEX} with little left to support the head/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen and shattered #{$DRCH_WOUND_BODY_PART_REGEX} which appears completely useless/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /a severely swollen and shattered #{$DRCH_WOUND_BODY_PART_REGEX} which appears useless to hold up the head/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /a completely paralyzed #{$DRCH_WOUND_BODY_PART_REGEX}/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /a mostly non-existent #{$DRCH_WOUND_BODY_PART_REGEX} filled with ugly chunks of scarred flesh/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /a severely swollen (?<part>chest) area with a shattered rib cage/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /an extremely painful #{$DRCH_WOUND_BODY_PART_REGEX} while gasping for breath in short shallow bursts/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /a severely bloated and discolored #{$DRCH_WOUND_BODY_PART_REGEX} which appears oddly rearranged/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /(?<abdomen>a death pallor and extreme loss of weight)/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /a severely swollen #{$DRCH_WOUND_BODY_PART_REGEX} with a shattered spinal cord/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /an extremely painful and bizarrely twisted #{$DRCH_WOUND_BODY_PART_REGEX} making it nearly impossible to move/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  },
+  /open and bleeding sores all over the (?<part>skin)/ => {
+    severity: 8,
+    internal: false,
+    scar: false
+  },
+  /severe (?<part>skin) loss exposing bone and internal organs/ => {
+    severity: 8,
+    internal: false,
+    scar: true
+  },
+  /(?<skin>complete paralysis of the entire body)/ => {
+    severity: 8,
+    internal: true,
+    scar: false
+  },
+  /(?<skin>general numbness all over and have difficulty thinking)/ => {
+    severity: 8,
+    internal: true,
+    scar: true
+  }
+}
+
+# https://elanthipedia.play.net/Damage#Wounds
+$DRCH_WOUND_COMMA_SEPARATOR = /(?<=swollen|bruised|scarred|painful),(?=\s(?:swollen|bruised|mangled|inflamed))/
 
 $wound_map = {
   'insignificant' => 1,
@@ -240,19 +1087,174 @@ module DRCH
     wounds
   end
 
-  def bind_wound(part, person = 'my')
+  # Given lines of text from the HEALTH command output,
+  # returns a map of any bleeding wounds where the keys
+  # are the severity and the values are the list of bleeding wounds.
+  def parse_bleeders(health_lines)
+    bleeders = Hash.new { |h, k| h[k] = [] }
+    if health_lines.grep(/^Bleeding|^\s*\bArea\s+Rate\b/).any?
+      health_lines
+        .take_while { |line| /^\b(inside\s+)?((l\.|r\.|left|right)\s+)?(head|eye|neck|chest|abdomen|back|arm|hand|leg)\b/ =~ line }
+        .drop_while { |line| /^Bleeding|^\s*\bArea\s+Rate\b/ =~ line }
+        .each do |line|
+          # Do regex then look for the body part match.
+          line =~ $DRCH_WOUND_BODY_PART_REGEX
+          body_part = Regexp.last_match.names.find { |x| Regexp.last_match[x.to_sym] }
+          body_part = Regexp.last_match[:part] if body_part == 'part'
+          # Standardize on full word for 'left' and 'right'.
+          # Internal bleeders use the abbreviations.
+          body_part = body_part.gsub('l.', 'left').gsub('r.', 'right')
+          # Check for the bleeding severity.
+          bleed_rate = /(?:head|eye|neck|chest|abdomen|back|arm|hand|leg)\s+(.+)/.match(line)[1]
+          severity = $DRCH_BLEED_RATE_TO_SEVERITY_MAP[bleed_rate][:severity]
+          # Check if internal or not. Want an actual boolean result here, not just "truthy/falsey".
+          is_internal = line =~ /^inside/ ? true : false
+          bleeders[severity] << Wound.new(
+            body_part: body_part,
+            severity: severity,
+            bleeding_rate: bleed_rate,
+            is_internal: is_internal
+          )
+        end
+    end
+    return bleeders
+  end
+
+  # Given the line of text from the HEALTH command output
+  # that expresses external and internal wounds and scars,
+  # returns a map of any wounds where the keys
+  # are the severity and the values are the list of wounds.
+  def parse_wounds(wounds_line)
+    wounds = Hash.new { |h, k| h[k] = [] }
+    if wounds_line
+      # Remove commas within wound text so we can split on each wound phrase.
+      # For example "a bruised, swollen and slashed left eye" => "a bruised swollen and slashed left eye"
+      wounds_line = wounds_line.gsub($DRCH_WOUND_COMMA_SEPARATOR, '')
+      # Remove the tidbits at the start and end of the sentence that aren't pertinent.
+      wounds_line = wounds_line.gsub(/^You have\s+/, '').gsub(/\.$/, '')
+      wounds_line.split(',').map(&:strip).each do |wound|
+        $DRCH_WOUND_SEVERITY_REGEX_MAP.each do |regex, template|
+          next unless wound =~ regex
+
+          body_part = Regexp.last_match.names.find { |x| Regexp.last_match[x.to_sym] }
+          body_part = Regexp.last_match[:part] if body_part == 'part'
+          wounds[template[:severity]] << Wound.new(
+            body_part: body_part,
+            severity: template[:severity],
+            is_internal: template[:internal],
+            is_scar: template[:scar]
+          )
+        end
+      end
+    end
+    return wounds
+  end
+
+  # Given the line of text from the HEALTH command output
+  # that expresses parasites latched to you,
+  # returns a map of any parasites where the keys
+  # are the severity and the values are the list of wounds.
+  def parse_parasites(parasites_line)
+    parasites = Hash.new { |h, k| h[k] = [] }
+    if parasites_line
+      # Remove the tidbits at the start and end of the sentence that aren't pertinent.
+      parasites_line = parasites_line.gsub(/^You have\s+/, '').gsub(/\.$/, '')
+      parasites_line.split(',').map(&:strip).each do |parasite|
+        # Do regex then look for the body part match.
+        parasite =~ $DRCH_PARASITE_BODY_PART_REGEX
+        body_part = Regexp.last_match[:part].to_s
+        severity = 1 # Do parasites have a range of severities?
+        parasites[severity] << Wound.new(
+          body_part: body_part,
+          severity: severity
+        )
+      end
+    end
+    return parasites
+  end
+
+  # Given the line of text from the HEALTH command output
+  # that expresses items lodged into you,
+  # returns a map of any lodged items where the keys
+  # are the severity and the values are the list of wounds.
+  def parse_lodged_items(lodged_line)
+    lodged_items = Hash.new { |h, k| h[k] = [] }
+    if lodged_line
+      # Remove the tidbits at the start and end of the sentence that aren't pertinent.
+      lodged_line = lodged_line.gsub(/^You have\s+/, '').gsub(/\.$/, '')
+      lodged_line.split(',').map(&:strip).each do |wound|
+        # Do regex then look for the body part match.
+        wound =~ $DRCH_LODGED_BODY_PART_REGEX
+        body_part = Regexp.last_match.names.find { |x| Regexp.last_match[x.to_sym] }
+        body_part = Regexp.last_match[:part] if body_part == 'part'
+        # Check for the lodged severity.
+        severity = /\blodged\s+(.*)\s+into your\b/.match(wound)[1]
+        severity = $DRCH_LODGED_TO_SEVERITY_MAP[severity]
+        lodged_items[severity] << Wound.new(
+          body_part: body_part,
+          severity: severity
+        )
+      end
+    end
+    return lodged_items
+  end
+
+  def bind_wound(body_part, person = 'my')
     snap = [DRC.left_hand, DRC.right_hand]
-    if /You \w+ remove/ =~ DRC.bput("tend #{person} #{part}", 'You work carefully at tending', 'That area has already been tended to', 'That area is not bleeding', 'You fumble', 'too injured for you to do that', 'You \w+ remove')
+    if /You \w+ remove/ =~ DRC.bput("tend #{person} #{body_part}", 'You work carefully at tending', 'That area has already been tended to', 'That area is not bleeding', 'You fumble', 'too injured for you to do that', 'You \w+ remove')
       DRCI.dispose(DRC.left_hand) if DRC.left_hand != snap.first
       DRCI.dispose(DRC.right_hand) if DRC.right_hand != snap.last
-      bind_wound(part, person)
+      bind_wound(body_part, person)
     end
     waitrt?
   end
 
-  def unwrap_wound(part)
-    DRC.bput("unwrap my #{part}", 'You unwrap your bandages') # Are there other messages?
-    pause 5
-    bind_wound(part)
+  def unwrap_wound(body_part, person = 'my')
+    DRC.bput("unwrap #{person} #{body_part}", 'You unwrap .* bandages', 'That area is not tended')
+    waitrt?
+  end
+
+  # Skill check to tend a bleeding wound.
+  # If you're not skilled enough you may
+  # make things worse and incur long roundtime.
+  def skilled_to_tend_wound?(bleed_rate)
+    min_skill = $DRCH_BLEED_RATE_TO_SEVERITY_MAP[bleed_rate][:skill_to_tend]
+    return false if min_skill.nil?
+    DRSkill.getrank('First Aid') >= min_skill
+  end
+
+  class Wound
+    attr_accessor :body_part, :severity, :bleeding_rate
+
+    def initialize(
+      # The part of the body that's wounded, like 'left hand' or 'abdomen'.
+      body_part: nil,
+      # Severity number for triaging this wound. Larger number is more severe.
+      severity: nil,
+      # At this time, at what rate is the wound bleeding, like 'light' or 'moderate(tended)'.
+      bleeding_rate: nil,
+      # Is this an internal wound (true) or external (false)?
+      is_internal: false,
+      # Is this a scar (true) or fresh wound (false)?
+      is_scar: false
+    )
+      @body_part = body_part
+      @severity = severity
+      @bleeding_rate = bleeding_rate
+      @is_internal = is_internal
+      @is_scar = is_scar
+    end
+
+    def bleeding?
+      return !@bleeding_rate.nil? && !@bleeding_rate.empty? && @bleeding_rate != '(tended)'
+    end
+
+    def internal?
+      return @is_internal
+    end
+
+    def scar?
+      return @is_scar
+    end
   end
 end

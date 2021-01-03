@@ -197,9 +197,15 @@ class SetupProcess
       echo('skipping summoned weapons because no moonblade available') if $debug_mode_ct
       weapon_training = weapon_training.reject { |skill, _| game_state.summoned_info(skill) }
     end
-    new_weapon_skill = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill), @priority_weapons.include?(skill) ? -1 : 0, DRSkill.getrank(skill)] }.first
-    game_state.update_weapon_info(new_weapon_skill)
 
+    # Exclude current skill so that a new one is selected.
+    new_weapon_skill = weapon_training
+      .reject { |skill, _| skill == game_state.weapon_skill }
+      .min_by { |skill, _| [DRSkill.getxp(skill), @priority_weapons.include?(skill) ? -1 : 0, DRSkill.getrank(skill)] }.first
+
+    # Update weapon skill to train next, if a new one was chosen.
+    # If you're training exactly one weapon then won't change.
+    game_state.update_weapon_info(new_weapon_skill) if new_weapon_skill
     game_state.update_target_weapon_skill
   end
 
@@ -2883,11 +2889,21 @@ class AttackProcess
         end
       else
         fput('load')
-        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand') != ''
+        case bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand', "As you try to reach", "You don't have the proper ammunition")
+        when "As you try to reach", "You don't have the proper ammunition"
+          DRC.message("Out of ammunition for #{game_state.weapon_name}, dancing until can switch to next weapon")
+          game_state.loaded = false
+          game_state.clear_aim_queue
+          dance(game_state)
+          # Increment action count so that the script
+          # will eventually progress to next skill to train.
+          game_state.action_taken(99)
+        else
+          game_state.loaded = true
+        end
       end
 
       waitrt?
-      game_state.loaded = true
       unless game_state.selected_maneuver
         game_state.set_aim_queue
         aim(game_state)
@@ -2935,6 +2951,8 @@ class AttackProcess
       when 'You attempt to ready your repeating arbalest'
         game_state.loaded = false
       end
+    when "isn't loaded"
+      game_state.loaded = false
     when 'Face what?'
       game_state.clear_aim_queue
     when 'Strangely, you don\'t feel like fighting right now'
@@ -3610,12 +3628,12 @@ class GameState
     @action_count = 0
   end
 
-  def action_taken
-    @action_count += 1
+  def action_taken(count = 1)
+    @action_count += count
   end
 
-  def action_reduce
-    @action_count -= 1
+  def action_reduce(count = 1)
+    @action_count -= count
   end
 
   def set_aim_queue

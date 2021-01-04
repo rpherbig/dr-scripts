@@ -147,7 +147,7 @@ class SetupProcess
     return if Time.now - @last_cycle_time < @cycle_armors_time
     return if game_state.loaded
     armor_types = @cycle_armors.map { |skill, _| skill }
-    next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    next_armor_type = game_state.sort_by_rate_then_rank(armor_types).first
     return if next_armor_type == @last_worn_type
     return if DRSkill.getxp(next_armor_type) >= @combat_training_abilities_target
 
@@ -178,7 +178,7 @@ class SetupProcess
       return
     end
     armor_types = @cycle_regalia
-    next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    next_armor_type = game_state.sort_by_rate_then_rank(armor_types).first
     return unless Flags['ct-regalia-expired'] || next_armor_type != @last_worn_type
     return unless Flags['ct-regalia-expired'] || game_state.last_regalia_type.nil? || DRSkill.getxp(next_armor_type) < @combat_training_abilities_target
 
@@ -199,9 +199,8 @@ class SetupProcess
     end
 
     # Exclude current skill so that a new one is selected.
-    new_weapon_skill = weapon_training
-      .reject { |skill, _| skill == game_state.weapon_skill }
-      .min_by { |skill, _| [DRSkill.getxp(skill), @priority_weapons.include?(skill) ? -1 : 0, DRSkill.getrank(skill)] }.first
+    new_weapon_skills = weapon_training.keys.reject { |skill| skill == game_state.weapon_skill }
+    new_weapon_skill = game_state.sort_by_rate_then_rank(new_weapon_skills, @priority_weapons).first
 
     # Update weapon skill to train next, if a new one was chosen.
     # If you're training exactly one weapon then won't change.
@@ -296,8 +295,7 @@ class SetupProcess
   end
 
   def determine_whirlwind_weapon(game_state)
-    temp_array = (game_state.whirlwind_trainables - [game_state.weapon_skill])
-    offhand_skill = temp_array.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    offhand_skill = game_state.sort_by_rate_then_rank(game_state.whirlwind_trainables - [game_state.weapon_skill]).first
     game_state.update_whirlwind_weapon_info(offhand_skill)
     game_state.wield_whirlwind_offhand
   end
@@ -1405,7 +1403,7 @@ class SpellProcess
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
                      .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
                      .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    needs_training = game_state.sort_by_rate_then_rank(needs_training).first
     return unless needs_training
 
     data = @training_spells[needs_training]
@@ -1624,7 +1622,9 @@ class SpellProcess
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
 
     data = if @offensive_spell_cycle.empty?
-             ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
+             skills = ready_spells.map { |spell| spell['skill'] }
+             skill = game_state.sort_by_rate_then_rank(skills).first
+             ready_spells.find { |spell| spell['skill'] == skill }
            else
              name = @offensive_spell_cycle.find { |spell_name| ready_spells.find { |spell| spell['name'] == spell_name } }
              @offensive_spell_cycle.rotate!
@@ -2242,9 +2242,8 @@ class TrainerProcess
     return unless Time.now - UserVars.almanac_last_use >= 600
     return if left_hand && !game_state.currently_whirlwinding
     unless @almanac_skills.empty?
-      training_skill = @almanac_skills
-                       .select { |skill| DRSkill.getxp(skill) < 18 }
-                       .sort_by { |skill| DRSkill.getxp(skill) }.first
+      training_skills = @almanac_skills.select { |skill| DRSkill.getxp(skill) < 18 }
+      training_skill = game_state.sort_by_rate_then_rank(training_skills).first
       return unless training_skill
     end
 
@@ -3513,7 +3512,7 @@ class GameState
 
   def dance
     if @dynamic_dance_skill
-      filtered_skills = weapon_training.keys.reject { |skill| $non_dance_skills.include?(skill) }
+      filtered_skills = weapon_training.reject { |skill, _| $non_dance_skills.include?(skill) }
       @dance_skill = sort_by_rate_then_rank(filtered_skills).first
     end
     update_weapon_info(@dance_skill)
@@ -3894,7 +3893,7 @@ class GameState
     options -= held_types if weapon_skill.eql?('Bow') || (weapon_skill.eql?('Crossbow') && !@using_light_crossbow)
     options -= thrown_types if (weapon_skill.eql?('Bow') && @left_hand_free)
     echo "determine_aiming_skill::options: #{options}" if $debug_mode_ct
-    options.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    sort_by_rate_then_rank(options).first
   end
 
   def use_stealth?
@@ -3908,13 +3907,13 @@ class GameState
   # This avoids repeatedly picking a high rank skill whose learn rate
   # will be 0/34 because not being challenged and consequently
   # starving lower rank skills from being chosen.
-  def sort_by_rate_then_rank(skills)
-    skills.sort do |skillA, skillB|
-      compare = DRSkill.getxp(skillA) <=> DRSkill.getxp(skillB)
-      if compare == 0
-        compare = DRSkill.getrank(skillA) <=> DRSkill.getrank(skillB)
-      end
-      compare
+  def sort_by_rate_then_rank(skills, priorities = [])
+    skills.sort_by do |skill|
+      [
+        DRSkill.getxp(skill),                 # choose first by skills with lowest learning rate
+        priorities.include?(skill) ? -1 : 0,  # and of those, choose skills that are to be prioritized
+        DRSkill.getrank(skill)                # and lastly, choose by skills with lowest ranks
+      ]
     end
   end
 

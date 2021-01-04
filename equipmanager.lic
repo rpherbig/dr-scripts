@@ -238,123 +238,140 @@ class EquipmentManager
     return_held_gear || stow_hands
   end
 
-  def verb_data(item)
+  # Logic for how to get an item with multiple attempts.
+  # For example, you try to get a bow from a container
+  # but you're actually wearing it currently so an attempt
+  # is made to remove said bow to get it to your hands.
+  #
+  # The returned hashmap has this format:
+  # [worn|tied|stowed|transform]:
+  #   verb: String, what to do to obtain the item
+  #   matches: Array of strings that mean you were successful
+  #   failures: Array of strings that indicate should make 2nd attempt
+  #   failure_recovery: Proc, block to perform 2nd attempt
+  #   exhausted: Array of strings that indicate you aren't getting item, give up
+  def verb_data_to_get_item(item)
     {
+      # First place to check for item is you're wearing it.
       worn: {
         verb: 'remove',
         matches: [
-            /You .*#{item.short_regex}/,
-            /You (get|sling|pull|work|loosen|slide|remove|yank).*#{item.name}/,
-            /Remove what/,
-            /You aren't wearing that/,
-            /slide themselves off of your/,
-            /you manage to loosen/
+          /You .*#{item.short_regex}/,
+          /You .*#{item.name}/,
+          /you manage to loosen/,
+          /slide themselves off of your/
         ],
         failures: [
-            /You aren't wearing that/
+          /You aren't wearing that/,
+          /Remove what/,
         ],
-        failure_recovery: proc do |noun|
-                            get_item_helper(item, :stowed)
-                          end,
+        # If not worn then try to get it from a container.
+        failure_recovery: proc do |noun, item, response|
+          get_item_helper(item, :stowed)
+        end,
         exhausted: [
-            /Remove what/,
-            /You aren't wearing that/
+          /I could not find what you were referring/,
+          /What were you referring/,
+          /Please rephrase that command/
         ]
       },
+      # First place to check for item is it's tied to something.
       tied: {
         verb: 'untie',
         matches: [
-            /You .*#{item.short_regex}/,
-            /.*you untie your .*#{item.short_regex} from it/,
-            /You remove.*#{item.name}/,
-            /What were you referring/,
-            /Untie what/,
-            /You are a little too busy/,
-            /You are a bit too busy/
+          /You .*#{item.short_regex}/,
+          /You .*#{item.name}/,
+          /.*you untie your .*#{item.short_regex} from it/
         ],
         failures: [
-            /You are a little too busy/,
-            /You are a bit too busy/
+          /Untie what/,
+          /You are a little too busy/,
+          /You are a bit too busy/
         ],
-        failure_recovery: proc do |noun, item, *matches|
-                            case matches
-                            when 'You are a little too busy'
-                              retreat
-                              get_item?(item)
-                            when 'You are a bit too busy'
-                              DRC.stop_playing
-                              get_item?(item)
-                            else
-                              stow_weapon
-                            end
-                          end,
+        # If too busy, then stop playing songs or fighting and retry.
+        failure_recovery: proc do |noun, item, response|
+          case response
+          when /Untie what/
+            get_item_helper(item, item.worn ? :worn : :stowed)
+          when /You are a little too busy/
+            DRC.retreat
+            get_item?(item)
+          when /You are a bit too busy/
+            DRC.stop_playing
+            get_item?(item)
+          end
+        end,
         exhausted: [
-            /What were you referring/,
-            /Untie what/
+          /I could not find what you were referring/,
+          /What were you referring/,
+          /Please rephrase that command/
         ]
       },
+      # First place to check for item is in a container.
       stowed: {
         verb: 'get',
         matches: [
-            /You .*#{item.short_regex}/,
-            /You .*#{item.name}/,
-            /The.* slides easily out/,
-            /What were you referring/,
-            /But that is already/,
-            /You are already holding/
+          /You .*#{item.short_regex}/,
+          /You .*#{item.name}/,
+          /The.* slides easily out/,
+          /You are already holding/
         ],
         failures: [
-            /But that is already/
+          /But that is already/
         ],
-        failure_recovery: proc do |noun|
-                            get_item_helper(item, :worn)
-                          end,
+        # If not stowed then maybe you're wearing it.
+        failure_recovery: proc do |noun, item, response|
+          get_item_helper(item, :worn)
+        end,
         exhausted: [
-            /What were you referring/
+          /I could not find what you were referring/,
+          /What were you referring/,
+          /Please rephrase that command/
         ]
       },
+      # First place to check for item is to perform verb to transform it.
       transform: {
         verb: item.transform_verb,
         matches: [item.transform_text],
         failures: [
-            /You'll need a free hand to do that/,
-            /You don't seem to be holding/
+          /need a free hand to do that/,
+          /You don't seem to be holding/,
+          /But you're not holding that/
         ],
-        failure_recovery: proc do |noun|
-                            fput('stow left') if left_hand && left_hand !~ /#{noun}/i
-                            fput('stow right') if right_hand && right_hand !~ /#{noun}/i
-                            item.worn ? bput("remove my #{noun}", '^You') : bput("get my #{noun}", '^You')
-                            bput("#{item.transform_verb} my #{item.short_name}", verb_data(item)[:matches])
-                          end,
+        # If you're not holding item then get it then transform it.
+        failure_recovery: proc do |noun, item, response|
+          case response
+          when /need a free hand to do that/
+            empty_hands
+            get_item_helper(item, :transform)
+          when /You don't seem to be holding/, /But you're not holding that/
+            get_item_helper(item, item.worn ? :worn : :stowed)
+            get_item_helper(item, :transform)
+          end
+        end,
         exhausted: [
-            /What were you referring/
+          /I could not find what you were referring/,
+          /What were you referring/,
+          /Please rephrase that command/
         ]
       }
     }
   end
 
   def get_item_helper(item, type)
-    data = verb_data(item)[type]
-    snapshot = [left_hand, right_hand]
+    data = verb_data_to_get_item(item)[type]
     waitrt?
-    response = bput("#{data[:verb]} my #{item.short_name}", *data[:matches], *data[:failures])
+    response = bput("#{data[:verb]} my #{item.short_name}", *data[:matches], *data[:failures], *data[:exhausted])
     waitrt?
     case response
+    when *data[:matches]
+      return true
     when *data[:exhausted]
       return false
     when *data[:failures]
       data[:failure_recovery].call(item.name, item, response)
     when 'You are already holding'
       return true
-    else
-      start = Time.now
-      loop do
-        # Assume we got the item if whats in our hands changed.
-        return true if snapshot != [DRC.left_hand, DRC.right_hand]
-        # Assume we aren't getting the item if nothing happens.
-        return false if Time.now - start >= 30
-        pause 0.05
-      end
     end
   end
 

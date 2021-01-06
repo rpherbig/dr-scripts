@@ -373,7 +373,7 @@ class LootProcess
 
     @rituals = get_data('spells').rituals
     echo("  @rituals: #{@rituals}") if $debug_mode_ct
-    
+
     @redeemed = settings.necro_redeemed
     echo("  @redeemed: #{@redeemed}") if $debug_mode_ct
 
@@ -956,7 +956,7 @@ class SpellProcess
 
     @training_spells_max_threshold = settings.combat_spell_training_max_threshold
     echo("  @training_spells_max_threshold: #{@training_spells_max_threshold}") if $debug_mode_ct
-    
+
     @training_spells_wait = settings.combat_spell_timer
     echo("  @training_spells_wait: #{@training_spells_wait}") if $debug_mode_ct
 
@@ -1037,6 +1037,9 @@ class SpellProcess
 
     @barb_healing = settings.barb_famine_healing
     echo("  @barb_healing: #{@barb_healing}") if $debug_mode_ct
+
+    @runestone_storage = settings.runestone_storage
+    echo("  @runestone_storage: #{@runestone_storage}") if $debug_mode_ct
 
     @perc_health_timer = Time.now
     @aura_timer = 0
@@ -1428,6 +1431,14 @@ class SpellProcess
     true
   end
 
+  def cast_runestone(data, game_state)
+    prepare_to_cast_runestone?(data, @settings)
+    return unless DRCI.in_hands?(data['runestone_name'])
+    prepare_spell(data, game_state, @buff_force_cambrinth)
+    return unless DRCI.in_hands?(data['runestone_name'])
+    DRCI.put_away_item?(data['runestone_name'], @runestone_storage)
+  end
+
   def check_buffs(game_state)
     return if game_state.casting
     return if mana < @buff_spell_mana_threshold
@@ -1453,6 +1464,16 @@ class SpellProcess
     game_state.casting_weapon_buff = $weapon_buffs.include?(name)
     if data['ritual']
       cast_ritual(data, game_state)
+    elsif data['runestone_name']
+      if DRCI.inside?(data['runestone_name'], @runestone_storage)
+        data['runestone_for_combat_exists'] = true
+        cast_runestone(data, game_state)
+      else
+        ### Just need this setting to remove the spell from the list
+        data['runestone_for_combat_exists'] = false
+        @buff_spells.reject! { |spell| @buff_spells[spell]['runestone_for_combat_exists'] == false }
+        return
+      end
     else
       prepare_spell(data, game_state, @buff_force_cambrinth)
     end
@@ -1461,13 +1482,13 @@ class SpellProcess
   def check_health(game_state)
     return if game_state.casting
     return unless DRStats.empath? || DRStats.barbarian?
-    
+
     if DRStats.barbarian? && !@barb_healing.empty?
       return if DRSpells.active_spells['Famine']
       return if health > @barb_healing['health_threshold']
       # Mana is the stat used by IF for Barbs...
       return if mana < @barb_healing['inner_fire_threshold']
-      
+
       DRC.bput('bers famine', 'you feel yourself growing healthier',
                               'But you are already',\
                               'Your inner fire lacks',\
@@ -1599,6 +1620,7 @@ class SpellProcess
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
                    .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
+
     data = if @offensive_spell_cycle.empty?
              skills = ready_spells.map { |spell| spell['skill'] }
              skill = game_state.sort_by_rate_then_rank(skills).first
@@ -1611,7 +1633,20 @@ class SpellProcess
 
     game_state.hide_on_cast = true if data['use_stealth']
 
-    prepare_spell(data, game_state)
+    if data['runestone_name']
+      if DRCI.inside?(data['runestone_name'], @runestone_storage)
+        data['runestone_for_combat_exists'] = true
+        cast_runestone(data, game_state)
+      else
+        ### Just need this setting to remove the spell from the list
+        data['runestone_for_combat_exists'] = false
+        @offensive_spells.reject! { |spell| spell['runestone_for_combat_exists']==false }
+        return
+      end
+    else
+      prepare_spell(data, game_state)
+    end
+
     Flags.reset('ct-spelllost')
   end
 
@@ -1695,7 +1730,7 @@ class SpellProcess
 
     game_state.casting_regalia = data['abbrev'].casecmp('REGAL').zero?
 
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'])
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     if data['cambrinth']

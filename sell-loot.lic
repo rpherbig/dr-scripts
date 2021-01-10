@@ -29,11 +29,14 @@ class SellLoot
     skip_bank = @settings.sell_loot_skip_bank
     skip_exchange = @settings.sell_loot_skip_exchange
     keep_money_by_currency = @settings.sell_loot_money_on_hand
+    @sort_auto_head = @settings.sort_auto_head
 
     sell_gems("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}") if @settings.sell_loot_pouch
     check_spare_pouch(@settings.spare_gem_pouch_container, @settings.gem_pouch_adjective) if @settings.spare_gem_pouch_container
 
     sell_bundle if @settings.sell_loot_bundle
+
+    sell_traps(@settings.component_container) if @settings.sell_loot_traps
 
     return if skip_bank && !@bankbot_enabled
     return if @bankbot_enabled && (@bankbot_name.nil? || @bankbot_room_id.nil?)
@@ -73,38 +76,38 @@ class SellLoot
   end
 
   def exchange_coins
-    walk_to @hometown['exchange']['id']
-    release_invisibility
+    DRCT.walk_to(@hometown['exchange']['id'])
+    DRC.release_invisibility
     exchange_to = @hometown['currency']
     $CURRENCIES
       .reject { |currency| currency =~ /#{exchange_to}/i }
-      .each { |currency| fput "exchange all #{currency} for #{exchange_to}" }
+      .each { |currency| fput("exchange all #{currency} for #{exchange_to}") }
   end
 
   def deposit_coins(keep_copper)
-    walk_to @hometown['deposit']['id']
-    release_invisibility
-    bput('wealth', 'Wealth:')
-    case bput('deposit all', 'you drop all your', 'drop your coins inside', 'You hand the clerk some coins', "You don't have any", 'There is no teller here', 'reached the maximum balance I can permit', "We don't serve necromancers or sorcerers here.")
+    DRCT.walk_to(@hometown['deposit']['id'])
+    DRC.release_invisibility
+    DRC.bput('wealth', 'Wealth:')
+    case DRC.bput('deposit all', 'you drop all your', 'drop your coins inside', 'You hand the clerk some coins', "You don't have any", 'There is no teller here', 'reached the maximum balance I can permit', "We don't serve necromancers or sorcerers here.")
     when 'There is no teller here', "We don't serve necromancers or sorcerers here."
       return
     end
-    minimize_coins(keep_copper).each { |amount| withdraw_exact_amount?(amount, @settings) }
-    bput('check balance', 'your current balance is', 'As expected, there are')
+    minimize_coins(keep_copper).each { |amount| DRCM.withdraw_exact_amount?(amount, @settings) }
+    DRC.bput('check balance', 'your current balance is', 'As expected, there are')
   end
 
   def give_money_to_bankbot(currency, keep)
-    copper_on_hand = check_wealth(currency)
+    copper_on_hand = DRCM.check_wealth(currency)
     deposit_amount = copper_on_hand - keep
     return if deposit_amount <= 0
 
-    walk_to @bankbot_room_id
+    DRCT.walk_to(@bankbot_room_id)
     return unless DRRoom.pcs.include?(@bankbot_name)
 
     Flags.reset('tip-accepted')
     Flags.reset('tip-expired')
     Flags.reset('tip-declined')
-    case bput("tip #{@bankbot_name} #{deposit_amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding', 'already has a tip offer pending', "But you don't have that much!")
+    case DRC.bput("tip #{@bankbot_name} #{deposit_amount} #{currency}", 'You offer', "I don't know who", 'you really should keep every bronze you can get your hands on', 'You already have a tip offer outstanding', 'already has a tip offer pending', "But you don't have that much!")
     when "I don't know who"
       echo '***Bankbot not found, skipping deposit***'
       return
@@ -126,22 +129,22 @@ class SellLoot
   end
 
   def sell_bundle
-    return unless exists?('bundle')
+    return unless DRCI.exists?('bundle')
 
-    return unless walk_to @hometown['tannery']['id']
+    return unless DRCT.walk_to(@hometown['tannery']['id'])
 
-    return if bput('remove my bundle', 'You remove', 'You sling', 'Remove what','You take') == 'Remove what'
-    release_invisibility
-    bput('sell my bundle', 'ponders over the bundle', 'sorts through it', 'gives it a close inspection', 'takes the bundle')
-    bput('stow rope', 'You put')
+    return if DRC.bput('remove my bundle', 'You remove', 'You sling', 'Remove what','You take') == 'Remove what'
+    DRC.release_invisibility
+    DRC.bput('sell my bundle', 'ponders over the bundle', 'sorts through it', 'gives it a close inspection', 'takes the bundle')
+    DRC.bput('stow rope', 'You put')
   end
 
   def check_spare_pouch(container, adj)
     fput("open my #{container}")
     return if inside?("#{adj} pouch", container)
-    walk_to @hometown['gemshop']['id']
+    DRCT.walk_to(@hometown['gemshop']['id'])
     clerk = which_clerk(@hometown['gemshop']['name'])
-    release_invisibility
+    DRC.release_invisibility
     fput("ask #{clerk} for #{adj} pouch")
     fput("put my pouch in my #{container}")
   end
@@ -151,25 +154,75 @@ class SellLoot
   end
 
   def sell_gems(container)
-    release_invisibility
-    case bput("open my #{container}", 'You open your', 'You open a', 'has been tied off', 'What were you referring to', 'That is already open')
+    DRC.release_invisibility
+    case DRC.bput("open my #{container}", 'You open your', 'You open a', 'has been tied off', 'What were you referring to', 'That is already open')
     when 'has been tied off', 'What were you referring to'
       return
     end
 
     gems = get_gems(container)
     unless gems.empty?
-      return unless walk_to @hometown['gemshop']['id']
+      return unless DRCT.walk_to(@hometown['gemshop']['id'])
       clerk = which_clerk(@hometown['gemshop']['name'])
 
       gems.each do |gem|
-        fput "get my #{gem} from my #{container}"
-        fput "sell my #{gem} to #{clerk}"
+        fput("get my #{gem} from my #{container}")
+        fput("sell my #{gem} to #{clerk}")
       end
     end
 
-    fput "close my #{container}" unless @settings.sell_loot_skip_pouch_close
+    fput("close my #{container}") unless @settings.sell_loot_skip_pouch_close
   end
+
+  # Thief only.
+  # Sells traps harvested from disarmed boxes to the locksmith.
+  # Not going to try to sell to a pawnshop because too great of risk of
+  # selling something valuable that found its way into this container.
+  # Bulk selling a component pouch is safest option because it works like
+  # bulk selling a bundle of skins or a trader bulk selling a gem pouch.
+  def sell_traps(container)
+    return unless DRStats.thief?
+    return unless DRC.bput("look in my #{container}", "There is nothing in there", "you see") == "you see"
+
+    DRC.release_invisibility
+    case DRC.bput("remove my #{container}", "You remove", "What were you referring to", "You aren't wearing that", "Remove what")
+    when "What were you referring to", "You aren't wearing that", "Remove what"
+      return
+    end
+
+    if DRCT.walk_to(@hometown['locksmithing']['id'])
+      clerk = which_clerk(@hometown['locksmithing']['name'])
+      # The locksmith won't accept your component container
+      # as long as other players are in the same room.
+      # Once the room is empty then try to give it to them.
+      wait_counter = 0
+      while !DRRoom.pcs.empty? do
+        break if wait_counter >= 5
+        wait_counter = wait_counter + 1
+        echo "Waiting for other players to leave the room..."
+        pause 5
+      end
+      case DRC.bput("give my #{container} to #{clerk}",
+        "hands it back to you along with some coins",     # success!
+        "There's nothing in there",                       # empty container
+        "What is it you're trying to give",               # no container or no npc
+        "not interested in",                              # non-traps in container
+        "doesn't appear to be interested in your offer",  # not a thief
+        "I don't have that in stock right now"            # players in room, try again later
+      )
+      when "not interested in"
+        DRC.message("Remove non-trap components from #{container} then try again.")
+      when "doesn't appear to be interested in your offer"
+        DRC.message("Only thieves can sell trap components in bulk to locksmiths. Try selling them individually at the pawnshop.")
+      when "I don't have that in stock right now"
+        DRC.message("Unable to sell #{container} at this time. Try again later when no one else is in the shop with you.")
+      end
+    end
+
+    DRC.bput("wear my #{container}", "You attach", "Wear what", "You are already wearing")
+    fput("sort auto head") if @sort_auto_head
+  end
+
 end
 
 before_dying do

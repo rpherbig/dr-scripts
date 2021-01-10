@@ -147,7 +147,7 @@ class SetupProcess
     return if Time.now - @last_cycle_time < @cycle_armors_time
     return if game_state.loaded
     armor_types = @cycle_armors.map { |skill, _| skill }
-    next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    next_armor_type = game_state.sort_by_rate_then_rank(armor_types).first
     return if next_armor_type == @last_worn_type
     return if DRSkill.getxp(next_armor_type) >= @combat_training_abilities_target
 
@@ -178,7 +178,7 @@ class SetupProcess
       return
     end
     armor_types = @cycle_regalia
-    next_armor_type = armor_types.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    next_armor_type = game_state.sort_by_rate_then_rank(armor_types).first
     return unless Flags['ct-regalia-expired'] || next_armor_type != @last_worn_type
     return unless Flags['ct-regalia-expired'] || game_state.last_regalia_type.nil? || DRSkill.getxp(next_armor_type) < @combat_training_abilities_target
 
@@ -197,9 +197,14 @@ class SetupProcess
       echo('skipping summoned weapons because no moonblade available') if $debug_mode_ct
       weapon_training = weapon_training.reject { |skill, _| game_state.summoned_info(skill) }
     end
-    new_weapon_skill = weapon_training.min_by { |skill, _| [DRSkill.getxp(skill), @priority_weapons.include?(skill) ? -1 : 0, DRSkill.getrank(skill)] }.first
-    game_state.update_weapon_info(new_weapon_skill)
 
+    # Exclude current skill so that a new one is selected.
+    new_weapon_skills = weapon_training.keys.reject { |skill| skill == game_state.weapon_skill }
+    new_weapon_skill = game_state.sort_by_rate_then_rank(new_weapon_skills, @priority_weapons).first
+
+    # Update weapon skill to train next, if a new one was chosen.
+    # If you're training exactly one weapon then won't change.
+    game_state.update_weapon_info(new_weapon_skill) if new_weapon_skill
     game_state.update_target_weapon_skill
   end
 
@@ -228,13 +233,12 @@ class SetupProcess
     points = override || previous.values.inject(&:+)
 
     priority = if game_state.current_weapon_stance
-                 game_state.current_weapon_stance[0..1].sort_by { |skill| [DRSkill.getxp(skill), skill] } + [game_state.current_weapon_stance.last]
+                 game_state.sort_by_rate_then_rank(game_state.current_weapon_stance[0..1]) + [game_state.current_weapon_stance.last]
                elsif @priority_defense
                  rest = ['Evasion', 'Parry Ability', 'Shield Usage'] - [@priority_defense]
-                 rest.sort_by! { |skill| [DRSkill.getxp(skill), skill] }
-                 [@priority_defense] + rest
+                 [@priority_defense] + game_state.sort_by_rate_then_rank(rest)
                else
-                 ['Evasion', 'Parry Ability', 'Shield Usage'].sort_by { |skill| [DRSkill.getxp(skill), skill] }
+                 game_state.sort_by_rate_then_rank(['Evasion', 'Parry Ability', 'Shield Usage'])
                end
 
     game_state.parrying = priority.index('Parry Ability') < 2
@@ -291,8 +295,7 @@ class SetupProcess
   end
 
   def determine_whirlwind_weapon(game_state)
-    temp_array = (game_state.whirlwind_trainables - [game_state.weapon_skill])
-    offhand_skill = temp_array.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    offhand_skill = game_state.sort_by_rate_then_rank(game_state.whirlwind_trainables - [game_state.weapon_skill]).first
     game_state.update_whirlwind_weapon_info(offhand_skill)
     game_state.wield_whirlwind_offhand
   end
@@ -488,7 +491,7 @@ class LootProcess
       return
     end
 
-    case bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'There isn\'t any more room', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything')
+    case bput("stow #{item}", 'You pick up', 'You get', 'You need a free hand', 'There isn\'t any more room', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything', 'rapidly decays away', 'cracks and rots away')
     when 'already in your inventory'
       if @gem_nouns.include?(item)
         bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
@@ -1397,7 +1400,7 @@ class SpellProcess
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
                      .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
                      .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    needs_training = game_state.sort_by_rate_then_rank(needs_training).first
     return unless needs_training
 
     data = @training_spells[needs_training]
@@ -1597,7 +1600,9 @@ class SpellProcess
                    .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
     data = if @offensive_spell_cycle.empty?
-             ready_spells.min_by { |spell| DRSkill.getxp(spell['skill']) }
+             skills = ready_spells.map { |spell| spell['skill'] }
+             skill = game_state.sort_by_rate_then_rank(skills).first
+             ready_spells.find { |spell| spell['skill'] == skill }
            else
              name = @offensive_spell_cycle.find { |spell_name| ready_spells.find { |spell| spell['name'] == spell_name } }
              @offensive_spell_cycle.rotate!
@@ -1690,7 +1695,7 @@ class SpellProcess
 
     game_state.casting_regalia = data['abbrev'].casecmp('REGAL').zero?
 
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'])
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     if data['cambrinth']
@@ -2202,9 +2207,8 @@ class TrainerProcess
     return unless Time.now - UserVars.almanac_last_use >= 600
     return if left_hand && !game_state.currently_whirlwinding
     unless @almanac_skills.empty?
-      training_skill = @almanac_skills
-                       .select { |skill| DRSkill.getxp(skill) < 18 }
-                       .sort_by { |skill| DRSkill.getxp(skill) }.first
+      training_skills = @almanac_skills.select { |skill| DRSkill.getxp(skill) < 18 }
+      training_skill = game_state.sort_by_rate_then_rank(training_skills).first
       return unless training_skill
     end
 
@@ -2251,7 +2255,7 @@ class TrainerProcess
     end
     bput "put #{@water_holder} in my #{@theurgy_supply_container}", 'You put', 'What were you referring to'
     fput "get #{@flint_lighter}", 'You get a', 'You are already'
-    if bput('get incense', 'You get', 'You are already', 'referring to') == 'referring to'
+    if bput("get incense from my #{@theurgy_supply_container}", 'You get', 'You are already', 'referring to') == 'referring to'
       fput "stow #{@flint_lighter}", 'You put your', 'Stow what'
       @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
       @training_abilities.delete('Meraud')
@@ -2727,7 +2731,7 @@ class AttackProcess
         end
       end
 
-      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip')
+      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'You turn to face', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip')
     end
 
     pause
@@ -2788,10 +2792,10 @@ class AttackProcess
     echo("Time now: #{Time.now.to_i}") if $debug_mode_ct
     echo("@firing_timer: #{@firing_timer}") if $debug_mode_ct
     echo("@firing_delay: #{@firing_delay}") if $debug_mode_ct
-    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
+    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn|fragment).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
     when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
-    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn).* at/i
+    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn|fragment).* at/i
       game_state.action_taken
       ammo = Regexp.last_match(2)
       @firing_check = 0
@@ -2876,19 +2880,40 @@ class AttackProcess
         waitrt?
       end
     else
-      if game_state.dual_load?
+      dual_load = game_state.dual_load?
+
+      if dual_load
+        # Occasionally, there may be no game output after loading.
+        # To be on the safe side, we do two attempts to get output.
         fput('load arrows')
-        pause 0.5 until (load_return = bput('load arrows', 'You reach into', 'already loaded', 'in your hand', 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands', 'Your .* makes the task more difficult')) != ''
-        if ['but are unable to draw upon its majesty', 'without steadier hands', 'Such a feat would be impossible without the winds to guide'].include?(load_return)
-          pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand') != ''
+        case bput('load arrows', 'You reach into', 'You carefully load', 'already loaded', 'in your hand', "As you try to reach", "You don't have the proper ammunition", 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands', 'Your .* makes the task more difficult')
+        when "As you try to reach", "You don't have the proper ammunition", 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands'
+          dual_load = false # fallback to single load
+          game_state.loaded = false
+        else
+          game_state.loaded = true
         end
-      else
+      end
+
+      unless dual_load
+        # Occasionally, there may be no game output after loading.
+        # To be on the safe side, we do two attempts to get output.
         fput('load')
-        pause 0.5 until bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand') != ''
+        case bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand', "As you try to reach", "You don't have the proper ammunition")
+        when "As you try to reach", "You don't have the proper ammunition"
+          DRC.message("Out of ammunition for #{game_state.weapon_name}, dancing until can switch to next weapon")
+          game_state.loaded = false
+          game_state.clear_aim_queue
+          dance(game_state)
+          # Increment action count so that the script
+          # will eventually progress to next skill to train.
+          game_state.action_taken(99)
+        else
+          game_state.loaded = true
+        end
       end
 
       waitrt?
-      game_state.loaded = true
       unless game_state.selected_maneuver
         game_state.set_aim_queue
         aim(game_state)
@@ -2936,6 +2961,8 @@ class AttackProcess
       when 'You attempt to ready your repeating arbalest'
         game_state.loaded = false
       end
+    when "isn't loaded"
+      game_state.loaded = false
     when 'Face what?'
       game_state.clear_aim_queue
     when 'Strangely, you don\'t feel like fighting right now'
@@ -3461,8 +3488,8 @@ class GameState
 
   def dance
     if @dynamic_dance_skill
-      filtered_skills = weapon_training.reject { |skill, _| $non_dance_skills.include?(skill) }
-      @dance_skill = filtered_skills.min_by { |skill, _| DRSkill.getrank(skill) }.first
+      filtered_skills = weapon_training.keys.reject { |skill| $non_dance_skills.include?(skill) }
+      @dance_skill = sort_by_rate_then_rank(filtered_skills).first
     end
     update_weapon_info(@dance_skill)
   end
@@ -3611,12 +3638,12 @@ class GameState
     @action_count = 0
   end
 
-  def action_taken
-    @action_count += 1
+  def action_taken(count = 1)
+    @action_count += count
   end
 
-  def action_reduce
-    @action_count -= 1
+  def action_reduce(count = 1)
+    @action_count -= count
   end
 
   def set_aim_queue
@@ -3842,11 +3869,28 @@ class GameState
     options -= held_types if weapon_skill.eql?('Bow') || (weapon_skill.eql?('Crossbow') && !@using_light_crossbow)
     options -= thrown_types if (weapon_skill.eql?('Bow') && @left_hand_free)
     echo "determine_aiming_skill::options: #{options}" if $debug_mode_ct
-    options.min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+    sort_by_rate_then_rank(options).first
   end
 
   def use_stealth?
     DRSkill.getxp('Stealth') < @combat_training_abilities_target
+  end
+
+  # Given an array of skills, sorts them first by
+  # their learning rate and then by their rank.
+  # For example, if two skills have the same learning rate (e.g. 12/34)
+  # then the skill with fewer ranks will be sorted first.
+  # This avoids repeatedly picking a high rank skill whose learn rate
+  # will be 0/34 because not being challenged and consequently
+  # starving lower rank skills from being chosen.
+  def sort_by_rate_then_rank(skills, priorities = [])
+    skills.sort_by do |skill|
+      [
+        DRSkill.getxp(skill),                 # choose first by skills with lowest learning rate
+        priorities.include?(skill) ? -1 : 0,  # and of those, choose skills that are to be prioritized
+        DRSkill.getrank(skill)                # and lastly, choose by skills with lowest ranks
+      ]
+    end
   end
 
   attr_reader :aiming_trainables, :summoned_weapons

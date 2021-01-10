@@ -6,16 +6,19 @@
 $TRASH_STORAGE = %w[basket bin gloop barrel bucket urn log arms stump tree statue chamberpot]
 
 $PUT_AWAY_ITEM_SUCCESS_PATTERNS = [/^You put your .* in/,
-                                   /^You hold out/]
+                                   /^You hold out/,
+                                   /^You tuck your/]
 $PUT_AWAY_ITEM_OPEN_PATTERNS = [/^But that's closed/]
-$PUT_AWAY_ITEM_FAILURE_PATTERNS = [/^What were you referring to/]
+$PUT_AWAY_ITEM_FAILURE_PATTERNS = [/^What were you referring to/,
+                                   /to fit in the/,
+                                  /^There isn't any more room in/]
 
-$OPEN_CONTAINER_SUCCESS_PATTERNS = [/^You open/, 
+$OPEN_CONTAINER_SUCCESS_PATTERNS = [/^You open/,
                                     /^That is already open/]
 $OPEN_CONTAINER_FAILURE_PATTERNS = [/^What were you referring to/]
 
 
-$CLOSE_CONTAINER_SUCCESS_PATTERNS = [/^You close/, 
+$CLOSE_CONTAINER_SUCCESS_PATTERNS = [/^You close/,
                                      /^That is already closed/]
 $CLOSE_CONTAINER_FAILURE_PATTERNS = [/^What were you referring to/]
 
@@ -158,6 +161,37 @@ module DRCI
     end
   end
 
+  # Returns a list of item descriptions from the `INVENTORY <type|slot>` verb output.
+  # Where <type> can be armor, weapon, fluff, container, or combat.
+  # Where <slot> can be any phrase from INV SLOTS LIST command.
+  def get_inventory_by_type(type = 'combat', line_count = 40)
+    case DRC.bput("inventory #{type}", "Use INVENTORY HELP for more options.", "The INVENTORY command is the best way")
+    when "The INVENTORY command is the best way"
+      DRC.message("Unrecognized inventory type: #{type}. Valid options are ARMOR, WEAPON, FLUFF, CONTAINER, COMBAT, or any slot from INVENTORY SLOTS LIST.")
+      return []
+    end
+    # Multiple lines may have been printed to the game window,
+    # grab the last several lines for analysis.
+    snapshot = reget(line_count)
+    # Unless you're looking for items at your feet, this is noise.
+    items_at_feet = snapshot.grep(/(^Lying at your feet)/).any?
+    # If the snapshot found all the inventory then begin processing.
+    if snapshot.grep(/^All of your (#{type}|items)|^You aren't wearing anything like that|Both of your hands are empty/).any? && snapshot.grep(/Use INVENTORY HELP/).any?
+      snapshot
+      .map(&:strip)
+      .reverse
+      .take_while { |line| [/^All of your (#{type}|items)/, /^You aren't wearing anything like that/, /Both of your hands are empty/].none? { |phrase| phrase =~ line } }
+      .drop_while { |line| !line.start_with?('[Use INVENTORY HELP for more options.]') }
+      .drop(1)
+      .reverse
+      .take_while { |line| !items_at_feet || !line.start_with?('Lying at your feet') }
+      .map { |item| item.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '') }
+    else
+      # Otherwise, retry the command. Other actions may have flooded the game window.
+      get_inventory_by_type(type, line_count + 40)
+    end
+  end
+
   def exists?(description)
     result = DRC.bput("tap my #{description}", 'You tap .*', 'I could not find', 'on the shoulder', '^You thump your fingers', 'The orb is delicate')
     result =~ /You tap|You thump|The orb is delicate/
@@ -247,27 +281,80 @@ module DRCI
     dispose_trash(DRC.get_noun(Regexp.last_match(1))) if braid_regex.match(result)
   end
 
-  def get_item(item, container)
-    result = DRC.bput("get #{item} in my #{container}", 'You get', 'I could not', 'What were you', 'You need a free')
-    result =~ /^You get/
+  # Gets an item unless you are already hold it.
+  # Use this method to avoid having two of an item
+  # in your hands when you only want one.
+  #
+  # Returns true if the item is in your hand
+  # or we were able to get it to your hand.
+  def get_item_if_not_held?(item, container = nil)
+    return false unless item
+    return true if in_hands?(item)
+    return get_item(item, container)
   end
 
+  # Gets an item, optionally from a specific container.
+  # If no container specified then generically grabs from the room/your person.
+  # Can provide an array of containers to try, too, in case some might be empty.
+  def get_item(item, container = nil)
+    if container.is_a?(Array)
+      container.each do |c|
+        return true if get_item_safe(item, c)
+      end
+      return false
+    end
+    get_item_safe(item, container)
+  end
+
+  # Same as 'get_item_unsafe' but ensures that
+  # the container argument is prefixed with ' my '.
+  def get_item_safe(item, container = nil)
+    container = "my #{container}" if container && !(container =~ /^((in|on|under|behind|from) )?my /i)
+    get_item_unsafe(item, container)
+  end
+
+  # Gets an item, optionally from a specific container.
+  # If no container specified then generically grabs from the room/your person.
+  def get_item_unsafe(item, container = nil)
+    from = container
+    from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
+    result = DRC.bput("get #{item} #{from}", 'You get', 'You pluck', 'I could not', 'What were you', 'You are already holding', 'You need a free hand')
+    result =~ /^You get|^You pluck|^You are already holding/
+  end
+
+  # Gets a list of items found in a container.
   def get_item_list(container)
-    container_contents = DRC.bput("look in #{container}",'In the .* you see (.*)\.').match(/In the .* you see (?:a|an|some) (?<items>.*)\./)[:items].split(/(?:, | and )?(?:a|an|some) /)
+    DRC.bput("rummage my #{container}", 'You rummage through .* and see (.*)\.', 'there is nothing')
+    .match(/You rummage through .* and see (?:a|an|some) (?<items>.*)\./)[:items]
+    .split(/(?:, | and )?(?:a|an|some) /)
   end
 
-  def put_away_item?(item, container)
-    result = put_away_item_safe?(item, container)
+  # Puts away an item, optionally into a specific container.
+  # If no container specified then uses the default stow location.
+  # Can provide an array of containers to try, too, in case some might be full.
+  def put_away_item?(item, container = nil)
+    if container.is_a?(Array)
+      container.each do |c|
+        return true if put_away_item_safe?(item, c)
+      end
+      return false
+    end
+    put_away_item_safe?(item, container)
   end
 
-  def put_away_item_safe?(item, container)
-    container = "my " + container
-    result = put_away_item_unsafe?(item, container)
+  # Same as 'put_away_item_unsafe?' but ensures that
+  # the container argument is prefixed with ' my '.
+  def put_away_item_safe?(item, container = nil)
+    container = "my #{container}" unless container.nil? || container =~ /^my /i
+    put_away_item_unsafe?(item, container)
   end
 
-  def put_away_item_unsafe?(item, container)
-    result = DRC.bput("put my #{item} in #{container}", $PUT_AWAY_ITEM_SUCCESS_PATTERNS, $PUT_AWAY_ITEM_OPEN_PATTERNS, $PUT_AWAY_ITEM_FAILURE_PATTERNS)
-
+  # Puts away an item, optionally into a specific container.
+  # If no container specified then uses the default stow location.
+  def put_away_item_unsafe?(item, container = nil)
+    command = "put my #{item} in #{container}" if container
+    command = "stow my #{item}" unless container
+    result = DRC.bput(command, $PUT_AWAY_ITEM_SUCCESS_PATTERNS, $PUT_AWAY_ITEM_OPEN_PATTERNS, $PUT_AWAY_ITEM_FAILURE_PATTERNS)
     case result
     when *$PUT_AWAY_ITEM_OPEN_PATTERNS
       return false if open_container?(container) == false

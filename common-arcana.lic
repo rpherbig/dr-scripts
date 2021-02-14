@@ -103,22 +103,31 @@ module DRCA
     end
   end
 
-  def prepare?(abbrev, mana, symbiosis = false, command = 'prepare', tattoo_tm = false)
+  def prepare?(abbrev, mana, symbiosis = false, command = 'prepare', tattoo_tm = false, runestone_name = nil, runestone_tm = false)
     return false unless abbrev
 
     DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
 
-    match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    if runestone_name.nil?
+      match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
+    else
+      match = DRC.bput("#{command} my #{runestone_name}", get_data('spells').invoke_messages)
+    end
     case match
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
-      return prepare?(abbrev, mana, symbiosis, command, tattoo_tm)
+      return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
     when 'Something in the area interferes with your spell preparations'
       DRC.bput('rel symb', 'You release the', 'But you haven\'t') if symbiosis
       return false
+    when 'Well, that was fun'
+      DRCI.dispose_trash(runestone_name)
+      return false
+    when 'You\'ll have to hold it'
+      return false
     end
 
-    DRC.bput("target", get_data('spells').prep_messages) if tattoo_tm
+    DRC.bput("target", get_data('spells').prep_messages) if tattoo_tm || runestone_tm
 
     match
   end
@@ -132,7 +141,7 @@ module DRCA
     command = spell['prep'] if spell['prep']
     command = spell['prep_type'] if spell['prep_type']
 
-    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'], command)
+    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'], command, spell['tattoo_tm'], spell['runestone_name'], spell['runestone_tm'])
     find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'], spell['sheathed_focus'])
 
     invoke(spell['focus'], nil, nil)
@@ -142,6 +151,26 @@ module DRCA
     waitcastrt?
     return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
     DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
+  end
+
+  def prepare_to_cast_runestone?(spell, settings)
+    if DRCI.inside?("#{spell['runestone_name']}", settings.runestone_storage)
+      return false if !get_runestone?(spell['runestone_name'], settings)
+    else
+      DRC.message("*** Out of #{spell['runestone_name']}! ***")
+      return false
+    end
+    return true
+  end
+
+  def get_runestone?(runestone, settings)
+    return true if DRCI.in_hands?(runestone)
+    DRCI.get_item(runestone, settings.runestone_storage)
+    if reget(3, "You get a useless #{runestone}")
+      DRCI.dispose_trash(runestone)
+      return false
+    end
+    return true
   end
 
   def cast?(cast_command = 'cast', symbiosis = false, before = [], after = [])
@@ -367,11 +396,10 @@ module DRCA
     infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
     spells.each do |name, data|
       next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
-      while (DRStats.mana < settings.waggle_spells_mana_threshold || DRStats.concentration < settings.waggle_spells_concentration_threshold)
+      while (mana < settings.waggle_spells_mana_threshold || DRStats.concentration < settings.waggle_spells_concentration_threshold)
         echo("Waiting on mana over #{settings.waggle_spells_mana_threshold} or concentration over #{settings.waggle_spells_concentration_threshold}...")
         pause 15
       end
-
       cast_spell(data, settings, force_cambrinth)
     end
   end
@@ -469,7 +497,14 @@ module DRCA
     command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
 
-    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'])
+    if data['runestone_name']
+      if !prepare_to_cast_runestone?(data, settings)
+        return
+      end
+    end
+
+    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
+    DRCI.put_away_item?(data['runestone_name'], settings.runestone_storage) if DRCI.in_hands?(data['runestone_name'])
     prepare_time = Time.now
 
     unless settings.cambrinth_items[0]['name']
@@ -638,13 +673,13 @@ module DRCA
     command = data['prep'] if data['prep']
     command = data['prep_type'] if data['prep_type']
 
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command)
+    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
   end
 
   def crafting_magic_routine(settings)
     training_spells = settings.crafting_training_spells
     return if training_spells.empty?
-    return if DRStats.mana <= settings.waggle_spells_mana_threshold
+    return if mana <= 40
 
     if !XMLData.prepared_spell.eql?('None') && checkcastrt == 0
       spell = XMLData.prepared_spell
@@ -691,7 +726,7 @@ module DRCA
     return unless Script.running?('avtalia')
 
     invoke(cambrinth, dedicated_camb_use, invoke_amount)
-    UserVars.avtalia[cambrinth]['mana'] -= [DRStats.mana, invoke_amount].min
+    UserVars.avtalia[cambrinth]['mana'] -= [mana, invoke_amount].min
   end
 
   def charge_avtalia(cambrinth, charge_amount)

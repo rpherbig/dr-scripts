@@ -2,12 +2,14 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#bolts
 =end
 
-custom_require.call(%w[common common-items common-crafting])
+custom_require.call(%w[common common-items common-crafting common-money common-travel])
 
 class Bolts
   include DRC
   include DRCC
   include DRCI
+  include DRCM
+  include DRCT
 
   def initialize
     @settings = get_settings
@@ -15,12 +17,13 @@ class Bolts
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.engineering_belt
     @hometown = @settings.hometown
+    @engineering_room = @settings.engineering_room
     @hometown_data = get_data('crafting')['shaping'][@hometown]
 
     arg_definitions = [
       [
         { name: 'type',
-          options: %w[cougar-claw boar-tusk sabertooth angiswaerd hele'la basilisk elsralael soot-stained ice-adder jagged-horn drake-fang],
+          options: %w[cougar-claw boar-tusk sabretooth angiswaerd hele'la basilisk elsralael soot-stained ice-adder jagged-horn drake-fang],
           variable: true,
           descriptions: "Which arrow type to create?" },
 
@@ -30,9 +33,9 @@ class Bolts
           description: 'Type of lumber used.' },
 
         { name: 'tools',
-          regex: /yes/,
+          regex: /tools/,
           optional: true,
-          description: 'Get tools from clerk?'}
+          description: 'Get tools from clerk.'}
       ],
       [
         { name: 'continue', regex: /continue/i, variable: true }
@@ -51,12 +54,14 @@ class Bolts
     @lumber = args.lumber
     @tools = args.tools
 
+    ensure_copper_on_hand(2000, @settings)
     get_tools if @tools
     order_lumber
     check_flights
     check_glue
     make_shafts
     make_bolts
+    DRCT.walk_to(@engineering_room)
     wait_for_script_to_complete('tinker', ['stow', '7', "#{@type} bolts", 'shafts', 'bolts'])
     exit_tasks
   end
@@ -64,80 +69,87 @@ class Bolts
   def exit_tasks
     clean_up
     store_tools if @tools
+    exit
   end
 
   def get_tools
-    wait_for_script_to_complete('clerk-tools', ['engineering', 'get'])
+    wait_for_script_to_complete('clerk-tools', ['engineering', 'get']) unless DRCI.exists?('shaper')
   end
 
   def store_tools
-    wait_for_script_to_complete('clerk-tools', ['engineering', 'store'])
+    wait_for_script_to_complete('clerk-tools', ['engineering', 'store']) if DRCI.exists?('shaper')
   end
 
   def order_lumber
-    return if exists?("#{@lumber} lumber") || exists?('shafts')
+    return if DRCI.exists?("#{@lumber} lumber") || DRCI.exists?('shafts')
     wood = find_piece("#{@lumber} lumber")
     2.times do
       order_item(@hometown_data['stock-room'], wood)
-      bput("get #{@lumber} lumber from #{@bag}", "You get", "What were")
-      bput("combine my lumber", "You combine", "You must")
-      bput("stow lumber", "You put")
+      #DRC.bput("get #{@lumber} lumber from #{@bag}", "You get", "What were")
+      DRC.bput("combine my lumber", "You combine", "You must") if DRCI.get_item("#{@lumber} lumber", @bag)
+      stow_craft('lumber')
     end
   end
 
   def check_flights
-    return if exists?('flights')
+    return if DRCI.exists?('flights')
     flight = find_piece('bolt flights')
     2.times do
       order_item(@hometown_data['stock-room'], flight)
-      bput("stow flights", "You put")
+      #stow_craft('flights')
     end
+    stow_craft('flights')
   end
 
   def check_glue
-    if search?('glue')
-      bput('get my glue', 'You get')
-      /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
+    if DRCI.search?('glue')
+      DRC.bput('get my glue', 'You get')
+      /(\d+)/ =~ DRC.bput('count my glue', 'The wood glue has *\d+ uses remaining')
       if Regexp.last_match(1).to_i < 5
-        stow_item('glue')
+        stow_craft('glue')
         dispose('glue')
-        order_item(info['tool-room'], info['glue-number'])
+        order_item(@hometown_data['tool-room'], @hometown_data['glue-number'])
       end
     else
-      order_item(info['tool-room'], info['glue-number'])
+      order_item(@hometown_data['tool-room'], @hometown_data['glue-number'])
     end
-    stow_item('glue')
+    stow_craft('glue')
   end
 
   def make_shafts
-    return if exists?('shafts')
-    get_item('shaper')
-    bput("get my #{@lumber} lumber from my #{@bag}", "You get", "What were")
-    bput("shape lumber into bolt shaft", 'Roundtime')
-    stow_item('shaper')
-    bput("stow my shafts in my #{@bag}", "You put")
+    return if DRCI.exists?('shafts')
+    get_craft('shaper')
+    #DRC.bput("get my #{@lumber} lumber from my #{@bag}", "You get", "What were")
+    if DRCI.get_item("#{@lumber} lumber", @bag)
+      DRC.bput("shape lumber into bolt shaft", 'Roundtime')
+      stow_craft('shaper')
+      stow_craft('shafts')
+      stow_craft('lumber')
+    else
+      DRC.message(" *** Out of #{@lumber} lumber and shafts *** ")
+      beep
+      exit
+    end
   end
 
   def make_bolts
-    return if exists?('boltheads')
-    bolt_head = { "cougar-claw" => "curved claw", "boar-tusk" => "boar tusk", "sabertooth" => "ivory fang", "angiswaerd" => "angiswaerd tooth", "hele'la" => "needlesharp tooth", "basilisk" => "basilisk fang", "elsralael" => "elsralael tooth", "soot-stained" => "soot-streaked fang", "ice-adder" => "adder fang", "jagged-horn" => "jagged horn", "drake-fang" => "drake fang" }
+    return if DRCI.exists?('boltheads')
+    bolt_head = { "cougar-claw" => "curved claw", "boar-tusk" => "boar tusk", "sabretooth" => "ivory fang", "angiswaerd" => "angiswaerd tooth", "hele'la" => "needlesharp tooth", "basilisk" => "basilisk fang", "elsralael" => "elsralael tooth", "soot-stained" => "soot-streaked fang", "ice-adder" => "adder fang", "jagged-horn" => "jagged horn", "drake-fang" => "drake fang" }
     new_type = bolt_head[@type]
-    case bput("get #{new_type} from my #{@bag}", 'You get', 'I could not', 'What were')
-    when /You get/
-      get_item('shaper')
-      bput("shape #{new_type} into bolthead", 'Roundtime', 'You fumble')
-      #bput("combine", "You combine") if bput("Get boltheads from my #{@bag}", "You get", "What were") =~ /You get/
-      stow_item('boltheads')
-    when /I could not/, /What were/
+    if DRCI.get_item(new_type, @bag)
+      get_craft('shaper')
+      DRC.bput("shape #{new_type} into bolthead", 'Roundtime', 'You fumble')
+      stow_craft('shaper')
+      stow_craft('boltheads')
+    else
       beep
-      echo("***Out of #{@type}!***")
-      exit
+      DRC.message("***Out of #{@type}!***")
+      exit_tasks
     end
-    stow_item('shaper')
   end
 
   def clean_up
-    bput("stow shafts", "you pick up", "What were", "Stow what?", "You put")
+    stow_craft('shafts')
   end
 
   def find_piece(match_string)
@@ -149,11 +161,11 @@ class Bolts
     Regexp.last_match(1)
   end
 
-  def get_item(name)
+  def get_craft(name)
     get_crafting_item(name, @bag, @bag_items, @belt)
   end
 
-  def stow_item(name)
+  def stow_craft(name)
     stow_crafting_item(name, @bag, @belt)
   end
 end

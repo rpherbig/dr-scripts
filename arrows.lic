@@ -2,12 +2,14 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#arrows
 =end
 
-custom_require.call(%w[common common-items common-crafting])
+custom_require.call(%w[common common-items common-crafting common-money common-travel])
 
 class Arrows
   include DRC
   include DRCC
   include DRCI
+  include DRCM
+  include DRCT
 
   def initialize
     @settings = get_settings
@@ -15,12 +17,13 @@ class Arrows
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.engineering_belt
     @hometown = @settings.hometown
+    @engineering_room = @settings.engineering_room
     @hometown_data = get_data('crafting')['shaping'][@hometown]
 
     arg_definitions = [
       [
         { name: 'type',
-          options: %w[cougar-claw boar-tusk sabertooth angiswaerd hele'la basilisk elsralael soot-stained ice-adder jagged-horn drake-fang],
+          options: %w[cougar-claw boar-tusk sabretooth angiswaerd hele'la basilisk elsralael soot-stained ice-adder jagged-horn drake-fang],
           variable: true,
           descriptions: "Which arrow type to create?" },
 
@@ -30,7 +33,7 @@ class Arrows
           description: 'Type of lumber used.' },
 
         { name: 'tools',
-          regex: /yes/,
+          regex: /tools/,
           optional: true,
           description: 'Get tools from clerk?'}
       ],
@@ -51,10 +54,12 @@ class Arrows
     @lumber = args.lumber
     @tools = args.tools
 
+    ensure_copper_on_hand(2000, @settings)
     get_tools if @tools
     order_lumber
     check_flights
     check_glue
+    DRCT.walk_to(@engineering_room)
     make_shafts
     make_arrowheads
     wait_for_script_to_complete('shape', ['stow', '5', "#{@type} arrows", 'shafts', 'arrows'])
@@ -64,34 +69,30 @@ class Arrows
   def exit_tasks
     clean_up
     store_tools if @tools
+    exit
   end
 
   def get_tools
-    wait_for_script_to_complete('clerk-tools', ['engineering', 'get'])
+    wait_for_script_to_complete('clerk-tools', ['engineering', 'get']) unless DRCI.exists?('shaper')
   end
 
   def store_tools
-    wait_for_script_to_complete('clerk-tools', ['engineering', 'store'])
+    wait_for_script_to_complete('clerk-tools', ['engineering', 'store']) if DRCI.exists?('shaper')
   end
 
   def order_lumber
-    return if exists?("#{@lumber} lumber") || exists?('shafts')
+    return if exists?("#{@lumber} lumber") || exists?('arrow shafts')
     wood = find_piece("#{@lumber} lumber")
-    2.times do
-      order_item(@hometown_data['stock-room'], wood)
-      bput("get #{@lumber} lumber from #{@bag}", "You get", "What were")
-      bput("combine my lumber", "You combine", "You must")
-      bput("stow lumber", "You put")
-    end
+    order_item(@hometown_data['stock-room'], wood)
+    bput("combine my lumber", "You combine", "You must") if DRCI.get_item("#{@lumber} lumber", @bag)
+    stow_craft('lumber')
   end
 
   def check_flights
-    return if exists?('flights')
+    return if exists?('arrow flights')
     flight = find_piece('arrow flights')
-    2.times do
-      order_item(@hometown_data['stock-room'], flight)
-      bput("stow flights", "You put")
-    end
+    order_item(@hometown_data['stock-room'], flight)
+    stow_craft('arrow flights')
   end
 
   def check_glue
@@ -99,44 +100,50 @@ class Arrows
       bput('get my glue', 'You get')
       /(\d+)/ =~ bput('count my glue', 'The wood glue has *\d+ uses remaining')
       if Regexp.last_match(1).to_i < 5
-        stow_item('glue')
+        stow_craft('glue')
         dispose('glue')
         order_item(@hometown_data['tool-room'], @hometown_data['glue-number'])
       end
     else
       order_item(@hometown_data['tool-room'], @hometown_data['glue-number'])
     end
-    stow_item('glue')
+    stow_craft('glue')
   end
 
   def make_shafts
-    return if exists?('shafts')
-    get_item('shaper')
-    bput("get my #{@lumber} lumber from my #{@bag}", "You get", "What were")
-    bput("shape lumber into arrow shaft", 'Roundtime')
-    stow_item('shaper')
-    bput("stow my shafts in my #{@bag}", "You put")
-  end
-
-  def make_arrowheads
-    return if exists?('arrowheads')
-    arrow_head = { "cougar-claw" => "curved claw", "boar-tusk" => "boar tusk", "sabertooth" => "ivory fang", "angiswaerd" => "angiswaerd tooth", "hele'la" => "needlesharp tooth", "basilisk" => "basilisk fang", "elsralael" => "elsralael tooth", "soot-stained" => "soot-streaked fang", "ice-adder" => "adder fang", "jagged-horn" => "jagged horn", "drake-fang" => "drake fang" }
-    new_type = arrow_head[@type]
-    case bput("get #{new_type} from my #{@bag}", 'You get', 'I could not', 'What were')
-    when /You get/
-      get_item('shaper')
-      bput("shape #{new_type} into arrowhead", 'Roundtime', 'You fumble')
-      stow_item('shaper')
-      stow_item('arrowheads')
-    when /I could not/, /What were/
+    return if exists?('arrow shafts')
+    get_craft('shaper')
+    if DRCI.get_item("#{@lumber} lumber", @bag)
+      bput("shape lumber into arrow shaft", 'Roundtime')
+      stow_craft('shaper')
+      stow_craft('shafts')
+    else
+      DRC.message(" *** Out of #{@lumber} lumber and shafts *** ")
       beep
-      echo("***Out of #{@type}!***")
       exit
     end
   end
 
+  def make_arrowheads
+    return if exists?("#{@type} arrowheads")
+    arrow_head = { "cougar-claw" => "curved claw", "boar-tusk" => "boar tusk", "sabretooth" => "ivory fang", "angiswaerd" => "angiswaerd tooth", "hele'la" => "needlesharp tooth", "basilisk" => "basilisk fang", "elsralael" => "elsralael tooth", "soot-stained" => "soot-streaked fang", "ice-adder" => "adder fang", "jagged-horn" => "jagged horn", "drake-fang" => "drake fang" }
+    new_type = arrow_head[@type]
+    if DRCI.get_item(new_type, @bag)
+      get_craft('shaper')
+      DRC.bput("shape #{new_type} into arrowhead", 'Roundtime', 'You fumble')
+      stow_craft('shaper')
+      stow_craft("#{@type} arrowheads")
+    else
+      beep
+      DRC.message("***Out of #{@type}!***")
+      exit_tasks
+    end
+  end
+
   def clean_up
-    bput("stow shafts", "you pick up", "What were", "Stow what?", "You put")
+    DRC.bput("get my arrow shafts", "You get", "You pick up", "What were")
+    stow_craft('arrow shafts')
+    stow_craft('lumber') if DRCI.exists?('lumber')
   end
 
   def find_piece(match_string)
@@ -148,11 +155,11 @@ class Arrows
     Regexp.last_match(1)
   end
 
-  def get_item(name)
+  def get_craft(name)
     get_crafting_item(name, @bag, @bag_items, @belt)
   end
 
-  def stow_item(name)
+  def stow_craft(name)
     stow_crafting_item(name, @bag, @belt)
   end
 end

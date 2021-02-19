@@ -12,16 +12,24 @@ class Attunement
   LUNAR_PERCEIVE_COMMANDS = ['mana', 'moons', 'planets']
 
   def initialize
+    arg_definitions = [
+      [
+        { name: 'health', regex: /health/, optional: true, description: 'As an Empath, will do PERCEIVE HEALTH instead of PERCEIVE to train empathy.' },
+      ]
+    ]
+    args = parse_args(arg_definitions, true)
     settings = get_settings
     @stationary_skills_only = settings.crossing_training_stationary_skills_only
     @hometown = settings.hometown
     @attunement_rooms = settings.attunement_rooms
+    @perceive_health_rooms = settings.perceive_health_rooms
+    @skill_to_train = (DRStats.empath? && args.health) ? 'Empathy' : 'Attunement'
     @exp_max_threshold = settings.crossing_training_max_threshold
     @exp_target_increment = settings.attunement_target_increment
-    @exp_start_mindstate = DRSkill.getxp('Attunement')
+    @exp_start_mindstate = DRSkill.getxp(@skill_to_train)
     @exp_stop_mindstate = get_target_mindstate(@exp_start_mindstate, @exp_target_increment, @exp_max_threshold)
     @lunar_perceive_index = -1
-    train_attunement(settings)
+    train_skill(settings)
   end
 
   # Determines the target mind state to train to
@@ -36,6 +44,10 @@ class Attunement
     DRStats.moon_mage? || DRStats.trader?
   end
 
+  def is_health_walk?
+    @skill_to_train == 'Empathy'
+  end
+
   def get_next_lunar_perceive_index
     @lunar_perceive_index = (@lunar_perceive_index + 1) % LUNAR_PERCEIVE_COMMANDS.length
   end
@@ -43,36 +55,67 @@ class Attunement
   def get_perceive_command
     if is_lunar_mage?
       "perceive #{LUNAR_PERCEIVE_COMMANDS[get_next_lunar_perceive_index]}"
+    elsif is_health_walk?
+      "perceive health"
     else
       "perceive"
     end
   end
 
   def get_rooms
+    rooms = []
     if @stationary_skills_only || is_lunar_mage?
-      [Room.current.id]
-    elsif !@attunement_rooms.empty?
-      @attunement_rooms
+      rooms = [Room.current.id]
+    elsif is_health_walk?
+      rooms = @perceive_health_rooms
+      rooms = get_data('town')[@hometown]['perceive_health_rooms'] if rooms.empty?
     else
-      get_data('town')[@hometown]['attunement_rooms']
+      rooms = @attunement_rooms
+      rooms = get_data('town')[@hometown]['attunement_rooms'] if rooms.empty?
     end
+    rooms
   end
 
   def done_training?
-    DRSkill.getxp('Attunement') >= @exp_stop_mindstate
+    DRSkill.getxp(@skill_to_train) >= @exp_stop_mindstate
   end
 
-  def train_attunement(settings)
+  def train_skill(settings)
     room_list = get_rooms
     until done_training?
       # If we keep looping, ensure buffs stay active
       DRCA.do_buffs(settings, 'attunement')
       room_list.each do |room_id|
-        walk_to(room_id)
-        bput(get_perceive_command, 'You reach out', 'Roundtime')
-        waitrt?
+        train_skill_in_room(room_id)
         break if done_training?
       end
+    end
+  end
+
+  def train_skill_in_room(room_id)
+    DRCT.walk_to(room_id)
+    # When health walking, you may fail to perceive your first time.
+    # Either from lack of skill or waiting on the timer between perceive health attempts.
+    # When health walking, will retry a few times before moving on.
+    # When power walking, will be successful first try and move on like normal.
+    5.times do
+      break if perceived?
+      # There is a 60 second timer between successful 'perceive health' commands.
+      # So if doing a health walk then pause a little bit between retries to avoid
+      # spamming the room (and yourself) with failed attempts. For normal attunement
+      # training then the wait is only as long as the perceive command takes.
+      pause (is_health_walk? ? 10 : 0)
+      waitrt?
+    end
+    waitrt?
+  end
+
+  def perceived?
+    case bput(get_perceive_command, "You fail to sense", "You're not ready to do that again, yet", "You reach out", "You sense:", "Roundtime")
+    when "You reach out", "You sense:"
+      true
+    else
+      false
     end
   end
 

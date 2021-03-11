@@ -21,7 +21,7 @@ class HealMe
     $debug_mode_hm = UserVars.healme_debug || args.debug
     @spells = load_healing_waggle_set
     @body_parts_not_to_heal = args.keep.split(',').map(&:strip) || []
-    ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.add("hm-#{x}-#{y}-healed", "The #{x} #{y} on your (.+) appear completely healed") } }
+    add_health_flags
     heal_self
   end
 
@@ -77,6 +77,7 @@ class HealMe
       self_health = get_self_health
       perc_health = get_perc_health
       break unless wounds_to_heal?(self_health, perc_health)
+      reset_health_flags
       attend_vitals
       flush_poisons if self_health['poisoned']
       cure_diseases if self_health['diseased']
@@ -136,7 +137,8 @@ class HealMe
   def attend_vitals
     heal_vitality if health < [50, @settings.health_threshold].max
     stop_bleeding if bleeding?
-    regenerate if @spells['Regenerate']
+    cast_regenerate if @spells['Regenerate']
+    cast_heal if @spells['Heal']
   end
 
   # Returns wounds list without the ones
@@ -189,8 +191,14 @@ class HealMe
 
   # If your 'healing' waggle set contains 'Regenerate' spell
   # then casts it to boost your healing rate.
-  def regenerate
+  def cast_regenerate
     cast_spell('Regenerate')
+  end
+
+  # If your 'healing' waggle set contains 'Heal' spell
+  # then casts it to boost your healing rate.
+  def cast_heal
+    cast_spell('Heal')
   end
 
   # Heal all the wounds of the highest severity, then returns
@@ -225,10 +233,11 @@ class HealMe
     wounds.sort_by { |severity, wounds| severity }.reverse.first[1].each do |wound|
       wound_location = wound.internal? ? 'internal' : 'external'
       wound_type = wound.scar? ? 'scars' : 'wounds'
-      next if healed_body_parts[wound_location][wound_type].include?(wound.body_part)
-      ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.reset("hm-#{x}-#{y}-healed") } }
-      heal_wound(wound)
+      # Before we try to heal a wound, check if it's already been healed either
+      # from a previous, potent cast or from heal over time spells like Heal or Regenerate.
       ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| healed_body_parts[x][y] << wound.body_part if Flags["hm-#{x}-#{y}-healed"] } }
+      next if healed_body_parts[wound_location][wound_type].include?(wound.body_part)
+      heal_wound(wound)
       attend_vitals
     end
   end
@@ -259,6 +268,7 @@ class HealMe
     end
   end
 
+  # For tending bleeders, dislodging ammo, or removing parasites.
   def tend_wound(wound)
     echo "Tending wound: #{wound.inspect}" if $debug_mode_hm
     DRCH.bind_wound(wound.body_part)
@@ -292,6 +302,7 @@ class HealMe
     end
   end
 
+  # Cast a spell if it's not active.
   def cast_spell(spell_name)
     if DRSpells.active_spells[spell_name]
       echo "Skipping casting spell #{spell_name} because already active" if $debug_mode_hm
@@ -306,6 +317,14 @@ class HealMe
     DRC.message(message) if message
     DRC.message("The spell '#{spell_name}' is neither configured in the 'healing' waggle set nor 'empath_healing:' setting")
     DRC.message("You may need to seek the help from another healer or remedy")
+  end
+
+  def add_health_flags
+    ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.add("hm-#{x}-#{y}-healed", "The #{x} #{y} on your (.+) appear completely healed") } }
+  end
+
+  def reset_health_flags
+    ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.reset("hm-#{x}-#{y}-healed") } }
   end
 
   # Returns true if the argument is nil or empty.

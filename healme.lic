@@ -11,18 +11,31 @@ class HealMe
 
   def initialize
     @settings = get_settings
+
     arg_definitions = [
       [
         { name: 'debug', regex: /debug/i, optional: true, description: 'Enable debug output' },
-        { name: 'keep', regex: /^[\w\s,]+$/i, variable: true, optional: true, description: 'Comma separated list of wounds to keep. Example: "right arm, chest, back"' }
+        { name: 'keep', regex: /^[a-zA-Z\s,]+$/i, variable: true, optional: true, description: 'Comma separated list of wounds to keep. Example: "right arm, chest, back"' },
+        { name: 'severity', regex: /^\d+$/i, optional: true, description: 'If specified, script will not proactively try to heal wounds whose numerical severity is at or below this value. Range is 0-13. Default is 0. Also see https://elanthipedia.play.net/Damage#Wound_Severity_Levels'}
       ]
     ]
     args = parse_args(arg_definitions)
+
     $debug_mode_hm = UserVars.healme_debug || args.debug
+
     @spells = load_healing_waggle_set
+
     @body_parts_not_to_heal = args.keep.split(',').map(&:strip) || []
+    echo "body_parts_not_to_heal = #{@body_parts_not_to_heal}" if $debug_mode_hm
+
     @use_heal_over_time_spells = @body_parts_not_to_heal.empty?
+    echo "use_heal_over_time_spells = #{@use_heal_over_time_spells}" if $debug_mode_hm
+
+    @wound_severity_threshold = args.severity.to_i || 0
+    echo "wound_severity_threshold = #{@wound_severity_threshold}" if $debug_mode_hm
+
     add_health_flags
+
     heal_self
   end
 
@@ -73,12 +86,12 @@ class HealMe
   def heal_self
     loop do
       echo 'Checking health' if $debug_mode_hm
+      reset_health_flags
       # Using these variable names to not conflict with
       # implicit 'health' variable that tells your vitality.
       self_health = get_self_health
       perc_health = get_perc_health
       break unless wounds_to_heal?(self_health, perc_health)
-      reset_health_flags
       attend_vitals
       flush_poisons if self_health['poisoned']
       cure_diseases if self_health['diseased']
@@ -144,18 +157,43 @@ class HealMe
     end
   end
 
-  # Returns wounds list without the ones
-  # that are for body parts we want to keep.
-  def remove_wounds_to_keep(wounds)
-    echo "All wounds: #{wounds}" if $debug_mode_hm
-    echo "Wounds to keep: #{@body_parts_not_to_heal}" if $debug_mode_hm
-    wounds = wounds.select do |wound|
-      !@body_parts_not_to_heal.any? do |body_part|
-        body_part.downcase == wound.body_part.downcase
-      end
+  # Removes wounds from health data that are
+  # either for body parts or severities we want to keep.
+  def remove_wounds_to_keep(health_data)
+    ['wounds', 'bleeders'].each do |type|
+      health_data[type].each { |severity, wounds| wounds.reject! { |wound| wound_to_keep?(wound) } }
+      health_data[type].select! { |severity, wounds| wounds.length > 0 }
     end
-    echo "Wounds to heal: #{wounds}" if $debug_mode_hm
-    wounds
+    health_data
+  end
+
+  # Should we keep the wound and NOT heal it?
+  def wound_to_keep?(wound)
+    should_heal_severity = should_heal_severity?(wound)
+    should_heal_body_part = should_heal_body_part?(wound)
+    wound_to_keep = !(should_heal_severity && should_heal_body_part)
+    if $debug_mode_hm
+      echo "severity = #{wound.severity}, body_part = #{wound.body_part}"
+      echo "should_heal_severity? = #{should_heal_severity}"
+      echo "should_heal_body_part? = #{should_heal_body_part}"
+      echo "wound_to_keep? = #{wound_to_keep}"
+      echo "---"
+    end
+    wound_to_keep
+  end
+
+  # Is the wound's severity greater than the threshold to keep?
+  # We won't try to heal wounds that are below the threshold.
+  def should_heal_severity?(wound)
+    wound.severity > @wound_severity_threshold
+  end
+
+  # Is the wound's body part NOT in the exclusion list?
+  # We won't try to heal wounds for body parts to keep injured.
+  def should_heal_body_part?(wound)
+    !@body_parts_not_to_heal.any? do |body_part|
+      body_part.downcase == wound.body_part.downcase
+    end
   end
 
   # Determines if there are any wounds, poisons, etc to heal.
@@ -209,7 +247,7 @@ class HealMe
   # The 'wounds' argument is a map whose keys are severity numbers (1,2,3...)
   # and the values are a list of wounds. So this only heals the wounds
   # for the map key that is the highest severity at the time.
-  def heal_wounds(wounds)
+  def heal_wounds(wounds_by_severity)
     # While iterating the wounds to heal,
     # track if any body parts become completely healed
     # so that we can avoid unnecessary spell casting.
@@ -233,10 +271,24 @@ class HealMe
         'scars' => []
       }
     }
-    wounds.sort_by { |severity, wounds| severity }.reverse.first[1].each do |wound|
+    # Convert map of "severity" => array_of_wounds to a list of wounds sorted by most severe first.
+    wounds = wounds_by_severity.sort_by { |severity, wounds| severity }.reverse.map { |arr| arr[1] }.flatten
+    return if wounds.empty?
+    # Heal over time spells, like Heal and Regenerate, try to heal the worst wounds automatically.
+    # To avoid the healing effects of those spells clashing with this script targeting the same
+    # wounds then if one of those spells is active then the script will target less severe wounds.
+    # Since we have a list of all wounds sorted by severity, we'll use an offset start index.
+    wounds_to_heal_offset = heal_over_time_spells_active? ? 4 : 0
+    # How many wounds to heal this method call before returning to main loop to re-assess your health?
+    wounds_to_heal_limit = 3
+    # Compute the array indices for which wounds we'll try to heal.
+    start_index = [wounds.length - 1, wounds_to_heal_offset].min
+    end_index = [wounds.length - 1, start_index + wounds_to_heal_limit].min
+    # Heal the needful
+    wounds.values_at(start_index..end_index).each do |wound|
       wound_location = wound.internal? ? 'internal' : 'external'
       wound_type = wound.scar? ? 'scars' : 'wounds'
-      # Before we try to heal a wound, check if it's already been healed either
+      # Before we try to heal a wound, check if it's already been healed, either
       # from a previous, potent cast or from heal over time spells like Heal or Regenerate.
       ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| healed_body_parts[x][y] << wound.body_part if Flags["hm-#{x}-#{y}-healed"] } }
       next if healed_body_parts[wound_location][wound_type].include?(wound.body_part)
@@ -249,6 +301,7 @@ class HealMe
   # If it's an internal wound then casts <spell> reverse.
   def heal_wound(wound)
     echo "Healing wound: #{wound.inspect}" if $debug_mode_hm
+    # Don't bleed out while we prepare spell.
     stop_bleeding(wound) if wound.bleeding?
     spell_name = wound.scar? ? 'Heal Scars' : 'Heal Wounds'
     # If an internal wound then focus healing power there,
@@ -320,6 +373,10 @@ class HealMe
     DRC.message(message) if message
     DRC.message("The spell '#{spell_name}' is neither configured in the 'healing' waggle set nor 'empath_healing:' setting")
     DRC.message("You may need to seek the help from another healer or remedy")
+  end
+
+  def heal_over_time_spells_active?
+    ['Heal', 'Regenerate'].any? { |spell_name| DRSpells.active_spells[spell_name] }
   end
 
   def add_health_flags

@@ -108,8 +108,6 @@ class HealMe
         tend_wounds(self_health['parasites'])
       elsif perc_health['wounds'].length > 0
         heal_wounds(perc_health['wounds'])
-      elsif self_health['wounds'].length > 0
-        heal_wounds(self_health['wounds'])
       elsif health < 100
         heal_vitality
       end
@@ -119,30 +117,19 @@ class HealMe
   # Get wounds inferred from HEALTH command.
   def get_self_health
     echo 'Checking for visible wounds, bleeders, parasites, and lodged items' if $debug_mode_hm
-    self_health = DRCH.check_health
-    # Exclude bleeders that are '(tended)' because
-    # they aren't causing immediate loss of vitality
-    # and, more technically, once the body part is
-    # healed the wound will still be listed in HEALTH
-    # as '(tended)' giving the impression you have a bleeder
-    # when in reality you don't. We have to wait for the
-    # bandages to fall off or removed explicitly in order
-    # to no longer see a bleeder in the HEALTH output.
-    # Without this workaround, the script loops repeatedly
-    # trying to heal a body part that's not injured.
-    self_health['bleeders'].each do |severity, wounds|
-      wounds.select! { |wound| wound.bleeding_rate != '(tended)' }
-    end
-    # Now, remove any keys from the map if no wounds left after filtering.
-    self_health['bleeders'].select! { |severity, wounds| wounds.length > 0 }
-    remove_wounds_to_keep(self_health)
+    health_data = DRCH.check_health
+    remove_wounds_to_keep(health_data['bleeders'])
+    health_data
   end
 
   # Get wounds inferred from PERCEIVE HEALTH SELF.
   def get_perc_health
     return if @settings.permashocked
     echo 'Perceiving internal and external wounds and scars' if $debug_mode_hm
-    remove_wounds_to_keep(DRCH.perceive_health)
+    health_data = DRCH.perceive_health
+    remove_wounds_to_keep(health_data['wounds'])
+    remove_wounds_to_keep(health_data['bleeders'])
+    health_data
   end
 
   # Takes a pulse on vitality then takes action accordingly.
@@ -157,25 +144,41 @@ class HealMe
     end
   end
 
-  # Removes wounds from health data that are
+  # Removes wounds from the wounds map that are
   # either for body parts or severities we want to keep.
-  def remove_wounds_to_keep(health_data)
-    ['wounds', 'bleeders'].each do |type|
-      health_data[type].each { |severity, wounds| wounds.reject! { |wound| should_keep_wound?(wound) } }
-      health_data[type].select! { |severity, wounds| wounds.length > 0 }
-    end
-    health_data
+  # This modifies the map directly.
+  def remove_wounds_to_keep(wounds_map)
+    wounds_map.each { |severity, wounds| wounds.reject! { |wound| should_keep_wound?(wound) } }
+    # Now, remove any keys from the map if no wounds left after filtering.
+    wounds_map.select! { |severity, wounds| wounds.length > 0 }
+    # Return the modified map for convenient api design
+    wounds_map
   end
 
   # Should we keep the wound and NOT heal it?
   def should_keep_wound?(wound)
+    # Exclude wounds that are below the threshold.
     should_heal_severity = should_heal_severity?(wound)
+    # Exclude wounds for body parts not to heal.
     should_heal_body_part = should_heal_body_part?(wound)
-    should_keep_wound = !(should_heal_severity && should_heal_body_part)
+    # Exclude bleeders that are '(tended)' because
+    # they aren't causing immediate loss of vitality
+    # and, more technically, once the body part is
+    # healed the wound will still be listed in HEALTH
+    # as '(tended)' giving the impression you have a bleeder
+    # when in reality you don't. We have to wait for the
+    # bandages to fall off or removed explicitly in order
+    # to no longer see a bleeder in the HEALTH output.
+    # Without this workaround, the script loops repeatedly
+    # trying to heal a body part that's not injured.
+    should_heal_bleeder = wound.bleeding_rate != '(tended)'
+    # If any one of the conditions is false then we'll keep the wound (not heal it).
+    should_keep_wound = !(should_heal_severity && should_heal_body_part && should_heal_bleeder)
     if $debug_mode_hm
-      echo "severity = #{wound.severity}, body_part = #{wound.body_part}"
+      echo "severity = #{wound.severity}, body_part = #{wound.body_part}, bleeding_rate = #{wound.bleeding_rate}"
       echo "should_heal_severity? = #{should_heal_severity}"
       echo "should_heal_body_part? = #{should_heal_body_part}"
+      echo "should_heal_bleeder? = #{should_heal_bleeder}"
       echo "should_keep_wound? = #{should_keep_wound}"
       echo "---"
     end
@@ -200,7 +203,6 @@ class HealMe
   def wounds_to_heal?(observed_health, perceived_health)
     wounds_to_heal = (
       !empty?(perceived_health['wounds']) ||
-      !empty?(observed_health['wounds']) ||
       !empty?(observed_health['bleeders']) ||
       !empty?(observed_health['parasites']) ||
       !empty?(observed_health['lodged']) ||

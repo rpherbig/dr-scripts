@@ -34,9 +34,36 @@ class HealMe
     @wound_severity_threshold = args.severity.to_i || 0
     echo "wound_severity_threshold = #{@wound_severity_threshold}" if $debug_mode_hm
 
-    add_health_flags
-
+    reset_health_flags
+    register_wounds_healed_hook
     heal_self
+  end
+
+  def register_wounds_healed_hook
+    wounds_healed_hook = lambda do |server_string|
+      # Do regex then look for the wound location, type, and body part matches.
+      if server_string =~ /The (?<location>internal|external) (?<type>wounds|scars) (?:on|to) your (?<parts>.*) (?:are fully healed|appear completely healed)/
+        body_parts = Regexp.last_match[:parts].to_s
+        wound_location = Regexp.last_match[:location].to_s
+        wound_type = Regexp.last_match[:type].to_s
+        echo "Detected fully healed wounds: body_parts=#{body_parts}, wound_location=#{wound_location}, wound_type=#{wound_type}" if $debug_mode_hm
+        # One or more body parts may have been fully healed.
+        # Split the string to identify each one.
+        body_parts
+          .gsub(' and ', ' , ')
+          .split(',')
+          .map { |value| value.strip.downcase }
+          .each do |body_part|
+            composite_key = build_wound_composite_key(body_part, wound_location, wound_type)
+            @healed_wounds[composite_key] = true
+            echo "@healed_wounds[#{composite_key}] = #{@healed_wounds[composite_key]}" if $debug_mode_hm
+          end
+      end
+      server_string
+    end
+
+    DownstreamHook.remove('wounds_healed_hook')
+    DownstreamHook.add('wounds_healed_hook', wounds_healed_hook)
   end
 
   # The original version of the 'healme' script used
@@ -250,29 +277,6 @@ class HealMe
   # and the values are a list of wounds. So this only heals the wounds
   # for the map key that is the highest severity at the time.
   def heal_wounds(wounds_by_severity)
-    # While iterating the wounds to heal,
-    # track if any body parts become completely healed
-    # so that we can avoid unnecessary spell casting.
-    # For example, a cast to heal an external chest wound
-    # could spill over and fully heal the internal wound, too.
-    # If the internal chest wound is in the wounds-to-heal list
-    # we'll waste time/mana overhealing an already healed wound.
-    # This is designed to only optimize healing the list of wounds
-    # given to this method with the understanding that your
-    # health and any remaining wounds will be re-assesed
-    # in the loop that called 'heal_wounds' to begin with.
-    # Also means that if some other cause reintroduces a wound
-    # then we won't mistakenly consider it still healed.
-    healed_body_parts = {
-      'internal' => {
-        'wounds' => [],
-        'scars' => []
-      },
-      'external' => {
-        'wounds' => [],
-        'scars' => []
-      }
-    }
     # Convert map of "severity" => array_of_wounds to a list of wounds sorted by most severe first.
     wounds = wounds_by_severity.sort_by { |severity, wounds| severity }.reverse.map { |arr| arr[1] }.flatten
     return if wounds.empty?
@@ -292,8 +296,10 @@ class HealMe
       wound_type = wound.scar? ? 'scars' : 'wounds'
       # Before we try to heal a wound, check if it's already been healed, either
       # from a previous, potent cast or from heal over time spells like Heal or Regenerate.
-      ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| healed_body_parts[x][y] << wound.body_part if Flags["hm-#{x}-#{y}-healed"] } }
-      next if healed_body_parts[wound_location][wound_type].include?(wound.body_part)
+      composite_key = build_wound_composite_key(wound.body_part, wound_location, wound_type)
+      wound_is_healed = @healed_wounds[composite_key]
+      echo "wound_is_healed = #{wound_is_healed}, composite_key = #{composite_key}" if $debug_mode_hm
+      next if wound_is_healed
       heal_wound(wound)
       attend_vitals
     end
@@ -381,12 +387,28 @@ class HealMe
     ['Heal', 'Regenerate'].any? { |spell_name| DRSpells.active_spells[spell_name] }
   end
 
-  def add_health_flags
-    ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.add("hm-#{x}-#{y}-healed", "The #{x} #{y} on your (.+) appear completely healed") } }
+  # Generate a key for use with @healed_wounds map.
+  def build_wound_composite_key(body_part, wound_location, wound_type)
+    "#{body_part}|#{wound_location}|#{wound_type}".downcase
   end
 
   def reset_health_flags
-    ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.reset("hm-#{x}-#{y}-healed") } }
+    # Track when a wound becomes fully healed.
+    # When 'heal over time' spells or herbs are in effect
+    # then a wound might become fully healed while
+    # you're preparing HW/HS spell, which will lead
+    # to a wasted cast on a now non-injury. Knowing
+    # if we're about to do this allows us to dynamically
+    # change which body part to cast HW/HS on at cast time.
+    #
+    # The keys in the map are in format '<body_part>|<wound_location>|<wound_type>'
+    # such as 'head|external|scar' or 'left arm|internal|wound'.
+    # A true value means that wound is fully healed, don't waste a HW/HS on it.
+    #
+    # This map gets re-created each time we perceive our health
+    # because a body part might be fully healed one moment but
+    # becomes worse the next due to disease, poison, or other cause.
+    @healed_wounds = Hash.new { |h, k| h[k] = false }
   end
 
   # Returns true if the argument is nil or empty.
@@ -396,7 +418,7 @@ class HealMe
 end
 
 before_dying do
-  ['internal', 'external'].each { |x| ['wounds', 'scars'].each { |y| Flags.delete("hm-#{x}-#{y}-healed") } }
+  DownstreamHook.remove('wounds_healed_hook')
 end
 
 HealMe.new

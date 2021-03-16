@@ -192,6 +192,9 @@ class SetupProcess
     echo('new skill needed for training') if $debug_mode_ct
 
     game_state.reset_action_count
+    # Moved this here from check_weapon based on order of operations and sheathing logic returning  
+    # if current weapon skill is twohanded.
+    game_state.sheath_whirlwind_offhand
 
     # If you're training with summoned moon weapons but you haven't cast the moonblade spell yet
     # then skip those weapon skills and train something else while we wait for moonblade spell to be cast.
@@ -268,7 +271,6 @@ class SetupProcess
     # Clean up the previous weapon
     if !last_summoned
       @equipment_manager.stow_weapon(game_state.last_weapon_name)
-      game_state.sheath_whirlwind_offhand
     elsif !next_summoned && !DRStats.moon_mage?
       break_summoned_weapon(game_state.last_weapon_name)
     elsif !next_summoned && DRStats.moon_mage?
@@ -297,7 +299,8 @@ class SetupProcess
   end
 
   def determine_whirlwind_weapon(game_state)
-    offhand_skill = game_state.sort_by_rate_then_rank(game_state.whirlwind_trainables - [game_state.weapon_skill]).first
+    return if game_state.twohanded_weapon_skill?
+    offhand_skill = game_state.sort_by_rate_then_rank(game_state.whirlwind_trainables - [game_state.weapon_skill] - $twohanded_skills).first
     game_state.update_whirlwind_weapon_info(offhand_skill)
     game_state.wield_whirlwind_offhand
   end
@@ -3228,6 +3231,7 @@ class GameState
   include DRC
 
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
+  $twohanded_skills = ['Twohanded Edged', 'Twohanded Blunt']
   $aim_skills = %w[Bow Slings Crossbow]
   $tactics_actions = %w[bob weave circle]
   $ranged_skills = $thrown_skills + $aim_skills
@@ -3285,6 +3289,7 @@ class GameState
     @analyze_combo_array = []
     @currently_whirlwinding = false
     @avtalia_cambrinth = {}
+    @barb_analyzes = { 'accuracy' => 50, 'damage' => 125, 'balance' => 600, 'flame' => 0 }
 
     @left_hand_free = settings.left_hand_free
     echo("  @left_hand_free: #{@left_hand_free}") if $debug_mode_ct
@@ -3417,6 +3422,15 @@ class GameState
 
     @whirlwind_trainables = settings.whirlwind_trainables
     echo("  @whirlwind_trainables: #{@whirlwind_trainables}") if $debug_mode_ct
+    
+    @flame_inner_fire_threshold = settings.flame_inner_fire_threshold
+    echo("  @flame_inner_fire_threshold: #{@flame_inner_fire_threshold}") if $debug_mode_ct
+
+    @flame_for_ww_expertise = !(@whirlwind_trainables && @charged_maneuvers)
+    echo("  @flame_for_ww_expertise: #{@flame_for_ww_expertise}") if $debug_mode_ct
+
+    @flame_expertise_training_threshold = settings.flame_expertise_training_threshold
+    echo("  @flame_expertise_training_threshold: #{@flame_expertise_training_threshold}") if $debug_mode_ct
 
     @avtalia_array = settings.avtalia_array
     echo("  @avtalia_array: #{@avtalia_array}") if $debug_mode_ct
@@ -3517,6 +3531,7 @@ class GameState
   end
 
   def sheath_whirlwind_offhand
+    return if twohanded_weapon_skill?
     return unless currently_whirlwinding
     @equipment_manager.stow_weapon(whirlwind_offhand_name)
   end
@@ -3546,13 +3561,17 @@ class GameState
   end
 
   def wield_whirlwind_offhand
+    return if twohanded_weapon_skill?
     return unless currently_whirlwinding
     @equipment_manager.wield_weapon_offhand(whirlwind_offhand_name)
   end
 
   def determine_whirlwind_action
-    if @use_weak_attacks && Flags['ct-accuracy-ready']
-      update_analyze_array(true) if @analyze_combo_array.empty?
+    if lacking_inner_fire? || (@flame_for_ww_expertise && need_expertise?)
+      update_analyze_array('flame') if @analyze_combo_array.empty?
+      @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
+    elsif Flags['ct-accuracy-ready']
+      update_analyze_array('accuracy') if @analyze_combo_array.empty?
       @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     elsif (npcs.length > 2) && !balance_low?
       'whirlwind'
@@ -3564,6 +3583,10 @@ class GameState
 
   def weapon_skill
     @current_weapon_skill
+  end
+
+  def twohanded_weapon_skill?
+    weapon_skill.include?'Twohanded'
   end
 
   def dance
@@ -3698,7 +3721,7 @@ class GameState
   end
 
   def charged_maneuver
-    return @charged_maneuvers['Dual Wield'] if currently_whirlwinding
+    return @charged_maneuvers['Dual Wield'] if currently_whirlwinding && !twohanded_weapon_skill?
     @charged_maneuvers[weapon_skill]
   end
 
@@ -3897,9 +3920,24 @@ class GameState
     Flags.reset('ct-damage-ready')
   end
 
+  def lacking_inner_fire?
+    return false unless DRStats.barbarian? && @use_analyze_combos
+    return false unless DRStats.mana < @flame_inner_fire_threshold
+    true
+  end
+
+  def need_expertise?
+    return false unless DRStats.barbarian? && @use_analyze_combos
+    return false unless DRSkill.getxp('Expertise') < @flame_expertise_training_threshold
+    true
+  end
+
   def melee_attack_verb
     if currently_whirlwinding
       determine_whirlwind_action
+    elsif (lacking_inner_fire? || need_expertise?) && !brawling?
+      update_analyze_array('flame') if @analyze_combo_array.empty?
+      @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     elsif attack_override
       attack_override
     elsif @use_weak_attacks
@@ -3907,7 +3945,7 @@ class GameState
     # !offhand & !brawling are there because you can't use a weapon for brawling commands
     # This issue will cause problems with the combo array system
     elsif @use_analyze_combos && !offhand? && !brawling?
-      update_analyze_array(false) if @analyze_combo_array.empty?
+      update_analyze_array if @analyze_combo_array.empty?
       @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     else
       'attack'
@@ -4016,11 +4054,13 @@ class GameState
     true
   end
 
-  def update_analyze_array(only_accuracy)
-    return perform_analyze?('accuracy', 50) if only_accuracy # Barb only setting
+  def update_analyze_array(type = nil)
     if DRStats.barbarian?
-      { 'accuracy' => 50, 'damage' => 125, 'balance' => 600, 'flame' => 0 }.each do |type, expertise|
-        break if perform_analyze?(type, expertise)
+      # Try to perform the desired combo, and if successful then return.
+      return if type && (perform_analyze?(type, @barb_analyzes[type]) || currently_whirlwinding)
+      # Otherwise, let system try to decide which combo to perform based on your expertise ranks.
+      @barb_analyzes.each do |combo, expertise|
+        break if perform_analyze?(combo, expertise)
       end
     else
       perform_analyze?('', 0)

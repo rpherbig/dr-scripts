@@ -53,7 +53,7 @@ class TestCheckHealth < Minitest::Test
   def check_health_with_buffer(messages, assertions = [])
     $server_buffer = messages.dup
     $history = $server_buffer.dup
-    @test = run_script_with_proc(['common', 'common-healing'], proc do
+    @test = run_script_with_proc(['common', 'common-healing-data', 'common-healing'], proc do
       health_result = DRCH.check_health
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(health_result) }

@@ -3,7 +3,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#common-arcana
 =end
 
-custom_require.call(%w[common events spellmonitor drinfomon])
+custom_require.call(%w[common common-items events spellmonitor drinfomon])
 
 $MANA_MAP = {
   'weak' => %w[dim glowing bright],
@@ -128,7 +128,7 @@ module DRCA
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
-    when 'Something in the area interferes with your spell preparations'
+    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now'
       DRC.bput('rel symb', 'You release the', 'But you haven\'t') if symbiosis
       return false
     when 'Well, that was fun'
@@ -189,12 +189,12 @@ module DRCA
 
     Flags.add('unknown-command', "Please rephrase that command")
     Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that")
-    Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell')
+    Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell', 'There is nothing else to face')
     Flags.add('cyclic-too-recent', 'The mental strain of initiating a cyclic spell so recently prevents you from formulating the spell pattern')
     Flags.add('spell-full-prep', /^This pattern may only be cast with full preparation/)
 
     case DRC.bput(cast_command || 'cast', get_data('spells').cast_messages)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/, /^There is nothing else to face/
       DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
       DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     when /You gesture/
@@ -267,7 +267,7 @@ module DRCA
     if stored_cambrinth
       DRC.bput("get my #{cambrinth}", 'You get', 'You are already holding that')
     elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach', 'You aren\'t wearing that.', 'You grab your','You clutch')
+      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach', 'You aren\'t wearing that.', 'You grab your', 'You clutch', 'You need a free hand')
     end
   end
 
@@ -275,7 +275,7 @@ module DRCA
     if stored_cambrinth
       DRC.bput("stow my #{cambrinth}", 'You put', 'Stow what')
     elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place', 'You gently suspend','You slip')
+      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place', 'You gently suspend', 'You slip')
     end
   end
 
@@ -293,9 +293,24 @@ module DRCA
   def invoke(cambrinth, dedicated_camb_use, invoke_amount)
     return unless cambrinth
 
-    DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages, 'Invoke what?')
+    result = DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages, 'Invoke what?')
     pause
     waitrt?
+    case result
+    when /you find it too clumsy/
+      DRC.message("*** Your arcana skill is too low to invoke your cambrinth while worn")
+      # If the cambrinth is in your hands and you can't invoke it, nothing else to do.
+      unless DRCI.in_hands?(cambrinth)
+        # Otherwise, try to find the cambrinth and get it to your hands.
+        find_cambrinth(cambrinth, false, 999)
+        # If you were able to get the cambrinth into a hand then retry invoking it.
+        # You might not have been able to if your hands were full.
+        if DRCI.in_hands?(cambrinth)
+          invoke(cambrinth, dedicated_camb_use, invoke_amount)
+          stow_cambrinth(cambrinth, false, 999)
+        end
+      end
+    end
   end
 
   def charge?(cambrinth, mana)
@@ -305,6 +320,21 @@ module DRCA
     case result
     when /You are in no condition to do that/
       harness?(mana)
+    when /you find it too clumsy/
+      DRC.message("*** Your arcana skill is too low to charge your cambrinth while worn")
+      charged = false
+      # If the cambrinth is in your hands and you can't charge it, nothing else to do.
+      unless DRCI.in_hands?(cambrinth)
+        # Otherwise, try to find the cambrinth and get it to your hands.
+        find_cambrinth(cambrinth, false, 999)
+        # If you were able to get the cambrinth into a hand then retry charging it.
+        # You might not have been able to if your hands were full.
+        if DRCI.in_hands?(cambrinth)
+          charged = charge?(cambrinth, mana)
+          stow_cambrinth(cambrinth, false, 999)
+        end
+      end
+      charged
     else
       result =~ /absorbs? all of the energy/
     end

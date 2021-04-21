@@ -21,19 +21,16 @@ class HealMe
     ]
     args = parse_args(arg_definitions)
 
-    $debug_mode_hm =  @settings['healme']['debug'] || UserVars.healme_debug || args.debug
+    $debug_mode_healme = @settings['healme']['debug'] || UserVars.healme_debug || args.debug
 
     @body_parts_not_to_heal = args.keep.split(',').map(&:strip).map(&:downcase) || []
-    echo "body_parts_not_to_heal = #{@body_parts_not_to_heal}" if $debug_mode_hm
-
-    @use_heal_over_time_spells = @body_parts_not_to_heal.empty?
-    echo "use_heal_over_time_spells = #{@use_heal_over_time_spells}" if $debug_mode_hm
+    echo "body_parts_not_to_heal = #{@body_parts_not_to_heal}" if $debug_mode_healme
 
     @wound_severity_threshold = (@settings['healme']['severity_threshold'] || args.severity || 0).to_i
-    echo "wound_severity_threshold = #{@wound_severity_threshold}" if $debug_mode_hm
+    echo "wound_severity_threshold = #{@wound_severity_threshold}" if $debug_mode_healme
 
     @max_wounds_to_tend_while_prep_spells = (@settings['healme']['max_wounds_to_tend_while_prep_spells'] || 1).to_i
-    echo "max_wounds_to_tend_while_prep_spells = #{@max_wounds_to_tend_while_prep_spells}" if $debug_mode_hm
+    echo "max_wounds_to_tend_while_prep_spells = #{@max_wounds_to_tend_while_prep_spells}" if $debug_mode_healme
 
     @health_data = {}
     @spells = load_healing_waggle_set
@@ -51,7 +48,7 @@ class HealMe
         body_parts = Regexp.last_match[:body_parts].to_s
         wound_location = Regexp.last_match[:location].to_s
         wound_type = Regexp.last_match[:type].to_s
-        echo "Detected fully healed wounds: body_parts=#{body_parts}, wound_location=#{wound_location}, wound_type=#{wound_type}" if $debug_mode_hm
+        echo "Detected fully healed wounds: body_parts=#{body_parts}, wound_location=#{wound_location}, wound_type=#{wound_type}" if $debug_mode_healme
         # One or more body parts may have been fully healed.
         # Split the string to identify each one.
         body_parts
@@ -59,9 +56,9 @@ class HealMe
           .split(',')
           .map { |value| value.strip.downcase }
           .each do |body_part|
-            composite_key = build_wound_composite_key(body_part, wound_location, wound_type)
+            composite_key = build_composite_key_for_wound_details(body_part, wound_location, wound_type)
             @healed_wounds[composite_key] = true
-            echo "@healed_wounds[#{composite_key}] = #{@healed_wounds[composite_key]}" if $debug_mode_hm
+            echo "@healed_wounds[#{composite_key}] = #{@healed_wounds[composite_key]}" if $debug_mode_healme
             # If external wound is fully healed then flag that it's been tended, too.
             if wound_location == 'external' && wound_type == 'wounds'
               @tended_wounds[body_part] = true
@@ -70,7 +67,7 @@ class HealMe
       end
       if server_string =~ /The bandages binding your (?<body_parts>.*) become useless and fall apart./
         body_parts = Regexp.last_match[:body_parts].to_s
-        echo "Detected bandages fall off: body_parts=#{body_parts}" if $debug_mode_hm
+        echo "Detected bandages fall off: body_parts=#{body_parts}" if $debug_mode_healme
         # One or more body parts lost their bandages.
         # Split the string to identify each one.
         body_parts
@@ -79,7 +76,7 @@ class HealMe
           .map { |value| value.strip.downcase }
           .each do |body_part|
             @tended_wounds[body_part] = false
-            echo "@tended_wounds[#{body_part}] = #{@tended_wounds[body_part]}" if $debug_mode_hm
+            echo "@tended_wounds[#{body_part}] = #{@tended_wounds[body_part]}" if $debug_mode_healme
           end
       end
       server_string
@@ -103,9 +100,9 @@ class HealMe
       exit
     end
     if waggle_set
-      echo "Using 'healing' waggle set to define healing spells" if $debug_mode_hm
+      echo "Using 'healing' waggle set to define healing spells" if $debug_mode_healme
     else
-      echo "Using empath_healing setting to define healing spells" if $debug_mode_hm
+      echo "Using empath_healing setting to define healing spells" if $debug_mode_healme
       # The 'empath_healing' setting is a map where the keys are spell abbreviations
       # and the values are a list of mana to use.
       # For example, definition for Heal Wounds spell with prep of 5 and cambrinth of 10:
@@ -125,7 +122,7 @@ class HealMe
         waggle_set[name] = data
       end
     end
-    echo "Healing spells: #{waggle_set}" if $debug_mode_hm
+    echo "Healing spells: #{waggle_set}" if $debug_mode_healme
     waggle_set
   end
 
@@ -134,19 +131,28 @@ class HealMe
       wound = nil
       case phase
       when 'post-prep'
+        # Once you've begun to prepare the spell you may
+        # be waiting a few seconds before you're ready to cast.
+        # To maximize our wait time, we'll look for any wounds
+        # that need tending (e.g. lodged ammo, bleeders, parasites).
         wounds = (
             @health_data['bleeders'].values.flatten +
             @health_data['parasites'].values.flatten +
             @health_data['lodged'].values.flatten
           )
-          .reject { |wound| wound_tended?(wound) }
-          .select { |wound| !wound.bleeding? || bleeder_tendable?(wound) }
+          .reject { |wound| wound_tended?(wound) } # skip already tended wounds
+          .select { |wound| !wound.bleeding? || bleeder_tendable?(wound) } # if not bleeding then it's a parasite or lodged item
+          .sort_by { |wound| wound.severity * -1 } # sort descending
           .first(@max_wounds_to_tend_while_prep_spells)
           .each { |wound| tend_wound(wound) }
       when 'pre-cast'
+        # If you have a heal-over-time effect active then
+        # by the time you are ready to cast HW/HS then the
+        # originally intended body part might now be healed.
+        # If that happens, then to try and avoid wasting the spell
+        # we'll find the next wound/scar to heal just before casting.
         if /^(hw|hs)$/i =~ spell_data['abbrev']
-          wounds = @health_data['wounds']
-          wounds = wounds.values.flatten.reject { |wound| wound_healed?(wound) }
+          wounds = get_wounds_in_priority_order(@health_data['wounds']).reject { |wound| wound_healed?(wound) }
           case spell_data['abbrev'].downcase
           when 'hw'
             wound = wounds.find { |wound| !wound.scar? }
@@ -165,7 +171,7 @@ class HealMe
   # you're always trying to heal the most severe wounds in the moment.
   def heal_self
     loop do
-      echo 'Checking health' if $debug_mode_hm
+      echo 'Checking health' if $debug_mode_healme
       reset_health_flags
       # Using these variable names to not conflict with
       # implicit 'health' variable that tells your vitality.
@@ -194,7 +200,7 @@ class HealMe
   end
 
   def get_health_data
-    echo 'Checking internal and external wounds and scars, bleeders, parasites, and lodged items' if $debug_mode_hm
+    echo 'Checking internal and external wounds and scars, bleeders, parasites, and lodged items' if $debug_mode_healme
     health_data = DRCH.perceive_health
     remove_wounds_to_keep(health_data['wounds'])
     remove_wounds_to_keep(health_data['bleeders'])
@@ -207,7 +213,7 @@ class HealMe
   def attend_vitals
     heal_vitality if DRStats.health < [50, @settings.health_threshold].max
     stop_bleeding if bleeding?
-    if @use_heal_over_time_spells
+    if use_heal_over_time_spells?
       cast_regenerate if @spells['Regenerate']
       cast_heal if @spells['Heal']
     end
@@ -243,7 +249,7 @@ class HealMe
     should_heal_bleeder = wound.bleeding_rate != '(tended)'
     # If any one of the conditions is false then we'll keep the wound (not heal it).
     should_keep_wound = !(should_heal_severity && should_heal_body_part && should_heal_bleeder)
-    if $debug_mode_hm
+    if $debug_mode_healme
       echo "#{wound.inspect}"
       echo "should_heal_severity? = #{should_heal_severity}"
       echo "should_heal_body_part? = #{should_heal_body_part}"
@@ -277,7 +283,7 @@ class HealMe
       health_data['diseased'] ||
       DRStats.health < 100
     )
-    echo "Wounds to heal? #{wounds_to_heal}" if $debug_mode_hm
+    echo "Wounds to heal? #{wounds_to_heal}" if $debug_mode_healme
     wounds_to_heal
   end
 
@@ -323,8 +329,7 @@ class HealMe
   # and the values are a list of wounds. So this only heals the wounds
   # for the map key that is the highest severity at the time.
   def heal_wounds(wounds_by_severity, max_wounds_to_heal = 3)
-    # Convert map of "severity" => array_of_wounds to a list of wounds sorted by most severe first.
-    wounds = wounds_by_severity.sort_by { |severity, wounds| severity }.reverse.map { |arr| arr[1] }.flatten
+    wounds = get_wounds_in_priority_order(wounds_by_severity)
     return if wounds.empty?
     # Heal the needful
     count_of_wounds_healed = 0
@@ -342,7 +347,7 @@ class HealMe
   # Casts either Heal Wounds or Heal Scars for the given wound.
   # If it's an internal wound then casts <spell> reverse.
   def heal_wound(wound)
-    echo "Healing wound: #{wound.inspect}" if $debug_mode_hm
+    echo "Healing wound: #{wound.inspect}" if $debug_mode_healme
     # Determine spell to cast to heal this wound.
     spell_name = get_spell_name_for_wound(wound)
     @spells[spell_name]['cast'] = get_cast_command_for_wound(wound)
@@ -350,11 +355,9 @@ class HealMe
   end
 
   def wound_healed?(wound)
-    wound_location = wound.internal? ? 'internal' : 'external'
-    wound_type = wound.scar? ? 'scars' : 'wounds'
-    composite_key = build_wound_composite_key(wound.body_part, wound_location, wound_type)
+    composite_key = build_composite_key_for_wound(wound)
     wound_is_healed = @healed_wounds[composite_key]
-    echo "Wound already healed? #{wound_is_healed}, wound = #{wound.inspect}" if $debug_mode_hm
+    echo "Wound already healed? #{wound_is_healed}, wound = #{wound.inspect}" if $debug_mode_healme
     wound_is_healed
   end
 
@@ -371,10 +374,10 @@ class HealMe
   # For tending bleeders, dislodging ammo, or removing parasites.
   def tend_wound(wound)
     if !wound_tended?(wound) && (!wound.bleeding? || bleeder_tendable?(wound))
-      echo "Tending wound: #{wound.inspect}" if $debug_mode_hm
+      echo "Tending wound: #{wound.inspect}" if $debug_mode_healme
       @tended_wounds[wound.body_part] = DRCH.bind_wound(wound.body_part)
     else
-      echo "Wound doesn't meet criteria to be tended: #{wound.inspect}" if $debug_mode_hm
+      echo "Wound doesn't meet criteria to be tended: #{wound.inspect}" if $debug_mode_healme
     end
   end
 
@@ -382,7 +385,7 @@ class HealMe
   # If yes then we don't need to retry until the bandages fall off.
   def wound_tended?(wound)
     wound_is_tended = @tended_wounds[wound.body_part]
-    echo "Wound already tended? #{wound_is_tended}, wound = #{wound.inspect}" if $debug_mode_hm
+    echo "Wound already tended? #{wound_is_tended}, wound = #{wound.inspect}" if $debug_mode_healme
     wound_is_tended
   end
 
@@ -393,7 +396,7 @@ class HealMe
     wound_is_tended = wound_tended?(wound)
     skilled_to_tend = DRCH.skilled_to_tend_wound?(wound.bleeding_rate)
     tendable = !wound_is_tended && wound.bleeding? && !wound.internal? && skilled_to_tend
-    if $debug_mode_hm
+    if $debug_mode_healme
       echo "wound = #{wound.inspect}"
       echo "wound_needs_tending? #{!wound_is_tended}"
       echo "wound_is_bleeding? #{wound.bleeding?}"
@@ -417,9 +420,9 @@ class HealMe
   # Cast a spell if it's not active.
   def cast_spell(spell_name)
     if DRSpells.active_spells[spell_name]
-      echo "Skipping casting spell #{spell_name} because already active" if $debug_mode_hm
+      echo "Skipping casting spell #{spell_name} because already active" if $debug_mode_healme
     else
-      echo "Casting spell: #{spell_name}" if $debug_mode_hm
+      echo "Casting spell: #{spell_name}" if $debug_mode_healme
       DRCA.check_discern(@spells[spell_name], @settings) if @spells[spell_name]['use_auto_mana']
       DRCA.cast_spells({ spell_name: @spells[spell_name] }, @settings, @settings.waggle_force_cambrinth, @cast_spell_lambda)
     end
@@ -450,18 +453,74 @@ class HealMe
       # which is usually a pet bleeder, then only focus the healing power
       # on the location for the wound we are given. Often this means
       # we're healing the internal damage but keeping the external pet bleeder.
-      spell_location = wound.internal? ? 'internal' : 'external'
+      spell_location = wound.location
     end
     cast_command = "cast #{wound.body_part} #{spell_location}"
+  end
+
+  # If you have wounds and aren't wanting to preserve any bleeders
+  # then should be good to use heal over time spells (e.g. Heal/Regenerate).
+  def use_heal_over_time_spells?
+    @body_parts_not_to_heal.empty? && !@health_data['wounds'].empty?
   end
 
   def heal_over_time_spells_active?
     ['Heal', 'Regenerate'].any? { |spell_name| DRSpells.active_spells[spell_name] }
   end
 
-  # Generate a key for use with @healed_wounds map.
-  def build_wound_composite_key(body_part, wound_location, wound_type)
+  # Generate a key to uniquely identify this wound. Good for map keys.
+  def build_composite_key_for_wound_details(body_part, wound_location, wound_type)
     "#{body_part}|#{wound_location}|#{wound_type}".downcase
+  end
+
+  # Generate a key to uniquely identify this wound. Good for map keys.
+  def build_composite_key_for_wound(wound)
+    build_composite_key_for_wound_details(wound.body_part, wound.location, wound.type)
+  end
+
+  # Given a map of wounds grouped by their unique composite keys,
+  # find a wound for the same body part and location as the given wound
+  # but that is for the opposite type. That is, if given an external neck scar
+  # will return if exists an external neck wound, or vice versa.
+  def get_wound_of_opposite_type(wounds_by_location, wound)
+    other_type = wound.scar? ? 'wound' : 'scar'
+    composite_key = build_composite_key_for_wound_details(wound.body_part, wound.location, other_type)
+    other_wound = wounds_by_location[composite_key]
+    return other_wound
+  end
+
+  # Given a map of wound severities (keys) to wounds (values)
+  # returns a flat list of those wounds in priority order to be healed.
+  # Most of the time the priority to heal a wound is the same as its severity,
+  # but we may prioritize healing a scar over a fresh wound to avoid scar death.
+  def get_wounds_in_priority_order(wounds_by_severity)
+    wounds_by_location = wounds_by_severity.values.flatten.reduce(Hash.new) do |wounds_by_location, wound|
+      composite_key = build_composite_key_for_wound(wound)
+      wounds_by_location[composite_key] = wound
+      wounds_by_location
+    end
+    wounds = wounds_by_severity
+      .reduce(Array.new) do |wounds_with_severity, pair|
+        severity, wounds = pair
+        wounds.each do |wound|
+          if wound.scar?
+            # Find the complementary non-scar wound for the same body part.
+            # If the severities of the two wounds together could cause scar death
+            # then increase severity (aka, the priority) of the scar so it's healed first.
+            echo "Found an #{wound.location} #{wound.type} on your #{wound.body_part}, checking for a wound in the same place that if healed could cause scar death" if $debug_mode_healme
+            other_wound = get_wound_of_opposite_type(wounds_by_location, wound)
+            if (other_wound && (wound.severity + other_wound.severity > 10))
+              severity = [wound.severity, other_wound.severity + 1].max
+              echo "Found an #{other_wound.location} #{other_wound.type} on your #{other_wound.body_part} that if healed could cause scar death" if $debug_mode_healme
+              echo "Setting the scar's severity to #{severity} to prioritize healing it before the wound" if $debug_mode_healme
+            end
+          end
+          wounds_with_severity << { 'severity' => severity, 'wound' => wound }
+        end
+        wounds_with_severity
+      end
+      .sort_by { |data| data['severity'] * -1 } # sort descending
+      .map { |data| data['wound'] }
   end
 
   def reset_health_flags

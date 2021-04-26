@@ -19,15 +19,25 @@ class TendMe
   end
 
   def bind_open_wounds?
+    tended_wounds = false
     health_data = DRCH.check_health
-    wounds = (
+    (
       health_data['lodged'].values.flatten +
       health_data['parasites'].values.flatten +
       health_data['bleeders'].values.flatten
     )
-    wounds
-      .reject { |wound| wound.internal? || wound.bleeding_rate =~ /tended|clotted/ }
-      .any? { |wound| DRCH.bind_wound(wound.body_part) }
+    .reject { |wound| wound.internal? || wound.bleeding_rate =~ /tended|clotted/ } # untendable
+    .select do |wound|      
+      skilled_to_tend = DRCH.skilled_to_tend_wound?(wound.bleeding_rate)
+      unless wound.bleeding? && skilled_to_tend
+        DRC.message("You are not skilled enough to tend a #{wound.bleeding_rate.upcase} bleeder on a #{wound.body_part.upcase}, skipping")
+      end
+      # if not bleeding then it's a parasite or lodged item
+      !wound.bleeding? || skilled_to_tend
+    end
+    .sort_by { |wound| wound.severity * -1 } # sort descending
+    .each { |wound| tended_wounds = DRCH.bind_wound(wound.body_part) || tended_wounds }
+    return tended_wounds
   end
 
   # Monitor for wounds to begin bleeding again then tend them.
@@ -38,38 +48,31 @@ class TendMe
 
     loop do
       pause 0.5
-      body_part = nil
-      # One or more active bleeders, tend them.
-      if Flags['tendme-bind-wound']
-        body_part = get_body_part_from_flag('tendme-bind-wound')
-      end
+      tend_wounds = false
       # If training, you can rewrap wound for more experience.
       if Flags['tendme-rewrap-wound']
         if train && DRSkill.getxp('First Aid') < 30
-          body_part = get_body_part_from_flag('tendme-rewrap-wound')
+          tend_wounds = true
+          body_part = Flags['tendme-rewrap-wound'][:body_part]
+          Flags.reset('tendme-rewrap-wound')
           DRCH.unwrap_wound(body_part)
         end
-        # Unwrapping a wound will cause a message that trips our flag.
-        # Clear the flag so we don't try to double tend a wound.
-        # If the flag was already tripped for a different bleeder
-        # then that'll get taken cared of when we bind all open wounds.
+      end
+      # One or more active bleeders, tend them.
+      if Flags['tendme-bind-wound']
+        tend_wounds = true
         Flags.reset('tendme-bind-wound')
       end
       # Detected lodged ammo or parasites, tend them out.
       if Flags['tendme-bind-lodged']
-        body_part = get_body_part_from_flag('tendme-bind-lodged')
+        tend_wounds = true
+        Flags.reset('tendme-bind-lodged')
       end
-      if body_part
-        DRCH.bind_wound(body_part)
+      if tend_wounds
+        tend_wounds = false
         bind_open_wounds?
       end
     end
-  end
-
-  def get_body_part_from_flag(flag)
-    body_part = Flags[flag][:body_part]
-    Flags.reset(flag)
-    return body_part
   end
 
 end

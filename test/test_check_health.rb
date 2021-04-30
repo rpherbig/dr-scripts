@@ -162,4 +162,5 @@ class TestCheckHealth < Minitest::Test
       @test.join
     end
   end
+
 end

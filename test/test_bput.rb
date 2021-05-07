@@ -6,10 +6,10 @@ include Harness
 
 class TestCommon < Minitest::Test
   def setup
+    reset_data
+    $history.clear
     sent_messages.clear
-    @result = nil
-    $history = []
-    $displayed_messages = []
+    displayed_messages.clear
   end
 
   def teardown

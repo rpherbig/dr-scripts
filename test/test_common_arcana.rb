@@ -134,23 +134,6 @@ class TestDRCA < Minitest::Test
     end)
   end
 
-  def test_find_stored_cambrinth_in_hands
-    cambrinth = 'cambrinth armband'
-    stored_cambrinth = true
-    cambrinth_cap = 32
-
-    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
-
-    messages = []
-
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
-      assert_found_cambrinth
-    ])
-  end
-
   def test_find_stored_cambrinth_by_get
     cambrinth = 'cambrinth armband'
     stored_cambrinth = true
@@ -274,6 +257,164 @@ class TestDRCA < Minitest::Test
 
     run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
       assert_not_found_cambrinth
+    ])
+  end
+
+  #########################################
+  # STOW CAMBRINTH
+  #########################################
+
+  def assert_stow_cambrinth
+    proc { |stowed_cambrinth| assert_equal(true, stowed_cambrinth) }
+  end
+
+  def assert_not_stow_cambrinth
+    proc { |stowed_cambrinth| assert_equal(false, stowed_cambrinth) }
+  end
+
+  def run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, assertions = [])
+    @test = run_script_with_proc(['common-arcana'], proc do
+      # Setup
+      $server_buffer = messages.dup
+      $history = $server_buffer.dup
+      DRCA.const_set("DRCI", fake_drci)
+
+      # Test
+      stowed_cambrinth = DRCA.stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+
+      # Assert
+      fake_drci.verify
+      assertions = [assertions] unless assertions.is_a?(Array)
+      assertions.each { |assertion| assertion.call(stowed_cambrinth) }
+    end)
+  end
+
+  def test_stow_stored_cambrinth_by_get
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = true
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:get_item_if_not_held?, true, [String])
+    fake_drci.expect(:stow_item?, true, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_stow_cambrinth
+    ])
+  end
+
+  def test_stow_stored_cambrinth_by_wear
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = true
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:get_item_if_not_held?, false, [String])
+    fake_drci.expect(:remove_item?, true, [String])
+    fake_drci.expect(:stow_item?, true, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_stow_cambrinth
+    ])
+  end
+
+  def test_not_stow_stored_cambrinth
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = true
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:get_item_if_not_held?, false, [String])
+    fake_drci.expect(:remove_item?, false, [String])
+    fake_drci.expect(:stow_item?, false, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_not_stow_cambrinth
+    ])
+  end
+
+  def test_stow_worn_cambrinth_in_hands_by_wear
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = false
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:in_hands?, true, [String])
+    fake_drci.expect(:wear_item?, true, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_stow_cambrinth
+    ])
+  end
+
+  def test_stow_worn_cambrinth_in_hands_by_stow
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = false
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:in_hands?, true, [String])
+    fake_drci.expect(:wear_item?, false, [String])
+    fake_drci.expect(:stow_item?, true, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_stow_cambrinth
+    ])
+  end
+
+  def test_not_stow_worn_cambrinth_in_hands
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = false
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:in_hands?, true, [String])
+    fake_drci.expect(:wear_item?, false, [String])
+    fake_drci.expect(:stow_item?, false, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_not_stow_cambrinth
+    ])
+  end
+
+  def test_stow_worn_cambrinth_not_in_hands
+    cambrinth = 'cambrinth armband'
+    stored_cambrinth = false
+    cambrinth_cap = 32
+
+    DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+
+    messages = []
+
+    fake_drci = Minitest::Mock.new
+    fake_drci.expect(:in_hands?, false, [String])
+
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+      assert_stow_cambrinth
     ])
   end
 

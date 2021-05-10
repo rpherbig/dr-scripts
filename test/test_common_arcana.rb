@@ -1,6 +1,7 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
 require 'ostruct'
+
 load 'test/test_harness.rb'
 
 include Harness
@@ -13,7 +14,6 @@ class TestDRCA < Minitest::Test
     $server_buffer.clear
     sent_messages.clear
     displayed_messages.clear
-    Object.send(:remove_const, :DRCA) if defined?(DRCA)
   end
 
   def teardown
@@ -122,6 +122,8 @@ class TestDRCA < Minitest::Test
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
+
+      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
       DRCA.const_set("DRCI", fake_drci)
 
       # Test
@@ -277,6 +279,8 @@ class TestDRCA < Minitest::Test
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
+
+      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
       DRCA.const_set("DRCI", fake_drci)
 
       # Test

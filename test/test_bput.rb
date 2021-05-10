@@ -1,6 +1,7 @@
-require 'minitest/autorun'
-load 'test/test_harness.rb'
+require_relative 'test_helper'
 require 'timecop'
+
+load 'test/test_harness.rb'
 
 include Harness
 

@@ -1,5 +1,9 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
+
+load 'test/test_harness.rb'
+
+include Harness
 
 class TestValidYaml < Minitest::Test
   def test_all_yaml_in_profiles

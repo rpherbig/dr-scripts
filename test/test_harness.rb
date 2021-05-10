@@ -99,16 +99,74 @@ module Harness
     def self.at_exit(&_block); end
   end
 
+  # Copied from lich.rbw
   class UpstreamHook
-    def self.add(*); end
+    @@upstream_hooks ||= Hash.new
 
-    def self.remove(*); end
+    def UpstreamHook.add(name, action)
+      unless action.class == Proc
+        echo "UpstreamHook: not a Proc (#{action})"
+        return false
+      end
+      @@upstream_hooks[name] = action
+    end
+
+    def UpstreamHook.run(client_string)
+      for key in @@upstream_hooks.keys
+        begin
+          client_string = @@upstream_hooks[key].call(client_string)
+        rescue
+          @@upstream_hooks.delete(key)
+          respond "--- Lich: UpstreamHook: #{$!}"
+          respond $!.backtrace.first
+        end
+        return nil if client_string.nil?
+      end
+      return client_string
+    end
+
+    def UpstreamHook.remove(name)
+      @@upstream_hooks.delete(name)
+    end
+
+    def UpstreamHook.list
+      @@upstream_hooks.keys.dup
+    end
   end
 
+  # Copied from lich.rbw
   class DownstreamHook
-    def self.add(*); end
+    @@downstream_hooks ||= Hash.new
 
-    def self.remove(*); end
+    def DownstreamHook.add(name, action)
+      unless action.class == Proc
+        echo "DownstreamHook: not a Proc (#{action})"
+        return false
+      end
+      @@downstream_hooks[name] = action
+    end
+
+    def DownstreamHook.run(server_string)
+      for key in @@downstream_hooks.keys
+        begin
+          server_string = @@downstream_hooks[key].call(server_string.dup)
+        rescue
+          @@downstream_hooks.delete(key)
+          respond "--- Lich: DownstreamHook: #{$!}"
+          respond $!.backtrace.first
+        end
+        return nil if server_string.nil?
+      end
+      return server_string
+    end
+
+    def DownstreamHook.remove(name)
+      @@downstream_hooks.delete(name)
+    end
+
+    def DownstreamHook.list
+      @@downstream_hooks.keys.dup
+    end
   end
 
   def before_dying(&code)

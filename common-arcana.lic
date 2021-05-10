@@ -264,18 +264,47 @@ module DRCA
 
   def find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("get my #{cambrinth}", 'You get', 'You are already holding that')
-    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach', 'You aren\'t wearing that.', 'You grab your', 'You clutch', 'You need a free hand')
+      # Your config says you keep your cambrinth stowed.
+      # If item not in your hands, maybe you're wearing it by accident?
+      DRCI.get_item_if_not_held?(cambrinth) || DRCI.remove_item?(cambrinth)
+    elsif !skilled_to_charge_while_worn?(cambrinth_cap)
+      # Your config says you wear your cambrinth.
+      # But you're not skilled to charge it while worn.
+      # If item not in your hands, maybe you're wearing it or stowed it by accident?
+      DRCI.in_hands?(cambrinth) || DRCI.remove_item?(cambrinth) || DRCI.get_item?(cambrinth)
+    else
+      # Your config says you wear your cambrinth
+      # and you're skilled to charge it while worn.
+      # Let's hope you're wearing or holding it :)
+      # To verify that would require more commands
+      # and more time, and be more spammy.
+      # For now, no validation or recovery for this scenario.
+      true
     end
   end
 
   def stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("stow my #{cambrinth}", 'You put', 'Stow what')
-    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place', 'You gently suspend', 'You slip')
+      # Your config says you keep your cambrinth stowed.
+      # If item not in your hands and not stowed, maybe you're wearing it by accident?
+      DRCI.get_item_if_not_held?(cambrinth) || DRCI.remove_item?(cambrinth)
+      DRCI.stow_item?(cambrinth)
+    elsif DRCI.in_hands?(cambrinth)
+      # Your config says you wear your cambrinth.
+      # For some reason it's currently in your hands.
+      # If can't wear item for some reason then stow it.
+      DRCI.wear_item?(cambrinth) || DRCI.stow_item?(cambrinth)
+    else
+      # Your config says you wear your cambrinth
+      # and you're not currently holding it so
+      # we'll assume you're wearing it.
+      # No further action needed.
+      true
     end
+  end
+
+  def skilled_to_charge_while_worn?(cambrinth_cap)
+    DRSkill.getrank('Arcana').to_i >= ((cambrinth_cap.to_i * 2) + 100)
   end
 
   def charge_and_invoke(cambrinth, dedicated_camb_use, charges, invoke_exact_amount = nil)
@@ -313,15 +342,26 @@ module DRCA
   end
 
   def charge?(cambrinth, mana)
+    charged = false
     result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages, 'I could not find')
     pause
     waitrt?
     case result
     when /You are in no condition to do that/
-      harness?(mana)
+      charged = harness?(mana)
+    when /You'll have to hold it/
+      # Your not wearing nor holding your cambrinth item, go find it again.
+      # Likely it's configured in your yaml that you wear it but it's stowed for some reason.
+      # Try to find the cambrinth and get it to your hands.
+      DRC.message("*** Where did your cambrinth go?")
+      retry_find_cambrinth = true
     when /you find it too clumsy/
       DRC.message("*** Your arcana skill is too low to charge your cambrinth while worn")
-      charged = false
+      retry_find_cambrinth = true
+    else
+      charged = result =~ /absorbs? all of the energy/
+    end
+    if retry_find_cambrinth
       # If the cambrinth is in your hands and you can't charge it, nothing else to do.
       unless DRCI.in_hands?(cambrinth)
         # Otherwise, try to find the cambrinth and get it to your hands.
@@ -333,10 +373,8 @@ module DRCA
           stow_cambrinth(cambrinth, false, 999)
         end
       end
-      charged
-    else
-      result =~ /absorbs? all of the energy/
     end
+    return charged
   end
 
   def release_cyclics

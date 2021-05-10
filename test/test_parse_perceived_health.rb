@@ -1,4 +1,5 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
+
 load 'test/test_harness.rb'
 
 include Harness

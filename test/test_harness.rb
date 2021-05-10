@@ -330,12 +330,15 @@ module Harness
   end
 
   def run_script_with_proc(scripts, test)
-    # Thread.abort_on_exception=true
     thread = Thread.new do
       scripts = [scripts] unless scripts.is_a?(Array)
       scripts.each do |script|
-        script = "#{script}.lic" unless script.end_with?('.lic')
-        load script
+        # To collect code coverage with the simplecov gem
+        # then the scripts MUST be launched via `require_relative` command.
+        # To be launched via `require_relative` command
+        # then the scripts MUST use the `.rb` extension.
+        script = "tmp/#{script}.rb" unless script.end_with?('.rb')
+        require_relative script
       end
       test.call
     end

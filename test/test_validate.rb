@@ -1,11 +1,12 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
 require 'ostruct'
+
 load 'test/test_harness.rb'
 
-class TestValidate < Minitest::Test
-  include Harness
+include Harness
 
+class TestValidate < Minitest::Test
   def setup
     $test_settings = nil
     reset_data

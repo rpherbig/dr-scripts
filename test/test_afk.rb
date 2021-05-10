@@ -1,6 +1,7 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
 require 'ostruct'
+
 load 'test/test_harness.rb'
 
 include Harness

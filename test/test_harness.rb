@@ -3,6 +3,8 @@ module Harness
   $_IDLETIMESTAMP_ = Time.now
   # Lich global for the last time a script sent a command to the game
   $_SCRIPTIDLETIMESTAMP_ = Time.now
+  # Indicate to scripts that we are in test mode
+  $_TEST_MODE_ = true
 
   class DRSpells
     @@_data_store = {}
@@ -49,6 +51,99 @@ module Harness
 
     def self.getrank(skillname)
       @@_data_store[skillname] || 100
+    end
+  end
+
+  class DRRoom
+    @@npcs ||= []
+    @@pcs ||= []
+    @@group_members ||= []
+    @@pcs_prone ||= []
+    @@pcs_sitting ||= []
+    @@dead_npcs ||= []
+    @@room_objs ||= []
+    @@exits ||= []
+    @@title = ''
+    @@description = ''
+
+    def self.npcs
+      @@npcs
+    end
+
+    def self.npcs=(val)
+      @@npcs = val
+    end
+
+    def self.pcs
+      @@pcs
+    end
+
+    def self.pcs=(val)
+      @@pcs = val
+    end
+
+    def self.exits
+      @@exits
+    end
+
+    def self.exits=(val)
+      @@exits = val
+    end
+
+    def self.title
+      @@title
+    end
+
+    def self.title=(val)
+      @@title = val
+    end
+
+    def self.description
+      @@description
+    end
+
+    def self.description=(val)
+      @@description = val
+    end
+
+    def self.group_members
+      @@group_members
+    end
+
+    def self.group_members=(val)
+      @@group_members = val
+    end
+
+    def self.pcs_prone
+      @@pcs_prone
+    end
+
+    def self.pcs_prone=(val)
+      @@pcs_prone = val
+    end
+
+    def self.pcs_sitting
+      @@pcs_sitting
+    end
+
+    def self.pcs_sitting=(val)
+      @@pcs_sitting = val
+    end
+
+    def self.dead_npcs
+      @@dead_npcs
+    end
+
+    def self.dead_npcs=(val)
+      @@dead_npcs = val
+    end
+
+    def self.room_objs
+      @@room_objs
+    end
+
+    def self.room_objs=(val)
+      @@room_objs = val
     end
   end
 
@@ -169,6 +264,27 @@ module Harness
     end
   end
 
+  class EquipmentManager
+  end
+
+  class Room
+    def self.current
+      Map.new
+    end
+  end
+
+  class Map
+    def id
+      1
+    end
+  end
+
+  class XMLData
+    def self.room_title
+      'Middle of Nowhere'
+    end
+  end
+
   def before_dying(&code)
     Script.at_exit(&code)
   end
@@ -186,7 +302,7 @@ module Harness
   end
 
   def parse_args(_dummy, _dumber)
-    args = OpenStruct.new
+    args = OpenStruct.new($parsed_args.dup || {})
     args.flex = 'test'
     args
   end

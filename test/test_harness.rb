@@ -269,13 +269,41 @@ module Harness
 
   class Room
     def self.current
-      Map.new
+      Map.new(
+        :id => 1,
+        :wayto => {
+          2 => nil
+        }
+      )
     end
   end
 
   class Map
+    @@_data_store = {}
+
+    def initialize(id: nil, wayto: nil)
+      self.id = id
+      self.wayto = wayto
+    end
+
+    def self._reset
+      @@_data_store = {}
+    end
+
     def id
-      1
+      @@_data_store['id']
+    end
+
+    def id=(val)
+      @@_data_store['id'] = val
+    end
+
+    def wayto
+      @@_data_store['wayto']
+    end
+
+    def wayto=(val)
+      @@_data_store['wayto'] = val
     end
   end
 
@@ -334,7 +362,7 @@ module Harness
     DRStats._reset
     DRSkill._reset
     DRRoom._reset
-
+    Map._reset
   end
 
   def echo(message)

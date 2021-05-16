@@ -55,101 +55,101 @@ module Harness
   end
 
   class DRRoom
-    @@npcs ||= []
-    @@pcs ||= []
-    @@group_members ||= []
-    @@pcs_prone ||= []
-    @@pcs_sitting ||= []
-    @@dead_npcs ||= []
-    @@room_objs ||= []
-    @@exits ||= []
-    @@title = ''
-    @@description = ''
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
 
     def self.npcs
-      @@npcs
+      @@_data_store['npcs'] || []
     end
 
     def self.npcs=(val)
-      @@npcs = val
+      @@_data_store['npcs'] = val
     end
 
     def self.pcs
-      @@pcs
+      @@_data_store['pcs'] || []
     end
 
     def self.pcs=(val)
-      @@pcs = val
+      @@_data_store['pcs'] = val
     end
 
     def self.exits
-      @@exits
+      @@_data_store['exits'] || []
     end
 
     def self.exits=(val)
-      @@exits = val
+      @@_data_store['exits'] = val
     end
 
     def self.title
-      @@title
+      @@_data_store['title'] || ''
     end
 
     def self.title=(val)
-      @@title = val
+      @@_data_store['title'] = val
     end
 
     def self.description
-      @@description
+      @@_data_store['description'] || ''
     end
 
     def self.description=(val)
-      @@description = val
+      @@_data_store['description'] = val
     end
 
     def self.group_members
-      @@group_members
+      @@_data_store['group_members'] || []
     end
 
     def self.group_members=(val)
-      @@group_members = val
+      @@_data_store['group_members'] = val
     end
 
     def self.pcs_prone
-      @@pcs_prone
+      @@_data_store['pcs_prone'] || []
     end
 
     def self.pcs_prone=(val)
-      @@pcs_prone = val
+      @@_data_store['pcs_prone'] = val
     end
 
     def self.pcs_sitting
-      @@pcs_sitting
+      @@_data_store['pcs_sitting'] || []
     end
 
     def self.pcs_sitting=(val)
-      @@pcs_sitting = val
+      @@_data_store['pcs_sitting'] = val
     end
 
     def self.dead_npcs
-      @@dead_npcs
+      @@_data_store['dead_npcs'] || []
     end
 
     def self.dead_npcs=(val)
-      @@dead_npcs = val
+      @@_data_store['dead_npcs'] = val
     end
 
     def self.room_objs
-      @@room_objs
+      @@_data_store['room_objs'] || []
     end
 
     def self.room_objs=(val)
-      @@room_objs = val
+      @@_data_store['room_objs'] = val
     end
   end
 
   class Flags
     @@flags = {}
     @@matchers = {}
+
+    def self._reset
+      @@flags = {}
+      @@matchers = {}
+    end
 
     def self.[](key)
       @@flags[key]
@@ -317,9 +317,24 @@ module Harness
     $test_data[dummy.to_sym]
   end
 
+  # After tests run, we need to wipe out/reset
+  # constants and other contextual data so that
+  # each test doesn't interfere with the others.
+  # Not doing so can lead to hard to find bugs
+  # because the test framework may run tests
+  # in random order, so sometimes things work
+  # and then other times they don't.
+  # https://stackoverflow.com/questions/11463060/how-to-reload-a-ruby-class
   def reset_data
     $data_called_with = []
     $test_data = {}
+
+    Flags._reset
+    DRSpells._reset
+    DRStats._reset
+    DRSkill._reset
+    DRRoom._reset
+
   end
 
   def echo(message)
@@ -332,9 +347,12 @@ module Harness
     end
   end
 
+  def message(message = '')
+    echo(message)
+  end
+
   def respond(message = '')
-    print(message.to_s + "\n") if $audible
-    displayed_messages << message
+    echo(message)
   end
 
   def displayed_messages

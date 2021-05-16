@@ -41,6 +41,10 @@ class TestFind < Minitest::Test
     end
   end
 
+  def assert_mock(mock)
+    proc { assert(mock.verify) if mock.class == Minitest::Mock }
+  end
+
   def run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions = [])
     @test = run_script_with_proc(['find'], proc do
       # Setup
@@ -82,9 +86,8 @@ class TestFind < Minitest::Test
       Harness.const_set("DRRoom", original_DRRoom)
 
       # Assert
-      fake_drc.verify
-      fake_drct.verify
       assertions = [assertions] unless assertions.is_a?(Array)
+      assertions += [assert_mock(fake_drc), assert_mock(fake_drct), assert_mock(fake_drroom)]
       assertions.each { |assertion| assertion.call(error) }
     end)
   end

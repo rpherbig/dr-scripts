@@ -19,11 +19,18 @@ class TestFind < Minitest::Test
   end
 
   def assert_find_npc
-    proc { refute($displayed_messages.any? { |message| message.include?('Failed to find an NPC') }) }
+    proc { |error| refute($displayed_messages.any? { |message| message.include?('Failed to find an NPC') }) }
   end
 
   def assert_not_find_npc
-    proc { assert($displayed_messages.any? { |message| message.include?('Failed to find an NPC') }) }
+    proc { |error| assert($displayed_messages.any? { |message| message.include?('Failed to find an NPC') }) }
+  end
+
+  def assert_raise_error(error_class, error_message)
+    proc do |error|
+      assert_equal(error.class, error_class)
+      assert(error.message.include?(error_message))
+    end
   end
 
   def run_find(messages, npc, fake_drc, fake_drct, assertions = [])
@@ -42,15 +49,31 @@ class TestFind < Minitest::Test
       Find.const_set("DRCT", fake_drct)
 
       # Test
-      Find.new
+      begin
+        Find.new
+      rescue Exception => e
+        # TODO need to raise if it's not expected
+        #      but if it is, then don't fail (e.g. many scripts do 'exit' to end early)
+        error = e
+      end
 
       # Assert
+      fake_drc.verify
+      fake_drct.verify
       assertions = [assertions] unless assertions.is_a?(Array)
-      assertions.each { |assertion| assertion.call() }
+      assertions.each { |assertion| assertion.call(error) }
     end)
   end
 
   def test_find_npc_one_word
+    rooms = [732, 741, 739]
+    last_room = 734
+    $test_data[:find] = OpenStruct.new({
+      'Crossing' => {
+        'rooms' => rooms + [last_room]
+      }
+    })
+
     messages = []
 
     npc = 'beggar'
@@ -58,19 +81,33 @@ class TestFind < Minitest::Test
     fake_drc = Minitest::Mock.new
 
     fake_drct = Minitest::Mock.new
-    [793, 792, 791, 789].each do |room_id|
+    rooms.each do |room_id|
       fake_drct.expect(:walk_to, true, [room_id])
     end
+    # Find the NPC in the last room we check
     fake_drct.expect(:walk_to, true) do |room_id|
-      DRRoom.npcs = ['old blind beggar']
+      if room_id == last_room
+        DRRoom.npcs = ['old blind beggar']
+        true
+      else
+        false
+      end
     end
 
     run_find(messages, npc, fake_drc, fake_drct, [
-      assert_find_npc
+      assert_find_npc()
     ])
   end
 
   def test_find_npc_full_name
+    rooms = [732, 741, 739]
+    last_room = 734
+    $test_data[:find] = OpenStruct.new({
+      'Crossing' => {
+        'rooms' => rooms + [last_room]
+      }
+    })
+
     messages = []
 
     npc = 'old blind beggar'
@@ -78,19 +115,33 @@ class TestFind < Minitest::Test
     fake_drc = Minitest::Mock.new
 
     fake_drct = Minitest::Mock.new
-    [793, 792, 791, 789].each do |room_id|
+    rooms.each do |room_id|
       fake_drct.expect(:walk_to, true, [room_id])
     end
+    # Find the NPC in the last room we check
     fake_drct.expect(:walk_to, true) do |room_id|
-      DRRoom.npcs = ['old blind beggar']
+      if room_id == last_room
+        DRRoom.npcs = ['old blind beggar']
+        true
+      else
+        false
+      end
     end
 
     run_find(messages, npc, fake_drc, fake_drct, [
-      assert_find_npc
+      assert_find_npc()
     ])
   end
 
   def test_not_find_npc
+    rooms = [732, 741, 739]
+    last_room = 734
+    $test_data[:find] = OpenStruct.new({
+      'Crossing' => {
+        'rooms' => rooms + [last_room]
+      }
+    })
+
     messages = []
 
     npc = 'beggar'
@@ -98,15 +149,13 @@ class TestFind < Minitest::Test
     fake_drc = Minitest::Mock.new
 
     fake_drct = Minitest::Mock.new
-    [793, 792, 791, 789].each do |room_id|
+    $test_data[:find]['Crossing']['rooms'].each do |room_id|
       fake_drct.expect(:walk_to, true, [room_id])
-    end
-    fake_drct.expect(:walk_to, true) do |room_id|
-      DRRoom.npcs = ['street urchin']
     end
 
     run_find(messages, npc, fake_drc, fake_drct, [
-      assert_not_find_npc
+      assert_not_find_npc(),
+      assert_raise_error(SystemExit, 'exit')
     ])
   end
 

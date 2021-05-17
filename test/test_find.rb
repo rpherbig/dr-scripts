@@ -362,7 +362,7 @@ class TestFind < Minitest::Test
 
   # Tests the get_town_and_region method
   def test_find_ozursus_in_asemath_academy
-    npc= 'ozursus'
+    npc = 'ozursus'
     town = 'Crossing'
     region = 'asemath_academy'
     script_args = {
@@ -376,12 +376,110 @@ class TestFind < Minitest::Test
 
   # Tests the get_town_and_region method
   def test_find_ozursus_not_in_asemath_academy
-    npc= 'ozursus'
+    npc = 'ozursus'
     town = 'Dirge'
     region = 'rooms'
     script_args = {
       'npc' => npc,
       'town' => town # use specific town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_shaman_in_dirge
+    npc = 'shaman'
+    town = 'Dirge'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc
+      # use default town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_shaman_not_in_dirge
+    npc = 'shaman'
+    town = 'Crossing'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc,
+      'town' => town # use specific town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_theurgist_in_shard
+    npc = 'theurgist'
+    town = 'Shard'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc
+      # use default town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_theurgist_not_in_shard
+    npc = 'theurgist'
+    town = 'Crossing'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc,
+      'town' => town # use specific town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_monk_in_boar_clan
+    npc = 'monk'
+    town = 'Boar Clan'
+    region = 'pilgrimage_trail'
+    script_args = {
+      'npc' => npc
+      # use default town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_monk_not_in_boar_clan
+    npc = 'monk'
+    town = 'Crossing'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc,
+      'town' => town # use specific town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the format_town method
+  def test_format_town_boar_as_boar_clan
+    npc = 'monk'
+    town = 'Boar Clan'
+    region = 'pilgrimage_trail'
+    script_args = {
+      'npc' => npc,
+      'town' => 'Boar'
     }
     run_find_special_npc(script_args, npc, town, region, [
       assert_find_npc()

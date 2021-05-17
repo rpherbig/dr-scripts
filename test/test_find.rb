@@ -92,12 +92,70 @@ class TestFind < Minitest::Test
     end)
   end
 
+  # For backwards compatibility with original version of 'find' that based on
+  # the NPC name then knew the specific zone and rooms to look in, this method helps
+  # us test that logic.
+  def run_find_special_npc(script_args, npc, town, region, assertions = [])
+    crossing_rooms = [1]
+    crossing_academy = [2]
+    dirge_rooms = [3]
+    shard_rooms = [4]
+    boar_clan_rooms = [5]
+    boar_clan_pilgrimage_trail = [6]
+
+    $test_data[:town] = OpenStruct.new({
+      'Crossing' => {
+        'wandering_npcs' => {
+          'rooms' => crossing_rooms,
+          'asemath_academy' => crossing_academy
+        }
+      },
+      'Dirge' => {
+        'wandering_npcs' => {
+          'rooms' => dirge_rooms
+        }
+      },
+      'Shard' => {
+        'wandering_npcs' => {
+          'rooms' => shard_rooms
+        }
+      },
+      'Boar Clan' => {
+        'wandering_npcs' => {
+          'rooms' => boar_clan_rooms,
+          'pilgrimage_trail' => boar_clan_pilgrimage_trail
+        }
+      }
+    })
+
+    messages = []
+
+    fake_drc = Minitest::Mock.new
+    fake_drct = Minitest::Mock.new
+    fake_drroom = DRRoom # not mocked this test
+
+    $test_data[:town][town]['wandering_npcs'][region].each do |room_id|
+      fake_drct.expect(:walk_to, true) do |room_arg|
+        if room_id == room_arg
+          DRRoom.npcs = [npc]
+          true
+        else
+          false
+        end
+      end
+    end
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions)
+  end
+
   def test_find_npc_one_word
     rooms = [732, 741, 739]
     last_room = 734
-    $test_data[:find] = OpenStruct.new({
+    $test_data[:town] = OpenStruct.new({
       'Crossing' => {
-        'rooms' => rooms + [last_room]
+        'wandering_npcs' => {
+          'rooms' => rooms + [last_room]
+        }
       }
     })
 
@@ -135,9 +193,11 @@ class TestFind < Minitest::Test
   def test_find_npc_full_name
     rooms = [732, 741, 739]
     last_room = 734
-    $test_data[:find] = OpenStruct.new({
+    $test_data[:town] = OpenStruct.new({
       'Crossing' => {
-        'rooms' => rooms + [last_room]
+        'wandering_npcs' => {
+          'rooms' => rooms + [last_room]
+        }
       }
     })
 
@@ -175,9 +235,11 @@ class TestFind < Minitest::Test
   def test_not_find_npc
     rooms = [732, 741, 739]
     last_room = 734
-    $test_data[:find] = OpenStruct.new({
+    $test_data[:town] = OpenStruct.new({
       'Crossing' => {
-        'rooms' => rooms + [last_room]
+        'wandering_npcs' => {
+          'rooms' => rooms + [last_room]
+        }
       }
     })
 
@@ -193,7 +255,7 @@ class TestFind < Minitest::Test
     fake_drroom = DRRoom # not mocked this test
 
     # Walk some rooms without finding NPC
-    $test_data[:find]['Crossing']['rooms'].each do |room_id|
+    $test_data[:town]['Crossing']['wandering_npcs']['rooms'].each do |room_id|
       fake_drct.expect(:walk_to, true, [room_id])
     end
 
@@ -205,9 +267,11 @@ class TestFind < Minitest::Test
   def test_find_npc_without_moving
     rooms = [732, 741, 739]
     last_room = 734
-    $test_data[:find] = OpenStruct.new({
+    $test_data[:town] = OpenStruct.new({
       'Crossing' => {
-        'rooms' => rooms + [last_room]
+        'wandering_npcs' => {
+          'rooms' => rooms + [last_room]
+        }
       }
     })
 
@@ -233,9 +297,11 @@ class TestFind < Minitest::Test
   def test_follow_npc
     rooms = [732, 741, 739]
     last_room = 734
-    $test_data[:find] = OpenStruct.new({
+    $test_data[:town] = OpenStruct.new({
       'Crossing' => {
-        'rooms' => rooms + [last_room]
+        'wandering_npcs' => {
+          'rooms' => rooms + [last_room]
+        }
       }
     })
 
@@ -273,6 +339,34 @@ class TestFind < Minitest::Test
       assert_following_npc(),
       assert_search_adjacent_rooms(),
       assert_not_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_ozursus_in_asemath_academy
+    npc= 'ozursus'
+    town = 'Crossing'
+    region = 'asemath_academy'
+    script_args = {
+      'npc' => npc
+      # use default town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
+    ])
+  end
+
+  # Tests the get_town_and_region method
+  def test_find_ozursus_not_in_asemath_academy
+    npc= 'ozursus'
+    town = 'Dirge'
+    region = 'rooms'
+    script_args = {
+      'npc' => npc,
+      'town' => town # use specific town
+    }
+    run_find_special_npc(script_args, npc, town, region, [
+      assert_find_npc()
     ])
   end
 

@@ -150,7 +150,7 @@ class TestFind < Minitest::Test
     run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions)
   end
 
-  def test_show_help_menu_if_no_npc_argument
+  def test_exit_script_if_no_npc_argument
     messages = []
 
     script_args = {}

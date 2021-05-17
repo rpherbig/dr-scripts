@@ -509,6 +509,10 @@ module Harness
     thread
   end
 
+  # Copied from lich.rbw
+  def force_start_script(script_name, cli_vars=[], flags={})
+  end
+
   def assert_sends_messages(expected_messages)
     expected_messages = expected_messages.clone
 

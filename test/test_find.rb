@@ -45,7 +45,7 @@ class TestFind < Minitest::Test
     proc { assert(mock.verify) if mock.class == Minitest::Mock }
   end
 
-  def run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions = [])
+  def run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions = [], expected_errors = [])
     @test = run_script_with_proc(['find'], proc do
       # Setup
       $server_buffer = messages.dup
@@ -70,9 +70,11 @@ class TestFind < Minitest::Test
         error = nil
       rescue Exception => e
         error = e
-        # TODO need to raise if it's not expected, ignore otherwise
-        puts e.inspect
-        puts e.backtrace
+        unless expected_errors.include?(error.class)
+          puts "\n#{error.class}: #{error.message}:\n"
+          puts error.backtrace
+          raise
+        end
       end
 
       # Restore injected dependencies
@@ -146,6 +148,22 @@ class TestFind < Minitest::Test
     end
 
     run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions)
+  end
+
+  def test_show_help_menu_if_no_npc_argument
+    messages = []
+
+    script_args = {}
+
+    fake_drc = Minitest::Mock.new
+    fake_drct = Minitest::Mock.new
+    fake_drroom = DRRoom # not mocked this test
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+      assert_raise_error(SystemExit, 'exit')
+    ], [
+      SystemExit
+    ])
   end
 
   def test_find_npc_one_word

@@ -15,7 +15,10 @@ module DRCI
   @@drop_trash_success_patterns = [
     /^You drop/,
     /^You put/,
-    /^You spread .* on the ground/
+    /^You spread .* on the ground/,
+    /smashing it to bits/,
+    # The next message is when item crumbles when dropped, like a moonblade.
+    /^As you open your hand to release the/
   ]
 
   @@drop_trash_failure_patterns = [
@@ -25,7 +28,23 @@ module DRCI
     /You're kidding, right/,
     /You can't do that/,
     /No littering/,
-    /You really shouldn't be loitering/
+    /You really shouldn't be loitering/,
+    # You may get the next message if you've been cursed and unable to let go of items.
+    # Find a Cleric to uncurse you.
+    /Oddly, when you attempt to stash it away safely/
+  ]
+
+  # Messages that when trying to drop an item you're warned.
+  # To continue you must retry the command.
+  @@drop_trash_retry_patterns = [
+    # You may get the next message if the item would be damaged upon dropping.
+    /If you still wish to drop it/,
+    /would damage it/,
+    # You may get the next messages when an outdated item is updated upon use.
+    # "Something appears different about the <item>, perhaps try doing that again."
+    # Example: https://elanthipedia.play.net/Item:Leather_lotion
+    /Something appears different about/,
+    /perhaps try doing that again/
   ]
 
   @@get_item_success_patterns = [
@@ -34,7 +53,7 @@ module DRCI
     /You pluck/,
     /You deftly remove/,
     /You are already holding/,
-    /You fade in for a moment as you get/
+    /You fade in for a moment as you/
   ]
 
   @@get_item_failure_patterns = [
@@ -69,7 +88,7 @@ module DRCI
 
   @@wear_item_failure_patterns = [
     /You can't wear/,
-    /You .* unload/,
+    /You (need to|should) unload/,
     /close the fan/,
     /You don't seem to be able to move/,
     /Wear what/,
@@ -105,7 +124,9 @@ module DRCI
   @@put_away_item_success_patterns = [
     /^You put your .* in/,
     /^You hold out/,
-    /^You tuck your/
+    /^You tuck your/,
+    # The next message is when item crumbles when stowed, like a moonblade.
+    /^As you open your hand to release the/
   ]
 
   @@put_away_item_failure_patterns = [
@@ -114,18 +135,34 @@ module DRCI
     /^What were you referring to/,
     /^I could not find what you were referring to/,
     /even after stuffing it/,
-    /is too long to fit/,
-    /is too small to hold that/,
+    /is too .* to (fit|hold)/,
+    /close the fan/,
+    /no matter how you arrange it/,
     /There isn't any more room in/,
     /There's no room/,
     /to fit in the/,
     /too heavy to go in there/,
+    /You (need to|should) unload/,
+    /You can't do that/,
     /You just can't get/,
     /You can't put items/,
     /You can only take items out/,
     /Perhaps you should be holding that first/,
     /Containers can't be placed in/,
-    /The .* is not designed to carry anything/
+    /The .* is not designed to carry anything/,
+    # You may get the next message if you've been cursed and unable to let go of items.
+    # Find a Cleric to uncurse you.
+    /Oddly, when you attempt to stash it away safely/
+  ]
+
+  # Messages that when trying to put away an item you're warned.
+  # To continue you must retry the command.
+  @@put_away_item_retry_patterns = [
+    # You may get the next messages when an outdated item is updated upon use.
+    # "Something appears different about the <item>, perhaps try doing that again."
+    # Example: https://elanthipedia.play.net/Item:Leather_lotion
+    /Something appears different about/,
+    /perhaps try doing that again/
   ]
 
   @@stow_item_success_patterns = [
@@ -136,6 +173,10 @@ module DRCI
   @@stow_item_failure_patterns = [
     *@@get_item_failure_patterns,
     *@@put_away_item_failure_patterns,
+  ]
+
+  @@stow_item_retry_patterns = [
+    *@@put_away_item_retry_patterns
   ]
 
   @@rummage_success_patterns = [
@@ -218,11 +259,24 @@ module DRCI
         trashcan = 'bin'
       end
 
-      if /^You (drop|put|spread)/ =~ DRC.bput("put my #{item} in #{trashcan}", *@@drop_trash_success_patterns, *@@drop_trash_failure_patterns)
+      case DRC.bput("put my #{item} in #{trashcan}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns)
+      when *@@drop_trash_retry_patterns
+        # If still didn't dispose of trash after retry
+        # then don't return yet, will try to drop it later.
+        return true if dispose_trash(item)
+      when *@@drop_trash_success_patterns
         return true
       end
     end
-    return /^You (drop|put|spread)/ =~ DRC.bput("drop my #{item}", *@@drop_trash_success_patterns, *@@drop_trash_failure_patterns)
+    # No trash bins or not able to put item in a bin, just drop it.
+    case DRC.bput("drop my #{item}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns)
+    when *@@drop_trash_retry_patterns
+      return dispose_trash(item)
+    when *@@drop_trash_success_patterns
+      return true
+    else
+      return false
+    end
   end
 
   #########################################
@@ -356,21 +410,16 @@ module DRCI
 
   def stow_hand(hand)
     braid_regex = /The braided (.+) is too long/
-    result = DRC.bput(
-      "stow #{hand}",
-      "You put",
-      braid_regex,
-      "close the fan",
-      "You .* unload",
-      "There isn't any more room",
-      "is too small to hold that",
-      "is too long",
-      "As you open your hand to release the",
-      "You easily strap",
-      "You hold out",
-      "Oddly, when you attempt to stash it away safely"
-    )
-    dispose_trash(DRC.get_noun(Regexp.last_match(1))) if braid_regex.match(result)
+    case DRC.bput("stow #{hand}", braid_regex, @@container_is_closed_patterns, @@stow_item_success_patterns, @@stow_item_failure_patterns, @@stow_item_retry_patterns)
+    when braid_regex
+      dispose_trash(DRC.get_noun(Regexp.last_match(1)))
+    when *@@stow_item_retry_patterns
+      stow_hand(hand)
+    when *@@stow_item_success_patterns
+      true
+    else
+      false
+    end
   end
 
   #########################################
@@ -502,7 +551,9 @@ module DRCI
   # Unless you include the 'my ' prefix in the item then this may
   # try to stow an item on the ground rather than something in your inventory.
   def stow_item_unsafe?(item)
-    case DRC.bput("stow #{item}", @@container_is_closed_patterns, @@stow_item_success_patterns, @@stow_item_failure_patterns)
+    case DRC.bput("stow #{item}", @@container_is_closed_patterns, @@stow_item_success_patterns, @@stow_item_failure_patterns, @@stow_item_retry_patterns)
+    when *@@stow_item_retry_patterns
+      return stow_item_unsafe?(item)
     when *@@stow_item_success_patterns
       return true
     else
@@ -647,10 +698,12 @@ module DRCI
   def put_away_item_unsafe?(item, container = nil)
     command = "put #{item} in #{container}" if container
     command = "stow #{item}" unless container
-    result = DRC.bput(command, @@container_is_closed_patterns, @@put_away_item_success_patterns, @@put_away_item_failure_patterns)
+    result = DRC.bput(command, @@container_is_closed_patterns, @@put_away_item_success_patterns, @@put_away_item_failure_patterns, @@put_away_item_retry_patterns)
     case result
     when *@@container_is_closed_patterns
       return false unless open_container?(container)
+      return put_away_item_unsafe?(item, container)
+    when *@@put_away_item_retry_patterns
       return put_away_item_unsafe?(item, container)
     when *@@put_away_item_success_patterns
       return true
@@ -686,7 +739,7 @@ module DRCI
   #########################################
 
   def give_item?(target, item)
-    # An offer expires after 30 seconds. 
+    # An offer expires after 30 seconds.
     # The timeout is set to 35 to give some buffer for clock skew.
     case DRC.bput("give my #{item} to #{target}", { 'timeout' => 35 }, "has accepted your offer", "has declined the offer", "Your offer to .* has expired", "You may only have one outstanding offer at a time", "What is it you're trying to give", "There's nothing in your right hand to give away")
     when "has accepted your offer"

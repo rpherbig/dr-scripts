@@ -49,100 +49,222 @@ class TestDRCI < Minitest::Test
   # GET ITEM
   #########################################
 
-  def test_get_item_success
-    command = 'get_item?'
-    fixtures = [
-      {
-        :message => "You get a {{item}} from inside your hitman's backpack.",
-        :item => "sanowret crystal"
-      },
-      {
-        :message => "You pick up a {{item}}.",
-        :item => "drake-fang arrow"
-      },
-      {
-        :message => "You pluck an emaciated pet {{item}} from a coarse burlap sack, the creature yawning as you wake it up.",
-        :item => "rat"
-      },
-      {
-        :message => "You deftly remove the {{item}} from your sash.",
-        :item => "spiky barb"
-      },
-      {
-        :message => "You fade in for a moment as you pick up a {{item}} fit with a polished flamewood handle.",
-        :item => "dainty cowbell"
-      },
-      {
-        :message => "You fade in for a moment as you get a small rust-colored {{item}} from a black gem pouch.",
-        :item => "andalusite"
-      }
-    ]
-    fixtures.each do |fixture|
-      run_drci_command(
-        [fixture[:message].gsub('{{item}}', fixture[:item])],
-        command,
-        [fixture[:item]],
-        [assert_result]
-      ).join
-    end
+  def test_get_item__should_get_crystal_from_backpack
+    run_drci_command(
+      ["You get a sanowret crystal from inside your hitman's backpack."],
+      'get_item?',
+      ["sanowret crystal"],
+      [assert_result]
+    ).join
   end
 
-  def test_get_item_failure
-    command = 'get_item?'
-    fixtures = [
-      {
-        :message => "But that is already in your inventory.",
-        :item => "sanowret crystal"
-      },
-      {
-        :message => "You need a free hand to do that.",
-        :item => "drake-fang arrow"
-      },
-      {
-        :message => "You need a free hand to pick that up.",
-        :item => "rat"
-      },
-      {
-        :message => "Picking up a rugged {{item}} would push you over the item limit of 100.  Please reduce your inventory count before you try again.",
-        :item => "red backpack"
-      },
-      {
-        :message => "You stop as you realize the {{item}} is not yours.",
-        :item => "boar-tusk arrow"
-      },
-      {
-        :message => "Get what?",
-        :item => "anything"
-      },
-      {
-        :message => "I could not find what you were referring to.",
-        :item => "something"
-      },
-      {
-        :message => "I could not find that container.",
-        :item => "backpack"
-      },
-      {
-        :message => "What were you referring to?",
-        :item => "nothing"
-      },
-      {
-        :message => "The large limb rapidly decays away.",
-        :item => "limb"
-      },
-      {
-        :message => "A sharp pine sapling cracks and rots away along with the troll.",
-        :item => "sapling"
-      }
-    ]
-    fixtures.each do |fixture|
-      run_drci_command(
-        [fixture[:message].gsub('{{item}}', fixture[:item])],
-        command,
-        [fixture[:item]],
-        [refute_result]
-      ).join
-    end
+  def test_get_item__should_pick_up_arrow
+    run_drci_command(
+      ["You pick up a drake-fang arrow."],
+      'get_item?',
+      ["drake-fang arrow"],
+      [assert_result]
+    ).join
+  end
+
+  def test_get_item__should_pluck_rat_from_sack
+    run_drci_command(
+      ["You pluck an emaciated pet rat from a coarse burlap sack, the creature yawning as you wake it up."],
+      'get_item?',
+      ["rat"],
+      [assert_result]
+    ).join
+  end
+
+  def test_get_item__should_remove_barb_from_sash
+    run_drci_command(
+      ["You deftly remove the spiky barb from your sash."],
+      'get_item?',
+      ["spiky barb"],
+      [assert_result]
+    ).join
+  end
+
+  def test_get_item__should_fade_in_to_pick_up_cowbell
+    run_drci_command(
+      ["You fade in for a moment as you pick up a dainty cowbell fit with a polished flamewood handle."],
+      'get_item?',
+      ["dainty cowbell"],
+      [assert_result]
+    ).join
+  end
+
+  def test_get_item__should_fade_in_to_get_gem_from_pouch
+    run_drci_command(
+      ["You fade in for a moment as you get a small rust-colored andalusite from a black gem pouch."],
+      'get_item?',
+      ["andalusite"],
+      [assert_result]
+    ).join
+  end
+
+  def test_get_item__should_stop_as_you_realize_not_yours
+    run_drci_command(
+      ["You stop as you realize the boar-tusk arrow is not yours."],
+      'get_item?',
+      ["boar-tusk arrow"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_not_exceed_inventory_limit
+    run_drci_command(
+      ["Picking up a rugged red backpack would push you over the item limit of 100.  Please reduce your inventory count before you try again."],
+      'get_item?',
+      ["red backpack"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_need_a_free_hand_to_pick
+    run_drci_command(
+      ["You need a free hand to pick that up."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_need_a_free_hand_to_do
+    run_drci_command(
+      ["You need a free hand to do that."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_already_be_in_your_inventory
+    run_drci_command(
+      ["But that is already in your inventory."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_ask_get_what
+    run_drci_command(
+      ["Get what?"],
+      'get_item?',
+      ["nothing"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_not_find_what_you_were_referring
+    run_drci_command(
+      ["I could not find what you were referring to."],
+      'get_item?',
+      ["nothing"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_ask_what_were_you_referring
+    run_drci_command(
+      ["What were you referring to?"],
+      'get_item?',
+      ["nothing"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_not_find_container
+    run_drci_command(
+      ["I could not find that container."],
+      'get_item?',
+      ["nothing"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_not_get_if_rapidly_decays
+    run_drci_command(
+      ["The large limb rapidly decays away."],
+      'get_item?',
+      ["large limb"],
+      [refute_result]
+    ).join
+  end
+
+  def test_get_item__should_not_get_if_rots_away
+    run_drci_command(
+      ["A sharp pine sapling cracks and rots away along with the troll."],
+      'get_item?',
+      ["large limb"],
+      [refute_result]
+    ).join
+  end
+
+  #########################################
+  # DISPOSE TRASH
+  #########################################
+
+  def test_dispose_trash_in_bin
+    # TODO get test coverage for various trash bins
+  end
+
+  def test_dispose_trash__should_drop_ocarina_on_ground
+    run_drci_command(
+      [
+        "Whoah!  Dropping a silverwillow ocarina would damage it!  If you wish to set the ocarina down, LOWER it.",
+        "You drop your ocarina on the ground, causing it to hit the surface with a dull *creak*."
+      ],
+      'dispose_trash',
+      ["ocarina"],
+      [assert_result]
+    ).join
+  end
+
+  def test_dispose_trash__should_drop_pack_on_ground
+    run_drci_command(
+      ["You drop a storm grey pack."],
+      'dispose_trash',
+      ["pack"],
+      [assert_result]
+    ).join
+  end
+
+  def test_dispose_trash__should_drop_pants_in_barrel
+    run_drci_command(
+      ["You drop some faded pants in a large wooden barrel."],
+      'dispose_trash',
+      ["faded pants"],
+      [assert_result]
+    ).join
+  end
+
+  def test_dispose_trash__should_drop_lily_in_bucket
+    run_drci_command(
+      ["You drop a queen-of-the-night lily in a bucket of viscous gloop."],
+      'dispose_trash',
+      ["lily"],
+      [assert_result]
+    ).join
+  end
+
+  def test_dispose_trash__should_spread_blanket_on_ground
+    run_drci_command(
+      ["You spread a thick sea-blue wool blanket embroidered with twining vines on the ground."],
+      'dispose_trash',
+      ["wool blanket"],
+      [assert_result]
+    ).join
+  end
+
+  def test_dispose_trash__should_release_moonblade
+    run_drci_command(
+      ["As you open your hand to release the moonblade, it crumbles into a fine ash."],
+      'dispose_trash',
+      ["moonblade"],
+      [assert_result]
+    ).join
   end
 
   #########################################

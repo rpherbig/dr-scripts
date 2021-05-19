@@ -222,6 +222,15 @@ class TestDRCI < Minitest::Test
     ).join
   end
 
+  def test_dispose_trash__should_smash_ocarina_to_bits
+    run_drci_command(
+      ["In sudden anger, you fling the ocarina to the ground, smashing it to bits!"],
+      'dispose_trash',
+      ["ocarina"],
+      [assert_result]
+    ).join
+  end
+
   def test_dispose_trash__should_drop_pack_on_ground
     run_drci_command(
       ["You drop a storm grey pack."],

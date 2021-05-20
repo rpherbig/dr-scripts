@@ -40,7 +40,7 @@ class TestAfk < Minitest::Test
 
     run_script('afk')
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_health
@@ -53,7 +53,7 @@ class TestAfk < Minitest::Test
     self.health = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_spirit
@@ -67,6 +67,6 @@ class TestAfk < Minitest::Test
     self.spirit = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 end

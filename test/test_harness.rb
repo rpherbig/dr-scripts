@@ -3,6 +3,8 @@ module Harness
   $_IDLETIMESTAMP_ = Time.now
   # Lich global for the last time a script sent a command to the game
   $_SCRIPTIDLETIMESTAMP_ = Time.now
+  # Indicate to scripts that we are in test mode
+  $_TEST_MODE_ = true
 
   class DRSpells
     @@_data_store = {}
@@ -52,9 +54,102 @@ module Harness
     end
   end
 
+  class DRRoom
+    @@_data_store = {}
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def self.npcs
+      @@_data_store['npcs'] || []
+    end
+
+    def self.npcs=(val)
+      @@_data_store['npcs'] = val
+    end
+
+    def self.pcs
+      @@_data_store['pcs'] || []
+    end
+
+    def self.pcs=(val)
+      @@_data_store['pcs'] = val
+    end
+
+    def self.exits
+      @@_data_store['exits'] || []
+    end
+
+    def self.exits=(val)
+      @@_data_store['exits'] = val
+    end
+
+    def self.title
+      @@_data_store['title'] || ''
+    end
+
+    def self.title=(val)
+      @@_data_store['title'] = val
+    end
+
+    def self.description
+      @@_data_store['description'] || ''
+    end
+
+    def self.description=(val)
+      @@_data_store['description'] = val
+    end
+
+    def self.group_members
+      @@_data_store['group_members'] || []
+    end
+
+    def self.group_members=(val)
+      @@_data_store['group_members'] = val
+    end
+
+    def self.pcs_prone
+      @@_data_store['pcs_prone'] || []
+    end
+
+    def self.pcs_prone=(val)
+      @@_data_store['pcs_prone'] = val
+    end
+
+    def self.pcs_sitting
+      @@_data_store['pcs_sitting'] || []
+    end
+
+    def self.pcs_sitting=(val)
+      @@_data_store['pcs_sitting'] = val
+    end
+
+    def self.dead_npcs
+      @@_data_store['dead_npcs'] || []
+    end
+
+    def self.dead_npcs=(val)
+      @@_data_store['dead_npcs'] = val
+    end
+
+    def self.room_objs
+      @@_data_store['room_objs'] || []
+    end
+
+    def self.room_objs=(val)
+      @@_data_store['room_objs'] = val
+    end
+  end
+
   class Flags
     @@flags = {}
     @@matchers = {}
+
+    def self._reset
+      @@flags = {}
+      @@matchers = {}
+    end
 
     def self.[](key)
       @@flags[key]
@@ -169,6 +264,55 @@ module Harness
     end
   end
 
+  class EquipmentManager
+  end
+
+  class Room
+    def self.current
+      Map.new(
+        :id => 1,
+        :wayto => {
+          2 => nil
+        }
+      )
+    end
+  end
+
+  class Map
+    @@_data_store = {}
+
+    def initialize(id: nil, wayto: nil)
+      self.id = id
+      self.wayto = wayto
+    end
+
+    def self._reset
+      @@_data_store = {}
+    end
+
+    def id
+      @@_data_store['id']
+    end
+
+    def id=(val)
+      @@_data_store['id'] = val
+    end
+
+    def wayto
+      @@_data_store['wayto']
+    end
+
+    def wayto=(val)
+      @@_data_store['wayto'] = val
+    end
+  end
+
+  class XMLData
+    def self.room_title
+      'Middle of Nowhere'
+    end
+  end
+
   def before_dying(&code)
     Script.at_exit(&code)
   end
@@ -186,7 +330,7 @@ module Harness
   end
 
   def parse_args(_dummy, _dumber)
-    args = OpenStruct.new
+    args = OpenStruct.new($parsed_args.dup || {})
     args.flex = 'test'
     args
   end
@@ -201,9 +345,24 @@ module Harness
     $test_data[dummy.to_sym]
   end
 
+  # After tests run, we need to wipe out/reset
+  # constants and other contextual data so that
+  # each test doesn't interfere with the others.
+  # Not doing so can lead to hard to find bugs
+  # because the test framework may run tests
+  # in random order, so sometimes things work
+  # and then other times they don't.
+  # https://stackoverflow.com/questions/11463060/how-to-reload-a-ruby-class
   def reset_data
     $data_called_with = []
     $test_data = {}
+
+    Flags._reset
+    DRSpells._reset
+    DRStats._reset
+    DRSkill._reset
+    DRRoom._reset
+    Map._reset
   end
 
   def echo(message)
@@ -216,9 +375,12 @@ module Harness
     end
   end
 
+  def message(message = '')
+    echo(message)
+  end
+
   def respond(message = '')
-    print(message.to_s + "\n") if $audible
-    displayed_messages << message
+    echo(message)
   end
 
   def displayed_messages
@@ -345,6 +507,10 @@ module Harness
     $threads ||= []
     $threads << thread
     thread
+  end
+
+  # Copied from lich.rbw
+  def force_start_script(script_name, cli_vars=[], flags={})
   end
 
   def assert_sends_messages(expected_messages)

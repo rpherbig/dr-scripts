@@ -6,27 +6,6 @@ load 'test/test_harness.rb'
 
 include Harness
 
-class EquipmentManager
-end
-
-class Room
-  def self.current
-    Map.new
-  end
-end
-
-class Map
-  def id
-    1
-  end
-end
-
-class XMLData
-  def self.room_title
-    'Middle of Nowhere'
-  end
-end
-
 class TestAfk < Minitest::Test
   def setup
     $history.clear

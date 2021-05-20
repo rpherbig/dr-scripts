@@ -5,28 +5,33 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestSpellMonitor < Minitest::Test
+
   def setup
     reset_data
-    $history.clear
-    $server_buffer.clear
-    sent_messages.clear
-    displayed_messages.clear
   end
 
   def teardown
     @test.join if @test
   end
 
+  #########################################
+  # ACTIVE/KNOWN SPELLS/FEATS
+  #########################################
+
   def assert_active_spell(name, duration)
-    proc { |active_spells, known_spells, known_feats| assert_equal(duration, active_spells[name], "Checking for active spell: #{name}, #{active_spells}") }
+    proc { |active_spells, known_spells, known_feats, has_slivers| assert_equal(duration, active_spells[name], "Checking for active spell: #{name}, #{active_spells}") }
   end
 
   def assert_know_spell(name, is_known)
-    proc { |active_spells, known_spells, known_feats| assert_equal(is_known, !!known_spells[name], "Checking for known spell: #{name}, #{known_spells}") }
+    proc { |active_spells, known_spells, known_feats, has_slivers| assert_equal(is_known, !!known_spells[name], "Checking for known spell: #{name}, #{known_spells}") }
   end
 
   def assert_know_feat(name, is_known)
-    proc { |active_spells, known_spells, known_feats| assert_equal(is_known, !!known_feats[name], "Checking for known feat: #{name}, #{known_feats}") }
+    proc { |active_spells, known_spells, known_feats, has_slivers| assert_equal(is_known, !!known_feats[name], "Checking for known feat: #{name}, #{known_feats}") }
+  end
+
+  def assert_has_slivers
+    proc { |active_spells, known_spells, known_feats, has_slivers| assert(has_slivers, "Expected to have orbiting slivers") }
   end
 
   def run_downstream_hook(messages, assertions = [])
@@ -40,7 +45,7 @@ class TestSpellMonitor < Minitest::Test
 
       # Assert
       assertions = [assertions] unless assertions.is_a?(Array)
-      assertions.each { |assertion| assertion.call(DRSpells.active_spells, DRSpells.known_spells, DRSpells.known_feats) }
+      assertions.each { |assertion| assertion.call(DRSpells.active_spells, DRSpells.known_spells, DRSpells.known_feats, DRSpells.slivers) }
     end)
   end
 
@@ -52,6 +57,9 @@ class TestSpellMonitor < Minitest::Test
       'Rage of the Clans  (4 roisaen)',
       '<popStream/><pushStream id="percWindow"/> Avalanche (thoroughly inflamed)',
       '<popStream/><pushStream id="percWindow"/>Khri Hasten (fading)',
+      '<popStream/><pushStream id="percWindow"/>Mantle of Flame (indefinite)',
+      '<popStream/><pushStream id="percWindow"/>Persistence of Mana (om)',
+      '<popStream/><pushStream id="percWindow"/>Many small orbiting slivers of lunar magic',
       '<popStream/>'
     ]
     run_downstream_hook(messages, [
@@ -59,7 +67,10 @@ class TestSpellMonitor < Minitest::Test
       assert_active_spell('Righteous Wrath', 8),
       assert_active_spell('Rage of the Clans', 4),
       assert_active_spell('Avalanche', 1000),
-      assert_active_spell('Khri Hasten', 0)
+      assert_active_spell('Khri Hasten', 0),
+      assert_active_spell('Mantle of Flame', 1000),
+      assert_active_spell('Persistence of Mana', 1000),
+      assert_has_slivers()
     ])
   end
 
@@ -72,6 +83,7 @@ class TestSpellMonitor < Minitest::Test
       "In the chapter entitled \"Enlightened Geometry\", you have notes on the Partial Displacement [pd], Teleport, and Moongate [mg] spells.",
       "You have temporarily memorized the Minor Physical Protection [mpp] spell.",
       "You recall proficiency with the magic feats of Basic Preparation Recognition, Augmentation Mastery, Utility Mastery, Warding Mastery, Cautious Casting, Injured Casting, Deep Attunement, Raw Channeling, Efficient Channeling, Efficient Harnessing and Magic Theorist.",
+      "You have 1 spell slot available.",
       "You are NOT currently set to recognize known spells when prepared by someone else in the area.  (Use SPELL RECOGNIZE ON to change this.)",
       "You are currently set to display full cast messaging.  (Use SPELL BRIEFMSG ON to change this.)",
       "You are currently attempting to hide your spell preparing.  (Use PREPARE /HIDE to change this.)",

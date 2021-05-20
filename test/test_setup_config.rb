@@ -6,15 +6,16 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestSetupConfig < Minitest::Test
+
   def setup
-    # $audible = true
+    reset_data
     $history = ['quit']
     load('edityaml.lic')
   end
 
   def teardown
+    @test.join if @test
     $save_character_profile = nil
-    # $audible = false
   end
 
   def test_saving_sends_loaded_data

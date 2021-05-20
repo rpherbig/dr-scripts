@@ -354,8 +354,16 @@ module Harness
   # and then other times they don't.
   # https://stackoverflow.com/questions/11463060/how-to-reload-a-ruby-class
   def reset_data
-    $data_called_with = []
     $test_data = {}
+    $test_settings = {}
+
+    $data_called_with = []
+    $warn_msgs = []
+    $error_msgs = []
+    $history = []
+    $server_buffer = []
+    $sent_messages = []
+    $displayed_messages = []
 
     Flags._reset
     DRSpells._reset

@@ -10,10 +10,6 @@ class TestDRCA < Minitest::Test
 
   def setup
     reset_data
-    $history.clear
-    $server_buffer.clear
-    sent_messages.clear
-    displayed_messages.clear
   end
 
   def teardown

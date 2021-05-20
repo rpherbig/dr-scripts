@@ -7,12 +7,16 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestAfk < Minitest::Test
+
   def setup
-    $history.clear
+    reset_data
     self.dead = false
     self.health = 100
     self.spirit = 100
-    sent_messages.clear
+  end
+
+  def teardown
+    @test.join if @test
   end
 
   def setup_settings(settings)

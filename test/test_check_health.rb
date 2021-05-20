@@ -5,9 +5,9 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestCheckHealth < Minitest::Test
+
   def setup
-    $server_buffer.clear
-    $history.clear
+    reset_data
   end
 
   def teardown

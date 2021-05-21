@@ -31,7 +31,7 @@ class TestAfk < Minitest::Test
     self.dead = true
     $history << 'another message'
 
-    sleep 0.2 # give script time to enter the main loop
+    sleep 0.2 # give script time to pick up on above data changes
 
     assert_sends_messages(expected_messages)
   end
@@ -47,7 +47,7 @@ class TestAfk < Minitest::Test
     self.dead = true
     $history << 'another message'
 
-    sleep 0.2 # give script time to enter the main loop
+    sleep 0.2 # give script time to pick up on above data changes
 
     assert_sends_messages(expected_messages)
   end

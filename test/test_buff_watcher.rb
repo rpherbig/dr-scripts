@@ -345,4 +345,216 @@ class TestBuffWatcher < Minitest::Test
     run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
   end
 
+  def test_should_activate_thief_khri
+    $test_settings.waggle_sets = {
+      'buffy' => [
+        'Focus'
+      ]
+    }
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Thief'
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    do_buffs_count = 0
+    fake_drca.expect(:do_buffs, true) do |arg_settings, arg_buff_set_name|
+      case arg_buff_set_name
+      when 'buffy'
+        DRSpells._set_active_spells({
+          'Khri Focus' => true
+        })
+        do_buffs_count = do_buffs_count + 1
+        true
+      else
+        false
+      end
+    end
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # Assert the buff is activated once, and not again if still active.
+      proc { assert_equal(1, do_buffs_count) }
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
+  def test_should_activate_barbarian_ability
+    $test_settings.waggle_sets = {
+      'buffy' => [
+        'Avalanche'
+      ]
+    }
+
+    $test_settings.barb_buffs_inner_fire_threshold = 15
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Barbarian'
+    DRStats.mana = 30
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    do_buffs_count = 0
+    fake_drca.expect(:do_buffs, true) do |arg_settings, arg_buff_set_name|
+      case arg_buff_set_name
+      when 'buffy'
+        DRSpells._set_active_spells({
+          'Avalanche' => true
+        })
+        do_buffs_count = do_buffs_count + 1
+        true
+      else
+        false
+      end
+    end
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # Assert the buff is activated once, and not again if still active.
+      proc { assert_equal(1, do_buffs_count) }
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
+  def test_should_cast_spell_buff
+    $test_settings.waggle_sets = {
+      'buffy' => {
+        'Manifest Force' => {
+          'mana' => 5
+        }
+      }
+    }
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Empath'
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    do_buffs_count = 0
+    fake_drca.expect(:do_buffs, true) do |arg_settings, arg_buff_set_name|
+      case arg_buff_set_name
+      when 'buffy'
+        DRSpells._set_active_spells({
+          'Manifest Force' => true
+        })
+        do_buffs_count = do_buffs_count + 1
+        true
+      else
+        false
+      end
+    end
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # Assert the buff is activated once, and not again if still active.
+      proc { assert_equal(1, do_buffs_count) }
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
+  def test_should_free_hands_to_use_stored_cambrinth__scenario_1
+    $test_settings.waggle_sets = {
+      'buffy' => {
+        'Manifest Force' => {
+          'mana' => 5
+        }
+      }
+    }
+
+    $test_settings.stored_cambrinth = true
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Empath'
+    self.left_hand = 'backpack'
+    self.right_hand = 'basket'
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    do_buffs_count = 0
+    fake_drca.expect(:do_buffs, true) do |arg_settings, arg_buff_set_name|
+      case arg_buff_set_name
+      when 'buffy'
+        DRSpells._set_active_spells({
+          'Manifest Force' => true
+        })
+        do_buffs_count = do_buffs_count + 1
+        true
+      else
+        false
+      end
+    end
+
+    fake_drci.expect(:lower_item?, true, ['backpack'])
+    fake_drci.expect(:get_item?, true, ['backpack'])
+
+    fake_drc.expect(:bput, "You glance down to see a reed-woven basket in your right hand and a rugged yellow backpack in your left hand.", ['glance', 'You glance down'])
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # Assert the buff is activated once, and not again if still active.
+      proc { assert_equal(1, do_buffs_count) }
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
 end

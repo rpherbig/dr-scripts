@@ -703,6 +703,22 @@ module Harness
     $dead = dead
   end
 
+  def left_hand=(item)
+    $left_hand = item
+  end
+
+  def left_hand
+    $left_hand
+  end
+
+  def right_hand=(item)
+    $right_hand = item
+  end
+
+  def right_hand
+    $right_hand
+  end
+
   def waitrt?; end
 
   def waitcastrt?; end

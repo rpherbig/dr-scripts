@@ -424,6 +424,10 @@ module Harness
       get?
     end
 
+    def self.running?(script_name)
+      $running_scripts.include?(script_name)
+    end
+
     def self.at_exit(&_block); end
   end
 
@@ -554,12 +558,22 @@ module Harness
     Script.new
   end
 
+  def smart_pause_all
+    []
+  end
+
+  def unpause_all_list(scripts)
+  end
+
   def custom_require(*)
     proc { |_args| }
   end
 
   def pause(duration = 1)
     $pause = duration
+    # Don't actually sleep, slows down tests.
+    # Use Timecop gem to simulate elapsed time.
+    # See test_bput as an example.
   end
 
   def parse_args(data, flex_args = false)
@@ -591,13 +605,25 @@ module Harness
     $test_settings = OpenStruct.new
     $parsed_args = OpenStruct.new
 
+    # We use queues because they are thread safe
+    # https://ruby-doc.org/core-2.5.5/Queue.html
     $data_called_with = []
     $warn_msgs = []
     $error_msgs = []
     $history = []
     $server_buffer = []
-    $sent_messages = []
     $displayed_messages = []
+    $running_scripts = []
+
+    # Uses a queue for thread safety.
+    # See assert_sends_messages method for usage.
+    $sent_messages = Queue.new
+
+    $health = 100
+    $spirit = 100
+    $dead = false
+    $hidden = false
+    $invisible = false
 
     Flags._reset
     DRSpells._reset
@@ -626,7 +652,7 @@ module Harness
   end
 
   def displayed_messages
-    $displayed_messages ||= []
+    $displayed_messages
   end
 
   def hiding?
@@ -662,7 +688,7 @@ module Harness
   end
 
   def sent_messages
-    $sent_messages ||= Queue.new
+    $sent_messages
   end
 
   def health=(health)

@@ -6,6 +6,15 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestValidYaml < Minitest::Test
+
+  def setup
+    reset_data
+  end
+
+  def teardown
+    @test.join if @test
+  end
+
   def test_all_yaml_in_profiles
     count = 0
     Dir.glob('profiles/**/*.yaml').each do |file|

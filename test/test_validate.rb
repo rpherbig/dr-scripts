@@ -7,8 +7,8 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestValidate < Minitest::Test
+
   def setup
-    $test_settings = nil
     reset_data
     $test_data = {
       mining: OpenStruct.new(mining_buddy_rooms: []),
@@ -16,8 +16,10 @@ class TestValidate < Minitest::Test
       hunting: OpenStruct.new(hunting_zones: [], escort_zones: []),
       spells: OpenStruct.new(spell_data: [])
     }
-    $warn_msgs = []
-    $error_msgs = []
+  end
+
+  def teardown
+    @test.join if @test
   end
 
   def setup_settings(settings)

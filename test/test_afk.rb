@@ -7,12 +7,16 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestAfk < Minitest::Test
+
   def setup
-    $history.clear
+    reset_data
     self.dead = false
     self.health = 100
     self.spirit = 100
-    sent_messages.clear
+  end
+
+  def teardown
+    @test.join if @test
   end
 
   def setup_settings(settings)
@@ -36,7 +40,7 @@ class TestAfk < Minitest::Test
 
     run_script('afk')
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_health
@@ -49,7 +53,7 @@ class TestAfk < Minitest::Test
     self.health = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_spirit
@@ -63,6 +67,6 @@ class TestAfk < Minitest::Test
     self.spirit = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    assert_sends_messages(expected_messages)
   end
 end

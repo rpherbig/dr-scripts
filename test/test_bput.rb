@@ -6,11 +6,9 @@ load 'test/test_harness.rb'
 include Harness
 
 class TestCommon < Minitest::Test
+
   def setup
     reset_data
-    $history.clear
-    sent_messages.clear
-    displayed_messages.clear
   end
 
   def teardown

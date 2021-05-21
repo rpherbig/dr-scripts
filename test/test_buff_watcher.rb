@@ -131,7 +131,7 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
-      sleep 1
+      sleep 0.2
       Thread.kill(thread)
     end
 
@@ -168,7 +168,7 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
-      sleep 1
+      sleep 0.2
       Thread.kill(thread)
     end
 
@@ -209,7 +209,7 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
-      sleep 1
+      sleep 0.2
       Thread.kill(thread)
     end
 
@@ -248,7 +248,7 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
-      sleep 1
+      sleep 0.2
       Thread.kill(thread)
     end
 
@@ -262,12 +262,87 @@ class TestBuffWatcher < Minitest::Test
     run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
   end
 
-  # def test_should_not_buff_if_need_inner_fire
+  def test_should_not_buff_if_need_inner_fire
+    $test_settings.waggle_sets = {
+      'buffy' => [
+        'Super Power'
+      ]
+    }
 
-  # end
+    $test_settings.barb_buffs_inner_fire_threshold = 15
 
-  # def test_should_not_buff_if_all_buffs_active
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
 
-  # end
+    messages = []
+
+    DRStats.guild = 'Barbarian'
+    DRStats.mana = 5
+    $hidden = false
+    $invisible = false
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
+  def test_should_not_buff_if_all_buffs_active
+    $test_settings.waggle_sets = {
+      'buffy' => {
+        'Manifest Force' => {
+          'mana' => 5
+        }
+      }
+    }
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    DRSpells._set_active_spells({
+      'Manifest Force' => true
+    })
+
+    messages = []
+
+    DRStats.guild = 'Empath'
+    $hidden = false
+    $invisible = false
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 0.2
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
 
 end

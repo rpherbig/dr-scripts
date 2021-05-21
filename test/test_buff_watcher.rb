@@ -45,6 +45,9 @@ class TestBuffWatcher < Minitest::Test
       # Test
       begin
         error = nil
+        # If you need to let the script-under-test's infinite loop run
+        # then provide a hook and you can stop the script when you need.
+        # Otherwise, don't provide a hook and the script will run synchronously.
         if on_script_start_hook
           thread = Thread.new { BuffWatcher.new }
           on_script_start_hook.call(thread)
@@ -120,6 +123,7 @@ class TestBuffWatcher < Minitest::Test
 
     DRStats.guild = 'Thief'
     $hidden = true
+    $invisible = false
 
     fake_drc = Minitest::Mock.new
     fake_drci = Minitest::Mock.new
@@ -127,13 +131,13 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 1
       Thread.kill(thread)
     end
 
     assertions = [
-      # nothing extra needed, when the mocks are verified
-      # that'll confirm that the script never got to spots
-      # that called that code
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
     ]
 
     expected_errors = []
@@ -155,6 +159,7 @@ class TestBuffWatcher < Minitest::Test
     messages = []
 
     DRStats.guild = 'Thief'
+    $hidden = false
     $invisible = true
 
     fake_drc = Minitest::Mock.new
@@ -163,13 +168,13 @@ class TestBuffWatcher < Minitest::Test
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 1
       Thread.kill(thread)
     end
 
     assertions = [
-      # nothing extra needed, when the mocks are verified
-      # that'll confirm that the script never got to spots
-      # that called that code
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
     ]
 
     expected_errors = []
@@ -177,13 +182,85 @@ class TestBuffWatcher < Minitest::Test
     run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
   end
 
-  # def test_should_not_buff_if_running_no_use_scripts
+  def test_should_not_buff_if_running_no_use_scripts
+    $test_settings.waggle_sets = {
+      'buffy' => [
+        'Super Power'
+      ]
+    }
 
-  # end
+    $test_settings.buff_watcher_no_use_scripts = ['burgle']
 
-  # def test_should_not_buff_if_inside_no_use_room
+    $running_scripts += $test_settings.buff_watcher_no_use_scripts
 
-  # end
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Thief'
+    $hidden = false
+    $invisible = false
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 1
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
+
+  def test_should_not_buff_if_inside_no_use_room
+    $test_settings.waggle_sets = {
+      'buffy' => [
+        'Super Power'
+      ]
+    }
+
+    $test_settings.buff_watcher_no_use_rooms = [Room.current.id]
+
+    script_args = {
+      'buff_set_name' => 'buffy'
+    }
+
+    messages = []
+
+    DRStats.guild = 'Thief'
+    $hidden = false
+    $invisible = false
+
+    fake_drc = Minitest::Mock.new
+    fake_drci = Minitest::Mock.new
+    fake_drca = Minitest::Mock.new
+
+    on_script_start_hook = proc do |thread|
+      # Let the buff watcher's passive loop run a bit then kill the script.
+      sleep 1
+      Thread.kill(thread)
+    end
+
+    assertions = [
+      # nothing extra needed, when the mocks are verified that'll confirm
+      # that the script never got to spots that called them
+    ]
+
+    expected_errors = []
+
+    run_buff_watcher(messages, script_args, fake_drc, fake_drci, fake_drca, on_script_start_hook, assertions, expected_errors)
+  end
 
   # def test_should_not_buff_if_need_inner_fire
 

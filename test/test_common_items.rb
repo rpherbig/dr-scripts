@@ -54,7 +54,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["sanowret crystal"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_pick_up_arrow
@@ -63,7 +63,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["drake-fang arrow"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_pluck_rat_from_sack
@@ -72,7 +72,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["rat"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_remove_barb_from_sash
@@ -81,7 +81,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["spiky barb"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_fade_in_to_pick_up_cowbell
@@ -90,7 +90,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["dainty cowbell"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_fade_in_to_get_gem_from_pouch
@@ -99,7 +99,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["andalusite"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_stop_as_you_realize_not_yours
@@ -108,7 +108,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["boar-tusk arrow"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_exceed_inventory_limit
@@ -117,7 +117,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["red backpack"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_need_a_free_hand_to_pick
@@ -126,7 +126,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_need_a_free_hand_to_do
@@ -135,7 +135,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_already_be_in_your_inventory
@@ -144,7 +144,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_ask_get_what
@@ -153,7 +153,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_find_what_you_were_referring
@@ -162,7 +162,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_ask_what_were_you_referring
@@ -171,7 +171,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_find_container
@@ -180,7 +180,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_get_if_rapidly_decays
@@ -189,7 +189,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["large limb"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_get_if_rots_away
@@ -198,7 +198,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["large limb"],
       [refute_result]
-    ).join
+    )
   end
 
   #########################################
@@ -218,7 +218,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["ocarina"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_smash_ocarina_to_bits
@@ -227,7 +227,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["ocarina"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_pack_on_ground
@@ -236,7 +236,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["pack"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_pants_in_barrel
@@ -245,7 +245,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["faded pants"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_lily_in_bucket
@@ -254,7 +254,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["lily"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_spread_blanket_on_ground
@@ -263,7 +263,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["wool blanket"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_release_moonblade
@@ -272,7 +272,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["moonblade"],
       [assert_result]
-    ).join
+    )
   end
 
   #########################################
@@ -285,7 +285,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["satchel"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_open_container__should_open
@@ -294,7 +294,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_open_container__should_spread_arms
@@ -303,7 +303,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["harvest bag"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_open_container__should_already_be_open
@@ -312,7 +312,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_open_container__please_rephrase
@@ -321,7 +321,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__what_were_you_referring
@@ -330,7 +330,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__could_not_find
@@ -339,7 +339,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__ruin_your_spell
@@ -348,7 +348,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__disturb_the_silence
@@ -357,7 +357,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__not_the_place
@@ -366,7 +366,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__no_way_to_do_that
@@ -375,7 +375,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__you_cant_do_that
@@ -384,7 +384,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__you_cant_do_that_while
@@ -393,7 +393,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__you_cant_do_that_here
@@ -402,7 +402,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_open_container__you_cant_do_that_to_item
@@ -411,7 +411,7 @@ class TestDRCI < Minitest::Test
       'open_container?',
       ["jailer's nightstick"],
       [refute_result]
-    ).join
+    )
   end
 
   #########################################
@@ -424,7 +424,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["satchel"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_close_container__should_close
@@ -433,7 +433,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_close_container__should_already_be_closed
@@ -442,7 +442,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_close_container__please_rephrase
@@ -451,7 +451,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__what_were_you_referring
@@ -460,7 +460,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__could_not_find
@@ -469,7 +469,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__ruin_your_spell
@@ -478,7 +478,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__disturb_the_silence
@@ -487,7 +487,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__not_the_place
@@ -496,7 +496,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__no_way_to_do_that
@@ -505,7 +505,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__you_cant_do_that
@@ -514,7 +514,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__you_cant_do_that_while
@@ -523,7 +523,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__you_cant_do_that_here
@@ -532,7 +532,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["medicine pouch"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_close_container__you_cant_do_that_to_item
@@ -541,7 +541,7 @@ class TestDRCI < Minitest::Test
       'close_container?',
       ["jailer's nightstick"],
       [refute_result]
-    ).join
+    )
   end
 
   #########################################

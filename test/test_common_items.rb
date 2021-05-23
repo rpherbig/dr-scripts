@@ -138,6 +138,24 @@ class TestDRCI < Minitest::Test
     )
   end
 
+  def test_get_item__should_not_pick_up_with_damaged_hand
+    run_drci_command(
+      ["You can't pick that up with your hand that damaged."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    )
+  end
+
+  def test_get_item__should_need_to_tend_wound
+    run_drci_command(
+      ["The crossbow bolt needs to be tended to be removed."],
+      'get_item?',
+      ["crossbow bolt"],
+      [refute_result]
+    )
+  end
+
   def test_get_item__should_already_be_in_your_inventory
     run_drci_command(
       ["But that is already in your inventory."],

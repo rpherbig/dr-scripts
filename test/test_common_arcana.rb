@@ -71,7 +71,7 @@ class TestDRCA < Minitest::Test
       "At the ritual's peak, your prophetic connection blooms a thousand-fold.  You are alone.  An infinitesimal speck in space and time adrift in an infinite sea of possibility.  The course of your past, present and future are dictated by ceaseless currents beyond any mortal control."
     ]
     DRSkill._set_rank('Defending', 60)
-    DRStats._set_guild('Barbarian')
+    DRStats.guild = 'Barbarian'
     DRSpells._set_active_spells({})
     @test = run_script_with_proc(['common', 'common-arcana'], proc do
       DRCA.ritual(spell_data, [])

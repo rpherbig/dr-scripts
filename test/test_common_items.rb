@@ -1,4 +1,5 @@
 require_relative 'test_helper'
+require 'timecop'
 
 load 'test/test_harness.rb'
 
@@ -33,7 +34,9 @@ class TestDRCI < Minitest::Test
       $history = $server_buffer.dup
 
       # Test
+      Timecop.scale(30) # artificially speed up bput's timeout
       result = DRCI.send(command, *args)
+      Timecop.return
 
       # Assert
       assertions = [assertions] unless assertions.is_a?(Array)
@@ -51,7 +54,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["sanowret crystal"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_pick_up_arrow
@@ -60,7 +63,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["drake-fang arrow"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_pluck_rat_from_sack
@@ -69,7 +72,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["rat"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_remove_barb_from_sash
@@ -78,7 +81,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["spiky barb"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_fade_in_to_pick_up_cowbell
@@ -87,7 +90,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["dainty cowbell"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_fade_in_to_get_gem_from_pouch
@@ -96,7 +99,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["andalusite"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_get_item__should_stop_as_you_realize_not_yours
@@ -105,7 +108,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["boar-tusk arrow"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_exceed_inventory_limit
@@ -114,7 +117,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["red backpack"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_need_a_free_hand_to_pick
@@ -123,7 +126,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_need_a_free_hand_to_do
@@ -132,7 +135,25 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
+  end
+
+  def test_get_item__should_not_pick_up_with_damaged_hand
+    run_drci_command(
+      ["You can't pick that up with your hand that damaged."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    )
+  end
+
+  def test_get_item__should_need_to_tend_wound
+    run_drci_command(
+      ["The crossbow bolt needs to be tended to be removed."],
+      'get_item?',
+      ["crossbow bolt"],
+      [refute_result]
+    )
   end
 
   def test_get_item__should_already_be_in_your_inventory
@@ -141,7 +162,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["anything"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_ask_get_what
@@ -150,7 +171,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_find_what_you_were_referring
@@ -159,7 +180,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_ask_what_were_you_referring
@@ -168,7 +189,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_find_container
@@ -177,7 +198,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["nothing"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_get_if_rapidly_decays
@@ -186,7 +207,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["large limb"],
       [refute_result]
-    ).join
+    )
   end
 
   def test_get_item__should_not_get_if_rots_away
@@ -195,7 +216,7 @@ class TestDRCI < Minitest::Test
       'get_item?',
       ["large limb"],
       [refute_result]
-    ).join
+    )
   end
 
   #########################################
@@ -215,7 +236,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["ocarina"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_smash_ocarina_to_bits
@@ -224,7 +245,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["ocarina"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_pack_on_ground
@@ -233,7 +254,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["pack"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_pants_in_barrel
@@ -242,7 +263,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["faded pants"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_drop_lily_in_bucket
@@ -251,7 +272,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["lily"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_spread_blanket_on_ground
@@ -260,7 +281,7 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["wool blanket"],
       [assert_result]
-    ).join
+    )
   end
 
   def test_dispose_trash__should_release_moonblade
@@ -269,7 +290,276 @@ class TestDRCI < Minitest::Test
       'dispose_trash',
       ["moonblade"],
       [assert_result]
-    ).join
+    )
+  end
+
+  #########################################
+  # OPEN CONTAINER
+  #########################################
+
+  def test_open_container__should_unbutton
+    run_drci_command(
+      ["You unbutton the flap of your satchel, pulling it open to reveal the contents."],
+      'open_container?',
+      ["satchel"],
+      [assert_result]
+    )
+  end
+
+  def test_open_container__should_open
+    run_drci_command(
+      ["You open your medicine pouch."],
+      'open_container?',
+      ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_open_container__should_spread_arms
+    run_drci_command(
+      ["You spread your arms, carefully holding your bag well away from your body"],
+      'open_container?',
+      ["harvest bag"],
+      [assert_result]
+    )
+  end
+
+  def test_open_container__should_already_be_open
+    run_drci_command(
+      ["That is already open."],
+      'open_container?',
+      ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_open_container__please_rephrase
+    run_drci_command(
+      ["Please rephrase that command."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__what_were_you_referring
+    run_drci_command(
+      ["What were you referring to?"],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__could_not_find
+    run_drci_command(
+      ["I could not find what you were referring to."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__ruin_your_spell
+    run_drci_command(
+      ["You don't want to ruin your spell just for that do you?"],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__disturb_the_silence
+    run_drci_command(
+      ["It would be a shame to disturb the silence of this place for that."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__not_the_place
+    run_drci_command(
+      ["This is probably not the time nor place for that."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__no_way_to_do_that
+    run_drci_command(
+      ["There is no way to do that."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__you_cant_do_that
+    run_drci_command(
+      ["You can't do that."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__you_cant_do_that_while
+    run_drci_command(
+      ["You can't do that while kneeling!"],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__you_cant_do_that_here
+    run_drci_command(
+      ["You can't do that in here."],
+      'open_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_open_container__you_cant_do_that_to_item
+    run_drci_command(
+      ["You can't do that to a brass jailer's nightstick with inconspicuous studs!"],
+      'open_container?',
+      ["jailer's nightstick"],
+      [refute_result]
+    )
+  end
+
+  #########################################
+  # CLOSE CONTAINER
+  #########################################
+
+  def test_close_container__should_pull
+    run_drci_command(
+      ["You pull the flap of your satchel closed and button it securely."],
+      'close_container?',
+      ["satchel"],
+      [assert_result]
+    )
+  end
+
+  def test_close_container__should_close
+    run_drci_command(
+      ["You close your medicine pouch."],
+      'close_container?',
+      ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_close_container__should_already_be_closed
+    run_drci_command(
+      ["That is already closed."],
+      'close_container?',
+      ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_close_container__please_rephrase
+    run_drci_command(
+      ["Please rephrase that command."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__what_were_you_referring
+    run_drci_command(
+      ["What were you referring to?"],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__could_not_find
+    run_drci_command(
+      ["I could not find what you were referring to."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__ruin_your_spell
+    run_drci_command(
+      ["You don't want to ruin your spell just for that do you?"],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__disturb_the_silence
+    run_drci_command(
+      ["It would be a shame to disturb the silence of this place for that."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__not_the_place
+    run_drci_command(
+      ["This is probably not the time nor place for that."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__no_way_to_do_that
+    run_drci_command(
+      ["There is no way to do that."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__you_cant_do_that
+    run_drci_command(
+      ["You can't do that."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__you_cant_do_that_while
+    run_drci_command(
+      ["You can't do that while kneeling!"],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__you_cant_do_that_here
+    run_drci_command(
+      ["You can't do that in here."],
+      'close_container?',
+      ["medicine pouch"],
+      [refute_result]
+    )
+  end
+
+  def test_close_container__you_cant_do_that_to_item
+    run_drci_command(
+      ["You can't do that to a brass jailer's nightstick with inconspicuous studs!"],
+      'close_container?',
+      ["jailer's nightstick"],
+      [refute_result]
+    )
   end
 
   #########################################

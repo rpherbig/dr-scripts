@@ -30,23 +30,14 @@ class TestFind < Minitest::Test
     proc { |error| assert($displayed_messages.any? { |message| message.include?('searching adjacent rooms') }) }
   end
 
-  def assert_raise_error(error_class, error_message)
-    proc do |error|
-      assert_equal(error_class, error.class)
-      assert(error.message.include?(error_message))
-    end
-  end
-
-  def assert_mock(mock)
-    proc { assert(mock.verify) if mock.class == Minitest::Mock }
-  end
-
   def run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions = [], expected_errors = [])
     @test = run_script_with_proc(['find'], proc do
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
       $parsed_args = script_args.dup
+
+      mocks = [fake_drc, fake_drct, fake_drroom]
 
       original_DRC = Find::DRC if defined?(Find::DRC)
       Find.send(:remove_const, "DRC") if defined?(Find::DRC)
@@ -67,9 +58,7 @@ class TestFind < Minitest::Test
       rescue Exception => e
         error = e
         unless expected_errors.include?(error.class)
-          puts "\n#{error.class}: #{error.message}:\n"
-          puts error.backtrace
-          raise
+          flunk(exception_details(e, 'Unexpected error running test'))
         end
       end
 
@@ -85,7 +74,7 @@ class TestFind < Minitest::Test
 
       # Assert
       assertions = [assertions] unless assertions.is_a?(Array)
-      assertions += [assert_mock(fake_drc), assert_mock(fake_drct), assert_mock(fake_drroom)]
+      mocks.each { |mock| assertions << proc { assert_mock(mock) } if mock.class == Minitest::Mock }
       assertions.each { |assertion| assertion.call(error) }
     end)
   end
@@ -93,7 +82,7 @@ class TestFind < Minitest::Test
   # For backwards compatibility with original version of 'find' that based on
   # the NPC name then knew the specific zone and rooms to look in, this method helps
   # us test that logic.
-  def run_find_special_npc(script_args, npc, town, region, assertions = [])
+  def run_find_special_npc(script_args, npc, town, region, assertions = [], expected_errors = [])
     crossing_rooms = [1]
     crossing_academy = [2]
     dirge_rooms = [3]
@@ -143,7 +132,7 @@ class TestFind < Minitest::Test
       end
     end
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions)
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_exit_script_if_no_npc_argument
@@ -155,11 +144,15 @@ class TestFind < Minitest::Test
     fake_drct = Minitest::Mock.new
     fake_drroom = DRRoom # not mocked this test
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_raise_error(SystemExit, 'exit')
-    ], [
+    ]
+
+    expected_errors = [
       SystemExit
-    ])
+    ]
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_find_npc_one_word
@@ -199,9 +192,13 @@ class TestFind < Minitest::Test
       end
     end
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_find_npc()
-    ])
+    ]
+
+    expected_errors = []
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_find_npc_full_name
@@ -241,9 +238,13 @@ class TestFind < Minitest::Test
       end
     end
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_find_npc()
-    ])
+    ]
+
+    expected_errors = []
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_not_find_npc
@@ -273,9 +274,13 @@ class TestFind < Minitest::Test
       fake_drct.expect(:walk_to, true, [room_id])
     end
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_not_find_npc()
-    ])
+    ]
+
+    expected_errors = []
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_find_npc_without_moving
@@ -303,9 +308,13 @@ class TestFind < Minitest::Test
     # Find NPC in current room
     DRRoom.npcs = ['old blind beggar']
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_find_npc()
-    ])
+    ]
+
+    expected_errors = []
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   def test_follow_npc
@@ -349,11 +358,15 @@ class TestFind < Minitest::Test
       fake_drct.expect(:walk_to, true, [room_id])
     end
 
-    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, [
+    assertions = [
       assert_following_npc(),
       assert_search_adjacent_rooms(),
       assert_not_find_npc()
-    ])
+    ]
+
+    expected_errors = []
+
+    run_find(messages, script_args, fake_drc, fake_drct, fake_drroom, assertions, expected_errors)
   end
 
   # Tests the get_town_and_region method

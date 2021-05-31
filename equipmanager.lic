@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#equipmanager
 =end
 
-custom_require.call(%w[common common-items events])
+custom_require.call(%w[common common-items])
 
 class EquipmentManager
   include DRC
@@ -129,6 +129,10 @@ class EquipmentManager
   def remove_item(item)
     bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide', 'Without any effort', 'you manage to loosen')
     waitrt?
+    # If removing item transforms it (e.g. exoskeletal armor => orb) then continue with the transformed item.
+    if item.transforms_to && DRCI.in_hands?(item.transforms_to)
+      item = item_by_desc(item.transforms_to)
+    end
     if item.tie_to
       stow_helper("tie my #{item.short_name} to #{item.tie_to}", item.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
     elsif item.wield
@@ -147,8 +151,9 @@ class EquipmentManager
       return false
     end
     if get_item?(item)
-      bput("wear my #{item.short_name}", 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', 'You put', 'You carefully loop', 'slide effortlessly onto your', 'You slip', "^You .* #{item.short_regex}")
-      waitrt?
+      # If getting item transforms it to immediately be worn (e.g. orb => exoskeletal armor)
+      # then the item won't be in our hands, it'll already be worn, so skip that step.
+      DRCI.wear_item?(item.short_name) if DRCI.in_hands?(item.short_name)
       return true
     end
     return false
@@ -241,8 +246,8 @@ class EquipmentManager
     {
       worn: {
         verb: 'remove',
-        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank).*#{item.name}/, 'Remove what', "You aren't wearing that", 'slide themselves off of your', 'you manage to loosen'],
-        failures: [/^You (get|sling|pull|work|slide|remove|yank) $/],
+        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank|unbuckle).*#{item.name}/, 'Remove what', "You aren't wearing that", 'slide themselves off of your', 'you manage to loosen'],
+        failures: [/^You (get|sling|pull|work|slide|remove|yank|unbuckle) $/],
         failure_recovery: proc { |noun| bput("wear my #{noun}", '^You ') },
         exhausted: ['Remove what', "You aren't wearing that"]
       },
@@ -307,48 +312,101 @@ class EquipmentManager
     if noun =~ /\bfan\b/i
       command = skill =~ /edged/i ? 'open' : 'close'
       bput("#{command} my fan", 'you snap', 'already')
-      return
+      return true
     end
     proper_skill = case skill
                    when /^he$|heavy edge|large edge|one-handed/i
                      'heavy edged'
-                   when /2he|^the$|twohanded edge|two-handed/i
+                   when /^2he$|^the$|twohanded edge|two-handed edge/i
                      'two-handed edged'
-                   when /2hb|^thb$|twohanded blunt/i
-                     'two-handed blunt'
                    when /^hb$|heavy blunt|large blunt/i
                      'heavy blunt'
-                   when /se|small edged/i
+                   when /^2hb$|^thb$|twohanded blunt|two-handed blunt/i
+                     'two-handed blunt'
+                   when /^se$|small edged|light edge|medium edge/i
                      '(light edged|medium edged)'
-                   when /sb|small blunt/i
+                   when /^sb$|small blunt|light blunt|medium blunt/i
                      '(light blunt|medium blunt)'
-                   when /lt|light thrown/i
+                   when /^lt$|light thrown/i
                      'light thrown'
+                   when /^ht$|heavy thrown/i
+                     'heavy thrown'
                    when /stave/i
                      '(short|quarter) staff'
                    when /polearms/i
                      '(halberd|pike)'
-                   when /ow|offhand weapon/i
-                     return
+                   when /^ow$|offhand weapon/i
+                     return true # just use weapon in your left hand
                    else
-                     echo('unsupported weapon swap, please help us add this weapon')
+                     DRC.message("Unsupported weapon swap: #{noun} to #{skill}. Please report this to https://github.com/rpherbig/dr-scripts/issues")
+                     return false
                    end
-
-    Flags.add('hand-full', 'You must have two free hands')
+    # All possible weapon skills to swap into.
+    weapon_skills = [
+      'light edged',
+      'medium edged',
+      'heavy edged',
+      'two-handed edged',
+      'light blunt',
+      'medium blunt',
+      'heavy blunt',
+      'two-handed blunt',
+      'light thrown',
+      'heavy thrown',
+      'short staff',
+      'quarter staff',
+      'halberd',
+      'pike'
+    ]
+    failure_matches = [
+      /You have nothing to swap/,
+      /Your (left|right) hand is too injured/,
+      /Will alone cannot conquer the paralysis that has wracked your body/,
+      /^You move a .* to your (left|right) hand/
+    ]
+    # The spaces in the regex are deliberate
     skill_match = / #{proper_skill} /i
-    until skill_match =~ bput("swap my #{noun}", skill_match, "\\b#{noun}\\b.*(heavy edged|two-handed edged|heavy blunt|two-handed blunt|light edged|medium edged|light blunt|medium blunt|light thrown|short staff|quarter staff|halberd)")
+    swapped_count = 0
+    loop do
       pause 0.25
-      next unless Flags['hand-full']
-      fput('stow left') if left_hand && left_hand !~ /#{noun}/i
-      fput('stow right') if right_hand && right_hand !~ /#{noun}/i
-      Flags.reset('hand-full')
+      # Avoid infinite loop where weapon can't swap to desired skill.
+      return false if swapped_count > weapon_skills.length
+      # Try to swap weapon to desired skill.
+      case bput("swap my #{noun}", skill_match, /\b#{noun}\b.*(#{weapon_skills.join('|')})/, "You must have two free hands", *failure_matches)
+      when /You must have two free hands/
+        fput('stow left') if left_hand && left_hand !~ /#{noun}/i
+        fput('stow right') if right_hand && right_hand !~ /#{noun}/i
+        next
+      when *failure_matches
+        return false
+      when skill_match
+        return true
+      end
+      swapped_count = swapped_count + 1
     end
   end
 
   def unload_weapon(name)
-    result = bput("unload my #{name}", 'You unload', 'Your .* fall.* from', 'As you release the string', 'You .* unloading')
+    # Phrases to match:
+    #   (hidden) You remain concealed by your surroundings, convinced that your unloading of the <weapon> went unobserved.
+    #   (hidden) You unload your <weapon> while blended in with your surroundings, but cannot shake the feeling that you drew attention to yourself.
+    #   (one hand empty) You unload the <weapon>.
+    #   (hands full) Your <ammo> falls from your <weapon> to your feet.
+    case bput("unload my #{name}", 'You unload', 'Your .* fall.*', 'As you release the string', 'You .* unloading', 'But your .* isn\'t loaded', 'You can\'t unload such a weapon', 'You don\'t have a ranged weapon to unload', 'You must be holding the weapon to do that')
+    when /^(?:Your .*?\b(?<ammo>[\w]+)\b fall.* from your .* to your feet.)$/
+      # Ammo fell to ground because hands are full.
+      # Lower weapon, stow ammo, then pick it back up.
+      ammo = Regexp.last_match[:ammo]
+      bput("lower ground left", "You lower") if DRCI.in_left_hand?(name)
+      bput("lower ground right", "You lower") if DRCI.in_right_hand?(name)
+      DRCI.put_away_item?(ammo)
+      bput("get my #{name}", "You get", "You pick")
+    when /(You unload|You .* unloading)/
+      # Ammo is in hand, stow whichever hand isn't holding the weapon.
+      bput("stow left", "You put") unless DRCI.in_left_hand?(name)
+      bput("stow right", "You put") unless DRCI.in_right_hand?(name)
+    end
     waitrt?
-    bput('stow left', 'You put') if result == 'You unload' || result =~ /You .* unloading/
   end
 
   def stow_weapon(description = nil)
@@ -363,6 +421,7 @@ class EquipmentManager
     if weapon.wield
       stow_helper("sheath my #{weapon.short_name}", weapon.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'close the fan', 'You secure your', 'You slip', 'You hang', 'You strap', "You don't seem to be able to move", 'You easily strap', 'is too small to hold that', 'With a flick of your wrist you stealthily sheathe', '^The .* slides easily', "There's no room")
     elsif weapon.worn
+      unload_weapon(weapon.short_name)
       stow_helper("wear my #{weapon.short_name}", weapon.short_name, 'You sling', 'You attach', 'You .* unload', 'You slide', 'You place', 'close the fan', 'You hang', 'You spin', 'You strap', 'You put', 'You carefully loop', "You don't seem to be able to move", "You are already wearing")
     elsif !weapon.tie_to.nil?
       stow_helper("tie my #{weapon.short_name} to my #{weapon.tie_to}", weapon.short_name, 'You attach', 'close the fan', 'you tie', 'You are a little too busy', "You don't seem to be able to move", 'Your wounds hinder your ability to do that')

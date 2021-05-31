@@ -1,12 +1,13 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
+
 load 'test/test_harness.rb'
 
 include Harness
 
 class TestCheckHealth < Minitest::Test
+
   def setup
-    $server_buffer.clear
-    $history.clear
+    reset_data
   end
 
   def teardown
@@ -53,7 +54,7 @@ class TestCheckHealth < Minitest::Test
   def check_health_with_buffer(messages, assertions = [])
     $server_buffer = messages.dup
     $history = $server_buffer.dup
-    @test = run_script_with_proc(['common', 'common-healing'], proc do
+    @test = run_script_with_proc(['common', 'common-healing-data', 'common-healing'], proc do
       health_result = DRCH.check_health
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(health_result) }
@@ -162,4 +163,5 @@ class TestCheckHealth < Minitest::Test
       @test.join
     end
   end
+
 end

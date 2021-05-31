@@ -3,6 +3,8 @@
 
   Search a deed register for the specified crafting material.
   Output all lines that match.
+  
+  Label deeds in a deed register.
 =end
 
 custom_require.call(%w[common common-items])
@@ -16,54 +18,152 @@ class Register
       [
         [
           { name: 'query', regex: /^[A-z0-9\s\-\'\.]+$/i, description: 'crafting material to search for, use quotes for multiple words' }
+        ],
+        [
+          { name: 'label', regex: /label/i },
+          { name: 'page', regex: /\d+/, variable: true, description: 'Page number to label' }
+        ],
+        [
+          { name: 'label', regex: /label/i },
+          { name: 'all', regex: /all/, variable: true, description: 'Label all unlabeled deeds' }
         ]
       ]
     args = parse_args(arg_definitions)
-    container = get_settings.crafting_container
+    @container = get_settings.crafting_container
+    @pen = get_settings.writing_instrument
 
     stow_hands
-    unless get_item('deed register', container)
-      unless bput('get my deed register', /You get/, /What were you referring to/) == 'You get'
-        echo "Can\'t find your deed register."
+    get_item('deed register')
+
+    if args.label
+      get_item(@pen)
+      if args.page
+        message("Labeling page #{args.page}")
+        label_page if turn_register?(args.page)
+      else
+        message("Labeling all unlabeled pages!")
+        turn_register?('contents')
+        find_unlabeled
+      end
+      stow_item(@pen)
+    else
+      turn_register?('contents')
+      display_results( search(args.query) )
+    end
+    stow_item('deed register')
+  end
+
+  def get_item(item)
+    unless DRCI.get_item(item, @container)
+      case bput("get my #{item}", /You get/, /You are already holding that/, /What were you referring to/, /You need a free hand/)
+      when /What were you referring to/
+        message("Can't find your #{item}!")
+        exit
+      when /You need a free hand/
+        message("Your hands are full!")
         exit
       end
     end
-    bput('turn my register to contents', 'You flip your deed register to the contents page.', 'But .+ is already at the table of contents!')
-    search(args.query)
-    bput("put my register in my #{container}", /You put/, /That.s too heavy to go in there/, /no matter how you arrange/)
-    stow_hands
+  end
+
+  def stow_item(item)
+    put_away_item?(item, @container)
+    stow_hands if in_hands?(item)
+  end
+
+  def turn_register?(page)
+    if page == 'contents'
+      bput('turn my register to contents', 'You flip your deed register to the contents page.', 'But .+ is already at the table of contents!', /You shouldn.t do that to somebody else.s deed book/)
+    else
+      case bput("turn my register to page #{page}", /You flip your deed register/, /But you.re already on page/, /But there aren.t that many pages/, /You shouldn.t do that to somebody else.s deed book/)
+      when /But there aren.t that many pages/
+        message("Invalid page number.")
+        return false
+      when /You shouldn.t do that to somebody else.s deed book/
+        message("This is not your deed register!")
+        return false
+      end
+    end
+    return true
+  end
+
+  def sort_mix(mix)
+    mix = mix.sub(', and ', ', ').split.map(&:capitalize).join(' ').split(', ').sort_by { |x| -(x[/\d+/].to_i) }.join(', ').sub(/medium carbon steel/i, 'MCS').sub(/low carbon steel/i, 'LCS').sub(/high carbon steel/i, 'HCS')
+    return mix
+  end
+
+  def label_page
+    quality, volume, pure, mix, type = nil
+    fput('read my register')
+    loop do
+      line = get
+      case line
+      when /Page \d+ is blank/
+        message("This page is blank!")
+        return false
+      when /Metallurgical Properties/
+        type = 'metal'
+      when /Quality:\s+(\d+)/
+        quality = Regexp.last_match(1).to_i
+      when /(?:Volume:|Yards:|Pieces:|Amount:)\s+(\d+)/
+        volume = Regexp.last_match(1).to_i
+      when /This ingot is certified pure/
+        pure = true
+      when /The metal appears to be composed of: (.*)\.$/
+        mix = Regexp.last_match(1)
+      when /^(?:You think it will still take|You think the item is ready for reclaiming)/
+        break
+      end
+    end
+    write = "#{volume}V #{quality}Q"
+    write << " - pure" if pure
+    write << " - #{sort_mix(mix)}" if mix
+    write << " - unknown mix" if type == 'metal' && !pure && mix.nil?
+    fput("write #{write}")
+  end
+
+  def find_unlabeled
+    results = search('^\s{4}.*[A-z]+$')
+    pages = Array.new
+    results.each do |line|
+      if line =~ /^\s+(\d+)/
+        pages.push(Regexp.last_match(1).to_i)
+      end
+    end
+    pages.each do |page|
+      turn_register?(page)
+      label_page
+    end
   end
 
   def display_results(results)
-    results.each do |data|
-      respond(data)
+    respond('   ' + 'Results:')
+    if results.any?
+      results.each do |data|
+        respond(data)
+      end
+    else
+      respond('   ' + 'No matches found.')
     end
   end
 
   def search(query)
     contents = []
-    bput('read my register', 'Stored Deeds:')
-    pause
+    case bput('read my register', 'Stored Deeds:', /You haven.t stored any deeds in this register/, /You shouldn.t read somebody else's deed book/)
+    when /You haven.t stored any deeds in this register/
+      contents.push('   There are no deeds in your register.')
+      return contents
+    when /You shouldn.t read somebody else's deed book/
+      contents.push('   This is not your deed register!')
+      return contents
+    end
+    # pause
     loop do
-      line = get?
-      if line.match("You haven't stored any deeds in this register.")
-        contents << '   There are no deeds in your register.'
-        break
-      end
-      if line.match("You shouldn't read somebody else's deed book.")
-        contents << '   This is not your deed register!'
-        break
-      end
-      contents << line if line =~ /\W#{query}\W*/i
+      line = get
+      contents.push(line) if line =~ /\W?#{query}\W?/i
       break if line.match('Maximum:  ')
     end
-
-    respond('   ' + 'Results:')
-    if contents.any?
-      display_results(contents)
-    else
-      respond('   ' + 'No matches found.')
-    end
+    return contents
   end
 end
 

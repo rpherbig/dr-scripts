@@ -1,13 +1,14 @@
-require 'minitest/autorun'
-load 'test/test_harness.rb'
+require_relative 'test_helper'
 require 'timecop'
+
+load 'test/test_harness.rb'
 
 include Harness
 
 class TestCommon < Minitest::Test
+
   def setup
-    sent_messages.clear
-    @result = nil
+    reset_data
   end
 
   def teardown
@@ -67,4 +68,63 @@ class TestCommon < Minitest::Test
 
     assert_equal 8.1, $pause
   end
+
+  def test_bput_not_suppresses_no_match_message
+    $history = [nil, 'not the correct string', '']
+    timeout = 0.1
+
+    @test = run_script_with_proc('common', proc do
+      DRC.bput('a test message', { 'timeout' => timeout, 'suppress_no_match' => false }, 'result')
+    end)
+
+    @test.join # wait for bput to timeout and finish
+
+    assert_includes($displayed_messages, "*** No match was found after #{timeout} seconds, dumping info")
+  end
+
+  def test_bput_suppresses_no_match_message
+    $history = [nil, 'not the correct string', '']
+    timeout = 0.1
+
+    @test = run_script_with_proc('common', proc do
+      DRC.bput('a test message', { 'timeout' => timeout, 'suppress_no_match' => true }, 'result')
+    end)
+
+    @test.join # wait for bput to timeout and finish
+
+    refute_includes($displayed_messages, "*** No match was found after #{timeout} seconds, dumping info")
+  end
+
+  def test_bput_displays_debug_info
+    $history = [nil, 'not the correct string', '']
+
+    @test = run_script_with_proc('common', proc do
+      DRC.bput('a test message', { 'debug' => true }, 'result')
+    end)
+
+    $history << 'result'
+
+    @test.join # wait for bput to timeout and finish
+
+    assert_includes($displayed_messages, 'bput.message=a test message')
+    assert_includes($displayed_messages, 'bput.options={"debug"=>true, "timeout"=>15}')
+    assert_includes($displayed_messages, 'bput.matches=["result"]')
+  end
+
+  def test_bput_not_displays_debug_info
+    $history = [nil, 'not the correct string', '']
+
+    @test = run_script_with_proc('common', proc do
+      DRC.bput('a test message', { 'debug' => false }, 'result')
+    end)
+
+    $history << 'result'
+
+    @test.join # wait for bput to timeout and finish
+
+    refute_includes($displayed_messages, 'bput.message=a test message')
+    refute_includes($displayed_messages, 'bput.options={"debug"=>false, "timeout"=>15}')
+    refute_includes($displayed_messages, 'bput.matches=["result"]')
+  end
+
 end

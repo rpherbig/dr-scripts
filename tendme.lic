@@ -1,85 +1,87 @@
-# quiet
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_repository#tendme
 =end
 
-custom_require.call(%w[common common-healing])
+custom_require.call(%w[common common-healing events])
 
-def bind_open_wounds?
-  DRC.bput('heal', '^You')
-  pause 1
-  raw = reget(15)
-  bleeders = raw
-             .dup
-             .reverse
-             .take_while { |item| item !~ /^Bleeding/ }
-             .keep_if { |item| item =~ /^\s+(?:\w+|\w+\s\w+)\s{7}.+/ }
-             .delete_if { |item| item =~ /\bskin\b/ }
-  leeches = raw
-            .dup
-            .map { |x| x.scan(/leech on your [^\,\.]+,|leech on your [^\,\.]+\./).to_a }
-            .flatten
-            .compact
-  mites = raw
-          .dup
-          .map { |x| x.scan(/mite on your [^\,\.]+,|mite on your [^\,\.]+\./).to_a }
-          .flatten
-          .compact
-  lodged = raw
-           .dup
-           .map { |x| x.scan(/lodged \w* into your [^\,\.]+/).to_a }
-           .flatten
-           .compact
+class TendMe
 
-  bleeders = bleeders.keep_if { |item| !item.include?('tended') && !item.include?('inside') && !item.include?('Area') }
-
-  lodged.each do |message|
-    message =~ /into your ([^\,\.]+)/
-    DRCH.bind_wound(Regexp.last_match(1))
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'train', regex: /train/i, optional: true, description: 'unwrap and rebind wounds for optimum learning' },
+        { name: 'monitor', regex: /monitor/i, optional: true, description: 'run in background to keep bleeders tended' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    waitrt? while bind_open_wounds?
+    monitor_health(args.train) if args.monitor
   end
 
-  bleeders.each do |message|
-    message =~ /^\s+(\w+|\w+\s\w+)\s{7}/
-    DRCH.bind_wound(Regexp.last_match(1))
+  def bind_open_wounds?
+    tended_wounds = false
+    health_data = DRCH.check_health
+    (
+      health_data['lodged'].values.flatten +
+      health_data['parasites'].values.flatten +
+      health_data['bleeders'].values.flatten
+    )
+    .reject { |wound| wound.internal? || wound.bleeding_rate =~ /tended|clotted/ } # untendable
+    .select do |wound|
+      if wound.bleeding? && !DRCH.skilled_to_tend_wound?(wound.bleeding_rate)
+        DRC.message("You are not skilled enough to tend a #{wound.bleeding_rate.upcase} bleeder on a #{wound.body_part.upcase}, skipping")
+        false
+      else
+        # the wound is either a tendable bleeder, parasite, or lodged item
+        true
+      end
+    end
+    .sort_by { |wound| wound.severity * -1 } # sort descending
+    .each { |wound| tended_wounds = DRCH.bind_wound(wound.body_part) || tended_wounds }
+    return tended_wounds
   end
 
-  leeches.each do |message|
-    message =~ /on your ([^\,\.]+)|(\,|\.)/
-    DRCH.bind_wound(Regexp.last_match(1))
+  # Monitor for wounds to begin bleeding again then tend them.
+  def monitor_health(train)
+    Flags.add('tendme-bind-lodged', /You feel a slight pain from the (?<item>.*) lodged in your (?<body_part>.*)\./)
+    Flags.add('tendme-bind-wound', /The bandages binding your (?<body_part>.*) (become|come|soak)/)
+    Flags.add('tendme-rewrap-wound', /You feel like now might be a good time to change the bandages on your (?<body_part>.*)\./)
+
+    loop do
+      pause 0.5
+      tend_wounds = false
+      # If training, you can rewrap wound for more experience.
+      if Flags['tendme-rewrap-wound']
+        if train && DRSkill.getxp('First Aid') < 30
+          tend_wounds = true
+          body_part = Flags['tendme-rewrap-wound'][:body_part]
+          Flags.reset('tendme-rewrap-wound')
+          DRCH.unwrap_wound(body_part)
+        end
+      end
+      # One or more active bleeders, tend them.
+      if Flags['tendme-bind-wound']
+        tend_wounds = true
+        Flags.reset('tendme-bind-wound')
+      end
+      # Detected lodged ammo or parasites, tend them out.
+      if Flags['tendme-bind-lodged']
+        tend_wounds = true
+        Flags.reset('tendme-bind-lodged')
+      end
+      if tend_wounds
+        tend_wounds = false
+        bind_open_wounds?
+      end
+    end
   end
 
-  mites.each do |message|
-    message =~ /on your ([^\,\.]+)|(\,|\.)/
-    DRCH.bind_wound(Regexp.last_match(1))
-  end
-
-  exit if bleeders.empty?
 end
 
-arg_definitions = [
-  [
-    { name: 'train', regex: /train/i, optional: true, description: 'unwrap and rebind wounds for optimum learning.' }
-  ]
-]
-
-args = parse_args(arg_definitions)
-
-waitrt? while bind_open_wounds?
-
-loop do
-  case script.gets
-  when /The bandages binding your (.*) come loose and you begin to bleed even more/
-    DRCH.bind_wound(Regexp.last_match(1))
-    bind_open_wounds?
-  when /The bandages binding your (.*) soak through with blood becoming useless and you begin bleeding again/
-    DRCH.bind_wound(Regexp.last_match(1))
-    bind_open_wounds?
-  when /You feel like now might be a good time to change the bandages on your (.*)\./
-    next unless args.train
-    DRCH.unwrap_wound(Regexp.last_match(1))
-    DRCH.bind_wound(Regexp.last_match(1))
-    bind_open_wounds?
-  when /You feel a slight pain from the .* lodged in your/
-    bind_open_wounds?
-  end
+before_dying do
+  Flags.delete('tendme-bind-wound')
+  Flags.delete('tendme-rewrap-wound')
+  Flags.delete('tendme-bind-lodged')
 end
+
+TendMe.new

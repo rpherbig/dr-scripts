@@ -1,7 +1,20 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
 
+load 'test/test_harness.rb'
+
+include Harness
+
 class TestValidYaml < Minitest::Test
+
+  def setup
+    reset_data
+  end
+
+  def teardown
+    @test.join if @test
+  end
+
   def test_all_yaml_in_profiles
     count = 0
     Dir.glob('profiles/**/*.yaml').each do |file|
@@ -16,7 +29,7 @@ class TestValidYaml < Minitest::Test
     base += YAML.load_file('./profiles/base-empty.yaml')['empty_values'].keys
 
     # Profiles using non-repo settings
-    custom_profiles = %w[Moza Foedari Mozof Paven Rizzoli Chuno Jardani Sseng Vuulag Zamecki Erendel Shagium Crannach Dankmar Melborne Paeriluno Valkiss Ssarek Qetu Ugsy Valkiss Dartellum Leustyin Dijkstra Quillith Kyrtoth]
+    custom_profiles = %w[Moza Foedari Mozof Paven Rizzoli Chuno Jardani Sseng Vuulag Zamecki Erendel Shagium Crannach Dankmar Melborne Paeriluno Valkiss Raistan Ssarek Qetu Ugsy Valkiss Dartellum Leustyin Dijkstra Quillith Kyrtoth]
 
     nonbase = Dir.glob('./profiles/*.yaml')
                  .reject { |item| item == '.' }

@@ -1,0 +1,120 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#buff-watcher
+=end
+
+no_kill_all
+no_pause_all
+
+custom_require.call(%w[common common-arcana common-items spellmonitor])
+
+class BuffWatcher
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'buff_set_name', regex: /\w+/, optional: true, description: 'Name of a set of buffs defined in waggle_sets: in your YAML' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+
+    @no_use_scripts = @settings.buff_watcher_no_use_scripts
+    @no_use_rooms = @settings.buff_watcher_no_use_rooms
+    @startup_delay = @settings.buff_watcher_startup_delay
+    @passive_delay = @settings.buff_watcher_passive_delay
+    @buff_set_name = args.buff_set_name || @settings.buff_watcher_name || 'default'
+    @barb_buffs_inner_fire_threshold = @settings.barb_buffs_inner_fire_threshold
+
+    # Don't allow users to make foolish mistakes, always prevent use during go2/burgle
+    @no_use_scripts << 'go2'
+    @no_use_scripts << 'burgle'
+
+    # Pause for the startup delay so you can control spammyness of autostart scripts
+    pause @startup_delay
+
+    unless @settings.waggle_sets[@buff_set_name]
+      DRC.message("No spells defined in buff set '#{@buff_set_name}'.  Ending script.  Double check your settings.")
+      exit
+    end
+
+    # Run passively in a loop
+    # If you want to run this only once, just call `buff` script directly
+    passive_run
+  end
+
+  def passive_run
+    loop do
+      activate_buffs if should_activate_buffs?
+      pause @passive_delay
+    end
+  end
+
+  def should_activate_buffs?
+    !(hidden? || invisible? || running_no_use_scripts? || inside_no_use_room? || need_inner_fire? || buffs_active?)
+  end
+
+  def activate_buffs
+    # Pause other scripts so they don't interfere with our casting
+    scripts_to_unpause = DRC.smart_pause_all
+    temp_left_item = nil
+    waitrt?
+
+    # Free up a hand in case you use held cambrinth
+    unless DRStats.thief? || DRStats.barbarian? || !use_stored_cambrinth?
+      if /nothing in your left hand\.$|at your empty hands\.$/ !~ DRC.bput('glance', 'You glance down')
+        # If both hands are full, store the left hand item in a variable for future
+        # use and lower the left hand to the feet slot.
+        # - Left causes less problems with combat (less likely to be a loaded weapon)
+        # - Feet slot causes less space/correct container issues
+        if DRC.left_hand && DRC.right_hand
+          temp_left_item = DRC.left_hand
+          temp_left_item = nil unless DRCI.lower_item?(DRC.left_hand)
+        end
+      end
+    end
+
+    # Do the needful
+    DRCA.do_buffs(@settings, @buff_set_name)
+
+    # Pick item back up if you lowered something
+    DRCI.get_item?(temp_left_item) if temp_left_item
+
+    # Resume scripts
+    DRC.unpause_all_list(scripts_to_unpause)
+  end
+
+  def buffs_active?
+    if DRStats.thief?
+      # Elements in the buff are ability names (strings) without the Khri prefix
+      return @settings.waggle_sets[@buff_set_name].all? { |spell| DRSpells.active_spells["Khri #{spell}"] }
+    elsif DRStats.barbarian?
+      # Elements in the buff are ability names (strings)
+      return @settings.waggle_sets[@buff_set_name].all? { |spell| DRSpells.active_spells[spell] }
+    else
+      # Elements in the buff are maps of spell name to spell data
+      return @settings.waggle_sets[@buff_set_name].all? { |spell, data| DRSpells.active_spells[spell] }
+    end
+  end
+
+  def running_no_use_scripts?
+    @no_use_scripts.any? { |name| Script.running?(name) }
+  end
+
+  def inside_no_use_room?
+    @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
+  end
+
+  def need_inner_fire?
+    return false unless DRStats.barbarian?
+    DRStats.mana < @barb_buffs_inner_fire_threshold
+  end
+
+  def use_stored_cambrinth?
+    @settings.stored_cambrinth || @settings.cambrinth_items.any? { |item| item['stored'] }
+  end
+
+end
+
+# Don't auto-run during unit tests
+BuffWatcher.new unless $_TEST_MODE_

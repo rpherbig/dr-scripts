@@ -169,6 +169,15 @@ class TestDRCI < Minitest::Test
     )
   end
 
+  def test_get_item__should_not_get_with_injured_hand
+    run_drci_command(
+      ["Your right hand is too injured to do that."],
+      'get_item?',
+      ["anything"],
+      [refute_result]
+    )
+  end
+
   def test_get_item__should_need_to_tend_wound
     run_drci_command(
       ["The crossbow bolt needs to be tended to be removed."],

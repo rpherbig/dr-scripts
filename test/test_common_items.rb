@@ -48,11 +48,20 @@ class TestDRCI < Minitest::Test
   # WEAR ITEM
   #########################################
 
-  def test_wear_item_you_toss_one_strap
+  def test_wear_item__you_toss_one_strap
     run_drci_command(
       ["You toss one strap of the harness over your shoulder, pull it down and buckle it to its mate."],
       'wear_item?',
       ["weapon harness"],
+      [assert_result]
+    )
+  end
+
+  def test_wear_item__you_tug
+    run_drci_command(
+      ["You tug on the chain gloves, flexing your hand as you pull them on for a snug fit."],
+      'wear_item?',
+      ["chain gloves"],
       [assert_result]
     )
   end

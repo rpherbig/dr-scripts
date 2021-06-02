@@ -824,7 +824,13 @@ class LootProcess
     end
 
     snap = [left_hand, right_hand]
-    case bput('skin', 'roundtime', 'skin what', 'cannot be skinned', 'carrying far too many items', 'need a more appropriate weapon', 'need to have a bladed instrument to skin')
+    case bput('skin', 'roundtime', 'skin what', 'cannot be skinned', 'carrying far too many items', 'need a more appropriate weapon', 'need to have a bladed instrument to skin', 'You must have one hand free to skin')
+    when 'You must have one hand free to skin'
+      temp_item = DRC.left_hand
+      if DRCI.lower_item?(temp_item)
+        check_skinning(mob_noun, game_state)
+        DRCI.get_item?(temp_item)
+      end
     when 'carrying far too many items'
       waitrt?
       fput 'get skin from my bundle'
@@ -880,12 +886,16 @@ class SafetyProcess
   include DRCH
   include DRCT
 
-  def initialize(settings)
+  def initialize(settings, equipment_manager)
     echo('New SafetyProcess') if $debug_mode_ct
     Flags.add('ct-engaged', 'closes to pole weapon range on you', 'closes to melee range on you')
     Flags.add('ct-lodged', 'from the .* lodged in your (?<body_part>.*)\.')
+    # When you drop an item due to loss of hand, the phrase is "Your <item> falls to your feet." (do recovery logic)
+    # When you shoot or throw something, the phrase is "The <item> falls to your feet!" (normal mechanics)
+    Flags.add('ct-itemdropped', '^Your (?<item>.*) falls to your feet\.', '^You cannot maintain your grip on the (?<item>.*), and it falls to the ground!')
     Flags.add('ct-germshieldlost', 'It jerks the.* (?<shield>\w+) out of your hands')
     Flags.add('active-mitigation', 'You believe you could \b(?<action>\w+) out of the way of the \b(?<obstacle>\w+)')
+    @equipment_manager = equipment_manager
     @health_threshold = settings.health_threshold
     echo("  @health_threshold: #{@health_threshold}") if $debug_mode_ct
   end
@@ -908,23 +918,46 @@ class SafetyProcess
       recover_item(game_state, Flags['ct-germshieldlost'][:shield], 'wear')
       Flags.reset('ct-germshieldlost')
     end
+    if Flags['ct-itemdropped']
+      # You dropped an item because either your hand is too injured to hold it or stolen or *tingle*.
+      # Since one hand might be useless, free up the other hand so you can pick something up with it.
+      temp_left_item = DRC.left_hand
+      temp_right_item = DRC.right_hand
+      temp_item = [temp_left_item, temp_right_item].compact.first
+      if temp_item
+        # Put item away per gear config, but if not in your config then just put it away.
+        @equipment_manager.stow_weapon(temp_item) || DRCI.put_away_item?(temp_item)
+      end
+      # Try to recover the item you lost.
+      recover_item(game_state, Flags['ct-itemdropped'][:item], 'pickup')
+      Flags.reset('ct-itemdropped')
+      # If put an item away then get it back out.
+      if temp_item
+        @equipment_manager.wield_weapon(temp_item) || DRCI.get_item?(temp_item)
+        # In case the items end up in opposite hands, swap.
+        # This may do nothing if you have only one usable hand.
+        fput('swap') if (DRC.left_hand != temp_left_item && DRC.right_hand != temp_right_item)
+      end
+    end
   end
 
   def recover_item(game_state, item, action = 'pickup')
     return unless item
+    echo "*** Recovering #{item}"
+    recovered = false
     game_state.sheath_whirlwind_offhand
-    case bput("get #{item}", 'You pick up', 'What were you', 'too injured')
-    when 'What were you', 'too injured'
-      warn_failed_item_recovery(item)
-    when 'you pick up'
+    if DRCI.get_item_unsafe(item)
       case action
+      when 'pickup'
+        recovered = true
       when 'wear'
-        bput("wear my #{item}", 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', 'You put', 'You carefully loop', 'slide effortlessly onto your', 'You slip', "^You .* #{item.short_regex}", /^You place/)
-        waitrt?
+        recovered = DRCI.wear_item?(item)
       when 'stow'
-        warn_failed_item_recovery(item) unless DRCI.put_away_item?(item)
+        recovered = @equipment_manager.stow_weapon(item) || DRCI.put_away_item?(item)
       end
     end
+    warn_failed_item_recovery(item) unless recovered
+    waitrt?
     game_state.wield_whirlwind_offhand
   end
 
@@ -3241,7 +3274,7 @@ class CombatTrainer
     @running = true
     $debug_mode_ct = UserVars.combat_trainer_debug || settings.debug_mode
     @game_state = GameState.new(settings, @equipment_manager)
-    @safety_process = SafetyProcess.new(settings)
+    @safety_process = SafetyProcess.new(settings, @equipment_manager)
     @combat_processes = make_processes(settings)
   end
 
@@ -4184,6 +4217,7 @@ before_dying do
   Flags.delete('ct-regalia-succeeded')
   Flags.delete('ct-powershot-ammo')
   Flags.delete('ct-germshieldlost')
+  Flags.delete('ct-itemdropped')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

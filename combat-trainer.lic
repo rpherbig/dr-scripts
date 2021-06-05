@@ -2808,11 +2808,13 @@ class AttackProcess
     echo("@firing_timer: #{@firing_timer}") if $debug_mode_ct
     @firing_check = 0
 
-    # Monitor for ammo falling to ground after powershot maneuver.
-    # The regular expression is important because we need a capturing group
-    # of the ammo so that we can stow it after the powershot.
-    # We are not interested in ammo that lodges, we will get that when looting the critter.
-    Flags.add('ct-powershot-ammo', "The (?<ammo>.*) (?:falls to the ground|lands nearby)!")
+    # Monitor for ammo falling to ground after firing your ranged weapon.
+    # Tests: https://regex101.com/r/J5RsYD/8/
+    # IMPORTANT: 'stone shard' must be listed before 'shard' and 'stone' in the pattern else won't match 'senci stone shard' correctly.
+    ammo_pattern = "(?<ammo>arrow|bolt|stone shard|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quarrel|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn|fragment)s?"
+    Flags.add('ct-ranged-ammo', "(you (?<action>fire|poach|snipe) an?|your) (?<prefix>[^\.!]*? )?#{ammo_pattern}(?<suffix> [^\.!]*?)?? (at|passes through)")
+    Flags.add('ct-powershot-ammo', "With a loud twang, you let fly your #{ammo_pattern}!")
+    Flags.add('ct-ranged-loaded', 'You reach into', 'You load', 'You carefully load', 'already loaded', 'in your hand')
     Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now.')
     Flags.add('ct-face-what', 'Face what')
@@ -2953,18 +2955,41 @@ class AttackProcess
     echo("Time now: #{Time.now.to_i}") if $debug_mode_ct
     echo("@firing_timer: #{@firing_timer}") if $debug_mode_ct
     echo("@firing_delay: #{@firing_delay}") if $debug_mode_ct
-    case bput(command, 'isn\'t loaded', 'There is nothing', 'But your', /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quarrel|quill|stone|stopper|verretto|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn|fragment).* at/i, 'I could not find', 'with no effect and falls to the ground', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire')
+
+    # Occasionally the game borks and the phrases like "Face what?"
+    # appear before the text that you fired your weapon.
+    # So, we use a flag to see if the message ever appears
+    # rather than relying on the first message returned from bput.
+    Flags.reset('ct-ranged-ammo')
+
+    result = bput(command, 'you (fire|poach|snipe)', 'isn\'t loaded', 'There is nothing', 'But your', 'I could not find', 'with no effect and falls (to the ground|to your feet)', 'Face what', 'How can you (poach|snipe)', 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire', 'But you don\'t have a ranged weapon in your hand to fire with')
+    waitrt?
+
+    case result
     when /How can you (poach|snipe)/
       shoot_aimed('shoot', game_state)
-    when /you (fire|poach|snipe) an? (?:.*\s)?(arrows?|bolt|shard|rock|sphere|clump|coral|fist|holder|lump|patella|pellet|pulzone|quadrello|quarrel|quill|stone|stopper|verretto|blowgun dart|crumb|spine|mantrap spike|tiny dragon|icicle|fang|scale|grey-black spike|bacon strip|page|naga|thorn|fragment).* at/i
+    when /That weapon must be in your right hand to fire|But you don't have a ranged weapon in your hand to fire with/
+      # Explicitly say 'swap right' because if you're holding a swappable weapon (e.g. riste)
+      # then just 'swap' will try to switch the weapon mode, not move it to other hand.
+      if fput('swap right') =~ /You (swap|move)/i
+        shoot_aimed(command, game_state)
+      end
+    when /you don't feel like fighting right now/
+      pause 1
+      shoot_aimed(command, game_state)
+    when /you (fire|poach|snipe)|with no effect and falls (to the ground|to your feet)/
+      # If you fired without Bless at an incorporeal undead then it'll have no effect.
+      # However, that's still considered an action taken, just you missed.
       game_state.action_taken
-      ammo = Regexp.last_match(2)
+    end
+
+    # If detected that you shot, then stow any non-lodged ammo.
+    if Flags['ct-ranged-ammo']
+      ammo = Flags['ct-ranged-ammo'][:ammo].to_s
       @firing_check = 0
       quantity = game_state.dual_load? ? 2 : 1
       stow_ammo(ammo, quantity)
-    when 'you don\'t feel like fighting right now', 'That weapon must be in your right hand to fire'
-      pause 1
-      shoot_aimed(command, game_state)
+      Flags.reset('ct-ranged-ammo')
     end
   end
 
@@ -3041,14 +3066,19 @@ class AttackProcess
         waitrt?
       end
     else
+      load_weapon_success = ["You reach into", "You load", "You carefully load", "already loaded", "in your hand"]
+      load_weapon_failure = ["As you try to reach", "You don't have the proper ammunition", "You don't have enough .* to load two at once", "What weapon are you trying to load", "Such a feat would be impossible without the winds to guide", "but are unable to draw upon its majesty", "without steadier hands"]
+
       dual_load = game_state.dual_load?
 
       if dual_load
         # Occasionally, there may be no game output after loading.
         # To be on the safe side, we do two attempts to get output.
-        fput('load arrows')
-        case bput('load arrows', 'You reach into', 'You carefully load', 'already loaded', 'in your hand', "As you try to reach", "You don't have the proper ammunition", "What weapon are you trying to load", 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands', 'Your .* makes the task more difficult')
-        when "As you try to reach", "You don't have the proper ammunition", "What weapon are you trying to load", 'Such a feat would be impossible without the winds to guide', 'but are unable to draw upon its majesty', 'without steadier hands'
+        Flags.reset('ct-ranged-loaded')
+        load_weapon_result = bput('load arrows', { 'timeout' => 1, 'suppress_no_match' => true }, *load_weapon_success, *load_weapon_failure)
+        load_weapon_result = bput('load arrows', *load_weapon_success, *load_weapon_failure) unless Flags['ct-ranged-loaded']
+        case load_weapon_result
+        when *load_weapon_failure
           dual_load = false # fallback to single load
           game_state.loaded = false
         else
@@ -3059,10 +3089,12 @@ class AttackProcess
       unless dual_load
         # Occasionally, there may be no game output after loading.
         # To be on the safe side, we do two attempts to get output.
-        fput('load')
-        case bput('load', 'You reach into', 'You carefully load', 'already loaded', 'in your hand', "As you try to reach", "You don't have the proper ammunition", "What weapon are you trying to load")
-        when "As you try to reach", "You don't have the proper ammunition", "What weapon are you trying to load"
-          DRC.message("Out of ammunition for #{game_state.weapon_name}, dancing until can switch to next weapon")
+        Flags.reset('ct-ranged-loaded')
+        load_weapon_result = bput('load', { 'timeout' => 1, 'suppress_no_match' => true }, *load_weapon_success, *load_weapon_failure)
+        load_weapon_result = bput('load', *load_weapon_success, *load_weapon_failure) unless Flags['ct-ranged-loaded']
+        case load_weapon_result
+        when *load_weapon_failure
+          DRC.message("Unable to load #{game_state.weapon_name}, you may be out of ammunition, dancing until can switch to next weapon")
           game_state.loaded = false
           game_state.clear_aim_queue
           dance(game_state)
@@ -3178,6 +3210,7 @@ class AttackProcess
       # When the flag matches game output then the value of the flag
       # is the regular expression matches. This is how we know the ammo to stow.
       stow_ammo(Flags['ct-powershot-ammo'][:ammo])
+      Flags.reset('ct-powershot-ammo')
     end
 
     game_state.use_charged_maneuvers = false
@@ -3187,6 +3220,10 @@ class AttackProcess
     echo "Stowing ammo: #{ammo}, #{quantity}" if $debug_mode_ct
     return unless ammo
     return unless quantity > 0
+    # The ammo may be 1, 2, or 3 words depending on the item (e.g. rock, crossbow bolt, matte indurium sphere)
+    # The majority of the time, if not always, the words to reference the item are the first and last (e.g. matte sphere).
+    ammo_parts = ammo.strip.split(' ')
+    ammo = [ammo_parts.first, ammo_parts.last].compact.uniq.join(' ')
     case bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what', 'needs to be tended to be removed')
     when 'You pick up', 'You put your'
       stow_ammo(ammo, quantity - 1)
@@ -4198,6 +4235,9 @@ before_dying do
   Flags.delete('glyph-mana-expired')
   Flags.delete('ct-face-what')
   Flags.delete('ct-aim-failed')
+  Flags.delete('ct-powershot-ammo')
+  Flags.delete('ct-ranged-ammo')
+  Flags.delete('ct-ranged-loaded')
   Flags.delete('ct-ranged-ready')
   Flags.delete('ct-accuracy-ready')
   Flags.delete('ct-damage-ready')
@@ -4206,7 +4246,6 @@ before_dying do
   Flags.delete('ct-regalia-expired')
   Flags.delete('ct-starlight-depleted')
   Flags.delete('ct-regalia-succeeded')
-  Flags.delete('ct-powershot-ammo')
   Flags.delete('ct-germshieldlost')
   Flags.delete('ct-itemdropped')
 end

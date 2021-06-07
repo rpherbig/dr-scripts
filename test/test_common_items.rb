@@ -337,6 +337,15 @@ class TestDRCI < Minitest::Test
   # OPEN CONTAINER
   #########################################
 
+  def test_open_container__should_slowly_open
+    run_drci_command(
+      ["You slowly open some dark encompassing shadows, glancing around suspiciously."],
+      'open_container?',
+      ["shadows"],
+      [assert_result]
+    )
+  end
+
   def test_open_container__should_unbutton
     run_drci_command(
       ["You unbutton the flap of your satchel, pulling it open to reveal the contents."],
@@ -490,6 +499,15 @@ class TestDRCI < Minitest::Test
       ["You close your medicine pouch."],
       'close_container?',
       ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_close_container__should_quickly_close
+    run_drci_command(
+      ["You quickly close your bag."],
+      'close_container?',
+      ["bag"],
       [assert_result]
     )
   end

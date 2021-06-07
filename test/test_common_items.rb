@@ -66,6 +66,15 @@ class TestDRCI < Minitest::Test
     )
   end
 
+  def test_wear_item__you_pull
+    run_drci_command(
+      ["You pull the chain balaclava over your head, tugging at the links to smooth them into optimal coverage."],
+      'wear_item?',
+      ["chain balaclava"],
+      [assert_result]
+    )
+  end
+
   #########################################
   # GET ITEM
   #########################################
@@ -328,6 +337,15 @@ class TestDRCI < Minitest::Test
   # OPEN CONTAINER
   #########################################
 
+  def test_open_container__should_slowly_open
+    run_drci_command(
+      ["You slowly open some dark encompassing shadows, glancing around suspiciously."],
+      'open_container?',
+      ["shadows"],
+      [assert_result]
+    )
+  end
+
   def test_open_container__should_unbutton
     run_drci_command(
       ["You unbutton the flap of your satchel, pulling it open to reveal the contents."],
@@ -481,6 +499,15 @@ class TestDRCI < Minitest::Test
       ["You close your medicine pouch."],
       'close_container?',
       ["medicine pouch"],
+      [assert_result]
+    )
+  end
+
+  def test_close_container__should_quickly_close
+    run_drci_command(
+      ["You quickly close your bag."],
+      'close_container?',
+      ["bag"],
       [assert_result]
     )
   end

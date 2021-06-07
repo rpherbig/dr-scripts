@@ -66,6 +66,15 @@ class TestDRCI < Minitest::Test
     )
   end
 
+  def test_wear_item__you_pull
+    run_drci_command(
+      ["You pull the chain balaclava over your head, tugging at the links to smooth them into optimal coverage."],
+      'wear_item?',
+      ["chain balaclava"],
+      [assert_result]
+    )
+  end
+
   #########################################
   # GET ITEM
   #########################################

@@ -263,8 +263,45 @@ class TestDRCI < Minitest::Test
   # DISPOSE TRASH
   #########################################
 
-  def test_dispose_trash_in_bin
-    # TODO get test coverage for various trash bins
+  def test_dispose_trash__early_exit__no_item
+    run_drci_command(
+      [
+      ],
+      'dispose_trash',
+      [nil],
+      [refute_result]
+    )
+  end
+
+  def test_dispose_trash__worn_trashcan__retries
+    run_drci_command(
+      [
+        'perhaps try doing that again',
+        'You drop a rock into a portable silversteel bucket with a flared rim.  Glancing inside, you notice the item being swirled in a whirlpool before dropping to the bottom of the bucket.',
+        'You drum your fingers on the bucket rhythmically.',
+        '[OOC: TAP the bucket again within the next 30 seconds to flush it.].',
+        'You drum your fingers on the bucket rhythmically.',
+        'After a moment, a dull THUD echoes from within the bucket.'
+      ],
+      'dispose_trash',
+      ["rock", "silversteel bucket", "tap"],
+      [assert_result]
+    )
+  end
+
+  def test_dispose_trash__worn_trashcan__happy_path
+    run_drci_command(
+      [
+        'You drop a rock into a portable silversteel bucket with a flared rim.  Glancing inside, you notice the item being swirled in a whirlpool before dropping to the bottom of the bucket.',
+        'You drum your fingers on the bucket rhythmically.',
+        '[OOC: TAP the bucket again within the next 30 seconds to flush it.].',
+        'You drum your fingers on the bucket rhythmically.',
+        'After a moment, a dull THUD echoes from within the bucket.'
+      ],
+      'dispose_trash',
+      ["rock", "silversteel bucket", "tap"],
+      [assert_result]
+    )
   end
 
   def test_dispose_trash__should_drop_ocarina_on_ground

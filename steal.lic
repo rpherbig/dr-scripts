@@ -5,16 +5,12 @@
 custom_require.call(%w[common common-arcana common-items common-travel drinfomon equipmanager])
 
 class Steal
-  include DRC
-  include DRCA
-  include DRCI
-  include DRCT
 
   def setup(settings)
     start_script('jail-buddy') unless Script.running?('jail-buddy')
 
     # Make sure that our Thievery ranks are up-to-date - avoid using stale data for new characters who joined the guild
-    bput('exp thievery', 'EXP HELP') if DRSkill.getrank('Thievery').zero?
+    DRC.bput('exp thievery', 'EXP HELP') if DRSkill.getrank('Thievery').zero?
 
     UserVars.stealing_timers ||= {}
 
@@ -25,7 +21,7 @@ class Steal
     @stealing_towns = settings.stealing_towns
     @bin_stolen = settings.bin_stolen
     if @bin_stolen && !@bin_id
-      echo("*** Binning is not yet supported in #{settings.hometown}")
+      DRC.message("*** Binning is not yet supported in #{settings.hometown}")
       @bin_stolen = false
     end
     @hide_to_steal = settings.hide_to_steal
@@ -55,21 +51,24 @@ class Steal
     targets = find_targets(args.item, args.container)
     npcs = settings.npc_stealing_attempt_count > 0 ? find_npcs : []
     if targets.empty? && npcs.empty?
-      echo '***NO VALID TARGETS FOUND***'
+      DRC.message('*** NO VALID TARGETS FOUND ***')
       return
     end
-
-    stealing_buffs = settings.stealing_buffs
-    do_buff(stealing_buffs, settings)
 
     @equipment_manager = EquipmentManager.new
     @equipment_manager.empty_hands
     @equipment_manager.wear_equipment_set?('stealing')
     if left_hand || right_hand
-      echo '***ITEMS ARE STILL IN HANDS, EXITING***'
+      DRC.message('*** ITEMS ARE STILL IN HANDS, EXITING ***')
       @equipment_manager.wear_equipment_set?('standard')
       return
     end
+
+    # Do buffs after swapping gear otherwise equipmanager
+    # may cause you to drop interferring buffs like Khri Silence
+    stealing_buffs = settings.stealing_buffs
+    do_buff(stealing_buffs, settings)
+
     start_script('performance', ['noclean']) unless settings.hide_to_steal
     npcs.each { |npc| steal_from_npc(npc, settings.npc_stealing_attempt_count) }
     targets.each { |target| steal(target) }
@@ -90,7 +89,7 @@ class Steal
     return if stop_stealing?
 
     echo("***STATUS*** Searching for: #{npc}") if UserVars.thievery_debug
-    wait_for_script_to_complete('find', [npc])
+    DRC.wait_for_script_to_complete('find', [npc])
     count.times do
       break unless DRRoom.npcs.include?(npc)
       echo("***STATUS*** Stealing from: #{npc}") if UserVars.thievery_debug
@@ -112,13 +111,13 @@ class Steal
 
   def do_buff(buffs, settings)
     buffs['spells'].each do |spell|
-      check_discern(spell, settings) if spell['use_auto_mana']
-      cast_spell(spell, settings)
+      DRCA.check_discern(spell, settings) if spell['use_auto_mana']
+      DRCA.cast_spell(spell, settings)
     end
 
     buffs['khri']
       .map { |name| "Khri #{name}" }
-      .each { |name| activate_khri?(settings.kneel_khri, name) }
+      .each { |name| DRCA.activate_khri?(settings.kneel_khri, name) }
   end
 
   def bin_items
@@ -128,8 +127,8 @@ class Steal
     stow_hands
     @bin_items.each do |item|
       if @slow_bin_speed
-        bput("get #{item} from my #{@stealing_bag}", 'You get')
-        bput("put #{item} in bin", 'nods toward you as your .* falls into the .* bin')
+        DRC.bput("get #{item} from my #{@stealing_bag}", 'You get')
+        DRC.bput("put #{item} in bin", 'nods toward you as your .* falls into the .* bin')
       else
         put("get #{item} from my #{@stealing_bag}")
         put("put #{item} in bin")
@@ -139,7 +138,7 @@ class Steal
   end
 
   def walk_to_bin?
-    @bin_id && walk_to(@bin_id)
+    @bin_id && DRCT.walk_to(@bin_id)
   end
 
   def find_targets(item, container)
@@ -160,7 +159,7 @@ class Steal
   def build_new(item, container)
     town = nil
     if @stealing_towns.empty?
-      echo('*** You have no stealing_towns set; cannot add a new item.')
+      DRC.message('*** You have no stealing_towns set; cannot add a new item.')
     elsif @stealing_towns.size == 1
       town = @stealing_towns.first
       echo('***This appears to be a new item.')
@@ -263,59 +262,24 @@ class Steal
       @bin_stolen = false
       # Dispose of one extra item to stay under the item limit
       last_stolen = @bin_items.pop
-      bput("get my #{last_stolen} from my #{@stealing_bag}", 'You get', 'What were you') if last_stolen
-      dispose_trash(last_stolen)
+      DRCI.get_item_if_not_held?(last_stolen, @stealing_bag) if last_stolen
+      DRCI.dispose_trash(last_stolen)
     end
 
     keep_item = @bin_stolen
 
     if keep_item
-      if put_item?(item)
+      if DRCI.put_away_item?(item, @stealing_bag)
         @bin_items.push(item)
       else
         keep_item = false
       end
     end
 
-    drop_item(item) unless keep_item
+    DRCI.dispose_trash(item) unless keep_item
 
     move('go portal') if XMLData.room_title == '[[A Junk Yard]]'
     waitrt?
-  end
-
-  def put_item?(item)
-    case bput("put my #{item} in my #{@stealing_bag}", 'What were you', 'You put', "You can't do that", 'no matter how you arrange it', 'The .* is *.* too \w+ to fit in', 'There isn\'t any more room', 'perhaps try doing that again')
-    when 'perhaps try doing that again'
-      return put_item?(item)
-    when 'You put'
-      return true
-    when 'What were you'
-      handheld = held_item(item)
-      drop_item(held_item(item)) if handheld
-      return false
-    end
-
-    false
-  end
-
-  def drop_item(item)
-    case bput("drop my #{item}", 'You drop', 'You spread', 'You wince', 'would damage it', 'smashing it to bits', 'Something appears different about', 'What were you')
-    when 'would damage it', 'Something appears different about'
-      drop_item(item)
-    when 'What were you'
-      handheld = held_item(item)
-      return drop_item(held_item(item)) if handheld
-    end
-  end
-  
-  def held_item(item)
-    [DRC.right_hand, DRC.left_hand].each do |hand_item|
-      hand_item.split.each do |item_word|
-        return hand_item if item.include?(item_word)
-      end
-    end
-    
-    return nil
   end
 
   def update_target(target, difficulty)
@@ -360,7 +324,7 @@ class Steal
     in_message = target['item_in']
     waitrt?
     count += 1
-    case bput("steal #{item} #{in_message}",
+    case DRC.bput("steal #{item} #{in_message}",
               'You learned exceptionally well from this nearly impossible theft',
               'You learned very well from this extremely difficult theft',
               'You learned rather well from this difficult theft',
@@ -408,20 +372,20 @@ class Steal
       update_target(target, 'exceptionally') if count == 1
       bin_item(target['item'])
     when /but decide you have too many outstanding fines as is/
-      beep
+      DRC.beep
       echo('Too many fines, cannot steal anything')
       return false
     when /You haven't picked something to steal/
-      beep
+      DRC.beep
       echo('Can not steal this item')
       return false
     when /realize that you are being watched and should back off|you decide to wait a while before trying again/
-      beep
+      DRC.beep
       echo('Temporarily cannot steal from this room')
       return false
     else
       bin_item(target['item'])
-      beep
+      DRC.beep
       echo('new learning message: PLEASE SUBMIT')
     end
 
@@ -431,7 +395,7 @@ class Steal
   def steal(target, count = 0)
     return if stop_stealing?
 
-    if walk_to(target['room'], false)
+    if DRCT.walk_to(target['room'], false)
       cooldown(target['room'], 60)
       waitrt?
       @equipment_manager.empty_hands
@@ -449,5 +413,5 @@ end
 before_dying do
   stop_script('performance') if Script.running?('performance')
 end
-# Call this last to avoid the need for forward declarations
+
 Steal.new

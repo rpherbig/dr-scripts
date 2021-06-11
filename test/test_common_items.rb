@@ -260,6 +260,60 @@ class TestDRCI < Minitest::Test
   end
 
   #########################################
+  # PUT AWAY ITEM
+  #########################################
+
+  def test_put_away_item__you_put
+    run_drci_command(
+      ["You put your arrow in your thigh quiver."],
+      'put_away_item?',
+      ["arrow", "quiver"],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__you_tuck
+    run_drci_command(
+      ["You tuck your jaguar-spotted kitten safely into its comfortable cat cottage."],
+      'put_away_item?',
+      ["kitten", ["cottage", "home"]],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__you_open_your_hand
+    run_drci_command(
+      ["As you open your hand to release the moonblade, it is consumed in a cold blue-white fire."],
+      'put_away_item?',
+      ["moonblade"],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__drop_in_bin
+    run_drci_command(
+      ["A bored-looking Human boy nods toward you as your silvered rapier falls into the azurite bin."],
+      'put_away_item_unsafe?',
+      ["rapier", "bin"],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__open_closed_container
+    run_drci_command(
+      [
+        "There isn't any more room in the backpack for that.",
+        "That is closed.",
+        "You open the cat cottage.",
+        "You tuck your jaguar-spotted kitten safely into its comfortable cat cottage."
+      ],
+      'put_away_item?',
+      ["kitten", ["backpack", "cottage"]],
+      [assert_result]
+    )
+  end
+
+  #########################################
   # DISPOSE TRASH
   #########################################
 

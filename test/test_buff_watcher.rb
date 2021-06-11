@@ -539,7 +539,7 @@ class TestBuffWatcher < Minitest::Test
     fake_drci.expect(:lower_item?, true, ['backpack'])
     fake_drci.expect(:get_item?, true, ['backpack'])
 
-    fake_drc.expect(:bput, "You glance down to see a reed-woven basket in your right hand and a rugged yellow backpack in your left hand.", ['glance', 'You glance down'])
+    fake_drc.expect(:bput, "You glance down to see a reed-woven basket in your right hand and a rugged yellow backpack in your left hand.", ['glance', /You glance down .*/])
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.
@@ -602,7 +602,7 @@ class TestBuffWatcher < Minitest::Test
       end
     end
 
-    fake_drc.expect(:bput, "You glance down to see a reed-woven basket in your right hand and nothing in your left hand.", ['glance', 'You glance down'])
+    fake_drc.expect(:bput, "You glance down to see a reed-woven basket in your right hand and nothing in your left hand.", ['glance', /You glance down .*/])
 
     on_script_start_hook = proc do |thread|
       # Let the buff watcher's passive loop run a bit then kill the script.

@@ -14,6 +14,10 @@ class TestCheckHealth < Minitest::Test
     @test.join if @test
   end
 
+  def assert_bleeding
+    proc { |health| assert_equal(false, health['bleeders'].empty?, 'Person is bleeding but reported as not bleeding') }
+  end
+
   def assert_wounded
     proc { |health| assert_equal(false, health['wounds'].empty?, 'Person is wounded but reported as not wounded') }
   end
@@ -59,6 +63,19 @@ class TestCheckHealth < Minitest::Test
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(health_result) }
     end)
+  end
+
+  def test_that_tail_is_bleeding
+    messages = [
+      'Your body feels slightly battered.',
+      'Your spirit feels full of life.',
+      'You have deep cuts across the tail.',
+      'Bleeding',
+      '            Area       Rate',
+      '-----------------------------------------',
+      '            tail       slight'
+    ]
+    check_health_with_buffer(messages, [assert_wounded, assert_bleeding])
   end
 
   def test_that_wounded_person_is_wounded

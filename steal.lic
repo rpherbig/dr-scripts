@@ -55,28 +55,30 @@ class Steal
       return
     end
 
+    # Do buffs after swapping gear otherwise equipmanager
+    # may cause you to drop interferring buffs like Khri Silence.
     @equipment_manager = EquipmentManager.new
     @equipment_manager.empty_hands
     @equipment_manager.wear_equipment_set?('stealing')
-    if left_hand || right_hand
+    if DRC.left_hand || DRC.right_hand
       DRC.message('*** ITEMS ARE STILL IN HANDS, EXITING ***')
       @equipment_manager.wear_equipment_set?('standard')
       return
     end
 
-    # Do buffs after swapping gear otherwise equipmanager
-    # may cause you to drop interferring buffs like Khri Silence
-    stealing_buffs = settings.stealing_buffs
-    do_buff(stealing_buffs, settings)
+    # Backwards compatibility with `stealing_buffs` setting.
+    stealing_buffs = (DRStats.thief? ? settings.stealing_buffs['khri'] : settings.stealing_buffs['spells'])
+    settings.waggle_sets['steal'] ||= stealing_buffs
+    DRCA.do_buffs(settings, 'steal')
 
     start_script('performance', ['noclean']) unless settings.hide_to_steal
     npcs.each { |npc| steal_from_npc(npc, settings.npc_stealing_attempt_count) }
     targets.each { |target| steal(target) }
     @equipment_manager.wear_equipment_set?('standard')
 
-    if stealing_buffs['khri']
-      stealing_buffs['khri'].each { |name| fput("khri stop #{name}") }
-    end
+    # As is done when `burgle` script finishes, release invisibility
+    # because it can interfere with other actions like using banks.
+    DRC.release_invisibility
 
     bin_items
   end
@@ -93,7 +95,7 @@ class Steal
     count.times do
       break unless DRRoom.npcs.include?(npc)
       echo("***STATUS*** Stealing from: #{npc}") if UserVars.thievery_debug
-      hide? if @hide_to_steal
+      DRC.hide? if @hide_to_steal
       fput("steal #{npc}")
       waitrt?
     end
@@ -109,26 +111,15 @@ class Steal
     echo("putting target on cooldown: #{name}") if UserVars.thievery_debug
   end
 
-  def do_buff(buffs, settings)
-    buffs['spells'].each do |spell|
-      DRCA.check_discern(spell, settings) if spell['use_auto_mana']
-      DRCA.cast_spell(spell, settings)
-    end
-
-    buffs['khri']
-      .map { |name| "Khri #{name}" }
-      .each { |name| DRCA.activate_khri?(settings.kneel_khri, name) }
-  end
-
   def bin_items
     return if @bin_items.empty?
     return unless walk_to_bin?
 
-    stow_hands
+    DRCI.stow_hands
     @bin_items.each do |item|
       if @slow_bin_speed
-        DRC.bput("get #{item} from my #{@stealing_bag}", 'You get')
-        DRC.bput("put #{item} in bin", 'nods toward you as your .* falls into the .* bin')
+        DRCI.get_item?(item, @stealing_bag)
+        DRCI.put_away_item_unsafe?(item, 'bin')
       else
         put("get #{item} from my #{@stealing_bag}")
         put("put #{item} in bin")
@@ -162,7 +153,7 @@ class Steal
       DRC.message('*** You have no stealing_towns set; cannot add a new item.')
     elsif @stealing_towns.size == 1
       town = @stealing_towns.first
-      echo('***This appears to be a new item.')
+      echo('*** This appears to be a new item.')
       echo("Note: the stealing town is set to '#{town}'.")
       echo(';send yes  if this is a new item and this town is correct, or ;send no  to cancel')
       loop do
@@ -171,7 +162,7 @@ class Steal
         break if line =~ /^yes/i
       end
     else
-      echo('***This appears to be a new item.')
+      echo('*** This appears to be a new item.')
       echo(';send the number of the town in the list below (e.g. ;send 1 ) if this is correct, or ;send no  to cancel.')
       @stealing_towns.each_with_index { |town, i| echo("  #{i + 1} :  #{town}") }
       echo('If the desired town does not appear in this list, add it to your stealing_towns and try again.')
@@ -319,7 +310,7 @@ class Steal
   end
 
   def make_grab?(target, count)
-    hide? if @hide_to_steal
+    DRC.hide? if @hide_to_steal
     item = target['item']
     in_message = target['item_in']
     waitrt?
@@ -372,21 +363,17 @@ class Steal
       update_target(target, 'exceptionally') if count == 1
       bin_item(target['item'])
     when /but decide you have too many outstanding fines as is/
-      DRC.beep
-      echo('Too many fines, cannot steal anything')
+      DRC.message('Too many fines, cannot steal anything')
       return false
     when /You haven't picked something to steal/
-      DRC.beep
-      echo('Can not steal this item')
+      DRC.message('Can not steal this item')
       return false
     when /realize that you are being watched and should back off|you decide to wait a while before trying again/
-      DRC.beep
-      echo('Temporarily cannot steal from this room')
+      DRC.message('Temporarily cannot steal from this room')
       return false
     else
       bin_item(target['item'])
-      DRC.beep
-      echo('new learning message: PLEASE SUBMIT')
+      DRC.message('New learning message. Please submit this to https://github.com/rpherbig/dr-scripts/issues/new')
     end
 
     true

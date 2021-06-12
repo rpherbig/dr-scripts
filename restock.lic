@@ -4,12 +4,29 @@ custom_require.call(%w[common common-items common-money common-travel])
 
 class Restock
   include DRC
-  include DRCM
-  include DRCI
-  include DRCT
 
   def initialize
-    setup
+    arg_definitions = [
+      [
+        { name: 'debug', regex: /debug/, optional: true, description: ''}
+      ]
+    ]
+
+    args = parse_args(arg_definitions, true)
+
+    @debug = args.debug || false
+    @settings = get_settings
+    @restock = @settings.restock
+    @hometown = @settings.hometown
+    @runestone_storage = @settings.runestone_storage
+    amount, denom = @settings.sell_loot_money_on_hand.split(' ')
+    @keep_copper = DRCM.convert_to_copper(amount, denom)
+    @settings.storage_containers.each { |container| DRCI.open_container?("my #{container}") }
+
+    start_restock
+  end
+
+  def start_restock
     items = parse_restockable_items
 
     custom_loc_items = items.select { |k| k['hometown'] }
@@ -36,38 +53,40 @@ class Restock
                     count_nonstackable_item(item)
                   end
       next unless remaining < item['quantity']
+
       num_needed = item['quantity'] - remaining
       buy_num = (num_needed / item['size'].to_f).ceil
       coin_needed += buy_num * item['price']
       item['buy_num'] = buy_num
       items_to_restock.push(item)
     end
+
+    return if items_to_restock.empty?
+    DRCI.stow_hands
+
     if coin_needed > 0
       ### The following line is for the bribe to the night attendant to let you in.
       coin_needed += 2502 if UserVars.sun['night'] && town =~ /\bShard\b/
-      get_money_from_bank("#{coin_needed} copper", "#{town_currency(town)}", "#{town}")
+      DRCM.get_money_from_bank("#{coin_needed} copper", "#{DRCM.town_currency(town)}", "#{town}")
     end
-    purchased = true unless items_to_restock.empty?
+
     items_to_restock.each do |item|
       item['buy_num'].times do
         DRCT.buy_item(item['room'], item['name'])
         if reget(3, 'Seeing that you are too encumbered')
           bput("get #{item['name']} from counter", "You get a")
         end
-        reget(2, 'runestone') ? DRCI.put_away_item?(item['name'], @runestone_storage) : stow_hands
+
+        if item['container']
+          DRCI.put_away_item?(item['name'], item['container'])
+        elsif item['name'] =~ /runestone/i
+          DRCI.put_away_item?(item['name'], @runestone_storage)
+        else
+          stow_hands
+        end
       end
     end
-    deposit_coins(@keep_copper, @settings, "#{town}") if purchased
-  end
-
-  def setup
-    @settings = get_settings
-    @restock = @settings.restock
-    @hometown = @settings.hometown
-    @runestone_storage = @settings.runestone_storage
-    amount, denom = @settings.sell_loot_money_on_hand.split(' ')
-    @keep_copper = convert_to_copper(amount, denom)
-    get_settings.storage_containers.each { |container| fput("open my #{container}") }
+    DRCM.deposit_coins(@keep_copper, @settings, "#{town}")
   end
 
   def parse_restockable_items
@@ -75,10 +94,11 @@ class Restock
     hometown_data = get_data('consumables')[@hometown]
     items = []
     item_list.each do |key, value|
+      echo "Restock Item: #{key} - #{value}" if @debug
       if hometown_data.key?(key) && !value.key?('hometown')
         ht_data = hometown_data[key]
-        data = ht_data.each_key { |k| ht_data[k] = value[k] if value.key?(k) }
-        items.push(data)
+        ht_data.each_key { |k| value[k] = ht_data[k] unless value.key?(k) }
+        items.push(value)
       elsif valid_item_data?(value)
         items.push(value)
       else
@@ -89,6 +109,8 @@ class Restock
   end
 
   def count_stackable_item(item)
+    echo "Counting stackable item: #{item}" if @debug
+
     count = 0
     $ORDINALS.each do |ordinal|
       count_msg = bput("count my #{ordinal} #{item['name']}", 'I could not find what you were referring to.', 'tell you much of anything.', 'and see there \w+ .+ left.')
@@ -109,6 +131,8 @@ class Restock
   end
 
   def count_nonstackable_item(item)
+    echo "Counting nonstackable item: #{item}" if @debug
+
     container = item['container']
     unless container
       /inside your (.*).|I could not find/ =~ bput("tap my #{item['name']}", 'inside your (.*).', 'I could not find')
@@ -116,10 +140,12 @@ class Restock
       return 0 if tap_result.nil?
       container = tap_result
     end
-    count_items_in_container(item['name'], container)
+    DRCI.count_items_in_container(item['name'], container)
   end
 
   def valid_item_data?(item_data)
+    echo "Validating custom item data: #{item_data}" if @debug
+
     %w[name size room price stackable quantity].all? { |x| item_data.key?(x) }
   end
 end

@@ -1123,6 +1123,7 @@ class SpellProcess
     Flags.add('ct-starlight-depleted', 'enough starlight') if DRStats.trader?
     Flags.add('ct-regalia-expired', 'Your .* glimmers? weakly') if DRStats.trader?
     Flags.add('ct-regalia-succeeded', 'You cup your palms skyward to bask in') if DRStats.trader?
+    Flags.add('ct-shock-warning', 'You are distinctly aware that completion of this spell pattern may bring you shock')
 
     @offensive_spells
       .select { |spell| spell['expire'] }
@@ -1405,15 +1406,22 @@ class SpellProcess
       @custom_cast = "barrage #{game_state.melee_attack_verb}"
     end
 
-    snapshot = DRSkill.getxp(@skill)
-    success = cast?(@custom_cast, @symbiosis, @before, @after)
-    if @symbiosis && @use_auto_mana
-      if !success
-        UserVars.discerns[@abbrev]['more'] = [UserVars.discerns[@abbrev]['more'] - 1, 0].max
-      elsif DRSkill.getxp(@skill) - snapshot < @symbiosis_learning_threshold
-        UserVars.discerns[@abbrev]['more'] = UserVars.discerns[@abbrev]['more'] + 1
+    if game_state.is_offense_allowed? || @prepared_spell['harmless']
+      snapshot = DRSkill.getxp(@skill)
+      success = cast?(@custom_cast, @symbiosis, @before, @after)
+      if @symbiosis && @use_auto_mana
+        if !success
+          UserVars.discerns[@abbrev]['more'] = [UserVars.discerns[@abbrev]['more'] - 1, 0].max
+        elsif DRSkill.getxp(@skill) - snapshot < @symbiosis_learning_threshold
+          UserVars.discerns[@abbrev]['more'] = UserVars.discerns[@abbrev]['more'] + 1
+        end
       end
+    else
+      echo('Dropping spell: Offensive magic is not allowed right now...')
+      bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+      bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
+
     @custom_cast = nil
     @symbiosis = nil
     @barrage = nil
@@ -1422,6 +1430,7 @@ class SpellProcess
     @skill = nil
     @abbrev = nil
     @use_auto_mana = nil
+    @prepared_spell = nil
     game_state.hide_on_cast = false
     game_state.casting = false
     game_state.cast_timer = nil
@@ -1475,6 +1484,7 @@ class SpellProcess
 
     needs_training = %w[Warding Utility Augmentation Sorcery]
                      .select { |skill| @training_spells[skill] }
+                     .select { |skill| game_state.is_offense_allowed? || @training_spells[skill]['harmless'] }
                      .select { |skill| DRSkill.getxp(skill) < @magic_exp_training_max_threshold }
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
                      .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
@@ -1688,6 +1698,7 @@ class SpellProcess
                    .select { |spell| spell['min_threshold'] ? game_state.npcs.length >= spell['min_threshold'] : true }
                    .select { |spell| spell['max_threshold'] ? game_state.npcs.length <= spell['max_threshold'] : true }
                    .select { |spell| spell['expire'] ? Flags["ct-#{spell['abbrev']}"] : true }
+                   .select { |spell| game_state.is_offense_allowed? || spell['harmless'] }
                    .select { |spell| game_state.dancing? ? spell['harmless'] : true }
                    .select { |spell| spell['recast_every'] ? check_spell_timer?(spell) : true }
                    .select { |spell| @cast_only_to_train || spell['cast_only_to_train'] ? DRSkill.getxp(spell['skill']) <= @magic_exp_training_max_threshold : true }
@@ -1749,6 +1760,7 @@ class SpellProcess
 
   def prepare_spell(data, game_state, force_cambrinth = false)
     return unless data
+
     data = check_discern(data, @settings) if data['use_auto_mana']
     game_state.cast_timer = Time.now
     @prep_time = data['prep_time']
@@ -1811,7 +1823,15 @@ class SpellProcess
 
     game_state.casting_regalia = data['abbrev'].casecmp('REGAL').zero?
 
-    prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
+    Flags.reset('ct-shock-warning')
+    DRCA.prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
+
+    if Flags['ct-shock-warning'] && !game_state.is_permashocked?
+      echo('Dropping spell: Got shock warning.')
+      bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+      bput('release mana', 'You release all', "You aren't harnessing any mana")
+    end
+
     game_state.casting = true
     game_state.cambrinth_charges(data['cambrinth'])
     if data['cambrinth']
@@ -1826,6 +1846,7 @@ class SpellProcess
     @prep = data['prep']
     @mana = data['mana']
     @command = data['command']
+    @prepared_spell = data
     @reset_expire = data['expire'] ? data['abbrev'] : nil
     Flags.reset('ct-spellcast')
     @before = data['before']
@@ -2771,15 +2792,6 @@ class AttackProcess
     @fatigue_regen_action = settings.fatigue_regen_action
     echo("  @fatigue_regen_action: #{@fatigue_regen_action}") if $debug_mode_ct
 
-    @is_empath = DRStats.empath?
-    echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
-
-    @is_permashocked = settings.permashocked
-    echo("  @is_permashocked: #{@is_permashocked}") if $debug_mode_ct
-
-    @undead = DRStats.empath? && settings.undead
-    echo("  @undead: #{@undead}") if $debug_mode_ct
-
     @stealth_attack_aimed_action = settings.stealth_attack_aimed_action
     echo("  @stealth_attack_aimed_action: #{@stealth_attack_aimed_action}") if $debug_mode_ct
 
@@ -2823,13 +2835,6 @@ class AttackProcess
   end
 
   def execute(game_state)
-    if @is_empath
-      if game_state.construct_mode? || @is_permashocked
-        @is_empath = false
-        echo "  setting @is_empath to false due to 'construct_mode'  or 'permashocked' override" if $debug_mode_ct
-      end
-    end
-
     check_face(game_state)
     if game_state.npcs.uniq.length == 1 && !game_state.stabbable?(game_state.npcs.uniq.first)
       game_state.no_stab_current_mob = true
@@ -2837,7 +2842,7 @@ class AttackProcess
       game_state.no_stab_current_mob = false
     end
 
-    if game_state.dancing? || game_state.weapon_skill == 'Targeted Magic' || (@is_empath && !(@undead && DRSpells.active_spells['Absolution']))
+    if game_state.dancing? || game_state.weapon_skill == 'Targeted Magic' || !game_state.is_offense_allowed?
       if game_state.finish_killing?
         echo('AttackProcess::clean_up') if $debug_mode_ct
         game_state.next_clean_up_step
@@ -3584,8 +3589,14 @@ class GameState
 
     $thrown_skills << 'Offhand Weapon' if settings.offhand_thrown
 
+    @is_empath = DRStats.empath?
+    echo("  @is_empath: #{@is_empath}") if $debug_mode_ct
     @construct_mode = settings.construct(false)
     echo("  @construct_mode: #{@construct_mode}") if $debug_mode_ct
+    @is_permashocked = settings.permashocked
+    echo("  @is_permashocked: #{@is_permashocked}") if $debug_mode_ct
+    @undead_mode = settings.undead(false)
+    echo("  @undead_mode: #{@undead_mode}") if $debug_mode_ct
   end
 
   def next_clean_up_step
@@ -3612,6 +3623,19 @@ class GameState
 
   def cleaning_up?
     !@clean_up_step.nil?
+  end
+
+  def is_offense_allowed?
+    return true if is_permashocked?
+    return true if @construct_mode
+    return true if @undead_mode && DRSpells.active_spells['Absolution']
+    false
+  end
+
+  def is_permashocked?
+    return true unless @is_empath
+    return true if @is_permashocked
+    false
   end
 
   def finish_killing?
@@ -4250,6 +4274,7 @@ before_dying do
   Flags.delete('ct-regalia-succeeded')
   Flags.delete('ct-germshieldlost')
   Flags.delete('ct-itemdropped')
+  Flags.delete('ct-shock-warning')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

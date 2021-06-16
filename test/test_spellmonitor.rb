@@ -77,6 +77,7 @@ class TestSpellMonitor < Minitest::Test
   def test_detect_known_spells
     messages = [
       "You recall the spells you have learned from your training.",
+      "From your apprenticeship you remember practicing with the Burden, Ease Burden [ease], Manifest Force [maf], and Strange Arrow [stra] spells.",
       "In the chapter entitled \"Perception\", you have notes on the Clear Vision [cv], Piercing Gaze [pg], Locate, Seer's Sense [seer], and Aura Sight [aus] spells.",
       "In the chapter entitled \"Psychic Projection\", you have notes on the Calm, Telekinetic Throw [tkt], Telekinetic Storm [tks], and Psychic Shield [psy] spells.",
       "In the chapter entitled \"Moonlight Manipulation\", you have notes on the Shadows, Focus Moonbeam [fm], Dazzle, Refractive Field [rf], Burn, Moonblade, Dinazen Olkar [do], Shape Moonblade [shmo], Cage of Light [col], and Shift Moonbeam [sm] spells.",
@@ -91,6 +92,10 @@ class TestSpellMonitor < Minitest::Test
     ]
     run_downstream_hook(messages, [
       # Spells
+      assert_know_spell('Burden', true),
+      assert_know_spell('Ease Burden', true),
+      assert_know_spell('Manifest Force', true),
+      assert_know_spell('Strange Arrow', true),
       assert_know_spell("Bless", false),
       assert_know_spell("Clear Vision", true),
       assert_know_spell("Locate", true),

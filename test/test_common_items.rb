@@ -472,6 +472,15 @@ class TestDRCI < Minitest::Test
       [assert_result]
     )
   end
+    
+  def test_open_container__should_already_be_open2
+    run_drci_command(
+      ["The wyvern skull's jaw is already open."],
+      'open_container?',
+      ["skull"],
+      [assert_result]
+    )
+  end
 
   def test_open_container__please_rephrase
     run_drci_command(
@@ -608,6 +617,15 @@ class TestDRCI < Minitest::Test
       ["That is already closed."],
       'close_container?',
       ["medicine pouch"],
+      [assert_result]
+    )
+  end
+    
+  def test_close_container__should_already_be_closed2
+    run_drci_command(
+      ["The wyvern skull's jaw is already closed."],
+      'close_container?',
+      ["skull"],
       [assert_result]
     )
   end

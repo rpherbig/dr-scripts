@@ -5,9 +5,11 @@ include Harness
 
 class TestCommonTheurgy < Minitest::Test
   def setup
-    Object.send(:remove_const, :DRCTH) if defined?(DRCTH)
-    $server_buffer.clear
-    $history.clear
+    if defined?(DRCTH)
+      Object.send(:remove_const, :DRCTH)
+      $LOADED_FEATURES.delete_if {|file| file =~ /common/}
+    end
+    reset_data
     @fake_drc = Minitest::Mock.new
   end
 

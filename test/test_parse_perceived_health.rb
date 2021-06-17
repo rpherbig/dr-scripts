@@ -380,4 +380,22 @@ class TestPerceiveHealth < Minitest::Test
     ])
   end
 
+  def test_parse_perceived_health_other_badly_infected
+    messages = [
+      'You touch Philian.',
+      'You sense a successful empathic link has been forged between you and Philian.',
+      'You feel the burning fire of pain and suffering building slowly as you instinctively draw out the truth behind Philian\'s injuries.',
+      'Philian\'s injuries include...',
+      'Wounds to the SKIN:',
+      '  Fresh External:  open and bleeding sores all over the skin -- useless (13/13)',
+      '  Fresh Internal:  complete paralysis of the entire body -- useless (13/13)',
+      'His wounds are badly infected.'
+    ]
+    parse_perceived_health(messages, 'Philian', [
+      assert_not_poisoned,
+      assert_diseased,
+      assert_no_parasites,
+      assert_wound_count(2)
+    ])
+  end
 end

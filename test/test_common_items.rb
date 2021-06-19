@@ -272,11 +272,20 @@ class TestDRCI < Minitest::Test
     )
   end
 
-  def test_put_away_item__you_tuck
+  def test_put_away_item__you_tuck_your
     run_drci_command(
       ["You tuck your jaguar-spotted kitten safely into its comfortable cat cottage."],
       'put_away_item?',
       ["kitten", ["cottage", "home"]],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__you_tuck_a
+    run_drci_command(
+      ["You tuck a blue-black Adan'f-scaled spellbook into the spellbook compartment of your diacan case."],
+      'put_away_item?',
+      ["spellbook", "case"],
       [assert_result]
     )
   end
@@ -472,7 +481,7 @@ class TestDRCI < Minitest::Test
       [assert_result]
     )
   end
-    
+
   def test_open_container__should_already_be_open2
     run_drci_command(
       ["The wyvern skull's jaw is already open."],
@@ -620,7 +629,7 @@ class TestDRCI < Minitest::Test
       [assert_result]
     )
   end
-    
+
   def test_close_container__should_already_be_closed2
     run_drci_command(
       ["The wyvern skull's jaw is already closed."],

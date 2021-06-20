@@ -13,6 +13,7 @@ class TestDRCA < Minitest::Test
       $LOADED_FEATURES.delete_if {|file| file =~ /common/}
     end
     reset_data
+    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
     @fake_drc = Minitest::Mock.new
     @fake_drci = Minitest::Mock.new
     load_base_settings
@@ -103,116 +104,110 @@ class TestDRCA < Minitest::Test
   # ACTIVATE KHRI
   #########################################
 
-  def test_handles_single_khri_not_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
+  def run_activate_khri_test_with_mocks(kneel, khri, expectation)
     @test = run_script_with_proc(['common-arcana'], proc do
-
-      @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
-      @fake_drc.expect(:fix_standing, nil)
       DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
       DRCA.const_set("DRC", @fake_drc)
 
-      activated = DRCA.activate_khri?(false, 'Hasten')
-      assert_equal(false, activated)
+      activated = DRCA.activate_khri?(kneel, khri)
+      assert_equal(expectation, activated)
     end)
+  end
+
+  def test_handles_single_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'Hasten', false)
   end
 
   def test_handles_single_khri_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      DRSpells._set_active_spells({"Khri Hasten" => 3})
-      # Do not mock bput, because this path should execute no commands
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'Hasten')
-      assert_equal(false, activated)
-    end)
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'Hasten', false)
   end
 
   def test_handles_single_khri_with_prefix_not_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
-      @fake_drc.expect(:fix_standing, nil)
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'Khri Hasten')
-      assert_equal(false, activated)
-    end)
+    @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri Hasten', false)
   end
 
   def test_handles_single_khri_with_prefix_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      DRSpells._set_active_spells({"Khri Hasten" => 3})
-      # Do not mock bput, because this path should execute no commands
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'Khri Hasten')
-      assert_equal(false, activated)
-    end)
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'KHRI Hasten', false)
   end
 
   def test_handles_delayed_single_khri_not_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
-      @fake_drc.expect(:fix_standing, nil)
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'delay hasten')
-      assert_equal(false, activated)
-    end)
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay HASTEN', false)
   end
 
   def test_handles_delayed_single_khri_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      DRSpells._set_active_spells({"Khri Hasten" => 3})
-      # Do not mock bput, because this path should execute no commands
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'delay hasten')
-      assert_equal(false, activated)
-    end)
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'delay hasten', false)
   end
 
   def test_handles_delayed_single_khri_with_prefix_not_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
-
-      @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
-      @fake_drc.expect(:fix_standing, nil)
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
-
-      activated = DRCA.activate_khri?(false, 'KHRI DELAY HASTEN')
-      assert_equal(false, activated)
-    end)
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'KHRI DELAY HASTEN', false)
   end
 
   def test_handles_delayed_single_khri_with_prefix_running_no_kneeling
-    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
-    @test = run_script_with_proc(['common-arcana'], proc do
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'khri delay hasten', false)
+  end
 
-      DRSpells._set_active_spells({"Khri Hasten" => 3})
-      # Do not mock bput, because this path should execute no commands
-      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
-      DRCA.const_set("DRC", @fake_drc)
+  def test_handles_mulitple_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', false)
+  end
 
-      activated = DRCA.activate_khri?(false, 'khri delay hasten')
-      assert_equal(false, activated)
-    end)
+  def test_handles_multiple_khri_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', false)
+  end
+
+  def test_handles_mulitple_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', false)
+  end
+
+  def test_handles_multiple_khri_with_prefix_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', false)
+  end
+
+  def test_handles_delayed_mulitple_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', false)
+  end
+
+  def test_handles_delayed_multiple_khri_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', false)
+  end
+
+  def test_handles_delayed_mulitple_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASTEN', false)
+  end
+
+  def test_handles_delayed_multiple_khri_with_prefix_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASten', false)
   end
 
   #########################################

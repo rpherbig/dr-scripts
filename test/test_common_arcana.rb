@@ -184,6 +184,16 @@ class TestDRCA < Minitest::Test
     run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', false)
   end
 
+  def test_handles_multiple_khri_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', false)
+  end
+
+  def test_handles_multiple_khri_with_prefix_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', false)
+  end
+
   def test_handles_delayed_mulitple_khri_not_running_no_kneeling
     @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen Hasten', Array])
     @fake_drc.expect(:fix_standing, nil)
@@ -208,6 +218,16 @@ class TestDRCA < Minitest::Test
     @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen', Array])
     @fake_drc.expect(:fix_standing, nil)
     run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASten', false)
+  end
+
+  def test_handles_delayed_multiple_khri_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', false)
+  end
+
+  def test_handles_delayed_multiple_khri_with_prefix_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'khri DELay DAMPEN HASTEN', false)
   end
 
   #########################################

@@ -137,7 +137,7 @@ class TestDRCA < Minitest::Test
   end
 
   def test_handles_delayed_single_khri_not_running_no_kneeling
-    @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
+    @fake_drc.expect(:bput, "You begin to draw your focus on increasing your celerity of motion", ['Khri Delay Hasten', Array])
     @fake_drc.expect(:fix_standing, nil)
     run_activate_khri_test_with_mocks(false, 'delay HASTEN', true)
   end
@@ -232,7 +232,8 @@ class TestDRCA < Minitest::Test
 
   def test_handles_delayed_multiple_khri_with_prefix_some_running_no_kneeling_failure
     DRSpells._set_active_spells({"Khri Hasten" => 3})
-    @fake_drc.expect(:bput, "------------------------TODO", ['Khri Delay Dampen', Array])
+    # You have not recovered from your previous use of the Hasten meditation.
+    @fake_drc.expect(:bput, 'You have not recovered', ['Khri Delay Dampen', Array])
     @fake_drc.expect(:fix_standing, nil)
     run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASten', false)
   end

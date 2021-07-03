@@ -1,6 +1,5 @@
 require_relative 'test_helper'
 require 'yaml'
-require 'ostruct'
 
 load 'test/test_harness.rb'
 
@@ -10,10 +9,16 @@ class TestDRCA < Minitest::Test
 
   def setup
     reset_data
+    load_base_settings
   end
 
   def teardown
     @test.join if @test
+  end
+
+  def load_base_settings(settings = {})
+    $test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
+    YAML.load_file('profiles/base-empty.yaml')['empty_values'].each { |key, val| $test_settings[key] ||= val }
   end
 
   def test_find_visible_planets_while_indoors
@@ -22,7 +27,10 @@ class TestDRCA < Minitest::Test
       "That's a bit tough to do when you can't see the sky.",
       'You put your telescope in your hunting pack.'
     ]
-    @test = run_script_with_proc(['common', 'common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+
       seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
       assert_empty(seen_planets)
     end)
@@ -36,7 +44,10 @@ class TestDRCA < Minitest::Test
       'The nestled armband pulses with Lunar energy.  You reach for its center and forge a magical link to it, readying all of its mana for your use.',
       'Roundtime: 1 sec.'
     ]
-    @test = run_script_with_proc(['common', 'common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+
       DRCA.invoke('armband', nil, 32)
       assert_sends_messages(['invoke my armband 32'])
     end)
@@ -73,7 +84,10 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Defending', 60)
     DRStats.guild = 'Barbarian'
     DRSpells._set_active_spells({})
-    @test = run_script_with_proc(['common', 'common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+
       DRCA.ritual(spell_data, [])
       assert_sends_messages(['stance set 100 0 81', 'prepare SPELL 1', 'remove my staff', 'invoke my staff', 'wear my staff', 'cast'])
     end)
@@ -86,7 +100,10 @@ class TestDRCA < Minitest::Test
   def test_skilled_to_charge_while_worn
     cambrinth_cap = 32
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
-    @test = run_script_with_proc(['common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+
       skilled = DRCA.skilled_to_charge_while_worn?(cambrinth_cap)
       assert_equal(true, skilled)
     end)
@@ -95,7 +112,10 @@ class TestDRCA < Minitest::Test
   def test_not_skilled_to_charge_while_worn
     cambrinth_cap = 32
     DRSkill._set_rank('Arcana', 1)
-    @test = run_script_with_proc(['common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+
       skilled = DRCA.skilled_to_charge_while_worn?(cambrinth_cap)
       assert_equal(false, skilled)
     end)
@@ -114,16 +134,21 @@ class TestDRCA < Minitest::Test
   end
 
   def run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, assertions = [])
-    @test = run_script_with_proc(['common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
 
+      original_DRCI = DRCA::DRCI if defined?(DRCA::DRCI)
       DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
       DRCA.const_set("DRCI", fake_drci)
 
       # Test
       found_cambrinth = DRCA.find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+
+      # Restore injected dependencies
+      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
+      DRCA.const_set("DRCI", original_DRCI)
 
       # Assert
       fake_drci.verify
@@ -271,16 +296,21 @@ class TestDRCA < Minitest::Test
   end
 
   def run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, assertions = [])
-    @test = run_script_with_proc(['common-arcana'], proc do
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
 
+      original_DRCI = DRCA::DRCI if defined?(DRCA::DRCI)
       DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
       DRCA.const_set("DRCI", fake_drci)
 
       # Test
       stowed_cambrinth = DRCA.stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
+
+      # Restore injected dependencies
+      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
+      DRCA.const_set("DRCI", original_DRCI || DRCI)
 
       # Assert
       fake_drci.verify
@@ -415,6 +445,97 @@ class TestDRCA < Minitest::Test
 
     run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
       assert_stow_cambrinth
+    ])
+  end
+
+  #########################################
+  # ACTIVATE BARBARIAN BUFFS
+  #########################################
+
+  def assert_activated_barb_buff
+    proc { |activated_buff| assert_equal(true, activated_buff) }
+  end
+
+  def assert_not_activated_barb_buff
+    proc { |activated_buff| assert_equal(false, activated_buff) }
+  end
+
+  def run_activate_barb_buff(messages, ability, meditation_pause_timer, sit_to_meditate, fake_drc, assertions = [], expected_errors = [])
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      # Setup
+      $server_buffer = messages.dup
+      $history = $server_buffer.dup
+
+      mocks = [fake_drc]
+
+      original_DRC = DRCA::DRC if defined?(DRCA::DRC)
+      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
+      DRCA.const_set("DRC", fake_drc)
+
+      # Test
+      begin
+        activated_buff = DRCA.activate_barb_buff?(ability, meditation_pause_timer, sit_to_meditate)
+      rescue Exception => e
+        error = e
+        unless expected_errors.include?(error.class)
+          flunk(exception_details(e, 'Unexpected error running test'))
+        end
+      end
+
+      # Restore injected dependencies
+      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
+      DRCA.const_set("DRC", original_DRC)
+
+      # Assert
+      assertions = [assertions] unless assertions.is_a?(Array)
+      mocks.each { |mock| assertions << proc { assert_mock(mock) } if mock.class == Minitest::Mock }
+      assertions.each { |assertion| assertion.call(activated_buff) }
+    end)
+  end
+
+  def test_barb_buff_sits_to_meditate
+    $test_data = {
+      spells: OpenStruct.new(YAML.load_file('data/base-spells.yaml'))
+    }
+
+    ability = 'Contemplation'
+    meditation_pause_timer = 10
+    sit_to_meditate = true
+
+    messages = []
+
+    fake_drc = Minitest::Mock.new
+    fake_drc.expect(:retreat, true, [])
+    fake_drc.expect(:bput, "You sit.", ['sit', 'You sit', 'You are already', 'You rise', 'While swimming?'])
+    fake_drc.expect(:bput, "You begin to meditate upon the chakrel amulet, your inner fire swelling as you center your mind, body, and spirit.") do |arg_command, *arg_matches|
+      arg_command == 'meditate contemplation'
+    end
+    fake_drc.expect(:fix_standing, true)
+
+    run_activate_barb_buff(messages, ability, meditation_pause_timer, sit_to_meditate, fake_drc, [
+      assert_activated_barb_buff
+    ])
+  end
+
+  def test_barb_buff_not_sits_to_meditate
+    $test_data = {
+      spells: OpenStruct.new(YAML.load_file('data/base-spells.yaml'))
+    }
+
+    ability = 'Contemplation'
+    meditation_pause_timer = 10
+    sit_to_meditate = false
+
+    messages = []
+
+    fake_drc = Minitest::Mock.new
+    fake_drc.expect(:bput, "You begin to meditate upon the chakrel amulet, your inner fire swelling as you center your mind, body, and spirit.") do |arg_command, *arg_matches|
+      arg_command == 'meditate contemplation'
+    end
+    fake_drc.expect(:fix_standing, true)
+
+    run_activate_barb_buff(messages, ability, meditation_pause_timer, sit_to_meditate, fake_drc, [
+      assert_activated_barb_buff
     ])
   end
 

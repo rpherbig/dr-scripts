@@ -2888,7 +2888,20 @@ class AttackProcess
   def attack_melee(charged_maneuver, game_state)
     waitrt?
     if charged_maneuver
+      # If you're prioritizing doublestrike but only wielding one melee weapon
+      # then temporarily wield a second weapon offhand to perform the maneuver.
+      offhand_weapon_name = nil
+      if charged_maneuver.casecmp?('doublestrike') && DRC.left_hand.nil?
+        skill = game_state.determine_doublestrike_skill
+        if skill
+          echo "attack_melee::maneuver_doublestrike:skill: #{skill}" if $debug_mode_ct
+          offhand_weapon_name = game_state.wield_offhand_weapon(skill)
+        end
+      end
+
       use_charged_maneuver(charged_maneuver, game_state)
+
+      game_state.sheath_offhand_weapon(skill) if offhand_weapon_name
     else
       if game_state.backstab? || game_state.use_stealth_attack? || game_state.ambush?
         hide?(@hide_type)
@@ -3386,6 +3399,7 @@ class GameState
   include DRCS
   include DRC
 
+  $martial_skills = ['Brawling']
   $melee_skills = ['Small Edged', 'Large Edged', 'Twohanded Edged', 'Small Blunt', 'Large Blunt', 'Twohanded Blunt', 'Staves', 'Polearms']
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $twohanded_skills = ['Twohanded Edged', 'Twohanded Blunt']
@@ -3512,6 +3526,9 @@ class GameState
 
     @charged_maneuvers = settings.charged_maneuvers
     echo("  @charged_maneuvers: #{@charged_maneuvers}") if $debug_mode_ct
+
+    @prioritize_maneuver_doublestrike = settings.prioritize_maneuver_doublestrike
+    echo("  @prioritize_maneuver_doublestrike: #{@prioritize_maneuver_doublestrike}") if $debug_mode_ct
 
     @fatigue_regen_threshold = settings.fatigue_regen_threshold
     echo("  @fatigue_regen_threshold: #{@fatigue_regen_threshold}") if $debug_mode_ct
@@ -3904,8 +3921,11 @@ class GameState
   end
 
   def charged_maneuver
-    return @charged_maneuvers['Dual Wield'] if currently_whirlwinding && !twohanded_weapon_skill?
-    @charged_maneuvers[weapon_skill]
+    if !twohanded_weapon_skill? && (@currently_whirlwinding || (@prioritize_maneuver_doublestrike && melee_weapon_skill?))
+      @charged_maneuvers['Dual Wield']
+    else
+      @charged_maneuvers[weapon_skill]
+    end
   end
 
   def fatigue_low?
@@ -4171,12 +4191,22 @@ class GameState
   end
 
   def determine_aiming_skill
-    held_types = ['Small Edged', 'Large Edged', 'Small Blunt', 'Large Blunt', 'Staves', 'Polearms']
-    thrown_types = ['Light Thrown', 'Heavy Thrown']
     options = @aiming_trainables
-    options -= held_types if weapon_skill.eql?('Bow') || (weapon_skill.eql?('Crossbow') && !@using_light_crossbow)
-    options -= thrown_types if (weapon_skill.eql?('Bow') && @left_hand_free)
+    options -= [weapon_skill] # can't be your mainhand skill
+    options -= $twohanded_skills # can't be a twohanded skill
+    options -= $melee_skills if weapon_skill.eql?('Bow') || (weapon_skill.eql?('Crossbow') && !@using_light_crossbow)
+    options -= $thrown_skills if (weapon_skill.eql?('Bow') && @left_hand_free)
     echo "determine_aiming_skill::options: #{options}" if $debug_mode_ct
+    sort_by_rate_then_rank(options).first
+  end
+
+  def determine_doublestrike_skill
+    options = @aiming_trainables
+    options -= [weapon_skill] # can't be your main hand skill, it's in your main hand
+    options -= $twohanded_skills # can't be a twohanded skill, you need both hands
+    options -= $thrown_skills # shouldn't be a thrown skill, you're doing a melee attack
+    options -= $martial_skills # shouldn't be brawling, you need a weapon in your offhand
+    echo "determine_doublestrike_skill::options: #{options}" if $debug_mode_ct
     sort_by_rate_then_rank(options).first
   end
 

@@ -8,17 +8,147 @@ class EquipmentManager
   include DRC
   include DRCI
 
+  SHOVEL_MATCHES = [
+    /and pull free the head of a shovel/
+  ]
+
+  TONGS_MATCHES = [
+    /readying them for use as tongs/
+  ]
+
   def initialize(settings = nil)
-    items(settings)
+    @settings = settings || get_settings
+    @debug = @settings.equipmanager['debug'] || false
+    @sort_head = @settings.sort_auto_head
+    @gear_sets = {}
+    @settings.gear_sets.each { |set_name, gear_list| @gear_sets[set_name] = gear_list.flatten.uniq }
+    @items = process_settings_gear_map
+    # Toolbelts and Tools should go away once people migrate to gear entries
+    process_toolbelts
+    process_tools
   end
 
-  def items(settings = nil)
-    return @items if @items
-    settings ||= get_settings
-    @gear_sets = {}
-    settings.gear_sets.each { |set_name, gear_list| @gear_sets[set_name] = gear_list.flatten.uniq }
-    @sort_head = settings.sort_auto_head
-    @items = settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges], ranged: item[:ranged], needs_unloading: item[:needs_unloading], skip_repair: item[:skip_repair], container: item[:container]) }
+  def process_settings_gear_map
+    return @settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking],
+        worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound],
+        wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text],
+        lodges: item[:lodges], ranged: item[:ranged], needs_unloading: item[:needs_unloading], skip_repair: item[:skip_repair],
+        container: item[:container], crafts: item[:crafts], tool_types: item[:tool_types]
+      )}
+  end
+
+  def process_toolbelts
+    # Anything in a toolbelt entry, that is not already in @items, should be added
+    add_tools_from_toolbelt(@settings.forging_belt['name'], @settings.forging_belt['items'])
+    add_tools_from_toolbelt(@settings.outfitting_belt['name'], @settings.outfitting_belt['items'])
+    add_tools_from_toolbelt(@settings.alchemy_belt['name'], @settings.alchemy_belt['items'])
+    add_tools_from_toolbelt(@settings.enchanting_belt['name'], @settings.enchanting_belt['items'])
+    add_tools_from_toolbelt(@settings.engineering_belt['name'], @settings.engineering_belt['items'])
+  end
+
+  def add_tools_from_toolbelt(belt_name, belt_items)
+    return unless belt_name && belt_items
+
+    belt_items.each { |belt_item|
+      next if item_by_desc(belt_item)
+
+      item = DRC::Item::from_text(belt_item)
+      item.tie_to = belt_name
+      item.skip_repair = true
+      @items << item
+    }
+  end
+
+  def process_tools
+    add_tools('forging', @settings.forging_tools)
+    add_tools('tinkering', @settings.tinkering_tools)
+    add_tools('outfitting', @settings.outfitting_tools)
+    add_tools('shaping', @settings.shaping_tools)
+    add_tools('alchemy', @settings.alchemy_tools)
+    add_tools('carving', @settings.carving_tools)
+    add_tools('enchanting', @settings.enchanting_tools)
+    add_tools('mining', [@settings.mining_implement])
+  end
+
+  def add_tools(craft_type, tools_items)
+    tools_items.each { |tool_item|
+      next unless tool_item
+
+      item = item_by_desc(tool_item)
+      if item.nil?
+        item = DRC::Item::from_text(tool_item) unless item
+        item.skip_repair = true
+        @items << item
+      end
+
+      item.crafts << craft_type unless item.crafts.include?(craft_type)
+      tool_type = get_tool_type_for_item(item)
+      item.tool_types << tool_type unless item.tool_types.include?(tool_type)
+    }
+  end
+
+  def items()
+    @items
+  end
+
+  def get_tool_info(craft_type, tool_type)
+    items.find { |item| item.crafts.include?(craft_type) && item.tool_types.include?(tool_type) }
+  end
+
+  def get_tool_info_for_craft(craft_type)
+    items.select { |item| item.crafts.include?(craft_type) }
+  end
+
+  def get_tool?(craft_type, tool_type)
+    # Check gear for matching item
+    echo "Searching items for tool flagged: #{craft_type} + #{tool_type}..." if @debug
+    item = items.find { |item| item.crafts.include?(craft_type) && item.tool_types.include?(tool_type) }
+
+    # Couldn't find anything that would work, fail out
+    echo "No matching item found for #{craft_type} + #{tool_type}" if @debug && item.nil?
+    return false unless item
+
+    return false unless get_item?(item)
+
+    return true unless item.swappable
+
+    return swap_to_tool_type?(item, tool_type)
+  end
+
+  def return_tool?(craft_type, tool_type)
+    echo "Searching items for tool flagged: #{craft_type} + #{tool_type}..." if @debug
+    item = items.find { |item| item.crafts.include?(craft_type) && item.tool_types.include?(tool_type) }
+    return false unless item
+
+    return_item(item)
+    return true
+  end
+
+  def get_tool_type_for_item(item)
+    case "#{item.adjective} #{item.name}"
+    when /hammer|mallet/
+      return 'hammer'
+    when /knitting needles/
+      return 'knitting needles'
+    when /sewing needles/
+      return 'sewing needles'
+    else
+      return item.name
+    end
+  end
+
+  def swap_to_tool_type?(item, tool_type)
+    tool_swap_command = "adjust my #{item.adjective} #{item.name}"
+
+    item.tool_types.length.times {
+      case DRC.bput(tool_swap_command, SHOVEL_MATCHES, TONGS_MATCHES)
+      when *SHOVEL_MATCHES
+        return true if tool_type =~ /shovel/i
+      when *TONGS_MATCHES
+        return true if tool_type =~ /tongs/i
+      end
+    }
+    return false
   end
 
   def remove_gear_by(&_block)
@@ -219,7 +349,7 @@ class EquipmentManager
 
   def get_item?(item)
     if item.wield
-      bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'Wield what', 'With a flick of your wrist you stealthily unsheathe') != 'Wield what'
+      DRC.bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'Wield what', 'With a flick of your wrist you stealthily unsheathe') != 'Wield what'
     elsif item.transforms_to
       item = item_by_desc(item.transforms_to)
       item.worn ? get_item_helper(item, :worn) : get_item_helper(item, :stowed)
@@ -227,7 +357,7 @@ class EquipmentManager
     elsif (item.tie_to && get_item_helper(item, :tied)) || (item.worn && get_item_helper(item, :worn)) || (item.container && DRCI.get_item(item.short_name, item.container)) || get_item_helper(item, :stowed)
       true
     else
-      echo("Could not find #{item.short_name} anywhere.")
+      DRC.message("Could not find #{item.short_name} anywhere.")
       false
     end
   end
@@ -248,20 +378,24 @@ class EquipmentManager
         stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your', 'You slip')
         true
       elsif info = items.find { |item| item.short_regex =~ held_item }
-        unload_weapon(info.short_name) if info.needs_unloading
-        if info.tie_to
-          stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
-        elsif info.wield
-          stow_helper("sheath my #{info.short_name}", info.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap')
-        elsif info.container
-          stow_helper("put my #{info.short_name} into #{info.container}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your', 'You hang')
-        else
-          stow_helper("stow my #{info.short_name}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
-        end
+        return_item(info)
         true
       else
         false
       end
+    end
+  end
+
+  def return_item(item)
+    unload_weapon(item.short_name) if item.needs_unloading
+    if item.tie_to
+      stow_helper("tie my #{item.short_name} to #{item.tie_to}", item.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
+    elsif item.wield
+      stow_helper("sheath my #{item.short_name}", item.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap')
+    elsif item.container
+      stow_helper("put my #{item.short_name} into #{item.container}", item.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your', 'You hang')
+    else
+      stow_helper("stow my #{item.short_name}", item.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
     end
   end
 

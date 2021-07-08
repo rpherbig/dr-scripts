@@ -8,7 +8,14 @@ include Harness
 class TestDRCA < Minitest::Test
 
   def setup
+    if defined?(DRCA)
+      Object.send(:remove_const, :DRCA)
+      $LOADED_FEATURES.delete_if {|file| file =~ /common/}
+    end
     reset_data
+    $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}
+    @fake_drc = Minitest::Mock.new
+    @fake_drci = Minitest::Mock.new
     load_base_settings
   end
 
@@ -94,6 +101,144 @@ class TestDRCA < Minitest::Test
   end
 
   #########################################
+  # ACTIVATE KHRI
+  #########################################
+
+  def run_activate_khri_test_with_mocks(kneel, khri, expectation)
+    @test = run_script_with_proc(['common-arcana'], proc do
+      DRCA.send(:remove_const, "DRC") if defined?(DRCA::DRC)
+      DRCA.const_set("DRC", @fake_drc)
+
+      activated = DRCA.activate_khri?(kneel, khri)
+      assert_equal(expectation, activated)
+    end)
+  end
+
+  def test_handles_single_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'Hasten', true)
+  end
+
+  def test_handles_single_khri_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'Hasten', true)
+  end
+
+  def test_handles_single_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri Hasten', true)
+  end
+
+  def test_handles_single_khri_with_prefix_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'KHRI Hasten', true)
+  end
+
+  def test_handles_delayed_single_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "You begin to draw your focus on increasing your celerity of motion", ['Khri Delay Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay HASTEN', true)
+  end
+
+  def test_handles_delayed_single_khri_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'delay hasten', true)
+  end
+
+  def test_handles_delayed_single_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'KHRI DELAY HASTEN', true)
+  end
+
+  def test_handles_delayed_single_khri_with_prefix_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    run_activate_khri_test_with_mocks(false, 'khri delay hasten', true)
+  end
+
+  def test_handles_mulitple_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', true)
+  end
+
+  def test_handles_multiple_khri_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', true)
+  end
+
+  def test_handles_mulitple_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', true)
+  end
+
+  def test_handles_multiple_khri_with_prefix_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', true)
+  end
+
+  def test_handles_multiple_khri_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'DAMPEN HASTEN', true)
+  end
+
+  def test_handles_multiple_khri_with_prefix_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'khri DAMPEN HASTEN', true)
+  end
+
+  def test_handles_delayed_mulitple_khri_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', true)
+  end
+
+  def test_handles_delayed_multiple_khri_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', true)
+  end
+
+  def test_handles_delayed_mulitple_khri_with_prefix_not_running_no_kneeling
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen Hasten', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASTEN', true)
+  end
+
+  def test_handles_delayed_multiple_khri_with_prefix_some_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    @fake_drc.expect(:bput, "foo", ['Khri Delay Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASten', true)
+  end
+
+  def test_handles_delayed_multiple_khri_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'delay DAMPEN HASTEN', true)
+  end
+
+  def test_handles_delayed_multiple_khri_with_prefix_all_running_no_kneeling
+    DRSpells._set_active_spells({"Khri Hasten" => 3, "Khri Dampen" => 5})
+    run_activate_khri_test_with_mocks(false, 'khri DELay DAMPEN HASTEN', true)
+  end
+
+  def test_handles_delayed_multiple_khri_with_prefix_some_running_no_kneeling_failure
+    DRSpells._set_active_spells({"Khri Hasten" => 3})
+    # You have not recovered from your previous use of the Hasten meditation.
+    @fake_drc.expect(:bput, 'You have not recovered', ['Khri Delay Dampen', Array])
+    @fake_drc.expect(:fix_standing, nil)
+    run_activate_khri_test_with_mocks(false, 'khri delay DAMPEN hASten', false)
+  end
+
+  #########################################
   # SKILLED TO CHARGE WHILE WORN
   #########################################
 
@@ -133,61 +278,46 @@ class TestDRCA < Minitest::Test
     proc { |found_cambrinth| assert_equal(false, found_cambrinth) }
   end
 
-  def run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, assertions = [])
-    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+  def run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, assertions = [])
+    @test = run_script_with_proc(['common', 'common-arcana'], proc do
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
-
-      original_DRCI = DRCA::DRCI if defined?(DRCA::DRCI)
-      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
-      DRCA.const_set("DRCI", fake_drci)
+      DRCA.const_set("DRCI", @fake_drci)
 
       # Test
       found_cambrinth = DRCA.find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
 
-      # Restore injected dependencies
-      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
-      DRCA.const_set("DRCI", original_DRCI)
-
       # Assert
-      fake_drci.verify
+      @fake_drci.verify
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(found_cambrinth) }
     end)
   end
 
   def test_find_stored_cambrinth_by_get
+    messages = []
     cambrinth = 'cambrinth armband'
     stored_cambrinth = true
     cambrinth_cap = 32
-
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+    @fake_drci.expect(:get_item_if_not_held?, true, [String])
 
-    messages = []
-
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_found_cambrinth
     ])
   end
 
   def test_find_stored_cambrinth_by_remove
+    messages = []
     cambrinth = 'cambrinth armband'
     stored_cambrinth = true
     cambrinth_cap = 32
-
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
+    @fake_drci.expect(:get_item_if_not_held?, false, [String])
+    @fake_drci.expect(:remove_item?, true, [String])
 
-    messages = []
-
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, false, [String])
-    fake_drci.expect(:remove_item?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_found_cambrinth
     ])
   end
@@ -200,12 +330,10 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:get_item_if_not_held?, false, [String])
+    @fake_drci.expect(:remove_item?, false, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, false, [String])
-    fake_drci.expect(:remove_item?, false, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_not_found_cambrinth
     ])
   end
@@ -218,11 +346,9 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', 1) # insufficient skill so must remove 'worn' cambrinth
 
     messages = []
+    @fake_drci.expect(:in_hands?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_found_cambrinth
     ])
   end
@@ -235,12 +361,10 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', 1) # insufficient skill so must remove 'worn' cambrinth
 
     messages = []
+    @fake_drci.expect(:in_hands?, false, [String])
+    @fake_drci.expect(:remove_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, false, [String])
-    fake_drci.expect(:remove_item?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_found_cambrinth
     ])
   end
@@ -253,13 +377,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', 1) # insufficient skill so must remove 'worn' cambrinth
 
     messages = []
+    @fake_drci.expect(:in_hands?, false, [String])
+    @fake_drci.expect(:remove_item?, false, [String])
+    @fake_drci.expect(:get_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, false, [String])
-    fake_drci.expect(:remove_item?, false, [String])
-    fake_drci.expect(:get_item?, true, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_found_cambrinth
     ])
   end
@@ -272,13 +394,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', 1) # insufficient skill so must remove 'worn' cambrinth
 
     messages = []
+    @fake_drci.expect(:in_hands?, false, [String])
+    @fake_drci.expect(:remove_item?, false, [String])
+    @fake_drci.expect(:get_item?, false, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, false, [String])
-    fake_drci.expect(:remove_item?, false, [String])
-    fake_drci.expect(:get_item?, false, [String])
-
-    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_find_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_not_found_cambrinth
     ])
   end
@@ -295,25 +415,18 @@ class TestDRCA < Minitest::Test
     proc { |stowed_cambrinth| assert_equal(false, stowed_cambrinth) }
   end
 
-  def run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, assertions = [])
-    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+  def run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, assertions = [])
+    @test = run_script_with_proc(['common', 'common-arcana'], proc do
       # Setup
       $server_buffer = messages.dup
       $history = $server_buffer.dup
-
-      original_DRCI = DRCA::DRCI if defined?(DRCA::DRCI)
-      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
-      DRCA.const_set("DRCI", fake_drci)
+      DRCA.const_set("DRCI", @fake_drci)
 
       # Test
       stowed_cambrinth = DRCA.stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
 
-      # Restore injected dependencies
-      DRCA.send(:remove_const, "DRCI") if defined?(DRCA::DRCI)
-      DRCA.const_set("DRCI", original_DRCI || DRCI)
-
       # Assert
-      fake_drci.verify
+      @fake_drci.verify
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(stowed_cambrinth) }
     end)
@@ -327,12 +440,10 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:get_item_if_not_held?, true, [String])
+    @fake_drci.expect(:stow_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, true, [String])
-    fake_drci.expect(:stow_item?, true, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_stow_cambrinth
     ])
   end
@@ -345,13 +456,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:get_item_if_not_held?, false, [String])
+    @fake_drci.expect(:remove_item?, true, [String])
+    @fake_drci.expect(:stow_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, false, [String])
-    fake_drci.expect(:remove_item?, true, [String])
-    fake_drci.expect(:stow_item?, true, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_stow_cambrinth
     ])
   end
@@ -364,13 +473,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:get_item_if_not_held?, false, [String])
+    @fake_drci.expect(:remove_item?, false, [String])
+    @fake_drci.expect(:stow_item?, false, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:get_item_if_not_held?, false, [String])
-    fake_drci.expect(:remove_item?, false, [String])
-    fake_drci.expect(:stow_item?, false, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_not_stow_cambrinth
     ])
   end
@@ -383,12 +490,10 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:in_hands?, true, [String])
+    @fake_drci.expect(:wear_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, true, [String])
-    fake_drci.expect(:wear_item?, true, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_stow_cambrinth
     ])
   end
@@ -401,13 +506,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:in_hands?, true, [String])
+    @fake_drci.expect(:wear_item?, false, [String])
+    @fake_drci.expect(:stow_item?, true, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, true, [String])
-    fake_drci.expect(:wear_item?, false, [String])
-    fake_drci.expect(:stow_item?, true, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_stow_cambrinth
     ])
   end
@@ -420,13 +523,11 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:in_hands?, true, [String])
+    @fake_drci.expect(:wear_item?, false, [String])
+    @fake_drci.expect(:stow_item?, false, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, true, [String])
-    fake_drci.expect(:wear_item?, false, [String])
-    fake_drci.expect(:stow_item?, false, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_not_stow_cambrinth
     ])
   end
@@ -439,11 +540,9 @@ class TestDRCA < Minitest::Test
     DRSkill._set_rank('Arcana', ((cambrinth_cap.to_i * 2) + 100))
 
     messages = []
+    @fake_drci.expect(:in_hands?, false, [String])
 
-    fake_drci = Minitest::Mock.new
-    fake_drci.expect(:in_hands?, false, [String])
-
-    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, fake_drci, [
+    run_stow_cambrinth(messages, cambrinth, stored_cambrinth, cambrinth_cap, [
       assert_stow_cambrinth
     ])
   end

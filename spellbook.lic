@@ -1,0 +1,195 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#spellbook
+
+  # Future
+  This script should probably be a wrapper around casting unleash with certain parameters in common-arcana.
+  Right now it's more of a casting script with a wrapper.
+
+  This script will:
+    1. travel to an indoors room
+      - use go2, but also determine the nearest room or something
+      - start with just a single room configurable in player yaml
+      - this is kind of interesting, because we may want to travel as part of buffwatcher
+    2. safely unleash a sorcery from a spellbook at a certain prep
+      - this is the main module
+      - check that the room is indoors before taking out the spellbook
+        - fail entirely if false
+    3. cast the spell
+      - can we use any arcana/magic common methods/classes/scripts?
+      - harness etc. all apply
+
+  A method for storing your current room before moving, from invoke-rune.lic:
+  def buy_runestone
+    current_room = Room.current.id
+    DRC.wait_for_script_to_complete('restock') unless Script.running?('combat-trainer')
+    DRCT.walk_to(current_room)
+  end
+=end
+
+custom_require.call(%w[common common-arcana common-items events spellmonitor drinfomon equipmanager])
+
+no_kill_all
+
+def junky_titleize(words)
+  return words.split(/ |\_|\-/).map(&:capitalize).join(" ")
+end
+
+class SpellBookManager
+  include DRC
+  include DRCA
+  include DRCI
+
+  def initialize
+
+    arg_definitions = [
+      [
+        { name: 'spellbook_spell', display: 'spellbook spell', regex: /\w+/, variable: true, description: 'Full name of the spellbook spell, wrap in double quotes if this is multiple words.' },
+      ]
+    ]
+    args = parse_args(arg_definitions)
+
+    @settings = get_settings
+    @hometown = @settings.hometown
+
+    @spellbook_case = @settings.spellbook_case
+    @spellbook_name = @settings.spellbook_name
+    @spellbook_scrolls_chapter = @settings.spellbook_scrolls_chapter
+    @spellbook_spell = junky_titleize(args.spellbook_spell)
+    @spellbook_spell_data = get_data("spells").spell_data[@spellbook_spell]
+
+    @unleashed_spell_data = {"abbrev" => @spellbook_spell_data["abbrev"], "unleash_item" => @spellbook_name}
+
+    @equipment_manager = EquipmentManager.new
+
+    main_spellbook
+
+    before_dying do
+      safe_empty_hands
+    end
+  end
+
+  # change this function name and the orientation of the script overall
+  # script is more utility for handling the spellbook, and probably 2nd utility for unleashing a spell once you are on it
+  def main_spellbook
+    safe_get_spellbook
+    open_spellbook_for_casting
+    turn_to_spell_page(find_spell_page)
+    unleash_spellbook(@unleashed_spell_data)
+    store_spellbook
+  end
+
+  def check_indoors
+    indoors_str = "That's a bit hard to do while inside."
+    indoors_portal_str = "You glance outside."
+    weather = bput("weather", indoors_str, indoors_portal_str)
+    if weather == indoors_str or weather == indoors_portal_str
+      return true
+    end
+    return false
+  end
+
+  # this is mainly to help this script fail out
+  def check_holding_spellbook
+    hands = bput("inv held", @spellbook_name, "Both of your hands are empty.", "right hand", "left hand")
+    if hands == @spellbook_name
+      return true
+    end
+    return false
+  end
+
+  def safe_empty_hands
+    if check_holding_spellbook
+      store_spellbook
+    end
+    if check_spellbook_safe
+      @equipment_manager.empty_hands
+    else
+      # should not hit this anymore
+      echo("*** WARNING: Your hands are not in a safe state, please empty your hands and start start over.")
+      safe_exit
+    end
+  end
+
+  def open_and_turn_spellbook_case_to_spellbook
+    bput("open my #{@spellbook_case}", "You open a", "That is already open")
+    bput("turn my #{@spellbook_case} to spellbook", "The compartment of your spellbook case which holds a spellbook is already open.", "You shift the partitions")
+  end
+
+  # TODO: would be nice if this was a wrapper that always did something and put the spellbook away safely.
+  # TODO: this would prevent me from being in an bad state if the script doesn't exit
+  # TODO: and if the script does exit unexpectedly, then before_dying would call the any unhandled exit.
+  def safe_get_spellbook
+    safe_empty_hands
+    open_and_turn_spellbook_case_to_spellbook
+    if check_indoors
+      bput("get my #{@spellbook_name} from my #{@spellbook_case}", "You get")
+    else
+      echo("*** WARNING: You must be indoors! This is very unsafe! Please debug this before using the script again... exiting.")
+      safe_exit
+    end
+  end
+
+  def store_spellbook
+    open_and_turn_spellbook_case_to_spellbook
+    bput("close my #{@spellbook_name}", "You close your", "That is already closed!")
+    tucked_spellbook = bput("put my #{@spellbook_name} in my #{@spellbook_case}", "You tuck")
+    check_spellbook_safe
+    # TODO: verify spellbook case does not need closed
+  end
+
+  def check_spellbook_safe
+    not_found = "I could not find what you were referring to."
+    found = "You tap a"
+    open_and_turn_spellbook_case_to_spellbook
+    result = bput("tap my #{@spellbook_name} in my #{@spellbook_case}", found, not_found)
+    if found == result
+      return true
+    end
+    if not_found == result
+      echo("*** WARNING: SPELLBOOK #{@spellbook_name} NOT FOUND IN #{@spellbook_case}")
+      return false
+    end
+    # TODO: verify spellbook case does not need closed
+  end
+
+  def safe_exit
+    if check_holding_spellbook
+      store_spellbook
+    end
+    exit
+  end
+
+  def open_spellbook_for_casting
+    already_open = "That is already open!"
+    opening_spellbook = bput("open my #{@spellbook_name}", "You open a", already_open)
+    if opening_spellbook = already_open
+      bput("turn my #{@spellbook_name} to contents", "You flip back", "The spellbook is already opened to the table of contents.")
+    end
+
+    bput("turn my #{@spellbook_name} to chapter #{@spellbook_scrolls_chapter}", "You turn the")
+  end
+
+  def find_spell_page
+    # TODO: consider trying this 3+ times
+    bput("read my #{@spellbook_name}", "spellbook reads")
+    page_line = matchtimeout 5, @spellbook_spell
+    if not page_line:
+      echo("*** WARNING: The spell is not in your spellbook. Did it get erased?")
+      safe_exit
+    end
+    # ref: Page 4.......Iron Constitution
+    page_number = page_line[/\d+/]  # get first decimal substring
+    return page_number
+  end
+
+  # TODO NB: It is not necessary to read the spellbook to unleash it.
+  def turn_to_spell_page(page_number)
+    bput("turn my #{@spellbook_name} to page #{page_number}", "You turn to page", "is already open to page")
+  end
+
+  def unleash_spellbook(data)
+    cast_spell(data, @settings)
+  end
+end
+
+SpellBookManager.new

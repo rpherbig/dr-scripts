@@ -2871,6 +2871,7 @@ class AttackProcess
     Flags.add('ct-ranged-ammo', "(you (?<action>fire|poach|snipe) an?|your) (?<prefix>[^\.!]*? )?#{ammo_pattern}(?<suffix> [^\.!]*?)?? (at|passes through)")
     Flags.add('ct-powershot-ammo', "With a loud twang, you let fly your #{ammo_pattern}!")
     Flags.add('ct-ranged-loaded', 'You reach into', 'You load', 'You carefully load', 'already loaded', 'in your hand')
+    Flags.add('ct-using-repeating-crossbow', /Your repeating crossbow/i, /Your repeating arbalest/i, /Your marksman's arbalest/i, /Your assassin's crossbow/i, /Your riot crossbow/i, /You .* ammunition (chamber|store)/, /already loaded with as much ammunition as it can hold/, /You realize readying more than one/)
     Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now.')
     Flags.add('ct-face-what', 'Face what')
@@ -3072,18 +3073,14 @@ class AttackProcess
     end
 
     if game_state.loaded && (game_state.done_aiming? || (Time.now - @firing_timer).to_i >= @firing_delay)
-      if charged_maneuver && use_charged_maneuver(charged_maneuver, game_state)
-        game_state.action_taken
-      else
-        command = if game_state.use_stealth_ranged? && hide?(@hide_type)
-                    @stealth_attack_aimed_action
-                  elsif game_state.use_stealth_attack? && hide?(@hide_type)
-                    @stealth_attack_aimed_action
-                  else
-                    'shoot'
-                  end
-        shoot_aimed(command, game_state)
-      end
+      command = if game_state.use_stealth_ranged? && hide?(@hide_type)
+                  @stealth_attack_aimed_action
+                elsif game_state.use_stealth_attack? && hide?(@hide_type)
+                  @stealth_attack_aimed_action
+                else
+                  'shoot'
+                end
+      shoot_aimed(command, game_state)
       game_state.loaded = false
       waitrt?
     elsif game_state.loaded && !game_state.aiming_trainables.empty?
@@ -3138,8 +3135,12 @@ class AttackProcess
         /You load/,
         /You carefully load/,
         /already loaded/,
-        /in your hand/
+        /in your hand/,
+        /A rapid series of clicks/,
+        /into firing position/,
+        /You realize readying/
       ]
+
       load_weapon_failure = [
         /As you try to reach/,
         /You don't have the proper ammunition/,
@@ -3149,6 +3150,10 @@ class AttackProcess
         /but are unable to draw upon its majesty/,
         /without steadier hands/,
         /You can not load .* in your left hand/,
+        /You attempt to ready your/,
+        /Push what?/,
+        /It's best to hold/,
+        /pushing that would have any effect/
       ]
 
       dual_load = game_state.dual_load?
@@ -3172,29 +3177,52 @@ class AttackProcess
         # Occasionally, there may be no game output after loading.
         # To be on the safe side, we do two attempts to get output.
         Flags.reset('ct-ranged-loaded')
+        Flags.reset('ct-using-repeating-crossbow')
+
         load_weapon_result = bput('load', { 'timeout' => 1, 'suppress_no_match' => true }, *load_weapon_success, *load_weapon_failure)
         load_weapon_result = bput('load', *load_weapon_success, *load_weapon_failure) unless Flags['ct-ranged-loaded']
+        waitrt?
+
         case load_weapon_result
         when *load_weapon_failure
-          DRC.message("Unable to load #{game_state.weapon_name}, you may be out of ammunition, dancing until can switch to next weapon")
-          game_state.loaded = false
-          game_state.clear_aim_queue
-          dance(game_state)
-          # Increment action count so that the script
-          # will eventually progress to next skill to train.
-          game_state.action_taken(99)
-        else
+          abort_attack_aimed(game_state)
+          return
+        when *load_weapon_success
+          # Check if loading a repeating crossbow because we need to then push ammo into the chamber
+          if Flags['ct-using-repeating-crossbow']
+            case bput("push my #{game_state.weapon_name}", *load_weapon_success, *load_weapon_failure)
+            when *load_weapon_failure
+              abort_attack_aimed(game_state)
+              return
+            end
+          end
           game_state.loaded = true
         end
       end
 
       waitrt?
-      unless charged_maneuver
-        game_state.set_aim_queue
-        aim(game_state)
-        Flags.reset('ct-ranged-ready')
+
+      if game_state.loaded
+        if charged_maneuver
+          use_charged_maneuver(charged_maneuver, game_state)
+          game_state.action_taken
+        else
+          game_state.set_aim_queue
+          aim(game_state)
+          Flags.reset('ct-ranged-ready')
+        end
       end
     end
+  end
+
+  def abort_attack_aimed(game_state)
+    DRC.message("Unable to load #{game_state.weapon_name}, you may be out of ammunition, dancing until can switch to next weapon")
+    game_state.loaded = false
+    game_state.clear_aim_queue
+    dance(game_state)
+    # Increment action count so that the script
+    # will eventually progress to next skill to train.
+    game_state.action_taken(99)
   end
 
   def execute_aiming_action?(action, game_state)
@@ -3218,31 +3246,40 @@ class AttackProcess
   end
 
   def aim(game_state)
-    case bput('aim', 'You begin to target', 'You are already', 'There is nothing else', 'Face what\?', 'You shift your target', 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your repeating arbalest', 'Strangely, you don\'t feel like fighting right now', 'Your riot crossbow', 'In one frozen moment', "isn't loaded", "You don't have a ranged weapon to aim with")
-    when 'You are already', 'You begin to target'
+    aim_success_messages = [
+      /You are already/,
+      /You begin to target/,
+      /You shift your target/,
+      /In one frozen moment/ # Syamelyo Kuniyo spell effect
+    ]
+
+    unloaded_messages = [
+      /isn't loaded/,
+      /You don't have a ranged weapon to aim with/
+    ]
+
+    no_enemy_messages = [
+      /There is nothing else/,
+      /Face what/
+    ]
+
+    wait_and_retry_messages = [
+      /Strangely, you don't feel like fighting right now/
+    ]
+
+    case bput("aim", *aim_success_messages, *unloaded_messages, *no_enemy_messages, *wait_and_retry_messages)
+    when *aim_success_messages
       game_state.loaded = true
       check_firing_time
-    when 'Your repeating crossbow', 'Your assassin\'s crossbow', 'Your riot crossbow'
-      case bput('push my cross', 'A rapid series of clicks', 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow','You realize readying')
-      when 'A rapid series of clicks','You realize readying'
-        aim(game_state)
-      when 'You attempt to ready your repeating crossbow', 'You attempt to ready your assassin\'s crossbow', 'You attempt to ready your riot crossbow', "isn't loaded"
-        game_state.loaded = false
-      end
-    when 'Your repeating arbalest'
-      case bput('push my arbalest', 'A rapid series of clicks', 'You attempt to ready your repeating arbalest')
-      when 'A rapid series of clicks'
-        aim(game_state)
-      when 'You attempt to ready your repeating arbalest'
-        game_state.loaded = false
-      end
-    when "isn't loaded", "You don't have a ranged weapon to aim with"
+    when *unloaded_messages
       game_state.loaded = false
-    when 'Face what?'
+    when *no_enemy_messages
       game_state.clear_aim_queue
-    when 'Strangely, you don\'t feel like fighting right now'
+    when *wait_and_retry_messages
       pause 1
       aim(game_state)
+    else
+      game_state.loaded = false
     end
   end
 
@@ -3336,6 +3373,7 @@ class AttackProcess
         if game_state.dual_load?
           shoot_aimed('shoot', game_state)
         end
+        game_state.loaded = false
       end
 
       # Woot! Barbarian reduced their maneuver cooldown so
@@ -3352,6 +3390,8 @@ class AttackProcess
         game_state.cooldown_timers[action] = Time.now + 90
       end
 
+      # Toggle off using charged maneuvers until
+      # training ability process toggles it back for training
       game_state.use_charged_maneuvers = false
 
       return true
@@ -4457,6 +4497,7 @@ before_dying do
   Flags.delete('ct-maneuver-cooldown-reduced')
   Flags.delete('ct-ranged-ammo')
   Flags.delete('ct-ranged-loaded')
+  Flags.delete('ct-using-repeating-crossbow')
   Flags.delete('ct-ranged-ready')
   Flags.delete('ct-accuracy-ready')
   Flags.delete('ct-damage-ready')

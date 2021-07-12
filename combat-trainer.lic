@@ -1963,6 +1963,15 @@ class AbilityProcess
     @kneel_khri = settings.kneel_khri
     echo("  @kneel_khri: #{@kneel_khri}") if $debug_mode_ct
 
+    @battle_cries = settings.battle_cries
+    echo("  @battle_cries: #{@battle_cries}") if $debug_mode_ct
+
+    @battle_cry_cycle = settings.battle_cry_cycle || @battle_cries.map { |battle_cry| battle_cry['name'] }
+    echo("  @battle_cry_cycle: #{@battle_cry_cycle}") if $debug_mode_ct
+
+    @battle_cry_cooldown = settings.battle_cry_cooldown
+    echo("  @battle_cry_cooldown: #{@battle_cry_cooldown}") if $debug_mode_ct
+
     @barb_buffs = @buffs.delete('barb_buffs') || []
     echo("  @barb_buffs: #{@barb_buffs}") if $debug_mode_ct
 
@@ -1973,6 +1982,7 @@ class AbilityProcess
     echo("  @meditation_pause_timer: #{@meditation_pause_timer}") if $debug_mode_ct
 
     setup_barb_buff_flags
+    Flags.add('ct-battle-cry-not-facing', 'You are not facing an enemy')
 
     @paladin_use_badge = settings.paladin_use_badge
     echo("  @paladin_use_badge: #{@paladin_use_badge}") if $debug_mode_ct
@@ -2003,6 +2013,7 @@ class AbilityProcess
   def execute(game_state)
     check_paladin_skills
     check_nonspell_buffs(game_state)
+    check_battle_cries(game_state)
     false
   end
 
@@ -2100,6 +2111,50 @@ class AbilityProcess
           echo "Did not activate barb_buff #{name}" if $debug_mode_ct
         end
       end
+    end
+
+  def check_battle_cries(game_state)
+    timer = game_state.cooldown_timers['Battle Cry']
+    return unless !timer || (Time.now - timer).to_i > @battle_cry_cooldown
+    return unless game_state.npcs.length > 0
+
+    Flags.reset('ct-battle-cry-not-facing')
+
+    battle_cries = @battle_cries
+      .select { |battle_cry| battle_cry['target_enemy'] ? game_state.npcs.include?(battle_cry['target_enemy']) : true }
+      .select { |battle_cry| battle_cry['min_threshold'] ? game_state.npcs.length >= battle_cry['min_threshold'] : true }
+      .select { |battle_cry| battle_cry['max_threshold'] ? game_state.npcs.length <= battle_cry['max_threshold'] : true }
+
+    # Of the ready battle cries, find the next best one according to the preferred cycle
+    battle_cry_name = @battle_cry_cycle.find { |next_cry| battle_cries.find { |ready_cry| ready_cry['name'] == next_cry } }
+
+    # Get the details about the selected battle cry
+    battle_cry_data = battle_cries.find { |battle_cry| battle_cry['name'] == battle_cry_name }
+
+    if battle_cry_data
+      echo "Selected battle cry: #{battle_cry_data}" if $debug_mode_ct
+      command = battle_cry_data['command']
+      command = (command + " at " + battle_cry_data['target_enemy']) if battle_cry_data['target_enemy']
+      fput(command)
+      pause
+      waitrt?
+      if Flags['ct-battle-cry-not-facing']
+        # Oops, you're not actually facing an enemy to roar/scream at
+        case DRC.bput('face next', 'You turn', 'There is nothing else to face')
+        when 'You turn'
+          # Let's try that again...
+          check_battle_cries(game_state)
+        else
+          # Nothing to roar/scream at, maybe next time
+          return
+        end
+      else
+        game_state.cooldown_timers['Battle Cry'] = Time.now
+        @battle_cry_cycle.rotate!
+      end
+    else
+      echo "No battle cries met criteria" if $debug_mode_ct
+    end
   end
 end
 
@@ -4516,6 +4571,7 @@ before_dying do
   Flags.delete('ct-shock-warning')
   Flags.delete('ct-maneuver-cooldown-reduced')
   Flags.delete('ct-attack-out-of-range')
+  Flags.delete('ct-battle-cry-not-facing')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

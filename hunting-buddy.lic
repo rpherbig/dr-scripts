@@ -25,6 +25,7 @@ class HuntingBuddy
                      'Lunar Magic', 'Attunement', 'Arcana', 'Targeted Magic', 'Inner Fire',\
                      'Inner Magic', 'Augmentation', 'Debilitation', 'Utility', 'Warding', 'Sorcery']
     @hunting_buddies_max = @settings.hunting_buddies_max
+    @hunting_encumbrance_threshold = @settings.hunting_encumbrance_threshold
 
     # Will deprecate prehunt_buffs tag as a room
     @buff_room = @settings.prehunt_buffing_room || @settings.prehunt_buffs
@@ -49,11 +50,6 @@ class HuntingBuddy
     end
 
     @hunting_info = format_hunting_info(hunting_info)
-  end
-
-  def need_boxes?
-    return false unless @settings.box_hunt_minimum
-    count_boxes(@settings) <= @settings.box_hunt_minimum
   end
 
   def main
@@ -81,6 +77,7 @@ class HuntingBuddy
       stop_on_low_skills = info['stop_on_low']
       stop_on_boxes = info['boxes']
       stop_on_no_moons = info['moons']
+      stop_on_encumbrance = info['encumbrance']
       waiting_room = info['full_waiting_room'] || @settings.safe_room
 
       if stop_on_boxes && !need_boxes?
@@ -101,6 +98,14 @@ class HuntingBuddy
           execute_actions(after_actions)
           next
         end
+      end
+
+      if stop_on_encumbrance && encumbered?
+        message('***STATUS*** Skipping hunt due to encumbrance')
+        stop_actions(during_actions)
+        # Execute scripts to run after the hunt
+        execute_actions(after_actions)
+        next
       end
 
       if all_skills_at_cap?(stop_on_skills)
@@ -128,7 +133,15 @@ class HuntingBuddy
           break
         end
         execute_nonblocking_actions(during_actions)
-        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil, stop_on_low_skills ? stop_on_low_skills[index] : nil, stop_on_boxes ? stop_on_boxes[index] : nil, stop_on_no_moons ? stop_on_no_moons[index] : nil)
+        hunt(
+          arg,
+          duration ? duration[index] : nil,
+          stop_on_skills ? stop_on_skills[index] : nil,
+          stop_on_low_skills ? stop_on_low_skills[index] : nil,
+          stop_on_boxes ? stop_on_boxes[index] : nil,
+          stop_on_no_moons ? stop_on_no_moons[index] : nil,
+          stop_on_encumbrance ? stop_on_encumbrance[index] : nil
+        )
       end
 
       stop_actions(during_actions)
@@ -252,11 +265,38 @@ class HuntingBuddy
     stop_on_low_skills && stop_on_low_skills.flatten.any? { |skill| DRSkill.getxp(skill) < @stop_on_low_threshold }
   end
 
+  # Is your current encumbrance at or higher than the threshold?
+  # Threshold is a number from 0 (None) to 11 (It's amazing you aren't squashed!)
+  def encumbered?
+    return false unless @hunting_encumbrance_threshold
+    fput('encumbrance') # drinfomon script will parse the output then update DRStats
+    encumbrance_index = [
+      "None",
+      "Light Burden",
+      "Somewhat Burdened",
+      "Burdened",
+      "Heavy Burden",
+      "Very Heavy Burden",
+      "Overburdened",
+      "Very Overburdened",
+      "Extremely Overburdened",
+      "Tottering Under Burden",
+      "Are you even able to move?",
+      "It's amazing you aren't squashed!"
+    ].index(DRStats.encumbrance)
+    return encumbrance_index >= @hunting_encumbrance_threshold
+  end
+
+  def need_boxes?
+    return false unless @settings.box_hunt_minimum
+    count_boxes(@settings) <= @settings.box_hunt_minimum
+  end
+
   def over_box_limit?
     $COMBAT_TRAINER.get_process('loot').at_box_limit?
   end
 
-  def hunt(args, duration, stop_on_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
+  def hunt(args, duration, stop_on_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons, stop_on_encumbrance)
     $COMBAT_TRAINER = nil
     hunting_room = Room.current.id
     Flags.add('familiar_drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
@@ -317,6 +357,11 @@ class HuntingBuddy
         Flags.reset('familiar_drag')
       end
       if (counter % 60).zero?
+        # Avoid spamming encumbrance checks by doing so only periodically
+        if stop_on_encumbrance && encumbered?
+          message('***STATUS*** stopping due to encumbrance')
+          break
+        end
         if duration
           if stop_on_skills
             message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")

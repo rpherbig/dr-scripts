@@ -181,4 +181,33 @@ class TestCheckHealth < Minitest::Test
     end
   end
 
+  def test_see_both_internal_and_external_bleeders
+    messages = [
+      "Your body feels in bad shape.",
+      "Your spirit feels full of life.",
+      "You have a severely swollen and deeply bruised right leg compounded by deep cuts across the right leg, a severely swollen and deeply bruised left leg compounded by deep slashes across the left leg, open and bleeding sores all over the skin.",
+      "",
+      "Bleeding",
+      "            Area       Rate              ",
+      "-----------------------------------------",
+      "       right leg       slight",
+      "        left leg       light",
+      "            skin       slight",
+      "   inside r. leg       slight",
+      "   inside l. leg       light"
+    ]
+
+    check_health_with_buffer(messages, [
+      proc do |health|
+        bleeders = health['bleeders'].values.flatten
+        assert_equal(5, bleeders.length)
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right leg' && !wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'left leg'  && !wound.internal?  && wound.bleeding_rate == 'light' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'skin'      && !wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right leg' &&  wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'left leg'  &&  wound.internal?  && wound.bleeding_rate == 'light' } )
+      end
+    ])
+  end
+
 end

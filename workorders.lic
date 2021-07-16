@@ -45,6 +45,7 @@ class WorkOrders
     @retain_crafting_materials = @settings.retain_crafting_materials
     @workorders_repair = @settings.workorders_repair
     @workorders_override_store = @settings.workorders_override_store
+    @equipment_manager = EquipmentManager.new
 
     wait_for_script_to_complete('safe-room', ['force']) if @settings.workorders_force_heal
 
@@ -76,13 +77,12 @@ class WorkOrders
       end
       item = recipes.find { |r| r['name'] == item_name }
     end
-    tools = []
     skill = ''
 
     case discipline
     when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
       skill = 'Forging'
-      tools = @settings.forging_tools
+      @craft_type = 'forging'
       @belt = @settings.forging_belt
       craft_method = if @use_own_ingot_type
                        :forge_items_with_own_ingot
@@ -91,8 +91,8 @@ class WorkOrders
                      end
     when 'tailoring'
       skill = 'Outfitting'
+      @craft_type = 'outfitting'
       @outfitting_room = @settings.outfitting_room
-      tools = @settings.outfitting_tools
       @belt = @settings.outfitting_belt
       case item['chapter']
       when 4, 2, 3
@@ -107,26 +107,26 @@ class WorkOrders
       end
     when 'shaping'
       skill = 'Engineering'
+      @craft_type = 'shaping'
       @engineering_room = @settings.engineering_room
-      tools = @settings.shaping_tools
       @belt = @settings.engineering_belt
       craft_method = :shape_items
     when 'carving'
       skill = 'Engineering'
+      @craft_type = 'carving'
       @engineering_room = @settings.engineering_room
-      tools = @settings.carving_tools
       @belt = @settings.engineering_belt
       craft_method = :carve_items
     when 'remedies'
       skill = 'Alchemy'
+      @craft_type = 'alchemy'
       @alchemy_room = @settings.alchemy_room
-      tools = @settings.alchemy_tools
       @belt = @settings.alchemy_belt
       craft_method = :remedy_items
     when 'artificing'
       skill = 'Enchanting'
+      @craft_type = 'enchanting'
       @enchanting_room = @settings.enchanting_room
-      tools = @settings.enchanting_tools
       @belt = @settings.enchanting_belt
       craft_method = :enchanting_items
     else
@@ -134,7 +134,7 @@ class WorkOrders
       return
     end
 
-    return repair_items(info, tools) if repair
+    return repair_items(info) if repair
 
     if DRSkill.getxp(skill) > @craft_max_mindstate
       echo("Exiting because your current mindstate for #{skill} over the set maximum craft_max_mindstate:#{@craft_max_mindstate}")
@@ -145,7 +145,7 @@ class WorkOrders
 
     complete_work_order(info)
 
-    repair_items(info, tools) if @workorders_repair
+    repair_items(info) if @workorders_repair
   end
 
   def complete_work_order(info)
@@ -168,26 +168,28 @@ class WorkOrders
     stow_crafting_item(name, @bag, @belt)
   end
 
-  def repair_items(info, tools)
+  def repair_items(info)
     walk_to info['repair-room']
 
+    tools = @equipment_manager.get_tool_info_for_craft(@craft_type)
+
     unless tools.size >= 5
-      need_to_repair = tools.find do |tool_name|
-        get_tool(tool_name)
-        result = bput("analyze my #{tool_name}", 'Analyze what', 'practically in mint', 'pristine condition', 'Roundtime')
+      need_to_repair = tools.find do |tool|
+        @equipment_manager.get_tool?(@craft_type, tool.tool_types[0])
+        result = bput("analyze my #{tool.name}", 'Analyze what', 'practically in mint', 'pristine condition', 'Roundtime')
         next if result == 'Analyze what'
         waitrt?
-        stow_tool(tool_name)
+        @equipment_manager.return_tool?(@craft_type, tool.tool_types[0])
         /roundtime/i =~ result
       end
       return unless need_to_repair
     end
 
-    tools.each do |tool_name|
-      get_tool(tool_name)
+    tools.each do |tool|
+      next unless @equipment_manager.get_tool?(@craft_type, tool.tool_types[0])
       case bput("give #{info['repair-npc']}", "I don't repair those here", 'What is it', "There isn't a scratch on that", 'Just give it to me again', 'I will not', "I can't fix those.  They only have so many uses and then you must buy another.")
       when /scratch/, /I will not/, /They only have so many uses/
-        stow_tool(tool_name)
+        @equipment_manager.return_tool?(@craft_type, tool.tool_types[0])
       when /give/
         bput("give #{info['repair-npc']}", 'repair ticket')
         bput('stow ticket', 'You put')
@@ -198,8 +200,7 @@ class WorkOrders
       pause 30 until bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
       bput("give #{info['repair-npc']}", 'You hand')
       pause 1
-      stow_tool(right_hand) if right_hand
-      stow_tool(left_hand) if left_hand
+      @equipment_manager.return_held_gear
     end
   end
 

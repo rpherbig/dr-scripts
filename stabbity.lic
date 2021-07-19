@@ -1,15 +1,14 @@
 =begin
-Stabbity, Stabbity, Stabbity. Repeat.
-https://elanthipedia.play.net/Lich_script_repository#stabbity
+  https://elanthipedia.play.net/Lich_script_repository#stabbity
 =end
-custom_require.call(%w[common drinfomon equipmanager events])
+
+custom_require.call(%w[common common-arcana drinfomon equipmanager events])
 
 class Stabbity
-  include DRC
 
   def initialize
     unless DRStats.thief?
-      echo '*** But you\'re not a thief! ***'
+      echo("*** But you're not a thief! ***")
       exit
     end
 
@@ -35,13 +34,17 @@ class Stabbity
     @ignored_npcs = @settings.ignored_npcs
     @current_weapon_type = nil
     @arena_trap = nil
+
     if arena_mode? && @khri_eliminate
-      Flags.add('khri-eliminate',/Round (?:5|10|15|20|25), FIGHT/)
+      Flags.add('khri-eliminate', /Round (?:5|10|15|20|25), FIGHT/)
     end
+
     cleanup if cleanup_mode?
-    use_weapon 'preferred'
+    use_weapon('preferred')
     exit if equip_mode?
-    hide?
+
+    DRCA.do_buffs(@settings, 'stabbity')
+    DRC.hide?
     combat_loop
   end
 
@@ -62,7 +65,7 @@ class Stabbity
   end
 
   def cleanup
-    echo '*** Cleaning up ***' if @debug
+    echo("*** Cleaning up ***") if @debug
     @equipmanager.stow_weapon
     exit
   end
@@ -73,40 +76,37 @@ class Stabbity
       if npcs.count > 0
         @target = npcs.first
         @npc_is_alive = true
-        echo "*** Target is #{@target} ***" if @debug
+        echo("*** Target is #{@target} ***") if @debug
         watch_target if arena_mode?
         if @alternate_weapon_npcs.include?(@target) || @thrown_weapon_npcs.include?(@target)
           dodge_arena_trap if arena_mode?
         end
         if arena_mode?
-          fput ("advance #{@target}")
-          if Flags['khri-eliminate']
-            fput ("khri eliminate")
+          fput("advance #{@target}")
+          if @khri_eliminate && Flags['khri-eliminate']
+            fput("khri eliminate")
             Flags.reset('khri-eliminate')
           end
         else
-          case bput("advance #{@target}", 'You are already at melee', 'is already quite dead', 'You begin to', 'You spin around')
+          case DRC.bput("advance #{@target}", 'You are already at melee', 'is already quite dead', 'You begin to', 'You spin around')
           when 'is already quite dead'
             pause 2
           end
         end
         switch_weapon
-        if @thrown_weapon_npcs.include? @target
-          echo "*** Target #{@target} is in thrown_weapon_npcs ***" if @debug
+        if @thrown_weapon_npcs.include?(@target)
+          echo("*** Target #{@target} is in thrown_weapon_npcs ***") if @debug
           kill_thrown
-          waitrt?
-          loot_mob unless @noloot
-          use_weapon 'preferred'
-          hide?
         else
           kill_stabbity
-          waitrt?
-          loot_mob unless @noloot
-          use_weapon 'preferred'
-          hide?
         end
+        waitrt?
+        loot_mob unless @noloot
+        use_weapon('preferred')
+        DRCA.do_buffs(@settings, 'stabbity')
+        DRC.hide?
       else
-        echo '*** No targets ***' if @debug
+        echo("*** No targets ***") if @debug
         exit if single_mode?
         pause 1
       end
@@ -115,61 +115,75 @@ class Stabbity
 
   def kill_stabbity
     while @npc_is_alive
-      fix_standing
-      case bput('backstab', 'You must be hidden to blindside',
-                'It would help if you were closer',
-                'You\'ll need to stand up first',
-                'flying out of reach',
-                'to stop flying before',
-                'Roundtime',
-                /\[You\'re /,
-                'There is nothing else')
-      when 'There is nothing else'
+      DRC.fix_standing
+      result = DRC.bput('backstab',
+        /You must be hidden to blindside/,
+        /It would help if you were closer/,
+        /You'll need to stand up first/,
+        /flying out of reach/,
+        /to stop flying before/,
+        /Roundtime/,
+        /\[You're /,
+        /What are you trying/,
+        /There is nothing else/
+      )
+      case result
+      when /There is nothing else/
         @npc_is_alive = false
         return
-      when 'You must be hidden to blindside'
-        hide?
+      when /You must be hidden to blindside/
+        DRC.hide?
         waitrt?
-      when 'It would help if you were closer'
+      when /It would help if you were closer/
         fput('advance')
         pause 3
-      when 'You\'ll need to stand up first'
-        fix_standing
-        hide?
-      when 'flying out of reach', 'to stop flying before'
-        if @thrown_weapon != nil 
-          echo "*** Switch to thrown -- add '#{@target}' to your use_thrown_on list ***" if @debug
-          use_weapon 'thrown' 
+      when /You'll need to stand up first/
+        DRC.fix_standing
+        DRC.hide?
+      when /flying out of reach/, /to stop flying before/
+        if @thrown_weapon != nil
+          DRC.message("*** Switching to thrown weapon -- add '#{@target}' to your use_thrown_on setting ***")
+          use_weapon('thrown')
           kill_thrown
           return
         end
         dodge_arena_trap if arena_mode?
-      when 'Roundtime', /\[You\'re /
+      when /Roundtime/, /\[You're /
         return if npc_dead?
         waitrt?
         dodge_arena_trap if arena_mode?
-        hide?
+        DRC.hide?
       end
     end
   end
 
   def kill_thrown
-    fix_standing
+    DRC.fix_standing
     attack_verb = thrown_attack_verb
     retrieve_verb = thrown_retrieve_verb
     while @npc_is_alive
-      case bput(attack_verb, 'Roundtime', 'What are you trying', 'There is nothing else')
-      when 'What are you trying'
-        bput(retrieve_verb, 'You pick up', 'suddenly leaps')
-        waitrt?
-      when 'Roundtime'
-        waitrt?
-        bput(retrieve_verb, 'You pick up', 'suddenly leaps')
-        return if npc_dead?
-        waitrt?
-      when 'There is nothing else'
+      result = DRC.bput(attack_verb,
+        /You'll need to stand up first/,
+        /Roundtime/,
+        /\[You're /,
+        /What are you trying/,
+        /There is nothing else/
+      )
+      case result
+      when /There is nothing else/
         @npc_is_alive = false
         return
+      when /You'll need to stand up first/
+        DRC.fix_standing
+        DRC.hide?
+      when /What are you trying/
+        DRC.bput(retrieve_verb, 'You pick up', 'suddenly leaps')
+        waitrt?
+      when /Roundtime/, /\[You're /
+        waitrt?
+        DRC.bput(retrieve_verb, 'You pick up', 'suddenly leaps')
+        return if npc_dead?
+        waitrt?
       end
     end
   end
@@ -180,7 +194,7 @@ class Stabbity
 
   def npc_dead?
     if DRRoom.dead_npcs.include?(@target) || get_npcs.empty?
-      echo "*** Target #{@target} has died ***" if @debug
+      echo("*** Target #{@target} has died ***") if @debug
       @npc_is_alive = false
       true
     else
@@ -189,41 +203,41 @@ class Stabbity
   end
 
   def switch_weapon
-    if @alternate_weapon_npcs.include? @target
-      echo '*** Switching to alternate weapon ***' if @debug
-      use_weapon 'alternate'
-      hide?
+    if @alternate_weapon_npcs.include?(@target)
+      echo("*** Switching to alternate weapon ***") if @debug
+      use_weapon('alternate')
+      DRC.hide?
     elsif @thrown_weapon_npcs.include? @target
-      echo '*** Switching to thrown weapon ***' if @debug
-      use_weapon 'thrown'
+      echo("*** Switching to thrown weapon ***") if @debug
+      use_weapon('thrown')
     elsif @current_weapon_type != 'preferred'
-      echo '*** Switching to preferred weapon' if @debug
-      use_weapon 'preferred'
-      hide?
+      echo("*** Switching to preferred weapon") if @debug
+      use_weapon('preferred')
+      DRC.hide?
     end
   end
 
   def use_weapon(weapon_type)
-    echo "*** Already on weapon type #{weapon_type} ***" if @debug && @current_weapon_type == weapon_type
+    echo("*** Already on weapon type #{weapon_type} ***") if @debug && @current_weapon_type == weapon_type
     return if @current_weapon_type == weapon_type
     case weapon_type
     when 'preferred'
       @current_weapon_type = 'preferred'
-      return if right_hand =~ /#{@preferred_weapon}/
+      return if DRC.right_hand =~ /#{@preferred_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@preferred_weapon) unless @preferred_weapon.empty?
     when 'alternate'
       @current_weapon_type = 'alternate'
-      return if right_hand =~ /#{@alternate_weapon}/
+      return if DRC.right_hand =~ /#{@alternate_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@alternate_weapon) unless @alternate_weapon.empty?
     when 'thrown'
       @current_weapon_type = 'thrown'
-      return if right_hand =~ /#{@thrown_weapon}/
+      return if DRC.right_hand =~ /#{@thrown_weapon}/
       @equipmanager.stow_weapon
       @equipmanager.wield_weapon(@thrown_weapon)
     end
-    echo "*** Changed weapon type to #{weapon_type} ***" if @debug
+    echo("*** Changed weapon type to #{weapon_type} ***") if @debug
   end
 
   def lodging_weapon?
@@ -256,23 +270,27 @@ class Stabbity
 
   def watch_target
     # Actions as of DuskRuin 2019: pedal, bob, duck, jump, lean, cower
-    @arena_trap = bput("watch #{@target}", /(?:pedal|bob|duck|jump|lean|cower)/)
-    echo "*** Will #{@arena_trap} to avoid trap ***" if @debug
+    @arena_trap = DRC.bput("watch #{@target}", /(?:pedal|bob|duck|jump|lean|cower)/)
+    echo("*** Will #{@arena_trap} to avoid trap ***") if @debug
   end
 
   def dodge_arena_trap
     if @arena_trap
-      echo "*** Performing #{@arena_trap} to avoid trap ***" if @debug
-      bput(@arena_trap, 'You set yourself up to')
+      echo("*** Performing #{@arena_trap} to avoid trap ***") if @debug
+      DRC.bput(@arena_trap, 'You set yourself up to')
       @arena_trap = nil
     end
   end
 
   def loot_mob
-    bput('loot', '.*')
+    fput("loot #{@settings.custom_loot_type}")
     pause 1
     # todo/maybe -- pick up loot
   end
+end
+
+before_dying do
+  Flags.delete('khri-eliminate')
 end
 
 Stabbity.new

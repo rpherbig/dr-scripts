@@ -323,6 +323,46 @@ class TestDRCI < Minitest::Test
   end
 
   #########################################
+  # STOW HANDS
+  #########################################
+
+  def test_stow_hands__open_pouch_for_gem_in_left_hand
+    $left_hand = 'crystal'
+    $right_hand = nil
+
+    run_drci_command(
+      ["You open your pouch and put the icy blue crystal inside, closing it once more."],
+      'stow_hands',
+      [],
+      [assert_result]
+    )
+  end
+
+  def test_stow_hands__open_pouch_for_gem_in_right_hand
+    $left_hand = nil
+    $right_hand = 'crystal'
+
+    run_drci_command(
+      ["You open your pouch and put the icy blue crystal inside, closing it once more."],
+      'stow_hands',
+      [],
+      [assert_result]
+    )
+  end
+
+  def test_stow_hands__skip_if_hands_empty
+    $left_hand = nil
+    $right_hand = nil
+
+    run_drci_command(
+      [],
+      'stow_hands',
+      [],
+      [assert_result]
+    )
+  end
+
+  #########################################
   # DISPOSE TRASH
   #########################################
 

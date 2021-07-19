@@ -1,3 +1,5 @@
+require 'ostruct'
+
 module Harness
   # Lich global for the last time a user sent a command to the game
   $_IDLETIMESTAMP_ = Time.now
@@ -375,6 +377,26 @@ module Harness
     end
   end
 
+  class GameObj
+    def self.left_hand
+      item = Harness.left_hand || 'Empty'
+      OpenStruct.new({ name: item, noun: item })
+    end
+
+    def self.left_hand=(val)
+      Harness.left_hand(val)
+    end
+
+    def self.right_hand
+      item = Harness.right_hand || 'Empty'
+      OpenStruct.new({ name: item, noun: item })
+    end
+
+    def self.right_hand=(val)
+      Harness.right_hand(val)
+    end
+  end
+
   class Flags
     @@flags = {}
     @@matchers = {}
@@ -624,6 +646,9 @@ module Harness
     $dead = false
     $hidden = false
     $invisible = false
+
+    $left_hand = nil
+    $right_hand = nil
 
     Flags._reset
     DRSpells._reset

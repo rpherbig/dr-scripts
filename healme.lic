@@ -135,14 +135,7 @@ class HealMe
         # be waiting a few seconds before you're ready to cast.
         # To maximize our wait time, we'll look for any wounds
         # that need tending (e.g. lodged ammo, bleeders, parasites).
-        wounds = (
-            @health_data['bleeders'].values.flatten +
-            @health_data['parasites'].values.flatten +
-            @health_data['lodged'].values.flatten
-          )
-          .reject { |wound| wound_tended?(wound) } # skip already tended wounds
-          .select { |wound| !wound.bleeding? || bleeder_tendable?(wound) } # if not bleeding then it's a parasite or lodged item
-          .sort_by { |wound| wound.severity * -1 } # sort descending
+        get_tendables
           .first(@max_wounds_to_tend_while_prep_spells)
           .each { |wound| tend_wound(wound) }
       when 'pre-cast'
@@ -205,6 +198,23 @@ class HealMe
     remove_wounds_to_keep(health_data['wounds'])
     remove_wounds_to_keep(health_data['bleeders'])
     health_data
+  end
+
+  # Gets a list of tendable wounds (bleeders, parasites, lodged items)
+  # that are not known to be tended yet and are within your ability to tend.
+  # The list is presorted in priority order based on wound severity.
+  # To be quick and current during the cast spell lambda, this uses
+  # DRCH.check_health instead of perceiving your health.
+  def get_tendables
+    health_data = DRCH.check_health
+    wounds = (
+        health_data['lodged'].values.flatten +
+        health_data['parasites'].values.flatten +
+        health_data['bleeders'].values.flatten
+      )
+      .reject { |wound| wound_tended?(wound) } # skip already tended wounds
+      .select { |wound| !wound.bleeding? || bleeder_tendable?(wound) } # if not bleeding then it's a parasite or lodged item
+      .sort_by { |wound| wound.severity * -1 } # sort descending
   end
 
   # Takes a pulse on vitality then takes action accordingly.
@@ -364,8 +374,13 @@ class HealMe
   # Similar to 'heal_wounds' except instead of casting a spell on the wound
   # this method tends the wound to remove parasites or lodged items.
   # This method is not intended for bleeders, use `heal_wound` method for those.
-  def tend_wounds(wounds)
-    wounds.sort_by { |severity, wounds| severity }.reverse.first[1].each do |wound|
+  def tend_wounds(wounds_by_severity)
+    wounds = get_wounds_in_priority_order(wounds_by_severity)
+    return if wounds.empty?
+    wounds.each do |wound|
+      # Before we try to tend a wound, check if it's already been healed, either
+      # from a previous, potent cast or from heal over time spells like Heal or Regenerate.
+      next if wound_tended?(wound)
       tend_wound(wound)
       attend_vitals
     end
@@ -395,12 +410,12 @@ class HealMe
   def bleeder_tendable?(wound)
     wound_is_tended = wound_tended?(wound)
     skilled_to_tend = DRCH.skilled_to_tend_wound?(wound.bleeding_rate)
-    tendable = !wound_is_tended && wound.bleeding? && !wound.internal? && skilled_to_tend
+    tendable = !wound_is_tended && wound.bleeding? && wound.tendable? && skilled_to_tend
     if $debug_mode_healme
       echo "wound = #{wound.inspect}"
       echo "wound_needs_tending? #{!wound_is_tended}"
       echo "wound_is_bleeding? #{wound.bleeding?}"
-      echo "wound_is_external? #{!wound.internal?}"
+      echo "wound_is_tendable? #{wound.tendable?}"
       echo "skilled_to_tend? #{skilled_to_tend}"
       echo "bleeder_tendable? #{tendable}"
     end

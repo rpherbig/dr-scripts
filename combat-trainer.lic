@@ -351,6 +351,12 @@ class LootProcess
     @skin = skinning['skin'] || false
     echo("  @skin: #{@skin}") if $debug_mode_ct
 
+    @dissect = skinning['dissect'] || false
+    echo("  @dissect: #{@dissect}") if $debug_mode_ct
+
+    @dissect_priority = skinning['dissect_priority']
+    echo("  @dissect_priority: #{@dissect_priority}") if $debug_mode_ct    
+
     @arrange_all = skinning['arrange_all'] || false
     echo("  @arrange_all: #{@arrange_all}") if $debug_mode_ct
 
@@ -428,6 +434,9 @@ class LootProcess
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
 
+    @gem_pouch_noun = settings.gem_pouch_noun
+    echo("  @gem_pouch_noun: #{@gem_pouch_noun}") if $debug_mode_ct
+
     @loot_delay = settings.loot_delay
     @loot_timer = Time.now - @loot_delay
     echo("  @loot_delay: #{@loot_delay}") if $debug_mode_ct
@@ -460,7 +469,7 @@ class LootProcess
     end
 
     Flags.add('using-corpse', 'begins arranging', 'completes arranging', 'kneels down briefly and draws a knife', 'cruelly into the body and carving out a chunk', 'makes additional cuts, purposeful but seemingly at random')
-    Flags.add('pouch-full', 'You think the .* pouch is too full to fit another gem into', 'You\'d better tie it up before putting')
+    Flags.add('pouch-full', 'You think the .* is too full to fit another gem into', 'You\'d better tie it up before putting')
     Flags.add('container-full', 'There isn\'t any more room')
   end
 
@@ -525,22 +534,22 @@ class LootProcess
       game_state.unlootable(item)
       return
     end
-    bput("remove my #{@gem_pouch_adjective} pouch", 'You remove')
+    bput("remove my #{@gem_pouch_adjective} #{@gem_pouch_noun}", 'You remove')
     if @full_pouch_container
-      case bput("put my #{@gem_pouch_adjective} pouch in my #{@full_pouch_container}", 'You put','too heavy to go in there')
+      case bput("put my #{@gem_pouch_adjective} #{@gem_pouch_noun} in my #{@full_pouch_container}", 'You put','too heavy to go in there')
       when 'too heavy to go in there'
-        bput("stow my #{@gem_pouch_adjective} pouch", 'You put')
+        bput("stow my #{@gem_pouch_adjective} #{@gem_pouch_noun}", 'You put')
       end
     else
-      bput("stow my #{@gem_pouch_adjective} pouch", 'You put')
+      bput("stow my #{@gem_pouch_adjective} #{@gem_pouch_noun}", 'You put')
     end
-    bput("get #{@gem_pouch_adjective} pouch from my #{@spare_gem_pouch_container}", 'You get a')
-    bput("wear my #{@settings.gem_pouch_adjective} pouch", 'You attach')
+    bput("get #{@gem_pouch_adjective} #{@gem_pouch_noun} from my #{@spare_gem_pouch_container}", 'You get a')
+    bput("wear my #{@gem_pouch_adjective} #{@gem_pouch_noun}", 'You attach')
     bput('stow gem', 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
     if @tie_pouch
-      bput('tie my pouch', 'You tie')
+      bput("tie my #{@gem_pouch_noun}", 'You tie')
     else
-      fput('close my pouch')
+      fput("close my #{@gem_pouch_noun}")
     end
   end
 
@@ -726,7 +735,7 @@ class LootProcess
       return
     end
 
-    quality = fput('glance')
+    quality = bput('glance','You glance down.*')
     if quality['great'] || quality['excellent'] || quality['perfect'] || quality['flawless']
       echo 'Harvested high quality material.' if $debug_mode_ct
     else
@@ -809,7 +818,33 @@ class LootProcess
     end
   end
 
+  #not necromancer related - not to be confused with the necro rituals.  According to GMs this may change but for now they are two separate functions.
+  def dissected?(mob_noun, game_state)
+    case bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing further",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.")
+    when 'You succeed in dissecting the corpse'  
+      return true
+    when 'While likely a fascinating study'
+      game_state.undissectable(mob_noun)
+      return false
+    when 'would probably object', "should be left alone."
+      fput ('dissect')
+    end
+    return false
+  end
+
   def check_skinning(mob_noun, game_state)
+    if @dissect && game_state.dissectable?(mob_noun)
+      if @dissect_priority == 'First Aid' && DRSkill.getxp('First Aid') <= 32
+        return if dissected?(mob_noun, game_state)
+      elsif @dissect_priority == 'Skinning' && DRSkill.getxp('Skinning') >= 32
+        return if dissected?(mob_noun, game_state)
+      elsif DRSkill.getxp('First Aid') < DRSkill.getxp('Skinning')
+        return if dissected?(mob_noun, game_state)
+      elsif !game_state.skinnable?(mob_noun) && DRSkill.getxp('First Aid') <= 32
+        return if dissected?(mob_noun, game_state)      
+      end
+    end
+
     return unless @skin
     return unless game_state.skinnable?(mob_noun)
 
@@ -1488,7 +1523,7 @@ class SpellProcess
     return if @training_spells_max_threshold && game_state.npcs.length > @training_spells_max_threshold
     return if DRStats.mana < @training_spell_mana_threshold
 
-    needs_training = %w[Warding Utility Augmentation Sorcery]
+    needs_training = ['Warding', 'Utility', 'Augmentation', 'Sorcery', 'Debilitation', 'Targeted Magic']
                      .select { |skill| @training_spells[skill] }
                      .select { |skill| game_state.is_offense_allowed? || @training_spells[skill]['harmless'] }
                      .select { |skill| DRSkill.getxp(skill) < @magic_exp_training_max_threshold }
@@ -1497,13 +1532,16 @@ class SpellProcess
                      .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
     needs_training = game_state.sort_by_rate_then_rank(needs_training).first
     return unless needs_training
+    DRC.message "needs_training: #{needs_training}" if $debug_mode_ct
 
     data = @training_spells[needs_training]
     @training_cast_timer = Time.now + @training_spells_wait
     if data['cyclic']
       @training_cyclic_timer = Time.now + 325
+      DRC.message "@training_cyclic_timer of Time.now + 325: #{@training_cyclic_timer}" if $debug_mode_ct
     elsif @training_cyclic_timer < @training_cast_timer
       @training_cyclic_timer = @training_cast_timer
+      DRC.message "@training_cyclic_timer less than @training_cast_timer: #{@training_cyclic_timer}" if $debug_mode_ct
     end
 
     game_state.hide_on_cast = true if data['use_stealth']
@@ -1593,7 +1631,7 @@ class SpellProcess
 
     if DRSpells.active_spells['Regeneration']
       if @empath_spells['VH'] && DRStats.health <= 95
-        data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
+        data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1], 'harmless' => true }
         prepare_spell(data, game_state)
       end
       return
@@ -1607,14 +1645,14 @@ class SpellProcess
     echo('Healing') if $debug_mode_ct
     if @wounds.any?
       if @empath_spells['FOC']
-        data = { 'abbrev' => 'foc', 'mana' => @empath_spells['FOC'].first, 'cambrinth' => @empath_spells['FOC'][1..-1] }
+        data = { 'abbrev' => 'foc', 'mana' => @empath_spells['FOC'].first, 'cambrinth' => @empath_spells['FOC'][1..-1], 'harmless' => true }
       elsif @empath_spells['HEAL']
-        data = { 'abbrev' => 'heal', 'mana' => @empath_spells['HEAL'].first, 'cambrinth' => @empath_spells['HEAL'][1..-1] }
+        data = { 'abbrev' => 'heal', 'mana' => @empath_spells['HEAL'].first, 'cambrinth' => @empath_spells['HEAL'][1..-1], 'harmless' => true }
       end
       @wounds = {}
       prepare_spell(data, game_state, true) if data
     elsif @empath_spells['VH']
-      data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1] }
+      data = { 'abbrev' => 'vh', 'mana' => @empath_spells['VH'].first, 'cambrinth' => @empath_spells['VH'][1..-1], 'harmless' => true }
       prepare_spell(data, game_state, true)
     end
   end
@@ -1693,10 +1731,12 @@ class SpellProcess
   end
 
   def check_offensive(game_state)
+    echo "Checking offensive spells:" if $debug_mode_ct
     return if game_state.casting
     return if game_state.npcs.empty?
     return if DRStats.mana < @offensive_spell_mana_threshold
 
+    echo "Figuring out ready offensive spells..." if $debug_mode_ct
     ready_spells = @offensive_spells
                    .select { |spell| spell['target_enemy'] ? game_state.npcs.include?(spell['target_enemy']) : true }
                    .select { |spell| spell['min_threshold'] ? game_state.npcs.length >= spell['min_threshold'] : true }
@@ -1711,6 +1751,7 @@ class SpellProcess
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
                    .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
+    echo "Ready Spells: #{ready_spells.to_yaml}" if $debug_mode_ct
 
     data = if @offensive_spell_cycle.empty?
              skills = ready_spells.map { |spell| spell['skill'] }
@@ -2344,6 +2385,9 @@ class TrainerProcess
     @gem_pouch_adjective = settings.gem_pouch_adjective
     echo("  @gem_pouch_adjective: #{@gem_pouch_adjective}") if $debug_mode_ct
 
+    @gem_pouch_noun = settings.gem_pouch_noun
+    echo("  @gem_pouch_noun: #{@gem_pouch_noun}") if $debug_mode_ct
+
     @almanac_skills = settings.almanac_skills
     echo("  @almanac_skills: #{@almanac_skills}") if $debug_mode_ct
 
@@ -2373,7 +2417,7 @@ class TrainerProcess
       appraise(game_state, 'careful')
     when /^App Pouch$/i
       retreat
-      bput("app my #{@gem_pouch_adjective} pouch quick", 'You sort', 'Appraise what', 'You cannot appraise', 'You can\'t appraise')
+      bput("app my #{@gem_pouch_adjective} #{@gem_pouch_noun} quick", 'You sort', 'Appraise what', 'You cannot appraise', 'You can\'t appraise')
     when /^App Bundle$/i
       retreat
       bput("app my bundle quick", 'You scan', 'Appraise what', 'You cannot appraise', 'You can\'t appraise')
@@ -3006,7 +3050,7 @@ class AttackProcess
 
     # If we didn't try a maneuver, or we did but it wasn't successful, then fallback to normal attack.
     unless maneuver_success
-      if game_state.backstab? || game_state.use_stealth_attack? || game_state.ambush?
+      if game_state.backstab? || game_state.use_stealth_attack? || game_state.ambush? || game_state.ambush_stun_training?
         hide?(@hide_type)
       end
 
@@ -3014,15 +3058,17 @@ class AttackProcess
 
       command = game_state.offhand? ? "#{verb} left" : verb
 
-      if (game_state.backstab? || game_state.ambush?) && hiding?
+      if (game_state.backstab? || game_state.ambush? || game_state.ambush_stun_training?) && hiding?
         if (game_state.backstab? && game_state.no_stab_current_mob) || (game_state.ambush? && !game_state.backstab?)
           command += " #{@ambush_location}"
+        elsif (game_state.ambush_stun_training?)
+          command = command.sub(verb, 'ambush stun')
         else
           command = command.sub(verb, 'backstab')
         end
       end
 
-      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'You turn to face', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip', 'You can not slam with that')
+      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'You turn to face', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip', 'You can not slam with that', 'You must be hidden or invisible to ambush', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'is already out cold')
     end
 
     pause
@@ -3651,6 +3697,7 @@ class GameState
     @clean_up_step = nil
     @target_weapon_skill = -1
     @no_skins = []
+    @no_dissect = []
     @constructs = []
     @no_stab_mobs = []
     @no_loot = []
@@ -3726,6 +3773,8 @@ class GameState
     @backstab = settings.backstab
     @backstab_past_mindlock = settings.backstab_past_mindlock
     echo("  @backstab: #{@backstab}") if $debug_mode_ct
+
+    @ambush_stun_weapons = settings.ambush_stun_weapons
 
     @charged_maneuvers = settings.charged_maneuvers
     echo("  @charged_maneuvers: #{@charged_maneuvers}") if $debug_mode_ct
@@ -4048,6 +4097,15 @@ class GameState
     @no_skins.push(mob_noun)
   end
 
+  def dissectable?(mob_noun)
+    !@no_dissect.include?(mob_noun)
+  end  
+
+  def undissectable(mob_noun)
+    echo("adding #{mob_noun} to no dissect list: #{@no_dissect}") if $debug_mode_ct
+    @no_dissect.push(mob_noun)
+  end   
+
   def construct?(mob_noun)
     @constructs.include?(mob_noun)
   end
@@ -4123,6 +4181,10 @@ class GameState
   def backstab?
     return @backstab.include?(weapon_skill) if @backstab_past_mindlock
     @backstab.include?(weapon_skill) && DRSkill.getxp('Backstab') < 34
+  end
+
+  def ambush_stun_training?
+    return @ambush_stun_weapons.include?(weapon_skill)
   end
 
   def dancing?
@@ -4495,7 +4557,7 @@ class GameState
     return false if combo_type != 'flame' && !Flags["ct-#{combo_type}-ready"] && DRStats.barbarian?
     return false if DRSkill.getrank('Expertise') < expertise_requirement
 
-    result = bput("analyze #{combo_type}", 'cannot repeat', 'Analyze what\?', 'by landing an? .*', 'You need to hold', 'You must be closer', 'You fail to find any')
+    result = bput("analyze #{combo_type}", 'cannot repeat', 'Analyze what\?', 'by landing an? .*', 'You need to hold', 'You must be closer', 'You fail to find any','What are you trying to attack\?')
     waitrt?
 
     case result
@@ -4511,6 +4573,8 @@ class GameState
       when 'You turn'
         return perform_analyze?(combo_type, expertise_requirement)
       end
+      return true
+    when 'What are you trying to attack?'
       return true
     end
 

@@ -91,8 +91,8 @@ class Pick
     @all_trap_messages = picking_data['traps']
     @disarmed_trap_messages = picking_data['disarmed_traps']
 
-    @harvest_traps = @settings.harvest_traps
-    @component_container = @settings.component_container
+    @harvest_traps = @settings.pick['harvest_traps'] || @settings.harvest_traps
+    @component_container = @settings.pick['component_container'] || @settings.component_container
     @trap_parts = picking_data['trap_parts']
 
     @tend_own_wounds = @settings.pick['tend_own_wounds'] || false
@@ -140,6 +140,7 @@ class Pick
       remove_hindering_gear
       crack_boxes
       stop_buffs
+      wear_normal_gear
       refill_ring
     end
   end
@@ -180,7 +181,8 @@ class Pick
     @sources.each do |source_container|
       DRCI.open_container?(source_container)
     end
-    DRCI.open_container?(@skipped_box_storage) if @skipped_box_storage
+    DRCI.open_container?(@too_hard_container) if @too_hard_container
+    DRCI.open_container?(@blacklist_container) if @blacklist_container
     DRCI.open_container?(@component_container) if @component_container
   end
 
@@ -205,6 +207,10 @@ class Pick
       @equipment_manager.wear_items(@removed_items)
       exit
     end
+  end
+
+  def wear_normal_gear
+    @equipment_manager.wear_equipment_set?('standard')
   end
 
   def setup_flags
@@ -347,6 +353,10 @@ class Pick
         while holding_box?(current_box) && current_box['trapped'] && !current_box['trap_difficulty'].nil?
           disarm_trap(current_box)
         end
+
+        if holding_box?(current_box) && @harvest_traps
+          analyze_and_harvest(current_box)
+        end
       end
 
       # Make sure we still have the box in hand, cause sometimes failed disarms make that not true...
@@ -378,13 +388,16 @@ class Pick
   end
 
   def try_unlock_box_with_key(box)
-    return false unless @settings.use_skeleton_key
-    DRCI.get_item_if_not_held?(@settings.skeleton_key)
-    result = bput("turn my #{@settings.skeleton_key} at my #{box}", "^You turn", "that doesn't seem to do much", "I could not find", "What were you referring")
+    return unless @settings.use_skeleton_key
+    return unless DRCI.get_item_if_not_held?(@settings.skeleton_key)
+
+    result = DRC.bput("turn my #{@settings.skeleton_key} at my #{box['noun']}", "^You turn", "that doesn't seem to do much", "I could not find", "What were you referring")
     waitrt?
     key_worked = result =~ /^You turn/
-    box['disarmed'] = !key_worked
-    box['locked'] = !key_worked
+    if key_worked
+      box['trapped'] = false
+      box['locked'] = false
+    end
   end
 
   def holding_box?(box)
@@ -395,7 +408,7 @@ class Pick
     Flags.reset('glance-no-traps')
     Flags.reset('glance-no-locks')
 
-    DRC.bput("glance #{box['noun']}", "Looking more closely you see", "It looks like there are no locks")
+    DRC.bput("glance my #{box['noun']}", "Looking more closely you see", "It looks like there are no locks")
 
     box['trapped'] = false if Flags['glance-no-traps']
     box['locked'] = false if Flags['glance-no-locks']
@@ -486,6 +499,8 @@ class Pick
       @disarmed_trap_messages.values,
       @disarm_retry,
       @disarm_succeeded)
+
+    echo "disarm_result: #{disarm_result}" if @debug
 
     trapped = true
     case disarm_result
@@ -678,11 +693,9 @@ class Pick
     end
 
     if (@settings.fill_pouch_with_box || @settings.loot_specials.empty?)
-      fill_result = DRC.bput("fill my #{@settings.gem_pouch_adjective} pouch with my #{box_noun}", 'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)
-      case fill_result
-      when /too full to fit/
-        swap_out_full_gempouch
-      end
+      # Don't handle full pouches here, cause if we do, we can't tie them (when they're empty)
+      DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{box_noun}",
+        'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)
     end
 
     box_items = DRCI.get_item_list(box_noun, 'look');
@@ -710,7 +723,8 @@ class Pick
       echo "Looted: #{item_long}" if @debug
     end
 
-    if @settings.loot_specials.find { |x| /\b#{x['name']}\b/i =~ item_long }
+    special = @settings.loot_specials.find { |x| /\b#{x['name']}\b/i =~ item_long }
+    if special
       DRCI.put_away_item?(item, special['bag'])
       return
     end
@@ -721,7 +735,6 @@ class Pick
         return
       when /You'd better tie it up/, /is too full to fit another gem/
         swap_out_full_gempouch
-        DRCI.stow_item?(item)
       end
       return
     end
@@ -737,24 +750,25 @@ class Pick
   def swap_out_full_gempouch
     if @settings.spare_gem_pouch_container.nil?
       DRC.message('You should set spare_gem_pouch_container to swap out your full pouch for you...')
+      pause 10
       return
     end
 
     lowered_item = DRC.left_hand
-    DRCI.lower_item?(DRC.left_hand.noun) if lowered_item
+    DRCI.lower_item?(DRC.left_hand) if lowered_item
 
-    DRCI.remove_item?("#{@settings.gem_pouch_adjective} pouch")
+    DRCI.remove_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
     if @settings.full_pouch_container
-      DRCI.put_away_item?("#{@settings.gem_pouch_adjective} pouch", @settings.full_pouch_container)
+      DRCI.put_away_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", @settings.full_pouch_container)
     else
-      DRCI.stow_item?("#{@settings.gem_pouch_adjective} pouch")
+      DRCI.stow_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
     end
 
-    DRCI.get_item?("#{@settings.gem_pouch_adjective} pouch", @settings.spare_gem_pouch_container)
-    DRCI.wear_item?("#{@settings.gem_pouch_adjective} pouch")
-    DRC.bput("tie my #{@settings.gem_pouch_adjective} pouch", 'You tie') if @tie_gem_pouches
-
+    DRCI.get_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", @settings.spare_gem_pouch_container)
+    DRCI.wear_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
     DRCI.get_item?(lowered_item) if lowered_item
+    DRCI.stow_item?(lowered_item) if lowered_item
+    DRC.bput("tie my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", 'You tie', "it's empty?", 'has already been tied off') if @tie_gem_pouches
   end
 
   def find_lockpick
@@ -767,28 +781,31 @@ class Pick
     end
   end
 
-  def analyze(box)
-    waitrt?
-    case DRC.bput("disarm my #{box} analyze", /You've already analyzed/, /You are unable to determine a proper method/, 'Roundtime')
+  def analyze_and_harvest(box)
+    echo "Analyze and Harvest: #{box}" if @debug
+
+    case DRC.bput("disarm my #{box['noun']} analyze", /You've already analyzed/, /You are unable to determine a proper method/, 'Roundtime')
     when /You are unable to determine a proper method/
-      return analyze(box)
+      return analyze_and_harvest(box)
     end
+
     harvest(box)
   end
 
   def harvest(box)
-    case DRC.bput("disarm my #{box} harvest",
-              /You fumble around with the trap apparatus/,
-              /much for it to be successfully harvested/,
-              /completely unsuitable for harvesting/,
-              /previous trap have already been completely harvested/,
-              'Roundtime')
+    echo "Harvesting: #{box}" if @debug
+
+    harvest_result = DRC.bput("disarm my #{box['noun']} harvest",
+      /You fumble around with the trap apparatus/, /much for it to be successfully harvested/,
+      /completely unsuitable for harvesting/, /previous trap have already been completely harvested/, 'Roundtime')
+
+    case harvest_result
     when /You fumble around with the trap apparatus/
       harvest(box)
     when 'Roundtime'
       waitrt?
-      DRCI.put_away_item?(DRC.left_hand, @component_container) if @component_container && left_hand =~ @trap_parts
-      DRCI.dispose_trash(DRC.left_hand, @worn_trashcan, @worn_trashcan_verb)
+      DRCI.put_away_item?(DRC.left_hand, @component_container) if @component_container
+      DRCI.dispose_trash(DRC.left_hand, @worn_trashcan, @worn_trashcan_verb) if @trap_parts.include?(DRC.left_hand)
     end
   end
 end
@@ -800,8 +817,6 @@ before_dying do
   Flags.delete('more-locks')
   Flags.delete('glance-no-traps')
   Flags.delete('glance-no-locks')
-
-  EquipmentManager.new.wear_equipment_set?('standard')
 end
 
 Pick.new

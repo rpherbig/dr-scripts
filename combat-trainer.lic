@@ -43,7 +43,7 @@ class SetupProcess
     if @warhorn.casecmp('egg').zero?
       @warhon_activation_command = "invoke my #{@warhorn}"
     else
-      @warhon_activation_command = "exhale my #{@warhorn} lure"
+      @warhon_activation_command = "exhale #{@warhorn} lure"
     end
 
     if DRCI.wearing?(@warhorn)
@@ -193,8 +193,8 @@ class SetupProcess
 
   def determine_next_to_train(game_state, weapon_training, ending_ranged)
     return unless game_state.skill_done? || !weapon_training[game_state.weapon_skill] || ending_ranged
-     #check if all weapons are maxed exp to prevent rapid cycling
-     if weapon_training.reject { | skill,_ |  DRSkill.getxp(skill) == 34 }.empty?
+    #check if all weapons are maxed exp to prevent rapid cycling
+    if weapon_training.reject { | skill,_ |  DRSkill.getxp(skill) == 34 }.empty?
       echo 'all weapons locked, not switching' if $debug_mode_ct
       return
     end
@@ -831,14 +831,17 @@ class LootProcess
 
   #not necromancer related - not to be confused with the necro rituals.  According to GMs this may change but for now they are two separate functions.
   def dissected?(mob_noun, game_state)
-    case bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing further",'While likely a fascinating study','You cannot dissect','would probably object','A skinned creature is worthless','You do not yet possess the knowledge required',"That'd be a waste of time")
+    case bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing further",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That's going to be hard","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge')
     when 'You succeed in dissecting the corpse'
       return true
-    when 'While likely a fascinating study','You do not yet possess the knowledge required',"That'd be a waste of time"
+    when 'While likely a fascinating study',"That'd be a waste of time.",'You do not yet possess the knowledge'
       game_state.undissectable(mob_noun)
       return false
-    when 'would probably object'
+    when 'would probably object', "should be left alone."
       fput ('dissect')
+    when "That's going to be hard"
+      fput ('unhide')
+      dissected?(mob_noun, game_state)
     end
     return false
   end
@@ -1481,9 +1484,9 @@ class SpellProcess
         end
       end
     else
-      echo('Dropping spell: Offensive magic is not allowed right now...')
-      bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
-      bput('release mana', 'You release all', "You aren't harnessing any mana")
+      DRC.message('Dropping spell: Offensive magic is not allowed right now...')
+      DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+      DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
 
     @custom_cast = nil
@@ -1895,9 +1898,9 @@ class SpellProcess
     DRCA.prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
 
     if Flags['ct-shock-warning'] && !game_state.is_permashocked?
-      echo('Dropping spell: Got shock warning.')
-      bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
-      bput('release mana', 'You release all', "You aren't harnessing any mana")
+      DRC.message('Dropping spell: Got shock warning.')
+      DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+      DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     end
 
     game_state.casting = true
@@ -2304,6 +2307,8 @@ class TrainerProcess
       'Barb Research Debilitation' => 'Debilitation',
       'Barb Research Utility' => 'Utility',
       'Barb Research Warding' => 'Warding',
+      'Berserk Landslide' => 'Warding',
+      'Berserk Avalanche' => 'Utility',
       'Charged Maneuver' => 'Expertise',
       'Collect' => 'Outdoorsmanship',
       'Favor Orb' => 'Anything',
@@ -2421,6 +2426,12 @@ class TrainerProcess
     @almanac = settings.almanac_noun
     echo("  @almanac: #{@almanac}") if $debug_mode_ct
 
+    @barb_buffs_inner_fire_threshold = settings.barb_buffs_inner_fire_threshold
+    echo("  @barb_buffs_inner_fire_threshold: #{@barb_buffs_inner_fire_threshold}") if $debug_mode_ct
+
+    @always_use_maneuvers = settings.always_use_maneuvers
+    echo("  @always_use_maneuvers: #{@always_use_maneuvers}") if $debug_mode_ct
+
     @worn_trashcan = settings.worn_trashcan
     echo("  @worn_trashcan: #{@worn_trashcan}") if $debug_mode_ct
 
@@ -2517,6 +2528,14 @@ class TrainerProcess
       bput('meditate research earthquake', 'You clear ')
     when /^Barb Research Utility$/i
       bput('meditate research prediction', 'You clear ')
+    when /^Berserk Landslide$/i
+      if DRStats.mana >= @barb_buffs_inner_fire_threshold
+        DRCA.activate_barb_buff?('Landslide')
+      end
+    when /^Berserk Avalanche$/i
+      if DRStats.mana >= @barb_buffs_inner_fire_threshold
+        DRCA.activate_barb_buff?('Avalanche')
+      end
     when /^Collect$/i
       game_state.sheath_whirlwind_offhand
       retreat
@@ -2968,6 +2987,9 @@ class TrainerProcess
     check = [check].flatten
     cooldown = ability_info.is_a?(Hash) ? ability_info[:cooldown] : ability_info.to_i
     expcheck = check.nil? || check.any? { |skill_to_check| DRSkill.getxp(skill_to_check) < @combat_training_abilities_target }
+    if name == 'Charged Maneuver' && @always_use_maneuvers
+      expcheck = true
+    end
     return expcheck unless game_state.cooldown_timers[name]
 
     Time.now - game_state.cooldown_timers[name] >= cooldown ? expcheck : false
@@ -3115,7 +3137,7 @@ class AttackProcess
         end
       end
 
-      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'You turn to face', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'Bumbling, you slip', 'You can not slam with that', 'You must be hidden or invisible to ambush', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'is already out cold')
+      bput(command, 'Wouldn\'t it be better if you used a melee weapon?', 'You turn to face', 'Face What?', 'Roundtime', "You aren't close enough to attack", 'It would help if you were closer', 'There is nothing else to face!', 'You must be hidden', 'flying too high for you to attack', 'You can\'t coldcock', 'while it is flying', 'Novel idea, but it\'s a ghost!', 'Bumbling, you slip', 'You can not slam with that', 'You must be hidden or invisible to ambush', 'You don\'t have enough focus', 'You don\'t think you have enough focus', 'is already out cold')
     end
 
     pause

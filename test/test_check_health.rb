@@ -18,10 +18,10 @@ class TestCheckHealth < Minitest::Test
     proc { |health| assert_equal(false, health['bleeders'].empty?, 'Person is bleeding but reported as not bleeding') }
   end
 
-  def assert_tendable_count(count)
+  def assert_tendable_bleeder_count(count)
     proc { |health| assert_equal(count,
       health['bleeders'].values.flatten.select { |wound| wound.tendable? }.length,
-      'Person has wrong number of tendable bleeders')
+      'Person has wrong number of tendable bleeding wounds')
     }
   end
 
@@ -53,6 +53,21 @@ class TestCheckHealth < Minitest::Test
     proc { |health| assert_empty(health['parasites'], 'Person parasite free but is reported as host to parasites') }
   end
 
+  def assert_parasite_count(count)
+    proc { |health| assert_equal(count, health['parasites'].values.flatten.length, 'Captured the wrong number of parasite wounds') }
+  end
+
+  def assert_lodged_count(count)
+    proc { |health| assert_equal(count, health['lodged'].values.flatten.length, 'Captured the wrong number of lodged item wounds') }
+  end
+
+  def assert_tendable_lodged_count(count)
+    proc { |health| assert_equal(count,
+      health['lodged'].values.flatten.select { |wound| wound.tendable? }.length,
+      'Person has wrong number of tendable lodged item wounds')
+    }
+  end
+
   def assert_healthy
     [
       assert_not_wounded,
@@ -82,7 +97,7 @@ class TestCheckHealth < Minitest::Test
       '-----------------------------------------',
       '            tail       slight'
     ]
-    check_health_with_buffer(messages, [assert_wounded, assert_bleeding, assert_tendable_count(1)])
+    check_health_with_buffer(messages, [assert_wounded, assert_bleeding, assert_tendable_bleeder_count(1)])
   end
 
   def test_that_wounded_person_is_wounded
@@ -160,7 +175,7 @@ class TestCheckHealth < Minitest::Test
     check_health_with_buffer(messages, [
       assert_diseased,
       assert_wounded,
-      assert_tendable_count(2)
+      assert_tendable_bleeder_count(2)
     ])
   end
 
@@ -209,7 +224,7 @@ class TestCheckHealth < Minitest::Test
     ]
 
     check_health_with_buffer(messages, [
-      assert_tendable_count(2),
+      assert_tendable_bleeder_count(2),
       proc do |health|
         bleeders = health['bleeders'].values.flatten
         assert_equal(5, bleeders.length)
@@ -236,7 +251,7 @@ class TestCheckHealth < Minitest::Test
     ]
 
     check_health_with_buffer(messages, [
-      assert_tendable_count(0),
+      assert_tendable_bleeder_count(0),
       proc do |health|
         bleeders = health['bleeders'].values.flatten
         # bleeders.each { |bleeder| p "Bleeder: #{bleeder} - tendable? #{bleeder.tendable?} - skilled? #{DRCH.skilled_to_tend_wound?(bleeder.bleeding_rate)}"}
@@ -262,7 +277,7 @@ class TestCheckHealth < Minitest::Test
 
     DRSkill._set_rank('First Aid', 0)
     check_health_with_buffer(messages, [
-      assert_tendable_count(0),
+      assert_tendable_bleeder_count(0),
       proc do |health|
         bleeders = health['bleeders'].values.flatten
         # bleeders.each { |bleeder| p "Bleeder: #{bleeder} - tendable? #{bleeder.tendable?} - skilled? #{DRCH.skilled_to_tend_wound?(bleeder.bleeding_rate)}"}
@@ -270,6 +285,22 @@ class TestCheckHealth < Minitest::Test
         assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right arm' && wound.internal? && wound.bleeding_rate == 'slight' } )
         assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right arm' && !wound.internal?  && wound.bleeding_rate == 'slight' } )
       end
+    ])
+  end
+
+  def test_tendable_wound_status_of_lodges
+    messages = [
+      "Your body feels at full strength.",
+      "Your spirit feels full of life.",
+      "You are slightly fatigued.",
+      "You have cuts and bruises about the chest area.",
+      "You have a retch maggot lodged firmly into your chest.",
+      "You feel fully rested."
+    ]
+
+    check_health_with_buffer(messages, [
+      assert_lodged_count(1),
+      assert_tendable_lodged_count(1)
     ])
   end
 

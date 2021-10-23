@@ -1,7 +1,15 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
+
 load 'test/test_harness.rb'
 
+include Harness
+
 class TestItems < Minitest::Test
+
+  def setup
+    reset_data
+  end
+
   def teardown
     @test.join if @test
   end

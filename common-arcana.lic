@@ -3,7 +3,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#common-arcana
 =end
 
-custom_require.call(%w[common events spellmonitor drinfomon])
+custom_require.call(%w[common common-items events spellmonitor drinfomon])
 
 $MANA_MAP = {
   'weak' => %w[dim glowing bright],
@@ -46,22 +46,42 @@ module DRCA
 
   def start_khris(khris, settings)
     khris
-      .map { |name| "Khri #{name}" }
-      .each do |name|
-        activate_khri?(settings.kneel_khri, name)
+      .each do |khri_set|
+        activate_khri?(settings.kneel_khri, khri_set)
       end
   end
 
+  # Needs to handle (based on current usage):
+  # - Hasten
+  # - Delay Hasten
+  # - Hasten Focus
+  # - Delay Hasten Focus
+  # - Khri Hasten
+  # - Khri Delay Hasten
+  # - Khri Delay Hasten Focus
   def activate_khri?(settings_kneel, ability)
-    return false if DRSpells.active_spells[ability]
-    kneel = kneel_for_khri?(settings_kneel, ability)
+    abilities = ability.split.map(&:capitalize)
+
+    # Standardize for with/without 'Khri' on the front
+    abilities = abilities.drop(1) if abilities.first.casecmp('khri') == 0
+
+    # Handling for 'Delay'
+    should_delay = abilities.first.casecmp('delay') == 0
+    abilities = abilities.drop(1) if should_delay
+
+    # Check each khri in the list against Active Spells, Drop any that are active
+    needed_abilities = abilities.select { |ability_to_check| DRSpells.active_spells["Khri #{ability_to_check}"].nil? }
+    return true if needed_abilities.empty?
+
+    kneel = needed_abilities.any? { |ability_to_check| kneel_for_khri?(settings_kneel, ability_to_check) }
     DRC.retreat if kneel
-    DRC.bput('kneel', 'You kneel', 'You are already', 'You rise') if kneel && !kneeling?
-    result = DRC.bput(ability, get_data('spells').khri_preps)
+    DRC.bput('kneel', 'You kneel', 'You are already', 'You rise', "While swimming?  Don't be silly") if kneel && !kneeling?
+
+    result = DRC.bput("Khri #{should_delay ? 'Delay ' : ''}#{needed_abilities.join(' ')}", get_data('spells').khri_preps)
     waitrt?
     DRC.fix_standing
 
-    ['Your body is willing', 'You have not recovered'].include?(result)
+    return ['Your mind and body are willing', 'Your body is willing', 'You have not recovered'].none?(result)
   end
 
   def kneel_for_khri?(kneel, ability)
@@ -73,17 +93,20 @@ module DRCA
   end
 
   def start_barb_abilities(abilities, settings)
-    # Note, you must know Power meditation or Powermonger mastery
-    # for your active abilities to be detected by DRSpells.
-    abilities
-      .reject { |name| DRSpells.active_spells[name] }
-      .each { |name| activate_barb_buff?(name, settings.meditation_pause_timer) }
+    abilities.each { |name| activate_barb_buff?(name, settings.meditation_pause_timer, settings.sit_to_meditate) }
   end
 
-  def activate_barb_buff?(name, meditation_pause_timer = 20)
+  def activate_barb_buff?(name, meditation_pause_timer = 20, sit_to_meditate = false)
+    # Note, you must know Power meditation or Powermonger mastery
+    # for your active abilities to be detected by DRSpells.
+    return true if DRSpells.active_spells[name]
     activated = false
     ability_data = get_data('spells').barb_abilities[name]
-    case DRC.bput(ability_data['start_command'], ability_data['activated_message'], 'But you are already', 'Your inner fire lacks', 'find yourself lacking the inner fire', 'You should stand', 'You must be sitting', 'You must be unengaged', 'While swimming?')
+    if ability_data['type'].eql?('meditation') && sit_to_meditate
+      DRC.retreat
+      DRC.bput('sit', 'You sit', 'You are already', 'You rise', 'While swimming?')
+    end
+    case DRC.bput(ability_data['start_command'], ability_data['activated_message'], 'You have not been trained', 'But you are already', 'Your inner fire lacks', 'find yourself lacking the inner fire', 'You should stand', 'You must be sitting', 'You must be unengaged', 'While swimming?')
     when 'You must be unengaged'
       DRC.retreat
       activated = activate_barb_buff?(name, meditation_pause_timer)
@@ -117,7 +140,7 @@ module DRCA
   def prepare?(abbrev, mana, symbiosis = false, command = 'prepare', tattoo_tm = false, runestone_name = nil, runestone_tm = false)
     return false unless abbrev
 
-    DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
+    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
 
     if runestone_name.nil?
       match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
@@ -128,8 +151,8 @@ module DRCA
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
-    when 'Something in the area interferes with your spell preparations'
-      DRC.bput('rel symb', 'You release the', 'But you haven\'t') if symbiosis
+    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts'
+      DRC.bput('release symbiosis', 'You release the', 'But you haven\'t') if symbiosis
       return false
     when 'Well, that was fun'
       DRCI.dispose_trash(runestone_name)
@@ -187,18 +210,25 @@ module DRCA
   def cast?(cast_command = 'cast', symbiosis = false, before = [], after = [])
     before.each { |action| DRC.bput(action['message'], action['matches']) }
 
-    Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell')
+    Flags.add('unknown-command', "Please rephrase that command")
+    Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that")
+    Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell', 'There is nothing else to face')
     Flags.add('cyclic-too-recent', 'The mental strain of initiating a cyclic spell so recently prevents you from formulating the spell pattern')
     Flags.add('spell-full-prep', /^This pattern may only be cast with full preparation/)
 
     case DRC.bput(cast_command || 'cast', get_data('spells').cast_messages)
-    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/
+    when /^Your target pattern dissipates/, /^You can't cast that at yourself/, /^You need to specify a body part to consume/, /^There is nothing else to face/
       DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
       DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
     when /You gesture/
       pause 0.25
     end
     waitrt?
+
+    # Warrior Mage failed to use (or doesn't know) barrage ability. Do regular cast instead.
+    if cast_command =~ /\b(barrage)\b/i && (Flags['unknown-command'] || Flags['barrage-fail'])
+      cast?('cast', symbiosis, [], after)
+    end
 
     if Flags['cyclic-too-recent'] || Flags['spell-full-prep']
       pause 1
@@ -258,18 +288,47 @@ module DRCA
 
   def find_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("get my #{cambrinth}", 'You get', 'You are already holding that')
-    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("remove my #{cambrinth}", 'You remove', 'You slide', 'You sling', 'You take', 'You detach', 'You aren\'t wearing that.', 'You grab your','You clutch')
+      # Your config says you keep your cambrinth stowed.
+      # If item not in your hands, maybe you're wearing it by accident?
+      DRCI.get_item_if_not_held?(cambrinth) || DRCI.remove_item?(cambrinth)
+    elsif !skilled_to_charge_while_worn?(cambrinth_cap)
+      # Your config says you wear your cambrinth.
+      # But you're not skilled to charge it while worn.
+      # If item not in your hands, maybe you're wearing it or stowed it by accident?
+      DRCI.in_hands?(cambrinth) || DRCI.remove_item?(cambrinth) || DRCI.get_item?(cambrinth)
+    else
+      # Your config says you wear your cambrinth
+      # and you're skilled to charge it while worn.
+      # Let's hope you're wearing or holding it :)
+      # To verify that would require more commands
+      # and more time, and be more spammy.
+      # For now, no validation or recovery for this scenario.
+      true
     end
   end
 
   def stow_cambrinth(cambrinth, stored_cambrinth, cambrinth_cap)
     if stored_cambrinth
-      DRC.bput("stow my #{cambrinth}", 'You put', 'Stow what')
-    elsif DRSkill.getrank('Arcana').to_i < cambrinth_cap * 2 + 100
-      DRC.bput("wear my #{cambrinth}", 'You attach', 'You slide', 'You are already wearing', 'You hang', 'You sling', 'You put', 'You place', 'You gently suspend','You slip')
+      # Your config says you keep your cambrinth stowed.
+      # If item not in your hands and not stowed, maybe you're wearing it by accident?
+      DRCI.get_item_if_not_held?(cambrinth) || DRCI.remove_item?(cambrinth)
+      DRCI.stow_item?(cambrinth)
+    elsif DRCI.in_hands?(cambrinth)
+      # Your config says you wear your cambrinth.
+      # For some reason it's currently in your hands.
+      # If can't wear item for some reason then stow it.
+      DRCI.wear_item?(cambrinth) || DRCI.stow_item?(cambrinth)
+    else
+      # Your config says you wear your cambrinth
+      # and you're not currently holding it so
+      # we'll assume you're wearing it.
+      # No further action needed.
+      true
     end
+  end
+
+  def skilled_to_charge_while_worn?(cambrinth_cap)
+    DRSkill.getrank('Arcana').to_i >= ((cambrinth_cap.to_i * 2) + 100)
   end
 
   def charge_and_invoke(cambrinth, dedicated_camb_use, charges, invoke_exact_amount = nil)
@@ -286,21 +345,60 @@ module DRCA
   def invoke(cambrinth, dedicated_camb_use, invoke_amount)
     return unless cambrinth
 
-    DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages, 'Invoke what?')
+    result = DRC.bput("invoke my #{cambrinth} #{invoke_amount} #{dedicated_camb_use}".strip, get_data('spells').invoke_messages, 'Invoke what?')
     pause
     waitrt?
+    case result
+    when /you find it too clumsy/
+      DRC.message("*** Your arcana skill is too low to invoke your cambrinth while worn")
+      # If the cambrinth is in your hands and you can't invoke it, nothing else to do.
+      unless DRCI.in_hands?(cambrinth)
+        # Otherwise, try to find the cambrinth and get it to your hands.
+        find_cambrinth(cambrinth, false, 999)
+        # If you were able to get the cambrinth into a hand then retry invoking it.
+        # You might not have been able to if your hands were full.
+        if DRCI.in_hands?(cambrinth)
+          invoke(cambrinth, dedicated_camb_use, invoke_amount)
+          stow_cambrinth(cambrinth, false, 999)
+        end
+      end
+    end
   end
 
   def charge?(cambrinth, mana)
+    charged = false
     result = DRC.bput("charge my #{cambrinth} #{mana}", get_data('spells').charge_messages, 'I could not find')
     pause
     waitrt?
     case result
     when /You are in no condition to do that/
-      harness?(mana)
+      charged = harness?(mana)
+    when /You'll have to hold it/
+      # Your not wearing nor holding your cambrinth item, go find it again.
+      # Likely it's configured in your yaml that you wear it but it's stowed for some reason.
+      # Try to find the cambrinth and get it to your hands.
+      DRC.message("*** Where did your cambrinth go?")
+      retry_find_cambrinth = true
+    when /you find it too clumsy/
+      DRC.message("*** Your arcana skill is too low to charge your cambrinth while worn")
+      retry_find_cambrinth = true
     else
-      result =~ /absorbs? all of the energy/
+      charged = result =~ /absorbs? all of the energy/
     end
+    if retry_find_cambrinth
+      # If the cambrinth is in your hands and you can't charge it, nothing else to do.
+      unless DRCI.in_hands?(cambrinth)
+        # Otherwise, try to find the cambrinth and get it to your hands.
+        find_cambrinth(cambrinth, false, 999)
+        # If you were able to get the cambrinth into a hand then retry charging it.
+        # You might not have been able to if your hands were full.
+        if DRCI.in_hands?(cambrinth)
+          charged = charge?(cambrinth, mana)
+          stow_cambrinth(cambrinth, false, 999)
+        end
+      end
+    end
+    return charged
   end
 
   def release_cyclics
@@ -399,7 +497,7 @@ module DRCA
     Flags.add('aura-growing?', 'Local conditions permit optimal growth of your aura', 'Local conditions are hindering the growth of your aura')
     aura = {}
     DRC.bput('perceive aura', 'Roundtime')
-    aura['level'] = Flags['aura-level'] ? starlight_messages.index(Flags['aura-level'].first) : 0
+    aura['level'] = Flags['aura-level'] ? starlight_messages.index(Flags['aura-level'][0]) : 0
     aura['capped'] = Flags['aura-capped?'] ? true : false
     aura['growing'] = Flags['aura-growing?'] ? true : false
     Flags.delete('aura-level')
@@ -408,7 +506,7 @@ module DRCA
     aura
   end
 
-  def cast_spells(spells, settings, force_cambrinth = false)
+  def cast_spells(spells, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
     infuse_om(!settings.osrel_no_harness, settings.osrel_amount)
     spells.each do |name, data|
       next if DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast'])
@@ -416,7 +514,7 @@ module DRCA
         echo("Waiting on mana over #{settings.waggle_spells_mana_threshold} or concentration over #{settings.waggle_spells_concentration_threshold}...")
         pause 15
       end
-      cast_spell(data, settings, force_cambrinth)
+      cast_spell(data, settings, force_cambrinth, cast_lifecycle_lambda)
     end
   end
 
@@ -489,7 +587,12 @@ module DRCA
     pause 0.5 while UserVars.moons.empty?
   end
 
-  def cast_spell(data, settings, force_cambrinth = false)
+  def cast_spell?(data, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
+    result = cast_spell(data, settings, force_cambrinth, cast_lifecycle_lambda)
+    result ? true : false
+  end
+
+  def cast_spell(data, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
     return unless data
     return unless settings
 
@@ -519,6 +622,8 @@ module DRCA
       end
     end
 
+    cast_lifecycle_lambda.call('pre-prep', data, settings) if cast_lifecycle_lambda != nil
+
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
     DRCI.put_away_item?(data['runestone_name'], settings.runestone_storage) if DRCI.in_hands?(data['runestone_name'])
     prepare_time = Time.now
@@ -543,13 +648,19 @@ module DRCA
       end
     end
 
+    cast_lifecycle_lambda.call('post-prep', data, settings) if cast_lifecycle_lambda != nil
+
     if data['prep_time']
       pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
     else
       waitcastrt?
     end
 
-    cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+    cast_lifecycle_lambda.call('pre-cast', data, settings) if cast_lifecycle_lambda != nil
+    spell_cast = cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+    cast_lifecycle_lambda.call('post-cast', data, settings) if cast_lifecycle_lambda != nil
+
+    return spell_cast
   end
 
   def check_discern(data, settings)
@@ -771,5 +882,29 @@ module DRCA
                                   .max_by { |camb, data| data['mana'] }
 
     return camb_to_use ? camb_to_use : {}
+  end
+
+  # Determine the numerical range of a Warrior Mage's elemental charge.
+  # This can be used to know if the mage is ready to perform certain abilities, like barrage.
+  # Returns a number between 0 (no charge) and 11 (max charge).
+  # https://elanthipedia.play.net/Summoning_skill#Charge_levels
+  def check_elemental_charge
+    return 0 unless DRStats.warrior_mage?
+    charge_levels = [
+        /^You sense nothing out of the ordinary.  Only magic could detect the useless trace of .* still in your system.$/,
+        /^A small charge lingers within your body, just above the threshold of perception.$/,
+        /^A small charge lingers within your body.$/,
+        /^A charge dances through your body.$/,
+        /^A charge dances just below the threshold of discomfort.$/,
+        /^A charge circulates through your body, causing a low hum to vibrate through your bones.$/,
+        /^Elemental essence floats freely within your body, leaving little untouched.$/,
+        /^Elemental essence has infused every inch of your body.  While you could contain more, you'd do so at the risk of your health.$/,
+        /^Extraplanar power crackles within your body, leaving you feeling mildly feverish.$/,
+        /^Extraplanar power crackles within your body, leaving you feeling acutely ill.$/,
+        /^Your body sings and crackles with a barely contained charge, destroying what little cenesthesia you had left.$/,
+        /^You have reached the limits of your body's capacity to store a charge.  The laws of the Elemental Plane of .* scream demands upon your physiology, threatening your life.$/
+    ]
+    result = DRC.bput("pathway sense", *charge_levels)
+    charge_levels.find_index { |pattern| pattern =~ result }
   end
 end

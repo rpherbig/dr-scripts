@@ -12,21 +12,42 @@ class WandWatcher
   include DRCI
 
   def initialize
+
+    arg_definitions = [
+      [
+        {
+          name: 'delay', 
+          regex: /^\d+$/, 
+          optional: true, 
+          description: 'Override wand_watcher_startup_delay from yaml' 
+        },
+        {
+          name: 'reset', 
+          regex: /^reset$/, 
+          optional: true, 
+          description: 'Clear timing variables' 
+        }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
     settings = get_settings
     @wand_list = settings.wands
     @queued_wands = []
     @no_use_scripts = settings.wand_watcher_no_use_scripts 
     @no_use_rooms = settings.wand_watcher_no_use_rooms 
-    @startup_delay = settings.wand_watcher_startup_delay
+    @startup_delay = args.delay || settings.wand_watcher_startup_delay 
     @passive_delay = settings.wand_watcher_passive_delay
     @activation_failure_messages = [/^The .* remains inert/]
     @activation_blocked_messages = [/^Something in the area is interfering/,
                                     /^This is not a good place for that/,
+                                    /^This is not the best place to be doing that/,
                                     /^You shouldn't disrupt the area/,
                                     /^You really shouldn't be loitering in here/,
                                     /^As you begin to do that an assistant scowls at you and motions for you to stop/,
                                     /^You cannot .* while maintaining the effort to stay hidden/]
-    UserVars.wand_watcher_timers = {} unless UserVars.wand_watcher_timers
+    UserVars.wand_watcher_timers = {} if !(UserVars.wand_watcher_timers) || args.reset
 
     # Don't allow users to make foolish mistakes, always prevent use during go2/burgle
     @no_use_scripts << 'go2'
@@ -95,14 +116,15 @@ class WandWatcher
     scripts_to_unpause = smart_pause_all
     temp_left_item = nil    
     waitrt?
-    if /nothing in your left hand\.$|at your empty hands\.$/ !~ bput('glance','You glance down')
+
+    if /nothing in your left hand\.$|at your empty hands\.$/ !~ bput('glance', /You glance down .*/)
       # If both hands are full, store the left hand item in a variable for future 
       # use and lower the left hand to the feet slot.  
       # - Left causes less problems with combat (less likely to be a loaded weapon)
       # - Feet slot causes less space/correct container issues
       if DRC.right_hand && DRC.left_hand
         temp_left_item = DRC.left_hand
-        temp_left_item = nil if /^You lower/ !~ bput("lower ground left",/^You lower/,"But you aren't holding anything in your left hand")
+        temp_left_item = nil unless DRCI.lower_item?(DRC.left_hand)
       end
     end
 
@@ -127,7 +149,7 @@ class WandWatcher
       # - or it's not in the right container
       # - or you simply don't have them
       # message the user, and remove the wand from the list of wands checked
-      if !get_item("#{$ORDINALS[count]} #{wand}",container)
+      if !DRCI.get_item?("#{$ORDINALS[count]} #{wand}",container)
         message "Could not find correct number of wands for #{wand} in #{container}."
         message "Double check your wand name, count, and container settings." 
         message "Removing this wand from the list."
@@ -143,7 +165,7 @@ class WandWatcher
       when *@activation_failure_messages
         # If activation fails, could just be a sort issue due login:
         # retry, until you succeed, or run out of wands
-        put_away_item?(wand,container)
+        DRCI.put_away_item?(wand,container)
         redo_count += 1
         redo unless redo_count > count
         # If you run out of wands to try, set next attempt to be 1/2 the cooldown time
@@ -173,12 +195,12 @@ class WandWatcher
       end
 
       # Put away the wand and reset the redo counter for next wand
-      put_away_item?(wand,container)
+      DRCI.put_away_item?(wand,container)
       redo_count = 0
     end
 
     # Pick item back up if you lowered something
-    bput("get #{temp_left_item}",/^You pick up/) if temp_left_item != nil
+    DRCI.get_item?(temp_left_item) if temp_left_item
 
     # Resume scripts
     unpause_all_list(scripts_to_unpause)

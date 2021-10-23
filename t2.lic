@@ -12,12 +12,12 @@ class T2
   include DRCT
 
   def initialize
+    @shutdown = false
     fput('awaken')
 
     @counter = 0
     @settings = get_settings
-    @repair_timer = @settings.repair_timer
-    UserVars.repair_timer_snap ||= Time.now
+    @after_shutdown = @settings.t2_after_shutdown
     UserVars.t2_timers ||= {}
 
     t2_avoids = @settings.t2_avoids
@@ -28,8 +28,11 @@ class T2
         fput("avoid #{avoid['type']}")
       end
     end
+  end
 
+  def run
     loop do
+      break if @shutdown
       trainables = @settings['training_list']
       EquipmentManager.new.empty_hands
 
@@ -43,11 +46,19 @@ class T2
         end
 
         # At this point we know that we need to train the skill
-        echo "***STATUS*** Starting #{trainable['skill']}"
+        if trainable['name'].nil?
+          echo "***STATUS*** Starting (#{trainable['start']}) #{trainable['skill']}"
+        else
+          echo "***STATUS*** Starting (#{trainable['start']}) #{trainable['name']}"
+        end
         execute_actions(trainable['scripts'])
-        update_cooldown trainable['skill'] if has_cooldown? trainable['skill']
+        update_cooldown(trainable['skill']) if has_cooldown?(trainable['skill'])
         break
       end
+    end
+    if !@after_shutdown.empty?
+      echo '***STATUS*** Controlled shutdown, executing shutdown actions.'
+      execute_actions(@after_shutdown) 
     end
   end
 
@@ -72,6 +83,25 @@ class T2
       wait_for_script_to_complete(script_name, action_parts)
     end
   end
+
+  def shutdown 
+    if @shutdown
+      DRC.message("T2 already set to shutdown.  Use '#{$clean_lich_char}e $T2.noshutdown' to cancel.")
+    else
+      @shutdown = true
+      DRC.message("Shutting down T2 on next check.  Use '#{$clean_lich_char}e $T2.noshutdown' to cancel.")
+    end
+  end
+
+  def noshutdown 
+    if @shutdown
+      @shutdown = false
+      DRC.message('Canceling shutdown of T2.')
+    else
+      DRC.message("T2 not set to shutdown.  Use '#{$clean_lich_char}e $T2.shutdown' to shutdown.")
+    end
+  end
+
 end
 
 before_dying do
@@ -79,7 +109,10 @@ before_dying do
   scripts.each do |script_name|
     stop_script(script_name) if Script.running?(script_name)
   end
-  fput('release cyclic')
+  # Don't bother releasing cyclic for NMU guilds
+  fput('release cyclic') unless %w[Commoner Barbarian Thief].include?(DRStats.guild)
 end
 
-T2.new
+$T2 = T2.new
+$T2.run
+$T2 = nil

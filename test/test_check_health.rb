@@ -1,16 +1,21 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
+
 load 'test/test_harness.rb'
 
 include Harness
 
 class TestCheckHealth < Minitest::Test
+
   def setup
-    $server_buffer.clear
-    $history.clear
+    reset_data
   end
 
   def teardown
     @test.join if @test
+  end
+
+  def assert_bleeding
+    proc { |health| assert_equal(false, health['bleeders'].empty?, 'Person is bleeding but reported as not bleeding') }
   end
 
   def assert_wounded
@@ -53,11 +58,24 @@ class TestCheckHealth < Minitest::Test
   def check_health_with_buffer(messages, assertions = [])
     $server_buffer = messages.dup
     $history = $server_buffer.dup
-    @test = run_script_with_proc(['common', 'common-healing'], proc do
+    @test = run_script_with_proc(['common', 'common-healing-data', 'common-healing'], proc do
       health_result = DRCH.check_health
       assertions = [assertions] unless assertions.is_a?(Array)
       assertions.each { |assertion| assertion.call(health_result) }
     end)
+  end
+
+  def test_that_tail_is_bleeding
+    messages = [
+      'Your body feels slightly battered.',
+      'Your spirit feels full of life.',
+      'You have deep cuts across the tail.',
+      'Bleeding',
+      '            Area       Rate',
+      '-----------------------------------------',
+      '            tail       slight'
+    ]
+    check_health_with_buffer(messages, [assert_wounded, assert_bleeding])
   end
 
   def test_that_wounded_person_is_wounded
@@ -162,4 +180,34 @@ class TestCheckHealth < Minitest::Test
       @test.join
     end
   end
+
+  def test_see_both_internal_and_external_bleeders
+    messages = [
+      "Your body feels in bad shape.",
+      "Your spirit feels full of life.",
+      "You have a severely swollen and deeply bruised right leg compounded by deep cuts across the right leg, a severely swollen and deeply bruised left leg compounded by deep slashes across the left leg, open and bleeding sores all over the skin.",
+      "",
+      "Bleeding",
+      "            Area       Rate              ",
+      "-----------------------------------------",
+      "       right leg       slight",
+      "        left leg       light",
+      "            skin       slight",
+      "   inside r. leg       slight",
+      "   inside l. leg       light"
+    ]
+
+    check_health_with_buffer(messages, [
+      proc do |health|
+        bleeders = health['bleeders'].values.flatten
+        assert_equal(5, bleeders.length)
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right leg' && !wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'left leg'  && !wound.internal?  && wound.bleeding_rate == 'light' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'skin'      && !wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'right leg' &&  wound.internal?  && wound.bleeding_rate == 'slight' } )
+        assert_equal(true, bleeders.any? { |wound| wound.body_part == 'left leg'  &&  wound.internal?  && wound.bleeding_rate == 'light' } )
+      end
+    ])
+  end
+
 end

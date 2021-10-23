@@ -95,14 +95,21 @@ module DRC
   # before performing command and do smart retries.
   # Will wait for matching text up to 15 seconds then timeout.
   def bput(message, *matches)
-    wput(message, 15, matches)
-  end
+    options = (matches.shift if matches.first.is_a?(Hash)) || {}
+    options['timeout'] ||= 15
+    options['ignore_rt'] ||= false
 
-  # Like `fput` but better because will wait for RT
-  # before performing command and do smart retries.
-  # Will wait for matching text up til the given timeout in seconds.
-  def wput(message, timeout, *matches)
-    waitrt?
+    timeout = options['timeout']
+    ignore_rt = options['ignore_rt']
+    suppress = options['suppress_no_match']
+
+    if options['debug']
+      echo "bput.message=#{message}"
+      echo "bput.options=#{options}"
+      echo "bput.matches=#{matches}"
+    end
+
+    waitrt? unless ignore_rt
     log = []
     matches.flatten!
     matches.map! { |item| item.is_a?(Regexp) ? item : /#{item}/i }
@@ -120,10 +127,12 @@ module DRC
 
       case response
       when /(?:\.\.\.wait |Wait |\.\.\. wait )([0-9]+)/
-        pause(Regexp.last_match(1).to_i - 0.9)
-        waitrt?
-        put message
-        timer = Time.now
+        unless ignore_rt
+          pause(Regexp.last_match(1).to_i - 0.9)
+          waitrt?
+          put message
+          timer = Time.now
+        end
         next
       when /Sorry, you may only type ahead/
         pause 1
@@ -154,11 +163,15 @@ module DRC
         end
       end
     end
-    echo "*** No match was found after #{timeout} seconds, dumping info"
-    echo "messages seen length: #{log.length}"
-    log.reverse.each { |logged_response| echo "message: #{logged_response}" }
-    echo "checked against #{matches}"
-    echo "for command #{message}"
+
+    unless suppress
+      echo "*** No match was found after #{timeout} seconds, dumping info"
+      echo "messages seen length: #{log.length}"
+      log.reverse.each { |logged_response| echo "message: #{logged_response}" }
+      echo "checked against #{matches}"
+      echo "for command #{message}"
+    end
+
     ''
   end
 
@@ -253,18 +266,6 @@ module DRC
     end
   end
 
-  def get_boxes(container)
-    rummage('B', container)
-  end
-
-  def count_boxes(settings)
-    current_box_count = get_boxes(settings.picking_box_source).size
-    if settings.picking_pet_box_source != settings.picking_box_source
-      current_box_count += get_boxes(settings.picking_pet_box_source).size
-    end
-    current_box_count
-  end
-
   def get_skins(container)
     rummage('S', container)
   end
@@ -312,9 +313,9 @@ module DRC
   # Items class. Name is the noun of the object. Leather/metal boolean. Is the item worn (defaults to true). Does it hinder lockpicking? (false)
   # Item.new(name:'gloves', leather:true, worn:true, hinders_locks:true, adjective:'ring', bound:true)
   class Item
-    attr_accessor :name, :leather, :worn, :hinders_lockpicking, :container, :swappable, :tie_to, :adjective, :bound, :wield, :transforms_to, :transform_verb, :transform_text, :lodges, :skip_repair
+    attr_accessor :name, :leather, :worn, :hinders_lockpicking, :container, :swappable, :tie_to, :adjective, :bound, :wield, :transforms_to, :transform_verb, :transform_text, :lodges, :skip_repair, :ranged, :needs_unloading
 
-    def initialize(name: nil, leather: nil, worn: false, hinders_locks: nil, container: nil, swappable: false, tie_to: nil, adjective: nil, bound: false, wield: false, transforms_to: nil, transform_text: nil, transform_verb: nil, lodges: true, skip_repair: false)
+    def initialize(name: nil, leather: nil, worn: false, hinders_locks: nil, container: nil, swappable: false, tie_to: nil, adjective: nil, bound: false, wield: false, transforms_to: nil, transform_text: nil, transform_verb: nil, lodges: true, skip_repair: false, ranged: nil, needs_unloading: nil)
       @name = name
       @leather = leather
       @worn = worn
@@ -330,6 +331,8 @@ module DRC
       @transform_text = transform_text
       @lodges = lodges.nil? ? true : lodges
       @skip_repair = skip_repair
+      @ranged = ranged.nil? ? is_ranged_weapon?(name) : ranged
+      @needs_unloading = needs_unloading.nil? ? @ranged : needs_unloading
     end
 
     def short_name
@@ -338,6 +341,34 @@ module DRC
 
     def short_regex
       @adjective ? /\b#{adjective}.*\b#{@name}/i : /\b#{@name}/i
+    end
+
+    def is_ranged_weapon?(noun)
+      # Common ranged weapon names
+      return true if noun =~ /^(bow|shortbow|longbow|crossbow|stonebow|latchbow|slurbow|lockbow|pelletbow|arbalest|sling|slingshot|blowgun)$/i
+      # Gamgweth or racial ranged weapon names
+      # https://elanthipedia.play.net/Genie_racial_language_item_subs
+      # https://elanthipedia.play.net/Category:Language_Book
+      return true if noun =~ /^(jranoki|uku'uan|uku'uanstaho|chunenguti|hhr'ibu|guti|mahil|taisgwelduan|chyeb|sverfil|tangara|alaer|kari|wami|usus|srigos|href|vrope|falocisana|stof|dzelt)$/i
+      # Not a ranged weapon we're aware of
+      return false
+    end
+
+    # Convenience method to parse the text of an item as shown when in your hands, with or without an adjective,
+    # into an Item class instance. Originally designed to support DRCI and equipmanager methods.
+    def self.from_text(text)
+      text = text
+        .sub('.', ' ') # convert 'foo.bar' => 'foo bar' so more easily split into adjective and noun
+        .squeeze(' ') # condense repeated runs of whitespace with a single space
+        .strip # remove leading/trailing whitespace
+      parts = text.split
+      if text.nil? || text.empty?
+        nil
+      elsif parts.size > 1
+        DRC::Item.new(adjective: parts.first, name: parts.last)
+      else
+        DRC::Item.new(name: text)
+      end
     end
   end
 
@@ -398,7 +429,7 @@ module DRC
 
   def hide?(hide_type = 'hide')
     unless hiding?
-      case bput(hide_type, 'Roundtime', 'too busy performing', 'can\'t see any place to hide yourself', 'Stalk what', 'You\'re already stalking', 'Stalking is an inherently stealthy', 'You haven\'t had enough time')
+      case bput(hide_type, 'Roundtime', 'too busy performing', 'can\'t see any place to hide yourself', 'Stalk what', 'You\'re already stalking', 'Stalking is an inherently stealthy', 'You haven\'t had enough time', 'You search but find no place to hide')
       when 'too busy performing'
         bput('stop play', 'You stop playing', 'In the name of')
         return hide?(hide_type)
@@ -457,9 +488,32 @@ module DRC
   def retreat(ignored_npcs = [])
     return if (DRRoom.npcs - ignored_npcs).empty?
 
-    escape_messages = ['You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat']
-    until escape_messages.include?(DRC.bput('retreat', *(escape_messages + ['retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing', 'You are already'])))
-      DRC.fix_standing
+    escape_messages = [
+      /You are already as far away as you can get/,
+      /You retreat from combat/,
+      /You sneak back out of combat/,
+      /Retreat to where/,
+      /There's no place to retreat to/
+    ]
+
+    retreat_messages = [
+      /retreat/,
+      /sneak/,
+      /grip on you/,
+      /grip remains solid/,
+      /You try to back/,
+      /You must stand first/,
+      /You stop advancing/,
+      /You are already/
+    ]
+
+    loop do
+      case DRC.bput("retreat", *escape_messages, *retreat_messages)
+      when *escape_messages
+        return true
+      else
+        DRC.fix_standing
+      end
     end
   end
 
@@ -493,9 +547,9 @@ module DRC
       play_command = play_command + " on my #{instrument}"
     end
     fput('release ecry') if DRSpells.active_spells["Eillie's Cry"].to_i > 0
-    result = bput(play_command, 'too damaged to play', 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing')
+    result = bput(play_command, 'too damaged to play', 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'Are you sure that\'s the right instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing')
     case result
-    when 'Play on what instrument'
+    when 'Play on what instrument', 'Are you sure that\'s the right instrument'
       snapshot = "#{right_hand}#{left_hand}"
       fput("get #{instrument}")
       return false if snapshot == "#{right_hand}#{left_hand}"

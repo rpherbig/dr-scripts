@@ -9,7 +9,8 @@ require 'yaml'
 require 'ostruct'
 require 'digest/sha1'
 
-$DEPENDENCY_VERSION = '1.2'
+$DEPENDENCY_VERSION = '1.3'
+$MIN_RUBY_VERSION = '2.5.5'
 
 no_pause_all
 no_kill_all
@@ -137,7 +138,11 @@ class OpenStruct
       if len != 1
         raise ArgumentError, "wrong number of arguments (#{len} for 1)", caller(1)
       end
-      modifiable[new_ostruct_member(mname)] = args[0]
+      if !respond_to?(:modifiable?, true) # for backwards compatability <2.3, to be removed eventually
+        modifiable[new_ostruct_member(mname)] = args[0]
+      else                                # new >=2.3 method
+        modifiable?[new_ostruct_member(mname)] = args[0]
+      end
     elsif len.zero?
       @table[mid]
     elsif len == 1
@@ -151,15 +156,17 @@ end
 
 class ScriptManager
   attr_reader :autostarts
+  attr_accessor :developer, :ignore_dependency
 
   def initialize(debug)
     @debug = debug
-    @git_token = '4491b4c6' + '20864db1575' + '3542a5d8729cf362acd1c'
+    @git_token = 'ghp_' + 'Z8AgbZCOYwmdG' + '9zgSr9MyQkFL' + 'exYYo2tROJO'
     @paste_bin_token = 'dca351a27a8af501a8d3123e29af7981'
     @paste_bin_url = 'https://pastebin.com/api/api_post.php'
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
-    @status_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
-    @item_url = 'https://api.github.com/repos/rpherbig/dr-scripts/git/blobs/'
+    @status_repo = Settings['status_repo'] || 'rpherbig/dr-scripts' 
+    @status_branch = Settings['status_branch'] ||'master'
+    update_status_url
     @lich_url = 'https://api.github.com/repos/dragon-realms/dr-lich/git/trees/master'
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
@@ -169,8 +176,10 @@ class ScriptManager
     Settings['autostart'] = Settings['autostart'] - ['dependency']
 
     Settings['base_versions'] ||= {}
+    CharSettings['next_ruby_version_check_datetime'] = Time.now
 
     @developer = Settings['dependency-developer'] || false
+    @ignore_dependency = Settings['ignore-dependency'] || false
     @add_autos = []
     @remove_autos = []
     update_autostarts
@@ -191,8 +200,29 @@ class ScriptManager
     @autostarts = UserVars.autostart_scripts + Settings['autostart']
   end
 
-  def toggle_developer
-    @developer = !@developer
+  def update_status_url
+    @status_url = 'https://api.github.com/repos/' + @status_repo + '/git/trees/' + @status_branch
+  end
+
+  def set_custom_status_repo(repo, branch)
+    @status_repo = repo
+    @status_branch = branch
+    update_status_url
+  end
+
+  def set_custom_status_branch(branch)
+    @status_branch = branch
+    update_status_url
+  end
+
+  def unset_custom_status
+    @status_repo = 'rpherbig/dr-scripts' 
+    @status_branch = 'master'
+    update_status_url
+  end
+
+  def check_custom_status
+    @status_url
   end
 
   def add_global_auto(script)
@@ -233,7 +263,11 @@ class ScriptManager
   end
 
   def run_queue
+    validate_supported_ruby_version
     Settings['dependency-developer'] = @developer
+    Settings['ignore-dependency'] = @ignore_dependency
+    Settings['status_repo'] = @status_repo 
+    Settings['status_branch'] = @status_branch
     update = false
 
     unless @add_autos.empty?
@@ -330,6 +364,11 @@ class ScriptManager
 
   def download_script(filename, force = false)
     return if filename.nil? || filename.empty?
+    if filename == 'dependency.lic' && @ignore_dependency
+      respond 'ignoring dependency download due to ignore_dependency setting'
+      respond "use '#{$lich_char}e check_dependency' to check the value."
+      return
+    end
     echo("downloading:#{filename}") if @debug
     info = get_file_status(filename)
     return unless info
@@ -447,6 +486,7 @@ class ScriptManager
   end
 
   def make_request(raw_uri)
+    echo "make_request:raw_uri = #{raw_uri}" if @debug
     uri = URI.parse(raw_uri)
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = true
@@ -878,6 +918,9 @@ class SetupFiles
     scrolls = base_items[:scroll_nouns]
     s.lootables = (base_lootables + boxes + gems + scrolls + s.loot_additions - s.loot_subtractions).uniq
 
+    battle_cries = @base_files['base-spells.yaml'][:battle_cries]
+    s.battle_cries.map! { |battle_cry| battle_cries[battle_cry['name']] ? battle_cries[battle_cry['name']].merge(battle_cry) : battle_cry }
+
     spells = @base_files['base-spells.yaml'][:spell_data]
     s.offensive_spells.map! { |spell| spells[spell['name']] ? spells[spell['name']].merge(spell) : spell }
 
@@ -918,6 +961,12 @@ class SetupFiles
      .select do |spell, i|
        spells.select { |_name, data| data['abbrev'].casecmp(spell['abbrev'].downcase).zero? }
              .each_value { |data| s.lockpick_buffs['spells'][i] = data.merge(spell) }
+     end
+
+    s.necromancer_healing
+     .each do |key, value|
+       spells.select { |name, _data| key.downcase == name.downcase }
+             .each_value { |data| s.necromancer_healing[key] = data.merge(value) }
      end
 
     s.waggle_sets
@@ -1162,15 +1211,23 @@ def list_tracked_scripts
 end
 
 def full_install
-  respond 'Removing lich autostarts for existing scripts...'
+  if !supported_ruby_version?
+    echo "You are using an unsupported version of ruby."
+    echo "In order to prevent people from wasting too much work on an unsupported version, this will not proceed."
+    echo "Please update to at least version #{$MIN_RUBY_VERSION} and try again."
+    echo "For further details / assistance, please join the dr-scripts Lich Discord: https://discord.gg/uxZWxuX "
+    exitfrom
+  end
+  respond 'Performing setup for dr-scripts.  This will take some time.  Do not stop this script until finished.'
+  respond '(Step 1 of 5) Removing lich autostarts for existing scripts...'
   remove_from_autostart(managed_scripts)
-  respond 'Adding dependency.lic to lich autostart'
+  respond '(Step 2 of 5) Adding dependency.lic to lich autostart'
   add_self_to_autostart
-  respond 'Creating a /profiles directory and downloading default profiles'
+  respond '(Step 3 of 5) Creating a /profiles directory and downloading default profiles (this will take a while)'
   setup_profiles
-  respond 'Creating a /data directory and downloading data files'
+  respond '(Step 4 of 5) Creating a /data directory and downloading data files (this will take a while)'
   setup_data
-  respond 'Backing up existing scripts and replacing with latest versions'
+  respond '(Step 5 of 5) Backing up existing scripts and replacing with latest versions (this will take a while)'
   replace_all
   respond 'Finished install!'
 end
@@ -1178,7 +1235,12 @@ end
 def replace_all
   managed_scripts
     .each do |script|
-      new_name = "#{script}#{Time.now.to_i}.bak"
+      if script == 'dependency.lic' && $manager.ignore_dependency
+        respond 'ignoring replace dependency due to ignore_dependency setting'
+        respond "use '#{$lich_char}e check_dependency' to check the value."
+        next
+      end
+      new_name = "#{script}.#{Time.now.to_i}.bak"
       respond "Renaming existing script #{script} to #{new_name}"
       File.rename("./scripts/#{script}", "./scripts/#{new_name}")
     end
@@ -1215,20 +1277,61 @@ def stop_autostart(script)
   end
 end
 
+def set_dev_mode
+  echo "Now turning dev mode on"
+  $manager.developer = true
+  echo "Developer mode now set to: #{$manager.developer}"
+end
+
+def unset_dev_mode
+  echo "Now turning dev mode off"
+  $manager.developer = false
+  echo "Developer mode now set to: #{$manager.developer}"
+end
+
+def check_dev_mode
+  echo "Developer mode set to: #{$manager.developer}"
+end
+
 def toggle_developer_mode
-  echo "Developer mode now set to: #{$manager.toggle_developer}"
+  echo "THIS METHOD IS NO LONGER USED. USE '#{$lich_char}e set_dev_mode' and '#{$lich_char}e unset_dev_mode'."
+end
+
+def ignore_dependency
+  echo "Now ignoring dependency updates"
+  $manager.ignore_dependency = true
+  echo "ignore_dependency now set to: #{$manager.ignore_dependency}"
+end
+
+def unignore_dependency
+  echo "Now processing dependency updates"
+  $manager.ignore_dependency = false
+  echo "ignore_dependency now set to: #{$manager.ignore_dependency}"
+end
+
+def check_dependency
+  echo "ignore_dependency is set to: #{$manager.ignore_dependency}"
+  echo "Use '#{$lich_char}e ignore_dependency' and '#{$lich_char}e unignore_dependency' to change."
 end
 
 def use_lich_fork
   echo 'Now switching onto the DR lich fork...'
   start_script('repository', ['unset-lich-updatable'])
+  pause 1 while Script.running?('repository')
+  echo 'Turning off updates from main lich branch on go2...'
+  start_script('repository', ['unset-updatable', 'go2'])
   $manager.queue_lich
 end
 
 def use_lich_main
   echo 'Now switching onto the lich mainline...'
   start_script('repository', ['set-lich-updatable'])
-  pause
+  pause 1 while Script.running?('repository')
+
+  echo 'Turning updates from main lich branch on go2 back on...'
+  start_script('repository', ['set-updatable', 'go2'])
+  pause 1 while Script.running?('repository')
+
   start_script('repository', ['download-lich'])
   pause
   pause 1 while Script.running?('repository')
@@ -1236,7 +1339,23 @@ def use_lich_main
 end
 
 def toggle_lich_fork
-  echo 'THIS METHOD IS NO LONGER USED. USE ;e use_lich_fork and ;e use_lich_main'
+  echo "THIS METHOD IS NO LONGER USED. USE #{$lich_char}e use_lich_fork and #{$lich_char}e use_lich_main"
+end
+
+def set_custom_status_repo(repo, branch='master')
+  $manager.set_custom_status_repo(repo,branch)
+end
+
+def set_custom_status_branch(branch)
+  $manager.set_custom_status_branch(branch)
+end
+
+def unset_custom_status
+  $manager.unset_custom_status
+end
+
+def check_custom_status
+  echo $manager.check_custom_status
 end
 
 def setup_profiles
@@ -1245,6 +1364,32 @@ end
 
 def setup_data
   $manager.setup_data
+end
+
+def supported_ruby_version?
+  return Gem::Version.new(RUBY_VERSION) >= Gem::Version.new($MIN_RUBY_VERSION)
+end
+
+def validate_supported_ruby_version
+  # Get stored time for next check (or now if not stored yet)
+  next_check_datetime = CharSettings['next_ruby_version_check_datetime'] || Time.now
+
+  # Don't spam user every iteration of run_queue
+  return if next_check_datetime > Time.now
+
+  #Check for supported version
+  if !supported_ruby_version?
+    echo "*** WARN WARN WARN WARN WARN WARN WARN ***"
+    echo "WARN: You are using an unsupported version of ruby."
+    echo "WARN: While many scripts may still continue to run, there are some that may not."
+    echo "WARN: Please update to at least version #{$MIN_RUBY_VERSION} as soon as possible."
+    echo "WARN: For further details / assistance, please join the dr-scripts Lich Discord: https://discord.gg/uxZWxuX."
+    echo "WARN: This warning will repeat on startup and every three hours."
+    echo "*** WARN WARN WARN WARN WARN WARN WARN ***"
+  end
+
+  # Set next check time to 3 hours from now
+  CharSettings['next_ruby_version_check_datetime'] = Time.now + (60 * 60 * 3)
 end
 
 def remove_from_autostart(scripts)
@@ -1275,8 +1420,10 @@ def help_me(user = nil)
   result = $manager.submit_help_pastebin
   if user
     LNet.send_message({ 'type' => 'private', 'to' => user }, result)
+    echo("Attempted to PM YAML link on lnet to #{user}.  Check lnet window for success or failure.")
   else
     LNet.send_message({ 'type' => 'channel' }, result)
+    echo('YAML link sent to lnet.  Check lnet window.')
   end
 end
 

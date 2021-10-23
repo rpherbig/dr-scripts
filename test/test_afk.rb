@@ -1,38 +1,19 @@
-require 'minitest/autorun'
+require_relative 'test_helper'
 require 'yaml'
 require 'ostruct'
+
 load 'test/test_harness.rb'
 
 include Harness
 
-class EquipmentManager
-end
-
-class Room
-  def self.current
-    Map.new
-  end
-end
-
-class Map
-  def id
-    1
-  end
-end
-
-class XMLData
-  def self.room_title
-    'Middle of Nowhere'
-  end
-end
-
 class TestAfk < Minitest::Test
+
   def setup
-    $history.clear
-    self.dead = false
-    self.health = 100
-    self.spirit = 100
-    sent_messages.clear
+    reset_data
+  end
+
+  def teardown
+    @test.join if @test
   end
 
   def setup_settings(settings)
@@ -42,9 +23,15 @@ class TestAfk < Minitest::Test
   def test_exits_if_dead_with_default_settings
     setup_settings({})
     expected_messages = ['exit']
-    self.dead = true
 
     run_script('afk')
+
+    sleep 0.2 # give script time to enter the main loop
+
+    self.dead = true
+    $history << 'another message'
+
+    sleep 0.2 # give script time to pick up on above data changes
 
     assert_sends_messages(expected_messages)
   end
@@ -52,11 +39,17 @@ class TestAfk < Minitest::Test
   def test_departs_if_dead_with_depart_on_death_enabled
     setup_settings('depart_on_death' => 'true')
     expected_messages = ['depart item', 'exit']
-    self.dead = true
 
     run_script('afk')
 
-    assert_sends_messages expected_messages
+    sleep 0.2 # give script time to enter the main loop
+
+    self.dead = true
+    $history << 'another message'
+
+    sleep 0.2 # give script time to pick up on above data changes
+
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_health
@@ -65,11 +58,15 @@ class TestAfk < Minitest::Test
     expected_messages = ['health', 'avoid all', 'exit']
 
     run_script('afk')
-    sleep 0.2
+
+    sleep 0.2 # give script time to enter the main loop
+
     self.health = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    sleep 0.2 # give script time to pick up on above data changes
+
+    assert_sends_messages(expected_messages)
   end
 
   def test_exits_if_low_spirit
@@ -79,10 +76,14 @@ class TestAfk < Minitest::Test
     $history = ['You continue to braid your vines.', 'You are attacked by a Grue! Your injuries are severe.']
 
     run_script('afk')
-    sleep 0.2
+
+    sleep 0.2 # give script time to enter the main loop
+
     self.spirit = 20
     $history << 'another message'
 
-    assert_sends_messages expected_messages
+    sleep 0.2 # give script time to pick up on above data changes
+
+    assert_sends_messages(expected_messages)
   end
 end

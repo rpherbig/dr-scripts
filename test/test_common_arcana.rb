@@ -37,9 +37,26 @@ class TestDRCA < Minitest::Test
     @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
       DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
       DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+      $test_settings.have_telescope = true
 
-      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
+      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'], $test_settings)
       assert_empty(seen_planets)
+    end)
+  end
+
+  def test_find_visible_planets_while_indoors
+    $history = [
+      'You get an ivory telescope inlaid with a ruby-eyed golden dragon from inside your hunting pack.',
+      "That's a bit tough to do when you can't see the sky.",
+      'You put your telescope in your hunting pack.'
+    ]
+    @test = run_script_with_proc(['common', 'common-items', 'common-arcana'], proc do
+      DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
+      DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
+      $test_settings.have_telescope = false
+
+      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'], $test_settings)
+      assert_nil(seen_planets)
     end)
   end
 

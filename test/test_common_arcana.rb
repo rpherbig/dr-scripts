@@ -11,6 +11,8 @@ class TestDRCA < Minitest::Test
     if defined?(DRCA)
       Object.send(:remove_const, :DRCA)
       $LOADED_FEATURES.delete_if {|file| file =~ /common/}
+      # There's a bug in our test setup, where we're not getting Harness.DRSpells, \
+      # instead we seem to be sometimes getting spellmonitor.DRSpells - which isn't mocked
     end
     reset_data
     $test_data = { :spells => OpenStruct.new({ :khri_preps => ['match strings'] })}

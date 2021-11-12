@@ -1,5 +1,6 @@
 require_relative 'test_helper'
 require 'timecop'
+require 'yaml'
 
 load 'test/test_harness.rb'
 
@@ -8,11 +9,22 @@ include Harness
 class TestDRCI < Minitest::Test
 
   def setup
+    if defined?(DRCI)
+      Object.send(:remove_const, :DRCI)
+      $LOADED_FEATURES.delete_if {|file| file =~ /common/}
+    end
     reset_data
+    @fake_drc = Minitest::Mock.new
   end
 
   def teardown
     @test.join if @test
+  end
+
+  def load_base_settings(settings = {})
+    test_settings = OpenStruct.new(YAML.load_file('profiles/base.yaml').merge(settings))
+    YAML.load_file('profiles/base-empty.yaml')['empty_values'].each { |key, val| test_settings[key] ||= val }
+    test_settings
   end
 
   #########################################
@@ -916,6 +928,102 @@ class TestDRCI < Minitest::Test
     ]
     run_accept_item(messages, [
       assert_accept_item_failure
+    ])
+  end
+
+  #########################################
+  # COUNT BOXES
+  #########################################
+  def run_get_box_list_in_container_with_mocks(bag_name, assertions)
+    @test = run_script_with_proc(['common-items'], proc do
+      # Setup
+      DRCI.send(:remove_const, "DRC") if defined?(DRCI::DRC)
+      DRCI.const_set("DRC", @fake_drc)
+
+      # Test
+      boxes = DRCI.get_box_list_in_container(bag_name);
+
+      # Assert
+      assertions = [assertions] unless assertions.is_a?(Array)
+      assertions.each { |assertion| assertion.call(boxes) }
+    end)
+  end
+
+  def test_get_box_list_for_container
+    bag_name = "foobag"
+    @fake_drc.expect(:rummage, [], ['B', bag_name])
+
+    run_get_box_list_in_container_with_mocks(bag_name, [
+      proc { |box_list| assert_equal([], box_list) }
+    ])
+  end
+
+  def run_count_all_boxes(settings, assertions)
+    @test = run_script_with_proc(['common-items'], proc do
+      # Setup
+      DRCI.send(:remove_const, "DRC") if defined?(DRCI::DRC)
+      DRCI.const_set("DRC", @fake_drc)
+
+      # Test
+      box_count = DRCI.count_all_boxes(settings);
+
+      # Assert
+      assertions = [assertions] unless assertions.is_a?(Array)
+      assertions.each { |assertion| assertion.call(box_count) }
+    end)
+  end
+
+  def test_count_all_boxes_zero_with_no_containers
+    settings = load_base_settings
+
+    run_count_all_boxes(settings, [
+      proc { |box_count| assert_equal(0, box_count) }
+    ])
+  end
+
+  def test_count_all_boxes_zero_with_empty_picking_box_source
+    settings = load_base_settings({'picking_box_source' => 'picking_box_bag'})
+    @fake_drc.expect(:rummage, [], ['B', 'picking_box_bag'])
+
+    run_count_all_boxes(settings, [
+      proc { |box_count| assert_equal(0, box_count) }
+    ])
+  end
+
+  def test_count_all_boxes_matches_with_only_picking_box_source
+    settings = load_base_settings({'picking_box_source' => 'picking_box_bag'})
+    @fake_drc.expect(:rummage, ['iron coffer', 'wooden crate'], ['B', 'picking_box_bag'])
+
+    run_count_all_boxes(settings, [
+      proc { |box_count| assert_equal(2, box_count) }
+    ])
+  end
+
+  def test_count_all_boxes_does_not_multi_count
+    settings = load_base_settings({
+      'picking_box_source' => 'picking_box_bag',
+      'pick' => {'too_hard_container' => 'picking_box_bag'}
+    })
+    @fake_drc.expect(:rummage, ['iron coffer', 'wooden crate'], ['B', 'picking_box_bag'])
+
+    run_count_all_boxes(settings, [
+      proc { |box_count| assert_equal(2, box_count) }
+    ])
+  end
+
+  def test_count_all_boxes_adds_all_bags
+    settings = load_base_settings({
+      'pick' => {
+        'picking_box_sources' => ['lootsack', 'stow_bag'],
+        'too_hard_container' => 'too_hard_bag'
+      }
+    })
+    @fake_drc.expect(:rummage, ['iron chest'], ['B', 'lootsack'])
+    @fake_drc.expect(:rummage, ['iron coffer', 'wooden crate'], ['B', 'stow_bag'])
+    @fake_drc.expect(:rummage, ['iron box', 'wooden strongbox', 'steel caddy'], ['B', 'too_hard_bag'])
+
+    run_count_all_boxes(settings, [
+      proc { |box_count| assert_equal(6, box_count) }
     ])
   end
 

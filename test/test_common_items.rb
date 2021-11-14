@@ -93,7 +93,14 @@ class TestDRCI < Minitest::Test
 
   def test_get_item__should_look_in_eddy_portal_then_get_branch_from_portal
     run_drci_command(
-      ["You get a bloodwood branch from inside a swirling eddy of incandescent light bound by a gold-striated coralite frame."],
+      [
+        # Don't see it the first time, so the script will need to look in the portal
+        "What were you referring to?",
+        # You look in the portal
+        "In the swirling eddy you see a bloodwood branch.",
+        # The retry attempt now gets the item
+        "You get a bloodwood branch from inside a swirling eddy of incandescent light bound by a gold-striated coralite frame."
+      ],
       'get_item?',
       ["bloodwood branch", "watery portal"],
       [assert_result]

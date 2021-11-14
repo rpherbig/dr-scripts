@@ -91,6 +91,15 @@ class TestDRCI < Minitest::Test
   # GET ITEM
   #########################################
 
+  def test_get_item__should_look_in_eddy_portal_then_get_branch_from_portal
+    run_drci_command(
+      ["You get a bloodwood branch from inside a swirling eddy of incandescent light bound by a gold-striated coralite frame."],
+      'get_item?',
+      ["bloodwood branch", "watery portal"],
+      [assert_result]
+    )
+  end
+
   def test_get_item__should_get_crystal_from_backpack
     run_drci_command(
       ["You get a sanowret crystal from inside your hitman's backpack."],

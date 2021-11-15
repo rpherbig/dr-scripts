@@ -1,0 +1,158 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#offload-items
+=end
+
+custom_require.call %w[common common-items]
+
+class OffloadItems
+  include DRC
+  include DRCI
+
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'source', regex: /^[A-z\.\s\-']+$/i, variable: true, description: 'Source container' },
+        { name: 'destination', regex: /^[A-z\.\s\-']+$/i, variable: true, description: 'Destination container including preposition. E.g. "on shelf", "in bucket"' },
+        { name: 'noun', regex: /^[A-z\.\s\-]+$/i, optional: true, variable: true, description: 'If specified, only items with this noun will be transferred.'}
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    offload_items(args.source, args.destination, args.noun)
+  end
+
+  @@offload_items_success_patterns = [
+    /^You drop/i,
+    /^You set/i,
+    /^You put/i
+  ]
+
+  # Messages that when trying to put away an item you're warned.
+  # To continue you must retry the command.
+  @@offload_items_retry_patterns = [
+    # You may get the next messages when an outdated item is updated upon use.
+    # "Something appears different about the <item>, perhaps try doing that again."
+    # Example: https://elanthipedia.play.net/Item:Leather_lotion
+    /Something appears different about/,
+    /perhaps try doing that again/
+  ]
+
+  @@offload_items_failure_patterns = [
+    /^You can't put that there/i,
+    /^What were you referring to/i,
+    /^Please rephrase that command/,
+    /^I could not find what you were referring to/,
+    /^You can't put that in|on|under|behind there/i,
+    /^Stow what/,
+    /^Please rephrase that command/,
+    /^What were you referring to/,
+    /^I could not find what you were referring to/,
+    /even after stuffing it/,
+    /is too .* to (fit|hold)/,
+    /close the fan/,
+    /no matter how you arrange it/,
+    /There isn't any more room in/,
+    /There's no room/,
+    /to fit in the/,
+    /too heavy to go in there/,
+    /You (need to|should) unload/,
+    /You can't do that/,
+    /You just can't get/,
+    /You can't put items/,
+    /You can only take items out/,
+    /Perhaps you should be holding that first/,
+    /Containers can't be placed in/,
+    /The .* is not designed to carry anything/,
+    # You may get the next message if you've been cursed and unable to let go of items.
+    # Find a Cleric to uncurse you.
+    /Oddly, when you attempt to stash it away safely/,
+    /completely full/,
+    /That doesn't belong in there!/,
+    /exerts a steady force preventing/
+  ]
+
+  def offload_items(source, destination, noun)
+    # Pause script and warn that the script is designed to offload items
+    # from your person to somewhere else. Item loss may occur.
+    DRC.message("WARNING: This script is designed to offload items from YOU to somewhere ELSE.")
+    DRC.message("WARNING: It also has the ability to move every item from the source container.")
+    DRC.message("WARNING: Item loss may occur. Use with caution.")
+    DRC.message("WARNING: If you want to transfer items between containers you own, use ;transfer-items instead.")
+    DRC.message("\n")
+    
+    unless noun
+      DRC.message("You are about to move EVERY SINGLE ITEM from from #{source} to #{destination}.")
+      DRC.message("Unpause the script to continue. Otherwise, ;kill the script to stop.")
+      pause_script
+      DRC.message("Are you SURE you want to offload EVERY SINGLE ITEM from YOUR #{source} to #{destination}?")
+      pause_script
+    else
+      DRC.message("You are about to move all #{noun}s from #{source} to #{destination}.")
+      DRC.message("Unpause the script to continue. Otherwise, ;kill the script to stop.")
+      pause_script
+    end
+    
+    # If container is very full then LOOK may not list all of them.
+    # If you're moving a specific item, then sort those to the top
+    # to increase chances we find and move all of them in one go.
+    bput("sort #{noun} in my #{source}", "are now at the top", "What were you referring to", "Please rephrase that command", "You may only sort items in your inventory") if noun
+    DRCI.get_item_list(source, 'look')
+      .map { |full_name| full_name =~ /lot of other stuff/ ? full_name : full_name.split(' ').last }
+      .select { |item| noun ? /\b#{noun}\b/ =~ item : true }
+      .each do |item|
+        # This indicates there is more items than LOOK can show
+        # and we've reached the end of what we last saw.
+        # We need to look again to see what we can now see.
+        # Keep doing this until fill the destination or exhaust source.
+        if item =~ /lot of other stuff/
+          offload_items(source, destination, noun)
+          return
+        end
+        # Attempt to get the item from the source container.
+        if DRCI.get_item(item, source)
+          if destination == 'trash'
+            trash_item(item)
+          else
+            unless move_item?(item, source, destination)
+              DRC.message("Unable to put #{item} in #{destination}. It may not accept items, or you may need to change the preposition (e.g. 'on shelf' vs. 'in shelf')")
+              # Failed. Return item to source container.
+              DRCI.put_away_item?(item, source)
+              exit
+            end
+          end
+        else
+          DRC.message("Unable to get #{item} from #{source}.")
+          DRC.message("Your hands are full!") if (DRC.left_hand && DRC.right_hand)
+          exit
+        end
+      end
+  end
+ 
+  def move_item?(item, source, destination)
+    # If the preposition isn't specified for the destination
+    # then default to "in <container>"
+    if !destination.include?(" ")
+      command = "put #{item} in #{destination}"
+    else
+      command = "put #{item} #{destination}"
+    end
+
+    result = DRC.bput(command, @@offload_items_success_patterns, @@offload_items_retry_patterns, @@offload_items_failure_patterns)
+    case result
+    when *@@offload_items_success_patterns
+      return true
+    when *@@offload_items_retry_patterns
+      return move_item?(item, source, destination)
+    when *@@offload_items_failure_patterns
+      return false
+    else
+      return false
+    end
+  end
+
+  def trash_item(item)
+    DRCI.dispose_trash(item)
+  end
+
+end
+
+OffloadItems.new

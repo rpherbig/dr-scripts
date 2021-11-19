@@ -350,6 +350,19 @@ class TestDRCI < Minitest::Test
     )
   end
 
+  def test_put_away_item__open_closed_vault
+    run_drci_command(
+      [
+        "That is closed.",
+        "The vault opens.",
+        "You put your bundle in the secure vault."
+      ],
+      'put_away_item?',
+      ["bundle", "vault"],
+      [assert_result]
+    )
+  end
+
   #########################################
   # STOW HANDS
   #########################################

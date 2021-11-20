@@ -473,7 +473,6 @@ class LootProcess
     if settings.box_loot_limit
       @box_nouns = get_data('items').box_nouns
       @box_loot_limit = settings.box_loot_limit
-      #@current_box_count = count_boxes(settings)
       @current_box_count = DRCI.count_all_boxes(settings)
       echo("  @current_box_count: #{@current_box_count}")
       echo("  @box_loot_limit: #{@box_loot_limit}")
@@ -840,7 +839,7 @@ class LootProcess
     when 'would probably object', "should be left alone."
       fput ('dissect')
     when "That's going to be hard"
-      DRC.release_invisibility
+      DRC.release_invisibility if invisible?
       fput ('unhide')
       dissected?(mob_noun, game_state)
     end
@@ -2321,7 +2320,6 @@ class TrainerProcess
       'Flee' => 'Athletics',
       'Hunt' => 'Perception',
       'Khri Prowess' => 'Debilitation',
-      'Locks' => 'Locksmithing',
       'Meraud' => 'Theurgy',
       'Perc Health' => 'Empathy',
       'Perc' => 'Attunement',
@@ -2392,9 +2390,6 @@ class TrainerProcess
     @forage_item = settings.forage_item
     echo("  @forage_item: #{@forage_item}") if $debug_mode_ct
 
-    @pet_box_source = settings.picking_pet_box_source
-    echo("  @pet_box_source: #{@pet_box_source}") if $debug_mode_ct
-
     @analyze_retry_count = settings.combat_analyze_retry_count
     echo("  @analyze_retry_count: #{@analyze_retry_count}") if $debug_mode_ct
 
@@ -2403,10 +2398,6 @@ class TrainerProcess
 
     @combat_training_abilities_target = settings.combat_training_abilities_target
     echo("  @combat_training_abilities_target: #{@combat_training_abilities_target}") if $debug_mode_ct
-
-    @pet_count = @skill_map.include?('Locks') ? DRCI.count_items_in_container("box", @pet_box_source) : 0
-    @pet_count = @skill_map.include?('Locks') ? @pet_count + DRCI.count_items_in_container("pouch", @pet_box_source) : 0
-    echo("  @pet_count: #{@pet_count}") if $debug_mode_ct
 
     @combat_trainer_herbs_allowhands = settings.combat_trainer_herbs_allowhands
     echo("  @combat_trainer_herbs_allowhands: #{@combat_trainer_herbs_allowhands}") if $debug_mode_ct
@@ -2437,12 +2428,6 @@ class TrainerProcess
 
     @always_use_maneuvers = settings.always_use_maneuvers
     echo("  @always_use_maneuvers: #{@always_use_maneuvers}") if $debug_mode_ct
-
-    @worn_trashcan = settings.worn_trashcan
-    echo("  @worn_trashcan: #{@worn_trashcan}") if $debug_mode_ct
-
-    @worn_trashcan_verb = settings.worn_trashcan_verb
-    echo("  @worn_trashcan_verb: #{@worn_trashcan_verb}") if $debug_mode_ct
   end
 
   def execute(game_state)
@@ -2480,8 +2465,6 @@ class TrainerProcess
       bput($tactics_actions.sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
     when /^Analyze$/i
       analyze(game_state, 0)
-    when /^Locks$/i
-      pickbox(game_state, number='first')
     when /^Hunt$/i
       bput('hunt', 'You take note of ', 'You find yourself unable to hunt in this area') unless game_state.retreating?
     when /^Teach$/i
@@ -2751,83 +2734,6 @@ class TrainerProcess
     return unless dirt_in_hand
     bput("put my dirt in my #{@dirt_stacker}",
          'dumping some dirt', 'What were you referring')
-  end
-
-  def pickbox(game_state, number='first')
-    DRC.message("@pet_count is #{@pet_count}.") if $debug_mode_ct
-    return unless @pet_box_source && @pet_count > 0
-    return if game_state.loaded || game_state.offhand?
-    return if left_hand && !game_state.currently_whirlwinding
-
-    if right_hand
-      if game_state.weapon_is_summoned?
-        echo 'combat-trainer::pickbox: weapon summoned' if $debug_mode_ct
-        if DRStats.warrior_mage?
-          bput("lower #{game_state.weapon_name} to ground", 'You lower')
-        else
-          bput("wear my #{game_state.weapon_name}", 'telekinetic force')
-        end
-      else
-        echo 'combat-trainer::pickbox: weapon NOT summoned' if $debug_mode_ct
-        @equipment_manager.stow_weapon(game_state.weapon_name)
-      end
-      had_weapon = true
-    end
-    game_state.sheath_whirlwind_offhand if game_state.currently_whirlwinding
-
-    num = 1
-    picked = false
-    while !picked
-      box = "box"
-      if !DRCI.in_hands?(box) && !DRCI.get_item?("#{number} #{box}", @pet_box_source)
-        box = "pouch"
-        DRCI.get_item?("#{number} #{box}", @pet_box_source) unless DRCI.in_hands?(box)
-      end
-      case bput("pick my #{box}", 'not making any progress', 'it opens.', "isn't locked", 'The lock feels warm', 'The lock looks weak, and rather than risk breaking it', /It's not even locked, why bother?/)
-      when /it opens/
-        waitrt?
-        bput("lock my #{box}", 'You quickly lock', 'already locked')
-        picked = true
-      when /isn't locked/
-        bput("close my #{box}", "You close", "That is already closed")
-        bput("lock my #{box}", "You quickly lock", "already locked")
-        picked = false
-      when /The lock feels warm/
-        num += 1
-        DRCI.put_away_item?(box, @pet_box_source)
-        @pet_count -= 1
-        if num == 2
-          ord = 'second'
-        elsif num == 3
-          ord = 'third'
-        elsif num = 4
-          ord = 'fourth'
-        end
-        return pickbox(game_state, number=ord)
-      when /The lock looks weak, and rather than risk breaking it/
-        DRCI.dispose_trash(box, @worn_trashcan, @worn_trashcan_verb)
-        @pet_count -= 1
-        pick = false
-      when /It's not even locked, why bother?/
-        DRCI.put_away_item?(box)
-        @pet_count -= 1
-        pick = false
-      end
-      break if @pet_count == 0
-    end
-    DRC.message("@pet_count is #{@pet_count}.") if $debug_mode_ct
-    waitrt?
-    DRCI.put_away_item?(box, @pet_box_source)
-
-    if had_weapon
-      if game_state.weapon_is_summoned?
-        bput("get my #{game_state.weapon_name}", 'You pick up', 'from the air')
-        pause 0.5
-      else
-        @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
-      end
-      game_state.wield_whirlwind_offhand if game_state.currently_whirlwinding
-    end
   end
 
   def analyze(game_state, fail_count)
@@ -3303,8 +3209,6 @@ class AttackProcess
           # The weapon lands on the ground, not in the 'at feet' slot, and 'my' will not work
           bput("get #{weapon_name}", 'You pick up', 'You get', 'What were')
         end
-        # Added because sometimes the prior bput is not done due to roundtime, even the retries.
-        bput("get #{weapon_name}", 'You pick up', 'You get', 'What were') unless DRCI.in_left_hand?(weapon_name)
       end
 
       game_state.sheath_offhand_weapon(skill)

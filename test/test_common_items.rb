@@ -91,6 +91,22 @@ class TestDRCI < Minitest::Test
   # GET ITEM
   #########################################
 
+  def test_get_item__should_look_in_eddy_portal_then_get_branch_from_portal
+    run_drci_command(
+      [
+        # Don't see it the first time, so the script will need to look in the portal
+        "What were you referring to?",
+        # You look in the portal
+        "In the swirling eddy you see a bloodwood branch.",
+        # The retry attempt now gets the item
+        "You get a bloodwood branch from inside a swirling eddy of incandescent light bound by a gold-striated coralite frame."
+      ],
+      'get_item?',
+      ["bloodwood branch", "watery portal"],
+      [assert_result]
+    )
+  end
+
   def test_get_item__should_get_crystal_from_backpack
     run_drci_command(
       ["You get a sanowret crystal from inside your hitman's backpack."],
@@ -330,6 +346,19 @@ class TestDRCI < Minitest::Test
       ],
       'put_away_item?',
       ["kitten", ["backpack", "cottage"]],
+      [assert_result]
+    )
+  end
+
+  def test_put_away_item__open_closed_vault
+    run_drci_command(
+      [
+        "That is closed.",
+        "The vault opens.",
+        "You put your bundle in the secure vault."
+      ],
+      'put_away_item?',
+      ["bundle", "vault"],
       [assert_result]
     )
   end

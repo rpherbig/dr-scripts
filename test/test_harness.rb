@@ -643,7 +643,9 @@ module Harness
 
     $health = 100
     $spirit = 100
+    $concentration = 100
     $dead = false
+    $standing = true
     $hidden = false
     $invisible = false
 
@@ -680,6 +682,10 @@ module Harness
     $displayed_messages
   end
 
+  def standing?
+    $standing || false
+  end
+
   def hiding?
     hidden?
   end
@@ -702,6 +708,10 @@ module Harness
 
   def spirit
     $spirit || 100
+  end
+
+  def concentration
+    $concentration || 100
   end
 
   def fput(message)

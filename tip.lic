@@ -2,96 +2,82 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#tip
 =end
 
-# Background: I've always been annoyed by the need to specify tips in coppers.
-# DR's required syntax leaves you counting zeroes if you want to tip someone.
-# So a tip of 10 platinum kronars requires you to tip 100000 kronars. How many
-# zeroes is that? I lost count already. This simple script allows you to tip 
-# someone, in a similar syntax, but use the denomination to do so (e.g. "platinum").
-# <;tip gildaren 10 plat kron> now works. If you don't specify a currency,
-# this script also chooses the currency of the greatest coin you have on hand.
-
 custom_require.call %w[common common-money]
 
 class Tip
 
-  # include DRC for the message function
-  # include DRCM for use of converting amounts to copper
+  # include DRC for the bput function
+  # include DRCM for various money handling functions
   
   def initialize
     arg_definitions = [
+      # Two required arguments - recipient and amount; One optional argument, currency
+      # Mirrors DR's mechanics of "tip <person> 10000 kron", and also allows "tip <person> 10000" and assumes coppers
       [
         { name: 'recipient', regex: /^[A-z\.\s\-']+$/i, variable: true, description: 'The recipent of your tip. Abbreviations ok.' },
         { name: 'amount', regex: /^\d+$/i, variable: true, description: 'Numeric amount to tip, no commas (e.g. the number "100" in 100 kronars)' },
-        { name: 'denomination', regex: /(\bp(l|la|lat|lati|latin|latinu|latinum)?\b)|(\bg(o|ol|old)?\b)|(\bs(i|il|ilv|ilve|ilver)?\b)|(\bb(r|ro|ron|ronz|ronze)?\b)|(\bc(o|op|opp|oppe|opper)?\b)/i, variable: true, description: 'The denomination. Abbrevations ok. (e.g. plat, gold, silv)' },
-        { name: 'currency', regex: /(\bk(r|ro|ron|rona|ronar|ronars)?\b)|(l(i|ir|iru|irum|irums)?\b)|(\bd(o|ok|oko|okor|okora|okoras)?\b)/i, optional: true, variable: true, description: 'Optional currency. Abbreviations ok: kron, lirums, dokor' }         
+        { name: 'currency', regex: Regexp.union($CURRENCY_REGEX_MAP.values), optional: true, variable: true, description: 'Optional currency. Abbreviations ok: kron, lirums, dokor' }         
+      ],
+      # Three required arguments - recipient, amount, denomination - plus a fourth optional argument - currency
+      # Allows mechanic of "tip person 10 plat" and chooses your current max on hand
+      # or "tip person 10 plat kron"
+      [
+        { name: 'recipient', regex: /^[A-z\.\s\-']+$/i, variable: true, description: 'The recipent of your tip. Abbreviations ok.' },
+        { name: 'amount', regex: /^\d+$/i, variable: true, description: 'Numeric amount to tip, no commas (e.g. the number "100" in 100 kronars)' },
+        { name: 'denomination', regex: Regexp.union($DENOMINATION_REGEX_MAP.values), variable: true, description: 'The denomination. Abbrevations ok. (e.g. plat, gold, silv)' },
+        { name: 'currency', regex: Regexp.union($CURRENCY_REGEX_MAP.values), optional: true, variable: true, description: 'Optional currency. Abbreviations ok: kron, lirums, dokor' }
       ]
     ]
+    
     args = parse_args(arg_definitions)  
     gratuity(args.recipient, args.amount, args.denomination, args.currency)
 
   end
 
-  def gratuity(recipient, amount, denomination, currency)
+  @tip_success_patterns = [
+    /^You offer/i
+  ]
+
+  @tip_failure_patterns = [
+    /^I don't know who/i,
+    /you really should keep every bronze/i,
+    /^You already have a tip offer outstanding/i,
+    /^But you don't have that much/i,
+    /^Hmmm, tipping yourself/i    
+  ]
+
+  def gratuity(recipient, amount, denomination, currency)    
+    # Grab the total amount in copper given a numerical amount
+    # and a denomination (e.g. 100 bronze). Utilize the
+    # helper method in common-money.
+    total = DRCM.convert_to_copper(amount, denomination)
+
+    # Handle the currency, either parsing an abbreviated
+    # currency to return the full canonical currency
+    # or, if no currency specified, checking current 
+    # wealth and using the max on hand.
+    currency = handle_currency(currency)
     
-    total = convert_total(amount, denomination)
-    currency = handle_currency(total, currency)
-    
-    fput("tip #{recipient} #{total} #{currency}")
-    
+    DRC.bput("tip #{recipient} #{total} #{currency}", @tip_success_patterns, @tip_failure_patterns)    
   end
 
-  def convert_total(amount, denomination)
-    # Take the amount, and the denomination, and determine the total
-    # in coppers. For example, 1 platinum would be 10000 coppers.
-
-    full_denom = nil
-
-    case denomination
-    when /\bp(l|la|lat|lati|latin|latinu|latinum)?\b/i
-      full_denom = "platinum"
-      return DRCM.convert_to_copper(amount, full_denom)
-    when /\bg(o|ol|old)?\b/i
-      full_denom = "gold"
-      return DRCM.convert_to_copper(amount, full_denom)
-    when /\bs(i|il|ilv|ilve|ilver)?\b/i
-      full_denom = "silver"
-      return DRCM.convert_to_copper(amount, full_denom)
-    when /\bb(r|ro|ron|ronz|ronze)?\b/i
-      full_denom = "bronze"
-      return DRCM.convert_to_copper(amount, full_denom)
-    when /\bc(o|op|opp|oppe|opper)?\b/i
-      full_denom = "copper"
-      return DRCM.convert_to_copper(amount, full_denom)
-    end
-  end
-
-  def handle_currency(total, currency)
+  def handle_currency(currency)
     # If user hasn't specified the currency, choose based
     # on max currency on hand, else parse specified currency
     # in case user has abbreviated it.
     unless currency
-      # Get current wealth by currency
-      purse = {
-        "kronars": DRCM.check_wealth("Kronars"),
-        "lirums":  DRCM.check_wealth("Lirums"),
-        "dokoras": DRCM.check_wealth("dokoras")
-      }
-      # Finds the currency of our current max on hand
-      currency = purse.max_by{|k,v| v}[0]
+      # If no currency is specified, this utilizes a  
+      # DRCM helper method that gets a hash of your total 
+      # wealth by currency, then finds the max currency and 
+      # returns the key.
+      currency = DRCM.get_total_wealth.max_by{|k,v| v}[0]
     else
-      # Parse abbreviations of the currency in the script call when given
-      case currency
-      when /\bk(r|ro|ron|rona|ronar|ronars)?\b/i
-        currency = "kronars"
-      when /\bl(i|ir|iru|irum|irums)?\b/i
-        currency = "lirums"
-      when /\bd(o|ok|oko|okor|okora|okoras)?\b/i
-        currency = "dokoras"
-      end
+      # Else when a currency is specified, parse the input
+      # in case the user has abbreviated the currency.
+      currency = DRCM.get_canonical_currency(currency)
     end
     
     return currency
-
   end
 
 end

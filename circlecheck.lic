@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#circlecheck
 =end
 
-custom_require.call(%w[drinfomon])
+custom_require.call(%w[drinfomon common])
 
 $Skills = [
   { name: 'Scouting', type: 'Survival' },
@@ -498,6 +498,9 @@ def main
 
   $debug_mode_cc = args.debug
 
+  # Get settings so we can check for yaml prettyprint true or false
+  @settings = get_settings
+
   level_target = [args.target.to_i, DRStats.circle + 1].max
   requirements = all_requirements(level_target)
   display_requirements(requirements, level_target, args.mode)
@@ -506,7 +509,14 @@ end
 def display_requirements(requirements, level_target, brief)
   can_circle = false
   first_circle_seen = nil
+  column_headings_displayed = false
   spacer_displayed = false
+
+  # Grab the circlecheck_prettyprint yaml setting
+  # prettyprint = @settings.circlecheck_prettyprint
+  prettyprint = @settings.circlecheck_prettyprint #Set manually for testing
+
+  # Caclulate the TDPs gained at next level
   tdps = if DRStats.circle < 9
            DRStats.circle + 51
          elsif DRStats.circle < 150
@@ -514,29 +524,142 @@ def display_requirements(requirements, level_target, brief)
          else
            0
          end
-  respond("Your next level will award: #{tdps} TDPs")
+
+  # If the user has yaml set to circlecheck_prettyprint
+  # then handle top of display. Otherwise display traditional.
+  if prettyprint
+    # Hash of column => spacing, which centralizes the formatting
+    # to handle display of circlecheck columns and allows us to easily
+    # edit column widths in an single spot.
+    column_spacing = {
+      1 => 16,
+      2 => 12,
+      3 => 6,
+      4 => 3,
+      5 => 8,
+      6 => 7,
+      7 => 2,
+      8 => 3
+    }
+
+    # This outputs the beginning section of circle check, which
+    # gives your current circle and your TDPs at next level.
+    DRC.message("___________________________________________________________")
+    respond("CURRENT CIRCLE:" + "#{DRStats.circle}" + " | Next level TDPS: " + "#{tdps}")
+    respond("")
+    
+    # Set column headings for later display for prettyprint
+    column_headings =   
+      "SKILL".center(column_spacing[1]) +
+      "CATEGORY".center(column_spacing[2]) +
+      "CIR".rjust(column_spacing[3]) +
+      "  ".center(column_spacing[4]) +
+      # "RANKS".rjust(9) +
+      # "TTL".rjust(6) +
+      # "CIR".rjust(5)
+      "RANKS for CIR".rjust(20)
+  else
+    # Retain original formatting at top of display
+    respond("Your next level will award: #{tdps} TDPs")
+  end
+
   new_target = 0
   requirements.each do |skill, met_circle, missing_ranks, ranks|
     first_circle_seen ||= met_circle
 
+    # Check if we're ready to circle. If so, display message.
+    # Also, if so, recognize that that our ;circlecheck readout
+    # should be targetting an additional circle (e.g. if we're
+    # currenly 30th circle but can circle to 31st, ;circlecheck
+    # should show us target skill for circle 32)
     if first_circle_seen > DRStats.circle && !can_circle
       echo("met_circle: #{met_circle} circle: #{DRStats.circle}") if $debug_mode_cc
       can_circle = true
       new_target = first_circle_seen + 1
-      respond("***You're ready to circle!***")
+      DRC.message("***You're ready to circle!***")
     end
 
+    # If we're in the first iteration of this loop, and user has
+    # prettyprint specified in yaml, display column headings,
+    # then recognize we've displayed column headings so we don't
+    # re-display them every loop.
+    if !column_headings_displayed && prettyprint
+      respond(column_headings)
+      column_headings_displayed = true
+    end
+
+    # This gives some space between the top set of skill(s) for target circle
+    # and the rest of the circlecheck readout.
     if met_circle >= [level_target, new_target].max && !spacer_displayed
       break if brief
       spacer_displayed = true
       respond('')
-      respond('')
     end
 
-    if met_circle == 200
-      respond("You have enough #{skill} for circle #{met_circle} and have exceeded it by #{missing_ranks} (#{ranks}) ranks")
-    else
-      respond("You have enough #{skill} for circle #{met_circle} and need #{missing_ranks} (#{missing_ranks + ranks}) ranks for circle #{[met_circle + 1, level_target].max}")
+    if prettyprint
+      # Break each skill string into skill name and skill category
+      # E.g. "Stealth (1st Survival)" becomes "Stealth" and "1st Survival"
+      # If this is a hard req, display hard req instead of category
+      if skill =~ /\(/i
+        sub_skill = skill.scan(/\(([A-z\.\s\-']+)\)/i).first.first
+        category = skill.split(/ \([A-z\.\s\-']+\)/i).first
+      else
+        sub_skill = skill
+        category = 'Hard Req'
+      end
+
+      # Calculate the percent remaining to next skill rank
+      # so we can display fractional amounts. Format so 
+      # we can easily append to current rank.
+      percent_remaining = 100 - DRSkill.getpercent(sub_skill).to_i
+      if percent_remaining.to_s.size < 2
+        percent_remaining = "0" + percent_remaining.to_s
+      elsif percent_remaining == 100
+        percent_remaining = 00
+      end
+
+      # Formulate the needed ranks to target circle including 
+      # fractional amount. Also prep total target ranks for proper display.
+      needed_ranks = (missing_ranks -1).to_s + "." + percent_remaining.to_s
+      missing_ranks_plus_ranks = "(" + (missing_ranks + ranks).to_s + ")"
+
+      # Handle formatting circlecheck output in column formatting.
+      case
+      when met_circle == 200
+        # If ranks are beyond what's needed for circle 200, add a +
+        # in front of the ranks to signify the amount beyond 200
+        # circle reqs.
+        needed_ranks_plus = "+" + needed_ranks.to_s
+
+        respond(
+          "#{sub_skill.center(column_spacing[1])}" +                             # Column 1 - Skill
+          "#{category.center(column_spacing[2])}" +                              # Column 2 - Category
+          "#{met_circle.to_s.rjust(column_spacing[3])}  " +                      # Column 3 - Met circle
+          "-".center(column_spacing[4]) +                                        # Column 4 - and need
+          "#{needed_ranks_plus.to_s.rjust(column_spacing[5])}" +                 # Column 5 - Needed Ranks
+          "#{missing_ranks_plus_ranks.to_s.rjust(column_spacing[6])} " +         # Column 6 - Total Target Ranks
+          "|".ljust(column_spacing[7]) +                                         # Column 7 - for
+          "#{met_circle.to_s.rjust(column_spacing[8])}"                          # Column 8 - Target circle
+        )
+      else
+        respond(
+          "#{sub_skill.center(column_spacing[1])}" +                               # Column 1 - Skill
+          "#{category.center(column_spacing[2])}" +                                # Column 2 - Category
+          "#{met_circle.to_s.rjust(column_spacing[3])}  " +                        # Column 3 - Met circle
+          "-".center(column_spacing[4]) +                                          # Column 4 - and need
+          "#{needed_ranks.to_s.rjust(column_spacing[5])}" +                        # Column 5 - Needed Ranks
+          "#{missing_ranks_plus_ranks.to_s.rjust(column_spacing[6])} " +           # Column 6 - Total Target Ranks
+          "|".ljust(column_spacing[7]) +                                           # Column 7 - for
+          "#{[met_circle + 1, level_target].max.to_s.rjust(column_spacing[8])}"    # Column 8 - Target circle
+        )
+      end # Prettyprint display section
+
+    else # If yaml prettyprint not set, display original format
+      if met_circle == 200
+        respond("You have enough #{skill} for circle #{met_circle} and have exceeded it by #{missing_ranks} (#{ranks}) ranks")
+      else
+        respond("You have enough #{skill} for circle #{met_circle} and need #{missing_ranks} (#{missing_ranks + ranks}) ranks for circle #{[met_circle + 1, level_target].max}")
+      end
     end
   end
 end

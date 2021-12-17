@@ -243,11 +243,14 @@ class ScriptManager
 
   def build_version_hash
     Dir['./scripts/*.lic'].each_with_object({}) do |path, versions|
-      file = File.basename(path)
-      body = File.open("./scripts/#{file}", 'r').readlines.join('')
-      sha = Digest::SHA1.hexdigest('blob' + " #{body.size}" + "\0" + body)
-      versions[file] = sha
+      versions[File.basename(path)] = git_hash_blob(path)
     end
+  end
+
+  def git_hash_blob(file_path)
+    # chomp + join with \n and \n append to deal with cross-platform eol issues
+    body = File.open(file_path,'r').readlines(chomp: true).join("\n") + "\n"
+    sha = Digest::SHA1.hexdigest('blob' + " #{body.size}" + "\0" + body)
   end
 
   def autos_proccessed?
@@ -598,6 +601,12 @@ class ScriptManager
     message_body += "\n"
     message_body += "Game Client: #{$frontend}"
     message_body += "\n"
+    message_body += "Developer mode: #{$manager.developer}" if $manager.developer
+    message_body += "Update URL for dr-scripts: #{$manager.check_custom_status}" unless $manager.developer
+    message_body += "\n"
+    message_body += "Ignoring dependency updates: #{$manager.ignore_dependency}"
+    message_body += "\n"
+
 
     Dir['./scripts/profiles/*.yaml'].map { |item| File.path(item) }.select { |path| path.include?("#{checkname}-") }.each do |path|
       message_body += "\n****\n" * 3
@@ -607,12 +616,64 @@ class ScriptManager
     end
 
     message_body += "\n****\n" * 3
-    message_body += Dir['./scripts/profiles/*.*'].join(',')
-    message_body += "\n"
-    message_body += Dir['./scripts/data/*.*'].join(',')
+    message_body += Dir['./scripts/profiles/*.*'].join(',')   # TODO: convert this to newline joins after migration of example profiles to subdir
+    message_body += "\n***\n"
+    message_body += help_me_data_checks
     message_body += "\n"
 
+    # get around pastebin's puritanical filter
+    message_body.gsub!("bastard","'child of an unwed mother(modified)'")
     submit_pastebin(message_body)
+  end
+
+  def help_me_data_checks
+    base_output = {}
+    data_output = {}
+    message_output = ""
+
+    # validate base / base-empty files from repo
+    prefix = "./scripts/profiles/"
+    profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
+    make_request(profile_tree_url)['tree']
+      .select { |data| /^base(?:-empty)?\.yaml/ =~ data['path'] }
+      .each { |file|
+        if File.exists?("#{prefix}#{file['path']}")
+          local_hash = git_hash_blob("#{prefix}#{file['path']}")
+          remote_hash = file['sha']
+          if local_hash == remote_hash
+            base_output["#{prefix}#{file['path']}"] = "OK"
+          else
+            base_output["#{prefix}#{file['path']}"] = "mismatch: #{local_hash}"
+          end
+        else
+          base_output["#{prefix}#{file['path']}"] = "missing"
+        end
+      }
+
+    # validate data files from repo
+    prefix = "./scripts/data/"
+    local_file_list = Dir["#{prefix}*.*"]
+    data_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
+    make_request(data_tree_url)['tree'].each { |file|
+      if File.exists?("#{prefix}#{file['path']}")
+        local_hash = git_hash_blob("#{prefix}#{file['path']}")
+        remote_hash = file['sha']
+        if local_hash == remote_hash
+          data_output["#{prefix}#{file['path']}"] = "OK"
+        else
+          data_output["#{prefix}#{file['path']}"] = "mismatch: #{local_hash}"
+        end
+      else
+        data_output["#{prefix}#{file['path']}"] = "missing"
+      end
+      local_file_list.delete("#{prefix}#{file['path']}")
+    }
+    local_file_list.each { |file| data_output[file] = "new"}
+
+    base_output.each { |k,v| message_output += "#{k} : #{v}\n"}
+    message_output += "***\n"
+    data_output.each { |k,v| message_output += "#{k} : #{v}\n"}
+    message_output
   end
 end
 

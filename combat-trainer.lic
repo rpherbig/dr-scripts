@@ -3666,15 +3666,35 @@ class GameState
   include DRC
 
   $martial_skills = ['Brawling']
-  $melee_skills = ['Small Edged', 'Large Edged', 'Twohanded Edged', 'Small Blunt', 'Large Blunt', 'Twohanded Blunt', 'Staves', 'Polearms']
+  $edged_skills = ['Small Edged', 'Large Edged', 'Twohanded Edged']
+  $blunt_skills = ['Small Blunt', 'Large Blunt', 'Twohanded Blunt']
+  $staff_skills = ['Staves']
+  $polearm_skills = ['Polearms']
+  $melee_skills = $edged_skills + $blunt_skills + $staff_skills + $polearm_skills
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $twohanded_skills = ['Twohanded Edged', 'Twohanded Blunt']
   $aim_skills = ['Bow', 'Slings', 'Crossbow']
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
-  $tactics_actions = %w[bob weave circle]
+  $tactics_actions = ['bob', 'weave', 'circle']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia, :starlight_values, :casting_cyclic
+  attr_accessor :action_count, :aim_queue, :analyze_combo_array, :blessed_room, :cast_timer,
+                :casting, :casting_cfb, :casting_consume, :casting_cyclic, :casting_moonblade,
+                :casting_regalia, :casting_sorcery, :casting_weapon_buff, :charges, :charges_total,
+                :clean_up_step, :constructs, :cooldown_timers, :current_weapon_skill,
+                :currently_whirlwinding, :dance_queue, :dancing, :danger, :hide_on_cast,
+                :last_regalia_type, :last_weapon_skill, :loaded, :mob_died, :need_bundle,
+                :no_loot, :no_skins, :no_stab_current_mob, :no_stab_mobs, :parrying, :prepare_cfb,
+                :prepare_consume, :regalia_cancel, :reset_stance, :retreating, :starlight_values,
+                :swap_regalia_type, :target_weapon_skill, :use_charged_maneuvers,
+                :whirlwind_trainables, :wounds
+
+  attr_reader :aim_fillers, :aim_fillers_stealth, :ambush, :backstab, :balance_regen_threshold,
+              :cambrinth, :cambrinth_cap, :charged_maneuvers, :dance_actions, :dance_actions_stealth,
+              :dance_skill, :dance_threshold, :dedicated_camb_use, :dual_load, :fatigue_regen_threshold,
+              :ignored_npcs, :retreat_threshold, :stances, :stored_cambrinth, :summoned_weapons_element,
+              :summoned_weapons_ingot, :target_action_count, :target_increment, :use_analyze_combos,
+              :use_stealth_attacks, :use_weak_attacks, :weapons_to_train
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -4024,15 +4044,6 @@ class GameState
     weapon_training[skill]
   end
 
-  def necro_casting?
-    return false unless DRStats.necromancer?
-    return true if @prepare_cfb
-    return true if @casting_cfb
-    return true if @prepare_consume
-    return true if @casting_consume
-    false
-  end
-
   def wield_whirlwind_offhand
     return if twohanded_weapon_skill?
     return unless currently_whirlwinding
@@ -4054,16 +4065,43 @@ class GameState
     end
   end
 
+  # Get the skill of the weapon currently being trained (e.g. Small Edged).
   def weapon_skill
     @current_weapon_skill
   end
 
+  # Does the current weapon train a two-handed skill (i.e. 2HE/2HB)?
   def twohanded_weapon_skill?
     $twohanded_skills.include?(weapon_skill)
   end
 
+  # Does the current weapon train a non-brawling melee skill (i.e. edged, blunt, staff, polearm)?
   def melee_weapon_skill?
     $melee_skills.include?(weapon_skill)
+  end
+
+  # Does the current weapon train a thrown skill (i.e. light/heavy thrown)?
+  def thrown_skill?
+    $thrown_skills.include?(weapon_skill)
+  end
+
+  # Does the current weapon train an aimable skill (i.e. bow/crossbow/sling)?
+  def aimed_skill?
+    $aim_skills.include?(weapon_skill)
+  end
+
+  # Is the offhand weapon skill currently being trained?
+  def offhand?
+    weapon_skill == 'Offhand Weapon'
+  end
+
+  # Is the melee brawling skill currently being trained?
+  def brawling?
+    weapon_skill == 'Brawling' && !is_brawling_ranged?
+  end
+
+  def is_brawling_ranged?
+    /(?:\b|^)blowgun(?:\b|$)/i.match(weapon_training['Brawling'])
   end
 
   def dance
@@ -4163,30 +4201,6 @@ class GameState
 
   def last_weapon_name
     weapon_training[@last_weapon_skill]
-  end
-
-  def thrown_skill?
-    $thrown_skills.include?(weapon_skill)
-  end
-
-  def aimed_skill?
-    $aim_skills.include?(weapon_skill)
-  end
-
-  def melee_skill?
-    !$ranged_skills.include?(weapon_skill)
-  end
-
-  def offhand?
-    weapon_skill == 'Offhand Weapon'
-  end
-
-  def brawling?
-    weapon_skill == 'Brawling' && !is_brawling_ranged?
-  end
-
-  def is_brawling_ranged?
-    /(?:\b|^)blowgun(?:\b|$)/i.match(weapon_training['Brawling'])
   end
 
   def use_stealth_attack?
@@ -4297,6 +4311,15 @@ class GameState
 
   def next_dance_action
     @dance_queue.shift
+  end
+
+  def necro_casting?
+    return false unless DRStats.necromancer?
+    return true if @prepare_cfb
+    return true if @casting_cfb
+    return true if @prepare_consume
+    return true if @casting_consume
+    false
   end
 
   def cambrinth_charges(charges)
@@ -4422,7 +4445,7 @@ class GameState
 
   def can_use_barrage_attack?
     return false unless DRStats.warrior_mage?
-    return false unless melee_skill? && !brawling?
+    return false unless melee_weapon_skill?
     return false unless DRCA.check_elemental_charge >= 5
     true
   end
@@ -4630,9 +4653,6 @@ class GameState
   def aim_stealth?
     @aim_fillers_stealth && @aim_fillers_stealth[weapon_skill] && use_stealth?
   end
-
-  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_analyze_combos, :balance_regen_threshold
 end
 
 before_dying do

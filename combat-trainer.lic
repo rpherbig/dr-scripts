@@ -86,9 +86,15 @@ class SetupProcess
     end
 
     if game_state.parrying
+      # If parrying, determine your next stance (e.g. evasion or shield)
+      # then switch to your new weapon. This ensures you have a weapon in hand
+      # to parry with while you're stanced to parry.
       check_stance(game_state)
       check_weapon(game_state)
     else
+      # And vice versa, if you're not parrying but you might stance to that next
+      # then ensure you have a weapon in hand then choose an appropriate stance.
+      # This also ensures the stance you choose respects any weapon-stance overrides.
       check_weapon(game_state)
       check_stance(game_state)
     end
@@ -307,7 +313,7 @@ class SetupProcess
       game_state.prepare_summoned_weapon(last_summoned)
     else
       bput('aim stop', "But you're not aiming", 'You stop concentrating', 'You are already') if game_state.aimed_skill?
-      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      game_state.wield_weapon(game_state.weapon_skill)
       if game_state.whirlwind_trainable?
         game_state.currently_whirlwinding = true
         determine_whirlwind_weapon(game_state)
@@ -325,7 +331,7 @@ class SetupProcess
 
   def determine_whirlwind_weapon(game_state)
     return if game_state.twohanded_weapon_skill?
-    offhand_skill = game_state.sort_by_rate_then_rank(game_state.whirlwind_trainables - [game_state.weapon_skill] - $twohanded_skills).first
+    offhand_skill = game_state.determine_whirlwind_weapon_skill
     game_state.update_whirlwind_weapon_info(offhand_skill)
     game_state.wield_whirlwind_offhand
   end
@@ -577,7 +583,7 @@ class LootProcess
   def stow_lootables(game_state)
     return unless @loot_bodies
 
-    pair = [left_hand, right_hand]
+    pair = [DRC.left_hand, DRC.right_hand]
     tried_loot = false
     items_to_loot = []
     @lootables
@@ -1257,6 +1263,24 @@ class SpellProcess
     return false if game_state.dismiss_pet?
 
     check_timer(game_state)
+
+    if game_state.finish_spell_casting?
+      echo('SpellProcess::clean_up') if $debug_mode_ct
+      game_state.next_clean_up_step
+      release_cyclics
+      if checkprep != 'None'
+        bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+        bput('release mana', 'You release all', "You aren't harnessing any mana")
+      end
+      if @tk_ammo
+        waitrt?
+        pause
+        fput("stow #{@tk_ammo}")
+      end
+      DRCA.shatter_regalia? if @regalia_array
+      return true
+    end
+
     if Flags['ct-spelllost']
       game_state.casting = false
       Flags.reset('ct-spelllost')
@@ -1287,22 +1311,7 @@ class SpellProcess
     check_training(game_state)
     check_offensive(game_state)
     check_current(game_state)
-    if game_state.finish_spell_casting? && !game_state.casting
-      echo('SpellProcess::clean_up') if $debug_mode_ct
-      game_state.next_clean_up_step
-      release_cyclics
-      if checkprep != 'None'
-        bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
-        bput('release mana', 'You release all', "You aren't harnessing any mana")
-      end
-      if @tk_ammo
-        waitrt?
-        pause
-        fput("stow #{@tk_ammo}")
-      end
-      DRCA.shatter_regalia? if @regalia_array
-      return true
-    end
+
     false
   end
 
@@ -2707,7 +2716,7 @@ class TrainerProcess
     dead_count = DRRoom.dead_npcs.size
     unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
       @equipment_manager.stow_weapon(game_state.weapon_name)
-      @equipment_manager.wield_weapon(@stun_weapon, @stun_weapon_skill)
+      game_state.wield_specific_weapon(@stun_weapon, @stun_weapon_skill)
     end
 
     if hide?
@@ -2718,7 +2727,7 @@ class TrainerProcess
 
     unless game_state.weapon_name == @stun_weapon && !game_state.offhand?
       @equipment_manager.stow_weapon(@stun_weapon)
-      @equipment_manager.wield_weapon(game_state.weapon_name, game_state.weapon_skill)
+      game_state.wield_weapon(game_state.weapon_skill)
     end
     DRRoom.dead_npcs.size > dead_count
   end
@@ -3660,15 +3669,35 @@ class GameState
   include DRC
 
   $martial_skills = ['Brawling']
-  $melee_skills = ['Small Edged', 'Large Edged', 'Twohanded Edged', 'Small Blunt', 'Large Blunt', 'Twohanded Blunt', 'Staves', 'Polearms']
+  $edged_skills = ['Small Edged', 'Large Edged', 'Twohanded Edged']
+  $blunt_skills = ['Small Blunt', 'Large Blunt', 'Twohanded Blunt']
+  $staff_skills = ['Staves']
+  $polearm_skills = ['Polearms']
+  $melee_skills = $edged_skills + $blunt_skills + $staff_skills + $polearm_skills
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $twohanded_skills = ['Twohanded Edged', 'Twohanded Blunt']
   $aim_skills = ['Bow', 'Slings', 'Crossbow']
   $ranged_skills = $thrown_skills + $aim_skills
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
-  $tactics_actions = %w[bob weave circle]
+  $tactics_actions = ['bob', 'weave', 'circle']
 
-  attr_accessor :mob_died, :last_weapon_skill, :danger, :parrying, :casting, :need_bundle, :cooldown_timers, :no_stab_current_mob, :loaded, :cast_timer, :casting_moonblade, :casting_weapon_buff, :use_charged_maneuvers, :casting_consume, :prepare_consume, :casting_cfb, :prepare_cfb, :wounds, :blessed_room, :currently_whirlwinding, :whirlwind_trainables, :reset_stance, :charges_total, :casting_sorcery, :hide_on_cast, :regalia_cancel, :last_regalia_type, :swap_regalia_type, :casting_regalia, :starlight_values, :casting_cyclic
+  attr_accessor :action_count, :aim_queue, :analyze_combo_array, :blessed_room, :cast_timer,
+                :casting, :casting_cfb, :casting_consume, :casting_cyclic, :casting_moonblade,
+                :casting_regalia, :casting_sorcery, :casting_weapon_buff, :charges, :charges_total,
+                :clean_up_step, :constructs, :cooldown_timers, :current_weapon_skill,
+                :currently_whirlwinding, :dance_queue, :dancing, :danger, :hide_on_cast,
+                :last_regalia_type, :last_weapon_skill, :loaded, :mob_died, :need_bundle,
+                :no_loot, :no_skins, :no_stab_current_mob, :no_stab_mobs, :parrying, :prepare_cfb,
+                :prepare_consume, :regalia_cancel, :reset_stance, :retreating, :starlight_values,
+                :swap_regalia_type, :target_weapon_skill, :use_charged_maneuvers,
+                :whirlwind_trainables, :wounds
+
+  attr_reader :aim_fillers, :aim_fillers_stealth, :ambush, :backstab, :balance_regen_threshold,
+              :cambrinth, :cambrinth_cap, :charged_maneuvers, :dance_actions, :dance_actions_stealth,
+              :dance_skill, :dance_threshold, :dedicated_camb_use, :dual_load, :fatigue_regen_threshold,
+              :ignored_npcs, :retreat_threshold, :stances, :stored_cambrinth, :summoned_weapons_element,
+              :summoned_weapons_ingot, :target_action_count, :target_increment, :use_analyze_combos,
+              :use_stealth_attacks, :use_weak_attacks, :weapons_to_train
 
   def initialize(settings, equipment_manager)
     @equipment_manager = equipment_manager
@@ -3739,6 +3768,21 @@ class GameState
 
     @retreat_threshold = settings.retreat_threshold
     echo("  @retreat_threshold: #{@retreat_threshold}") if $debug_mode_ct
+
+    @damaris_weapon_sets = settings.damaris_weapon_sets
+    echo("  @damaris_weapon_sets: #{@damaris_weapon_sets}") if $debug_mode_ct
+
+    # Identify the current state the damaris weapons are turned to.
+    echo "Identifying the current state of your Damaris weapons..." if @damaris_weapon_sets
+    @damaris_weapon_states = Hash.new
+    @damaris_weapon_sets.each do |group, weapons|
+      weapon = weapons.find do |weapon|
+        item = @equipment_manager.item_by_desc(weapon)
+        DRCI.exists?(item.name, item.container)
+      end
+      @damaris_weapon_states[group] = weapon
+    end
+    echo("  @damaris_weapon_states: #{@damaris_weapon_states}") if $debug_mode_ct
 
     @summoned_weapons = settings.summoned_weapons
     echo("  @summoned_weapons: #{@summoned_weapons}") if $debug_mode_ct
@@ -4010,27 +4054,117 @@ class GameState
     @equipment_manager.stow_weapon(weapon_training[skill])
   end
 
-  def wield_offhand_weapon(skill)
+  # Wields a weapon to train the specified skill,
+  # but instead of inferring the weapon name from
+  # `weapon_training:` config, wields the specified
+  # weapon name given.
+  #
+  # Initially designed to support `ambush_stun` attacks
+  # where you need a specific weapon of a particular weight, etc.
+  # so the weapon you want to use may differ from your regular weapon
+  # for the same skill.
+  #
+  # @param weapon_name
+  #   The <adj> + <noun> of the weapon to wield as configured in your gear.
+  # @param skill
+  #   The weapon skill to train.
+  # @param hand
+  #   Which hand to equip the weapon into?
+  #   To equip offhand, specify 'left' or 'offhand'.
+  # @returns name of the wielded weapon
+  def wield_specific_weapon(weapon_name, skill, hand = 'main')
+    echo "wield_specific_weapon: weapon_name=#{weapon_name}, skill=#{skill}, hand=#{hand}" if $debug_mode_ct
+    if is_damaris_weapon?(weapon_name)
+      return wield_damaris_weapon(weapon_name, hand)
+    else
+      if hand =~ /^(left|off)/i
+        @equipment_manager.wield_weapon_offhand(weapon_name, skill)
+      else
+        @equipment_manager.wield_weapon(weapon_name, skill)
+      end
+    end
+    return weapon_name
+  end
+
+  # Wields a weapon to train the specified skill.
+  #
+  # @param skill
+  #   The weapon skill to train. We infer the weapon to wield based on this.
+  # @param hand
+  #   Which hand to equip the weapon into?
+  #   To equip offhand, specify 'left' or 'offhand'.
+  # @returns name of the wielded weapon
+  def wield_weapon(skill, hand = 'main')
     return if skill.eql?('Brawling')
     return if skill.eql?('Tactics')
 
-    @equipment_manager.wield_weapon_offhand(weapon_training[skill], skill)
-    weapon_training[skill]
+    weapon_name = weapon_training[skill]
+    echo "wield_weapon: weapon_name=#{weapon_name}, skill=#{skill}, hand=#{hand}" if $debug_mode_ct
+    if is_damaris_weapon?(weapon_name)
+      return wield_damaris_weapon(weapon_name, hand)
+    else
+      if hand =~ /^(left|off)/i
+        @equipment_manager.wield_weapon_offhand(weapon_name, skill)
+      else
+        @equipment_manager.wield_weapon(weapon_name, skill)
+      end
+    end
+    return weapon_name
   end
 
-  def necro_casting?
-    return false unless DRStats.necromancer?
-    return true if @prepare_cfb
-    return true if @casting_cfb
-    return true if @prepare_consume
-    return true if @casting_consume
-    false
+  def wield_offhand_weapon(skill)
+    return wield_weapon(skill, 'offhand')
+  end
+
+  # Assumes the weapon name is a Damaris weapon.
+  # Designed to be called from `wield_weapon(skill)`.
+  #
+  # @param weapon_name
+  #   The <adj> + <noun> of the weapon to wield as configured in your gear.
+  # @param hand
+  #   Which hand to equip the weapon into?
+  #   To equip offhand, specify 'left' or 'offhand'.
+  # @returns name of the wielded weapon
+  def wield_damaris_weapon(weapon_name, hand = 'main')
+    # We need to wield based on the weapon's last known state then turn it to the desired noun.
+    damaris_weapon_group = get_damaris_weapon_group(weapon_name)
+    damaris_weapon_state = get_damaris_weapon_state(damaris_weapon_group)
+    echo "wield_damaris_weapon: weapon_to_wield=#{weapon_name}, damaris_group=#{damaris_weapon_group}, damaris_state=#{damaris_weapon_state}, hand=#{hand}" if $debug_mode_ct
+    if hand =~ /^(left|off)/i
+      @equipment_manager.wield_weapon_offhand(damaris_weapon_state)
+    else
+      @equipment_manager.wield_weapon(damaris_weapon_state)
+    end
+    # Damaris weapons can be turned until a certain date then need an infuser stone for more time.
+    # Only if we successfully turn the weapon to the new noun do we update the damaris weapon state for the group.
+    # Otherwise combat-trainer will be confused thinking we're using a different weapon than we really are.
+    if @equipment_manager.turn_to_weapon?(DRC.get_noun(damaris_weapon_state), DRC.get_noun(weapon_name))
+      set_damaris_weapon_state(damaris_weapon_group, weapon_name)
+      return weapon_name # turn successful, return the new weapon name
+    else
+      DRC.message("Unable to turn #{damaris_weapon_state} into #{weapon_name}. Is the transition possible? Does it require an infuser stone? STUDY the weapon for more details.")
+      return damaris_weapon_state # unable to turn, return unchanged weapon name
+    end
+  end
+
+  # Assumes the weapon name is a Damaris weapon.
+  # Designed to be called from `wield_offhand_weapon(skill)`.
+  def wield_offhand_damaris_weapon(weapon_name)
+    return wield_damaris_weapon(weapon_name, 'offhand')
   end
 
   def wield_whirlwind_offhand
     return if twohanded_weapon_skill?
     return unless currently_whirlwinding
-    @equipment_manager.wield_weapon_offhand(whirlwind_offhand_name)
+
+    weapon_name = whirlwind_offhand_name
+    echo "wield_whirlwind_offhand: weapon_name=#{weapon_name}" if $debug_mode_ct
+    if is_damaris_weapon?(weapon_name)
+      return wield_offhand_damaris_weapon(weapon_name)
+    else
+      @equipment_manager.wield_weapon_offhand(weapon_name)
+    end
+    return weapon_name
   end
 
   def determine_whirlwind_action
@@ -4048,16 +4182,43 @@ class GameState
     end
   end
 
+  # Get the skill of the weapon currently being trained (e.g. Small Edged).
   def weapon_skill
     @current_weapon_skill
   end
 
+  # Does the current weapon train a two-handed skill (i.e. 2HE/2HB)?
   def twohanded_weapon_skill?
     $twohanded_skills.include?(weapon_skill)
   end
 
+  # Does the current weapon train a non-brawling melee skill (i.e. edged, blunt, staff, polearm)?
   def melee_weapon_skill?
     $melee_skills.include?(weapon_skill)
+  end
+
+  # Does the current weapon train a thrown skill (i.e. light/heavy thrown)?
+  def thrown_skill?
+    $thrown_skills.include?(weapon_skill)
+  end
+
+  # Does the current weapon train an aimable skill (i.e. bow/crossbow/sling)?
+  def aimed_skill?
+    $aim_skills.include?(weapon_skill)
+  end
+
+  # Is the offhand weapon skill currently being trained?
+  def offhand?
+    weapon_skill == 'Offhand Weapon'
+  end
+
+  # Is the melee brawling skill currently being trained?
+  def brawling?
+    weapon_skill == 'Brawling' && !is_brawling_ranged?
+  end
+
+  def is_brawling_ranged?
+    /(?:\b|^)blowgun(?:\b|$)/i.match(weapon_training['Brawling'])
   end
 
   def dance
@@ -4157,30 +4318,6 @@ class GameState
 
   def last_weapon_name
     weapon_training[@last_weapon_skill]
-  end
-
-  def thrown_skill?
-    $thrown_skills.include?(weapon_skill)
-  end
-
-  def aimed_skill?
-    $aim_skills.include?(weapon_skill)
-  end
-
-  def melee_skill?
-    !$ranged_skills.include?(weapon_skill)
-  end
-
-  def offhand?
-    weapon_skill == 'Offhand Weapon'
-  end
-
-  def brawling?
-    weapon_skill == 'Brawling' && !is_brawling_ranged?
-  end
-
-  def is_brawling_ranged?
-    /(?:\b|^)blowgun(?:\b|$)/i.match(weapon_training['Brawling'])
   end
 
   def use_stealth_attack?
@@ -4291,6 +4428,15 @@ class GameState
 
   def next_dance_action
     @dance_queue.shift
+  end
+
+  def necro_casting?
+    return false unless DRStats.necromancer?
+    return true if @prepare_cfb
+    return true if @casting_cfb
+    return true if @prepare_consume
+    return true if @casting_consume
+    false
   end
 
   def cambrinth_charges(charges)
@@ -4416,7 +4562,7 @@ class GameState
 
   def can_use_barrage_attack?
     return false unless DRStats.warrior_mage?
-    return false unless melee_skill? && !brawling?
+    return false unless melee_weapon_skill?
     return false unless DRCA.check_elemental_charge >= 5
     true
   end
@@ -4503,6 +4649,7 @@ class GameState
 
   # Determine the weapon skill to train offhand while aiming a ranged weapon.
   def determine_aiming_skill
+    damaris_weapon_options = get_damaris_weapon_options(weapon_name)
     options = @aiming_trainables
     options -= [weapon_skill] # can't be your mainhand skill, it's in your main hand
     options -= $twohanded_skills # can't be a twohanded skill, you need both hands
@@ -4510,19 +4657,22 @@ class GameState
     options -= $melee_skills if weapon_skill.eql?('Bow') || (weapon_skill.eql?('Crossbow') && !@using_light_crossbow) # can't aim with weapon in your offhand
     options -= $thrown_skills if (weapon_skill.eql?('Bow') && @left_hand_free)
     options -= weapon_training.select { |skill, weapon| weapon == weapon_training[weapon_skill] }.keys # can't be same weapon that's equipped in your mainhand
+    options -= weapon_training.select { |skill, weapon| damaris_weapon_options.include?(weapon) }.keys # remove all weapons part of the same Damaris weapon group since they're the same item
     echo "determine_aiming_skill::options: #{options}" if $debug_mode_ct
     sort_by_rate_then_rank(options).first
   end
 
   # Determine the weapon skill to equip offhand to perform a doublestrike maneuver.
   def determine_doublestrike_skill
-    options = @aiming_trainables
+    damaris_weapon_options = get_damaris_weapon_options(weapon_name)
+    options = @doublestrike_trainables
     options -= [weapon_skill] # can't be your main hand skill, it's in your main hand
     options -= $twohanded_skills # can't be a twohanded skill, you need both hands
     options -= $aim_skills # can't use aimable weapons in your offhand
     options -= $martial_skills # shouldn't be brawling, you need a weapon in your offhand
-    echo "determine_doublestrike_skill::options: #{options}" if $debug_mode_ct
     options -= weapon_training.select { |skill, weapon| weapon == weapon_training[weapon_skill] }.keys # can't be same weapon that's equipped in your mainhand
+    options -= weapon_training.select { |skill, weapon| damaris_weapon_options.include?(weapon) }.keys # remove all weapons part of the same Damaris weapon group since they're the same item
+    echo "determine_doublestrike_skill::options: #{options}" if $debug_mode_ct
     sort_by_rate_then_rank(options).first
   end
 
@@ -4536,6 +4686,46 @@ class GameState
     (melee_weapon_skill? || thrown_skill?) && # mainhand weapon is a one-handed, melee weapon
     !twohanded_weapon_skill? && # mainhand weapon is not a twohanded weapon (extra precaution)
     determine_doublestrike_skill # there's at least one weapon skill that can be equipped offhand that's different from the mainhand (can't equip same weapon in both hands)
+  end
+
+  # Determine the weapon skill to equip offhand to use while whirlwinding.
+  def determine_whirlwind_weapon_skill
+    return if twohanded_weapon_skill?
+    damaris_weapon_options = get_damaris_weapon_options(weapon_name)
+    options = whirlwind_trainables
+    options -= [weapon_skill] # can't be your main hand skill, it's in your main hand
+    options -= $twohanded_skills # can't be a twohanded skill, you need both hands
+    options -= weapon_training.select { |skill, weapon| weapon == weapon_training[weapon_skill] }.keys # can't be same weapon that's equipped in your mainhand
+    options -= weapon_training.select { |skill, weapon| damaris_weapon_options.include?(weapon) }.keys # remove all weapons part of the same Damaris weapon group since they're the same item
+    echo "determine_whirlwind_weapon_skill::options: #{options}" if $debug_mode_ct
+    sort_by_rate_then_rank(options).first
+  end
+
+  # Determines if the given weapon name is part of a Damaris weapon group.
+  def is_damaris_weapon?(weapon_name)
+    get_damaris_weapon_group(weapon_name) != nil
+  end
+
+  # Returns the Damaris weapon group the weapon name belongs to.
+  # Initially designed so that we can check if two weapons
+  # are part of the same set or not to know if we can `turn {x} to {y}`.
+  def get_damaris_weapon_group(weapon_name)
+    @damaris_weapon_sets.find { |group, weapons| weapons.find { |weapon| weapon == weapon_name } }.first
+  end
+
+  # What can the given weapon turn into?
+  def get_damaris_weapon_options(weapon_name)
+    @damaris_weapon_sets[get_damaris_weapon_group(weapon_name)]
+  end
+
+  # For the given Damaris weapon group, what is the last known state it's in?
+  def get_damaris_weapon_state(group)
+    @damaris_weapon_states[group]
+  end
+
+  # Record the last known state the Damaris weapon has been turned to.
+  def set_damaris_weapon_state(group, weapon_name)
+    @damaris_weapon_states[group] = weapon_name
   end
 
   def use_stealth?
@@ -4624,9 +4814,6 @@ class GameState
   def aim_stealth?
     @aim_fillers_stealth && @aim_fillers_stealth[weapon_skill] && use_stealth?
   end
-
-  attr_accessor :clean_up_step, :current_weapon_skill, :target_weapon_skill, :no_skins, :constructs, :no_stab_mobs, :no_loot, :dancing, :retreating, :action_count, :charges, :aim_queue, :dance_queue, :analyze_combo_array
-  attr_reader :dance_skill, :target_action_count, :dance_threshold, :retreat_threshold, :target_increment, :stances, :weapons_to_train, :use_stealth_attacks, :ambush, :backstab, :charged_maneuvers, :fatigue_regen_threshold, :aim_fillers, :aim_fillers_stealth, :dance_actions, :dance_actions_stealth, :ignored_npcs, :dual_load, :summoned_weapons_element, :summoned_weapons_ingot, :cambrinth, :stored_cambrinth, :cambrinth_cap, :use_weak_attacks, :dedicated_camb_use, :use_analyze_combos, :balance_regen_threshold
 end
 
 before_dying do

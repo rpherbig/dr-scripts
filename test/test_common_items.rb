@@ -96,6 +96,8 @@ class TestDRCI < Minitest::Test
       [
         # Don't see it the first time, so the script will need to look in the portal
         "What were you referring to?",
+        # You open the portal
+        "You open your swirling eddy.",
         # You look in the portal
         "In the swirling eddy you see a bloodwood branch.",
         # The retry attempt now gets the item

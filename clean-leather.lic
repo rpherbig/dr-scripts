@@ -2,80 +2,159 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#clean-leather
 =end
 
-custom_require.call(%w[common common-crafting common-items common-money common-travel drinfomon])
+custom_require.call(%w[common common-items common-travel])
+
+# ;clean-leather backpack troll skin rucksack quick
+
+  # TODOS
+  # Set room to craft in to CURRENT room if not set in yaml?
 
 class CleanLeather
-  include DRC
-  include DRCC
-  include DRCI
-  include DRCM
-  include DRCT
-
   def initialize
     arg_definitions = [
       [
-        { name: 'source', regex: /\w+/, description: 'bundle, container, etc' },
-        { name: 'noun', regex: /\w+/, description: 'pelt, hide, skin, etc' },
-        { name: 'storage', regex: /\w+/, optional: true, description: 'container to put them in, otherwise stow' },
-        { name: 'speed', regex: /normal|quick|careful/i, optional: true, description: 'how quickly to scrape' },
-        { name: 'debug', regex: /debug/i, optional: true, description: 'Output debug info.' }
+        { name: 'source', regex: /\w+/, optional: false, description: 'REQUIRED: Our source container (e.g. bundle, backpack, etc.)' },
+        { name: 'animal', regex: /\w+/, optional: false, description: 'REQUIRED: type of rawhide (e.g. troll, kobold, etc.)' },
+        { name: 'hide', regex: /\w+/, optional: false, description: 'REQUIRED: The noun of the type of rawhide (e.g. skin, pelt, hide, etc.)' },
+        { name: 'storage', regex: /\w+/, optional: false, description: 'REQUIRED: The container to put finished leather in. Must be different than source container.' },
+        { name: 'speed', regex: /normal|quick|careful/i, optional: true, description: 'OPTIONAL: How quickly to scrape. Defaults to normal.' },
+        { name: 'salt_bae', regex: /full/i, optional: true, description: 'OPTIONAL: Specify "full" to apply preservative the max number of times.' },
+        { name: 'debug', regex: /debug/i, optional: true, description: 'OPTIONAL: Output debug info.' }
       ]
     ]
     args = parse_args(arg_definitions)
 
+    # Grab our yaml crafting settings if they exist
     @settings = get_settings
     @bag = @settings.crafting_container
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.outfitting_belt
-    @engineering_room = @settings.engineering_room
-    @outfitting_room = @settings.outfitting_room
+    engineering_room = @settings.engineering_room
+    outfitting_room = @settings.outfitting_room
 
-    @stock_room = args.noun =~ /^bones?$/i ? get_data('crafting')['shaping'][@settings.hometown]['tool-room'] : get_data('crafting')['tailoring'][@settings.hometown]['tool-room']
-    DRC.message("@stock_room is set to #{@stock_room}.") if args.debug
-    ensure_copper_on_hand(2000, @settings)
-    @room = args.noun =~ /^bones?$/i ? @engineering_room : @outfitting_room
-    DRC.message("@room is set to #{@room}.") if args.debug
+    # Set the proper stock rooms, preservative, and order number depending on whether we're
+    # cleaning hides or bones.
+    if args.hide =~ /^bones?$/i
+      @stock_room = get_data('crafting')['shaping'][@settings.hometown]['tool-room']
+      @room = engineering_room
+      @preservative = 'bleaching solution'
+      @order_number = '7'
+    else
+      @stock_room = get_data('crafting')['tailoring'][@settings.hometown]['tool-room']
+      @room = outfitting_room
+      @preservative = 'tanning lotion'
+      @order_number = '8'
+    end
+
+    # Set our script args to variables
+    source = args.source
+    animal = args.animal
+    hide = args.hide
+    storage = args.storage
+    speed = args.speed || 'normal'
+    full_preservative = args.salt_bae
+
+    # Debug output
+    if args.debug
+      respond("ROOM AND RESTOCK SETTINGS:")
+      respond("  @stock_room (the room to restock our preservative) is set to:        #{@stock_room}")
+      respond("  @room (the room we'll clean leather in) is set to:                   #{@room}")
+      respond("  @preservative (the preservative we'll use) is set to:                #{@preservative}")
+      respond("  @order_number (the order number to restock preservative) is set to:  #{@order_number}")
+      respond("")
+      respond("SCRIPT CALL ARGUMENT SETTINGS")
+      respond("  source (container we get rawhide from) is set to:                    #{source}")
+      respond("  animal (the animal the hide or bones are from) is set to:            #{animal}")
+      respond("  hide (the noun of the rawhide) is set to:                            #{hide}")
+      respond("  storage (the container we'll store clean hides in) is set to:        #{storage}")
+      respond("  speed (the speed we'll scrape the hide) is set to:                   #{speed}")
+      respond("  full_preservative (whether apply once or full) is set to:            #{full_preservative}")
+    end
+
+    clean_leather(source, animal, hide, storage, speed, full_preservative)
+  end
+
+  def clean_leather(source, animal, hide, storage, speed, full_preservative)
+    # Walk to the room we'll be crafting in (set in yaml)
+    # Stow anything in our hands
     DRCT.walk_to(@room)
+    DRCI.stow_hands
 
-    @preservative = args.noun =~ /^bones?$/i ? 'bleaching solution' : 'tanning lotion'
-    DRC.message("@preservative is set to #{@preservative}.") if args.debug
-    @item = args.noun =~ /^bones?$/i ? '7' : '8'
-    DRC.message("@item is set to #{@item}.") if args.debug
-    @speed = args.speed || ''
-
-    while bput("get #{args.noun} from my #{args.source}", 'You get', 'You carefully remove', 'What were you') != 'What were you'
-      fput('stow left') if left_hand == 'bundling rope'
-      fput('stow right') if right_hand == 'bundling rope'
-      get_crafting_item('scraper', @bag, @bag_items, @belt)
-      until bput("scrape #{args.noun} with my scraper #{@speed}", 'roundtime', 'looks as clean as you') == 'looks as clean as you'
-        waitrt?
-      end
-      waitrt?
-      stow_crafting_item('scraper', @bag, @belt)
-      if bput("get my #{@preservative}", 'You get', 'What were you') == 'What were you'
-        order_stow_lotion
-        DRCT.walk_to(@room)
-      end
-      bput("pour #{@preservative} on my #{args.noun}", 'roundtime')
-      waitrt?
-
-      if @bag.nil?
-        fput("stow my #{@preservative}")
+    # Get as many skins as we have in the source container, cleaning them, then preserving
+    # them, then putting them in the storage container.
+    loop do
+      case DRC.bput("get #{animal} #{hide} from my #{source}", /^You get/i, /^You carefully remove/i, /^What were you/i, /What do you want to get?/i)
+      when /^You get/i, /^You carefully remove/i
+        scrape_leather(hide, speed)
+        apply_preservative(animal, hide, storage, full_preservative)
+      when /^What were you/i, /What do you want to get?/i
+        DRC.message("Done with all #{animal} #{hide}s.")
+        break
       else
-        fput("put my #{@preservative} in my #{@bag}")
-      end
-
-      if args.storage
-        fput("put my #{args.noun} in my #{args.storage}")
-      else
-        fput("stow my #{args.noun}")
+        DRC.message("Unable to get the rawhide. Please report this error.")
+        DRCI.stow_hands
       end
     end
   end
 
-  def order_stow_lotion
-    walk_to(@stock_room)
-    DRCT.order_item(@stock_room, @item)
+  def scrape_leather(hide, speed)
+    DRCC.get_crafting_item('scraper', @bag, @bag_items, @belt)
+
+    # Scrapes a skin until it's fully-scraped
+    loop do
+      case DRC.bput("scrape #{hide} with my scraper #{speed}", /^You (quickly|carefully)? scrape your/i, /looks as clean as you/i)
+      when /^You (quickly|carefully)? scrape your/i
+        waitrt?
+        next
+      when /looks as clean as you/
+        break
+      else
+        DRC.message("Unable to scrape leather. Please report this error.")
+        DRCI.stow_hands
+        exit
+      end
+    end
+
+    DRCC.stow_crafting_item('scraper', @bag, @belt)
+  end
+
+  def apply_preservative(animal, hide, storage, full_preservative)
+
+    # This loop applies a single application of preservative unless
+    # the user has specified "full" application in the args, in which case
+    # it applies until game messages suggest we're at max.
+    loop do
+      # If we have no preservative on-hand, get money,
+      # get preservative, go back to crafting spot.
+      unless DRCI.get_item_if_not_held?(@preservative)
+        DRCM.ensure_copper_on_hand(2000, @settings)
+        DRCT.order_item(@stock_room, @order_number)
+        DRCT.walk_to(@room)
+      end
+
+      case DRC.bput("pour #{@preservative} on my #{animal} #{hide}", /^You pour/i, /would only be damaged by adding more/i, /What do you want/i, /^Pour what?/i)
+      when /^You pour/i
+        waitrt?
+        # If user hasn't specified that we apply max preservative, break out
+        # here after a single application.
+        break if !full_preservative
+        next
+      when /^Pour what?/i
+        # We've run out of lotion during the pouring process, re-run method, which will buy more
+        apply_preservative(animal, hide, storage, full_preservative)
+      when /would only be damaged by adding more/i
+        break
+      else
+        DRC.message("Unable to apply preservative. Please report this error.")
+        exit
+      end
+    end
+
+    unless DRCI.put_away_item?(@preservative, @bag) && DRCI.put_away_item?(hide, storage)
+      DRC.message("Unable to your store your preservative and/or cleaned hide. Exiting.")
+      DRCI.stow_hands
+      exit
+    end
   end
 end
 

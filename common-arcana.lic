@@ -23,7 +23,7 @@ module DRCA
     failure = ['as if it hungers for more', 'Your infusion fails completely', 'You don\'t have enough harnessed mana to infuse that much', 'You have no harnessed']
 
     loop do
-      pause 5 while mana <= amount
+      pause 5 while mana <= 40
       harness_mana([amount]) if harness
       break if success.include?(DRC.bput("infuse om #{amount}", success, failure))
       pause 0.5
@@ -140,7 +140,7 @@ module DRCA
   def prepare?(abbrev, mana, symbiosis = false, command = 'prepare', tattoo_tm = false, runestone_name = nil, runestone_tm = false)
     return false unless abbrev
 
-    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
+    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared', 'Please don\'t do that here') if symbiosis
 
     if runestone_name.nil?
       match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
@@ -151,7 +151,7 @@ module DRCA
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
-    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts'
+    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts', 'Please don\'t do that here'
       DRC.bput('release symbiosis', 'You release the', 'But you haven\'t') if symbiosis
       return false
     when 'Well, that was fun'
@@ -211,7 +211,7 @@ module DRCA
     before.each { |action| DRC.bput(action['message'], action['matches']) }
 
     Flags.add('unknown-command', "Please rephrase that command")
-    Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that", "You do not know how to manipulate that pathway.")
+    Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that", "You do not know how to manipulate that pathway.", "You cannot BARRAGE with that spell.")
     Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell', 'There is nothing else to face')
     Flags.add('cyclic-too-recent', 'The mental strain of initiating a cyclic spell so recently prevents you from formulating the spell pattern')
     Flags.add('spell-full-prep', /^This pattern may only be cast with full preparation/)
@@ -406,8 +406,7 @@ module DRCA
       .spell_data
       .select { |_name, properties| properties['cyclic'] }
       .select { |name, _properties| DRSpells.active_spells.keys.include?(name) }
-      .reject { |_name, properties| properties['skip_release'] }
-      .reject { |_name, properties| properties['harmless'] }
+      .reject { |name| get_settings.cyclic_no_release.include?(name) }
       .map { |_name, properties| properties['abbrev'] }
       .each { |abbrev| fput("release #{abbrev}") }
   end
@@ -605,18 +604,10 @@ module DRCA
       cast_spell({ 'abbrev' => 'cv', 'mana' => 1, 'prep_time' => 5 }, settings)
     end
 
-    release_cyclics if data['cyclic']
-    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
-    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
-
     if data['ritual']
       ritual(data, settings)
       return
     end
-
-    command = 'prep'
-    command = data['prep'] if data['prep']
-    command = data['prep_type'] if data['prep_type']
 
     if data['runestone_name']
       if !prepare_to_cast_runestone?(data, settings)
@@ -625,6 +616,19 @@ module DRCA
     end
 
     cast_lifecycle_lambda.call('pre-prep', data, settings) if cast_lifecycle_lambda != nil
+
+    command = 'prep'
+    command = data['prep'] if data['prep']
+    command = data['prep_type'] if data['prep_type']     
+    
+    if command == 'segue'
+      return if segue?(data['abbrev'], data['mana'])
+      command = 'prep'
+    end
+
+    release_cyclics if data['cyclic']
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")    
 
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
     DRCI.put_away_item?(data['runestone_name'], settings.runestone_storage) if DRCI.in_hands?(data['runestone_name'])
@@ -663,6 +667,14 @@ module DRCA
     cast_lifecycle_lambda.call('post-cast', data, settings) if cast_lifecycle_lambda != nil
 
     return spell_cast
+  end
+
+  def segue?(abbrev,mana)
+    case DRC.bput("segue #{abbrev} #{mana}", get_data('spells').segue_messages)
+    when 'You must be performing a cyclic spell to segue from','It is too soon to segue','You are lacking the bardic flair'
+      return false
+    end
+    true
   end
 
   def check_discern(data, settings)
@@ -824,7 +836,7 @@ module DRCA
     needs_training.append("Sorcery") if (settings.crafting_training_spells_enable_sorcery && !Script.running?('forge')) ||
                                         (settings.crafting_training_spells_enable_sorcery && settings.crafting_training_spells_enable_sorcery_forging)
     needs_training = needs_training .select { |skill| training_spells[skill] } .select { |skill| DRSkill.getxp(skill) < 31 } .sort_by { |skill| DRSkill.getxp(skill) }.first
- 
+
     return unless needs_training
 
     crafting_prepare_spell(training_spells[needs_training], settings)

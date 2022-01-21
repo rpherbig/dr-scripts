@@ -2,31 +2,29 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#almanac
 =end
 
-custom_require.call(%w[common common-items])
+custom_require.call(%w[common common-items drinfomon])
 
 class Almanac
-  include DRC
-  include DRCI
 
   def initialize
     settings = get_settings
     UserVars.almanac_last_use ||= Time.now - 600
     @no_use_scripts = settings.almanac_no_use_scripts
+    @no_use_rooms = settings.almanac_no_use_rooms
     @almanac_skills = settings.almanac_skills
     @almanac = settings.almanac_noun
 
     passive_loop
   end
 
-  def use_almanac
-    return if Time.now - UserVars.almanac_last_use < 600
-    return if @no_use_scripts.any? { |name| Script.running?(name) }
-    return if XMLData.room_title.include? 'Carousel Chamber'
-    return if XMLData.room_title.include? 'Carousel Booth'
-    return if XMLData.room_title.include? 'Family Vault'
-    return if hidden?
-    return if checkleft
+  def passive_loop
+    loop do
+      use_almanac if should_use_almanac?
+      pause 20
+    end
+  end
 
+  def use_almanac
     unless @almanac_skills.empty?
       training_skill = @almanac_skills
                        .select { |skill| DRSkill.getxp(skill) < 18 }
@@ -34,35 +32,61 @@ class Almanac
       return unless training_skill
     end
 
-    pause 1 until pause_all
+    # Pause scripts to prevent interference
+    scripts_to_unpause = []
+    scripts_to_unpause = DRC.smart_pause_all
     waitrt?
-    case bput("get my #{@almanac}", 'You get', 'What were', 'You are already', 'You need a free')
-    when 'What were'
-      echo('Almanac not found, exiting.')
-      unpause_all
+
+    # Wait for any last output from paused scripts to resolve
+    # to mitigate things like combat-trainer doing `loot treasure`
+    # and getting a "I could not find what you were referring to" response
+    # (because no critter to loot) before the response to "get my almanac".
+    # In that race condition, we think we didn't get your almanac and
+    # the script exits, but that leaves you with an almanac in your hand
+    # and can cause combat-trainer to hang if it's trying to use a twohanded weapon.
+    pause 1
+    clear
+
+    unless DRCI.get_item_if_not_held?(@almanac) && DRCI.in_hands?(@almanac)
+      DRC.message('Almanac not found, exiting')
+      DRC.unpause_all_list(scripts_to_unpause)
       exit
-    when 'You need a free'
-      unless DRCI.in_hands?(@almanac)
-        unpause_all
-        return
-      end
     end
+
     if training_skill
-      bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn')
+      DRC.bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn')
     end
-    bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what', 'interrupt your research')
+
+    DRC.bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what', 'interrupt your research')
     waitrt?
-    bput("stow my #{@almanac}", 'You put', 'Stow what', 'You hold out')
+
+    DRCI.put_away_item?(@almanac)
+
     UserVars.almanac_last_use = Time.now
-    unpause_all
+
+    DRC.unpause_all_list(scripts_to_unpause)
   end
 
-  def passive_loop
-    loop do
-      use_almanac
-      pause 20
-    end
+  def should_use_almanac?
+    !(hidden? || invisible? || almanac_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
   end
+
+  def running_no_use_scripts?
+    @no_use_scripts.any? { |name| Script.running?(name) }
+  end
+
+  def inside_no_use_room?
+    @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
+  end
+
+  def almanac_on_cooldown?
+    (Time.now - UserVars.almanac_last_use) < 600
+  end
+
+  def hands_full?
+    DRC.left_hand && DRC.right_hand && !DRCI.in_hands?(@almanac)
+  end
+
 end
 
 Almanac.new

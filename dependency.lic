@@ -956,6 +956,7 @@ class SetupFiles
 
     battle_cries_data = base_data_spells.battle_cries
     spells_data = base_data_spells.spell_data
+    spells_data_values = spells_data.values
     empty_data = base_data_empty.empty_values
 
     # Populate nil settings with default empty arrays/hashes
@@ -963,20 +964,14 @@ class SetupFiles
     # Note we don't merge to overwrite, we merge to assign if nil.
     empty_data.each { |name, value| settings[name] ||= value }
 
-    # Lootables
-    settings.lootables = (
-      base_data_items.lootables +
-      base_data_items.box_nouns +
-      base_data_items.gem_nouns +
-      base_data_items.scroll_nouns +
-      settings.loot_additions -
-      settings.loot_subtractions
-    ).uniq
+    # Find spell data by its name, case insensitive.
+    get_spell_data_by_name = lambda do |name_to_find|
+      spells_data_values.find { |data| data['name'].casecmp?(name_to_find) }
+    end
 
-    # Battle Cries
-    settings.battle_cries.map! do |battle_cry_setting|
-      battle_cry_data = battle_cries_data[battle_cry['name']]
-      (battle_cry_data || {}).merge(battle_cry_setting)
+    # Find spell data by its abbreviation, case insensitive.
+    get_spell_data_by_abbrev = lambda do |abbrev_to_find|
+      spells_data_values.find { |data| data['abbrev'].casecmp?(abbrev_to_find) }
     end
 
     # Given a hash for a single spell definition,
@@ -992,20 +987,64 @@ class SetupFiles
     # then this method returns the enriched spell configuration as:
     #   { name: 'Death Monkey', abbrev: 'DM', mana: 8, skill: 'Targeted Magic' }
     #
-    enrich_spells_block = lambda do |spell_setting|
+    enrich_spells_with_data_block = lambda do |spell_setting|
       return spell_setting unless spell_setting.is_a?(Hash)
-      spell_data = spells_data[spell_setting['name']]
+      spell_data = get_spell_data_by_name.call(spell_setting['name']) ||
+                   get_spell_data_by_abbrev.call(spell_setting['abbrev'])
       (spell_data || {}).merge(spell_setting)
     end
 
-    # Waggle sets are maps of arbitrary names to map of spell name to map of spell properties.
+    # Given a hash of spell names to spell definitions,
+    # populates the `name:` property on the spell definition if it's missing.
+    #
+    # Because the the map keys are themselves the spell names,
+    # some players don't repeat the `name:` or `abbrev:` property
+    # in the spell setting. However, we need that information
+    # in order to enrich the spell setting with base data.
+    #
+    # For example:
+    # if spells map has:
+    #   { 'Devour': { 'use_auto_mana': true }, 'wound_level_threshold': 2 }
+    #
+    # then this method returns the enriched spell configuration as:
+    #   { 'Devour': { 'name': 'Devour', 'use_auto_mana': true }, 'wound_level_threshold': 2 }
+    #
+    enrich_spells_with_name_block = lambda do |spells_map|
+      spells_map.each do |spell_name, spell_setting|
+        # Sometimes these maps support keys other than spell names,
+        # such as numeric thresholds or other related script settings.
+        # Check if this setting is a hash to avoid "no implicit conversion" errors
+        # when we try to access the `name` property.
+        if spell_setting.is_a?(Hash)
+          spell_setting['name'] ||= spell_name
+        end
+      end
+    end
+
+    # Waggle sets are maps of arbitrary names to map of spell names to map of spell properties.
+    # For example:
+    #   { 'burgle': { 'Refractive Field': { abbrev: 'RF' ... }, 'Death Monkey': { ... } } }
     # Iterate each waggle's list of spells to enrich them.
     # Enrich each's spell definition by merging base spell data with spell settings.
     settings.waggle_sets.transform_values! do |spells_map|
-      spells_map.transform_values!(&enrich_spells_block)
+      enrich_spells_with_name_block.call(spells_map)
+      spells_map.transform_values!(&enrich_spells_with_data_block)
     end
 
-    # Spell settings that are configured as a map whose values are maps of spell properties.
+    # Spell settings that are maps of spell names to map of spell properties.
+    # For example:
+    #   { 'Augmentation': { abbrev: 'MAF', mana: 5 ... } }
+    # Enrich each's spell definition by merging base spell data with spell settings.
+    [
+      settings.buff_spells,
+      settings.necromancer_healing,
+    ].each do |spells_map|
+      enrich_spells_with_name_block.call(spells_map)
+      spells_map.transform_values!(&enrich_spells_with_data_block)
+    end
+
+    # Spell settings that are magic skill names to map of spell properties.
+    # For example, { 'Augmentation': { abbrev: 'MAF' ... } }
     # Enrich each's spell definition by merging base spell data with spell settings.
     [
       settings.buff_spells,
@@ -1016,7 +1055,9 @@ class SetupFiles
       settings.crafting_training_spells,
       settings.necromancer_healing,
     ].each do |spells_map|
-      spells_map.transform_values!(&enrich_spells_block)
+      # Because the map keys are skill names, not spell names,
+      # we have to assume the spell name or abbrev are defined in the setting.
+      spells_map.transform_values!(&enrich_spells_with_data_block)
     end
 
     # Spell settings that are configured as a list whose values are maps of spell properties.
@@ -1024,7 +1065,9 @@ class SetupFiles
     [
       settings.offensive_spells
     ].each do |spells_list|
-      spells_list.map!(&enrich_spells_block)
+      # Because there is no other context to know which spell the setting is for
+      # we have to assume the spell name or abbrev are defined in the setting.
+      spells_list.map!(&enrich_spells_with_data_block)
     end
 
     # For TM spells, default their 'prep' command to 'target'
@@ -1037,6 +1080,22 @@ class SetupFiles
         spell_setting['prep'] ||= 'target'
       end
     end
+
+    # Battle Cries
+    settings.battle_cries.map! do |battle_cry_setting|
+      battle_cry_data = battle_cries_data[battle_cry['name']]
+      (battle_cry_data || {}).merge(battle_cry_setting)
+    end
+
+    # Lootables
+    settings.lootables = (
+      base_data_items.lootables +
+      base_data_items.box_nouns +
+      base_data_items.gem_nouns +
+      base_data_items.scroll_nouns +
+      settings.loot_additions -
+      settings.loot_subtractions
+    ).uniq
 
     # Pull sensitive settings from UserVars.
     # This is legacy from when people would commit and share their

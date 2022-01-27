@@ -777,7 +777,7 @@ class SetupFiles
   include MonitorMixin
 
   class FileInfo
-    attr_reader :path, :name, :data, :mtime
+    attr_reader :path, :name, :mtime
 
     def initialize(path:, name:, data:, mtime:)
       @path = path
@@ -790,6 +790,14 @@ class SetupFiles
       # Create deep clone of data to mitigate scripts changing settings in-memory
       # because that leads to hard to track down bugs and unpredictable script behaviors.
       Marshal.load(Marshal.dump(@data))
+    end
+
+    def peek(property)
+      # An efficient and safe way to return a specific property
+      # from the yaml file without the risks of passing around shallow copies.
+      # This marshals the one property which is magnitudes faster than
+      # marshalling the entire file to access one property.
+      Marshal.load(Marshal.dump(@data[property.to_sym]))
     end
 
     def to_s
@@ -825,10 +833,21 @@ class SetupFiles
     character_filenames = character_suffixes_to_filenames(character_suffixes)
     # Ensure latest profiles are loaded into cache
     reload_profiles(character_filenames)
+    # Get 'include' filenames, suffixes to other files where players externalize
+    # reusable settings that they share/include in other character setting files.
+    include_filenames = character_filenames
+      .reduce([]) do |result, filename|
+        result += (cache_get_by_filename(filename).peek('include') || [])
+      end
+      .map do |suffix|
+        to_include_filename(suffix)
+      end
+    reload_profiles(include_filenames)
     # Merge base and character settings
     settings = [
       'base.yaml',
       'base-empty.yaml',
+      include_filenames,
       character_filenames
     ].flatten.reduce({}) do |result, filename|
       result.merge(cache_get_by_filename(filename).data || {})
@@ -856,6 +875,9 @@ class SetupFiles
 
   private
 
+  SCRIPTS_DATA_PATH = File.join('.', 'scripts', 'data')
+  SCRIPTS_PROFILES_PATH = File.join('.', 'scripts', 'profiles')
+
   # Reloads the base profiles plus any that match the filenames given.
   def reload_profiles(filenames = [])
     load_files(get_profiles_glob_patterns(filenames))
@@ -869,19 +891,19 @@ class SetupFiles
   # Gets glob patterns for the profiles directory.
   # Includes base profiles plus any specified in the filenames argument.
   def get_profiles_glob_patterns(filenames = [])
-    get_glob_patterns(File.join('.', 'scripts', 'profiles'), filenames)
+    get_glob_patterns(SCRIPTS_PROFILES_PATH, filenames)
   end
 
   # Gets glob patterns for the data directory.
   # Includes base data plus any specified in the filenames argument.
   def get_data_glob_patterns(filenames = [])
-    get_glob_patterns(File.join('.', 'scripts', 'data'), filenames)
+    get_glob_patterns(SCRIPTS_DATA_PATH, filenames)
   end
 
   # Generates an array of file glob patterns, one per filename in the given basepath.
   # `base*.yaml` is automatically and always included in the glob pattern.
   def get_glob_patterns(basepath = '.', filenames = [])
-    filenames = ["base*.yaml", filenames].flatten.compact.uniq
+    filenames = ["base*.yaml", "include*.yaml", filenames].flatten.compact.uniq
     filenames.map { |filename| File.join(basepath, File.basename(filename)) }
   end
 
@@ -901,6 +923,12 @@ class SetupFiles
   # For example 'spells' returns 'base-spells.yaml'.
   def to_base_filename(suffix)
     "base-#{suffix}.yaml"
+  end
+
+  # Returns the filename to an include yaml file for the given suffix.
+  # For example 'spells' returns 'include-spells.yaml'.
+  def to_include_filename(suffix)
+    "include-#{suffix}.yaml"
   end
 
   # Iterates the files matched by the glob pattern and for those that
@@ -1592,6 +1620,10 @@ end
 
 def help_me(user = nil)
   result = $manager.submit_help_pastebin
+  if result.include?('Bad API request')
+    echo(result)
+    return
+  end
   if user
     LNet.send_message({ 'type' => 'private', 'to' => user }, result)
     echo("Attempted to PM YAML link on lnet to #{user}.  Check lnet window for success or failure.")

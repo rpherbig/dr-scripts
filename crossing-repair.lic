@@ -10,18 +10,65 @@ class CrossingRepair
   include DRCT
 
   def initialize
-    settings = setup
+    arg_definitions = [
+      [
+        { name: 'town', regex: $HOMETOWN_REGEX, optional: true, description: 'Town to sell in' },
+        { name: 'force', regex: /force/i, optional: true, description: 'Force repair gear, ignoring any wait timers' },
+        { name: 'debug', regex: /debug/i, optional: true, description: 'Enable debug mode' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
 
-    start_script('performance', ['noclean']) unless settings.instrument
+    $debug_mode_crossing_repair = args.debug || UserVars.crossing_repair_debug
 
-    @repair_info.each do |repairer, items|
+    town = DRC.get_town_name(args.town)
+    settings = get_settings
+
+    # If town argument is not recognized, choosing to exit the script with error
+    # instead of continue with the character's hometown because if the player
+    # wanted to repair in a specific town then they might be far away from their
+    # hometown and not want the script to suddenly rush them off,
+    # especially if it was a simple typo or the player suffers social outrage.
+    if args.town && !town
+      DRC.message("Could not identify town for argument: #{args.town}")
+      DRC.message("To avoid ambiguity, please use the town's full name: https://elanthipedia.play.net/Category:Cities")
+      exit
+    end
+
+    settings['hometown'] = town if town
+
+    @repair_heuristic_gear = settings.repair_heuristic_gear
+    @repair_heuristic_threshold = settings.repair_heuristic_threshold
+    @repair_timer = settings.repair_timer
+    UserVars.repair_timer_snap ||= Time.now
+
+    unless args.force || should_repair?
+      echo "Skipping repair" if $debug_mode_crossing_repair
+      exit
+    end
+
+    @equipment_manager = EquipmentManager.new
+    @equipment_manager.wear_equipment_set?('standard')
+    @equipment_manager.empty_hands
+
+    @skip_bank = settings.sell_loot_skip_bank
+    amount, denom = settings.sell_loot_money_on_hand.split(' ')
+    @keep_copper = DRCM.convert_to_copper(amount, denom)
+    @repair_withdrawal_amount = settings.repair_withdrawal_amount
+    @hometown_data = get_data('town')[settings.hometown]
+
+    # Verify for the repair town specified, we have a bank, a leather repairer
+    # (if leather items exist), and a metal repairer (if metal items exist)
+    repair_info = repair_prep(town, settings)
+
+    repair_info.each do |repairer, items|
       echo "Repairing at #{repairer}" if $debug_mode_crossing_repair
       repair_at(repairer['name'], repairer['id'], items)
     end
 
     DRCM.deposit_coins(@keep_copper, settings) unless settings.sell_loot_skip_bank
 
-    @repair_info.to_a.reverse.each do |(repairer, _items)|
+    repair_info.to_a.reverse.each do |(repairer, _items)|
       while tickets_left?(repairer)
       end
     end
@@ -31,6 +78,77 @@ class CrossingRepair
 
     # don't wear your boots on your head, silly
     fput('sort auto head') if settings.sort_auto_head
+  end
+
+  def repair_prep(town, settings)
+    # This method is designed to prep for repair by checking if we have a bank specified for the
+    # town in base-town.yaml, and checking if we have leather and/or metal items to repair and if
+    # there is a requisite metal or leather repair person specified in base-town.yaml.
+    # If we don't have the proper specifications in base-town.yaml, warn user, direct to submit issue.
+    # Returns: the hash of items to repair at either metal/leather repairer.
+
+    DRC.message("Validating bank and repairers...") if $debug_mode_crossing_repair
+
+    # Populate a hash of leather items to repair, and metal items to repair, based on user's
+    # yaml list of equipment. While having to repair different items at leather vs. metal
+    # repair is deprecated, we still need to support the legacy settings.
+    leather_items_to_repair = @equipment_manager.items.select(&:leather).reject(&:skip_repair)
+    metal_items_to_repair = @equipment_manager.items.reject(&:leather).reject(&:skip_repair)
+
+    # No bank specified in base-town.yaml for specified repair town? Message user. This method
+    # both withdraws and deposits coins, so having a bank specified is requisite.
+    if !@hometown_data['deposit']
+      DRC.message("No bank found for #{town} in base-town.yaml. Please submit an issue on GitHub:")
+      DRC.message("https://github.com/rpherbig/dr-scripts/issues")
+      exit
+    end
+
+    # Check if we have leather items specified in yaml. If so, verify we have a leather
+    # repair person specified in base-town.yaml for the user-specified repair town.
+    # If not, message user and direct to report issue.
+    if leather_items_to_repair.any?
+      echo "Leather items detected." if $debug_mode_crossing_repair
+      if !@hometown_data['leather_repair']
+        DRC.message("No leather repairer specified in base-town.yaml. Please submita an issue on GitHub:")
+        DRC.message("https://github.com/rpherbig/dr-scripts/issues")
+        exit
+      end
+    end
+
+    # Check if we have metal items specified in yaml. If so, verify we have a metal
+    # repair person specified in base-town.yaml for the user-specified repair town.
+    # If not, message user and direct to report issue.
+    if metal_items_to_repair.any?
+      echo "Metal items detected." if $debug_mode_crossing_repair
+      if !@hometown_data['metal_repair']
+        DRC.message("No metal repairer specified in base-town.yaml. Please submita an issue on GitHub:")
+        DRC.message("https://github.com/rpherbig/dr-scripts/issues")
+        exit
+      end
+    end
+
+    # Verify we have enough money as specified in the user's yaml
+    # Also start the performance script for some lovely extra exp = tdps
+    DRCM.ensure_copper_on_hand(@repair_withdrawal_amount, settings)
+    start_script('performance', ['noclean']) unless settings.instrument
+
+    # Display our metal and leather item hashes for repair if debug set
+    if $debug_mode_crossing_repair
+      DRC.message("Metal items hash:")
+      echo @hometown_data['metal_repair'] => metal_items_to_repair
+
+      DRC.message("Leather items hash:")
+      echo @hometown_data['leather_repair'] => leather_items_to_repair
+    end
+
+    # If we've not exited above, we're validated ready to repair.
+    # Populate a hash of items to repair at either leather or metal repairer.
+    # Return this hash for future use.
+    repair_info = { @hometown_data['leather_repair'] => leather_items_to_repair }
+                    .merge(@hometown_data['metal_repair'] => metal_items_to_repair) { |_key, old, new| old + new }
+
+    # Return our repair info hash, both leather and metal
+    return repair_info
   end
 
   def repair(repairer, item, repeat = false)
@@ -173,62 +291,6 @@ class CrossingRepair
       end
       should_repair
     end
-  end
-
-  def setup
-    arg_definitions = [
-      [
-        { name: 'town', regex: $HOMETOWN_REGEX, optional: true, description: 'Town to sell in' },
-        { name: 'force', regex: /force/i, optional: true, description: 'Force repair gear, ignoring any wait timers' },
-        { name: 'debug', regex: /debug/i, optional: true, description: 'Enable debug mode' }
-      ]
-    ]
-    args = parse_args(arg_definitions)
-
-    $debug_mode_crossing_repair = args.debug || UserVars.crossing_repair_debug
-
-    town = DRC.get_town_name(args.town)
-    settings = get_settings
-
-    # If town argument is not recognized, choosing to exit the script with error
-    # instead of continue with the character's hometown because if the player
-    # wanted to repair in a specific town then they might be far away from their
-    # hometown and not want the script to suddenly rush them off,
-    # especially if it was a simple typo or the player suffers social outrage.
-    if args.town && !town
-      DRC.message("Could not identify town for argument: #{args.town}")
-      DRC.message("To avoid ambiguity, please use the town's full name: https://elanthipedia.play.net/Category:Cities")
-      exit
-    end
-
-    settings['hometown'] = town if town
-
-    @repair_heuristic_gear = settings.repair_heuristic_gear
-    @repair_heuristic_threshold = settings.repair_heuristic_threshold
-    @repair_timer = settings.repair_timer
-    UserVars.repair_timer_snap ||= Time.now
-
-    unless args.force || should_repair?
-      echo "Skipping repair" if $debug_mode_crossing_repair
-      exit
-    end
-
-    @equipment_manager = EquipmentManager.new
-    @equipment_manager.wear_equipment_set?('standard')
-    @equipment_manager.empty_hands
-
-    @skip_bank = settings.sell_loot_skip_bank
-    amount, denom = settings.sell_loot_money_on_hand.split(' ')
-    @keep_copper = DRCM.convert_to_copper(amount, denom)
-    @repair_withdrawal_amount = settings.repair_withdrawal_amount
-    hometown_data = get_data('town')[settings.hometown]
-
-    DRCM.ensure_copper_on_hand(@repair_withdrawal_amount, settings)
-
-    # Merge, do not overwrite
-    @repair_info = { hometown_data['leather_repair'] => @equipment_manager.items.select(&:leather).reject(&:skip_repair) }
-                   .merge(hometown_data['metal_repair'] => @equipment_manager.items.reject(&:leather).reject(&:skip_repair)) { |_key, old, new| old + new }
-    settings
   end
 end
 

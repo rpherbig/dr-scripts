@@ -1,0 +1,183 @@
+=begin
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#check-symbiosis
+=end
+begin
+  custom_require.call %[common common-arcana drinfomon events]
+rescue
+  echo "Dependency is not running! This script requires dependency to be installed and running."
+  exit
+end
+
+
+class Researcher
+  include DRC
+
+  def initialize
+    args = get_args
+
+    @settings = get_settings
+    @current_topic = nil
+    add_flags
+    UserVars.researcher ||= {}
+    check_status
+
+    if args.skill || args.symbiosis || args.guild_skill
+      @current_topic = args.skill if args.skill
+      @current_topic = "symbiosis #{args.sym_type}" if args.symbiosis
+      @current_topic = convert_guild_skills(args.guild_skill) if args.guild
+      check_research
+      loop do
+        pause 5
+        check_research
+        break unless researching
+      end
+    else
+      echo "Using YAML settings is not supported at the moment, please specify a research target, or type ';researcher help' for a list of targets"
+      exit
+    end
+  end
+
+  def convert_guild_skills(skill)
+    case skill
+      when 'astro', 'astrology', 'plane'
+        'plane'
+      when 'summon', 'summoning', 'planes'
+        'planes'
+      when 'therugy', 'road'
+        'road'
+    end 
+  end
+
+
+  def set_researching(status)
+    UserVars.researcher['researching'] = status
+    UserVars.researcher['timestamp'] = Time.now
+  end
+
+  def researching
+    return false if Flags['research-partial']
+    return false if Flags['research-complete']
+    return false unless DRSpells.active_spells.include?('Gauge Flow')
+    UserVars.researcher['researching']
+  end
+
+  def add_flags
+    # Use the same flags from crossing-training
+    Flags.add('research-partial', 'there is still more to learn before you arrive at a breakthrough', 'distracted by combat', 'distracted by your spellcasting', 'You lose your focus on your research project', 'you forget what you were') unless Flags['research-partial']
+    Flags.add('research-complete', '^Breakthrough!', 'You complete reviewing your knowledge of the \w+ symbiosis and commit the details to memory') unless Flags['research-complete']
+  end
+
+  def check_status
+    case DRC.bput('research status', 'You estimate that you will complete it a few minutes from now', "You're not researching anything", "You have completed .+ of a project about")
+      when /You estimate that you will complete it a few minutes from now/
+        set_researching(true)
+      when /You're not researching anything/, /You have completed .+ of a project about/
+        set_researching(false)
+    end
+  end
+
+  def check_research
+    if Flags['research-partial']
+      Flags.reset('research-partial')
+      set_researching(false)
+      start_research
+    elsif Flags['research-complete']
+      Flags.reset('research-complete')
+      set_researching(false)
+      @current_topic = nil
+    else
+      start_research
+    end
+  end
+
+  def start_research
+    return if researching
+
+    research_start_msgs = [
+      'You focus', 
+      'You tentatively', 
+      'You confidently', 
+      'Abandoning the normal', 
+      'You are already busy',
+      'You start to research',
+      'With a mixture of rational concern',
+      'You expertly coach',
+      'You begin to bend',
+      'You bring yourself',
+      'Inwardly, you make an exercise',
+      'You orient in the figurative direction'
+    ]
+
+    research_start_fail_msgs = [
+      'You cannot begin',
+      'Usage:', 
+      'You do not know how to research'
+    ]
+
+
+    check_gaf
+    @current_topic = 'stream' if @current_topic == 'attunement'
+    case bput("research #{@current_topic} 300", research_start_msgs, research_start_fail_msgs )
+    when 'You cannot begin'
+      DRCA.release_magical_research
+      start_research
+    when *research_start_msgs
+      set_researching(true)
+    when 'Usage:', 'You do not know how to research'
+      DRC.message("Invalid research option")
+      set_researching(false)
+      exit
+    end
+  end
+
+  def check_gaf
+    return if DRSpells.active_spells.include?('Gauge Flow')
+    # Doing the AND check for set and spell is to not rely on lich nil; indexing into a non-existant key raises exception, not nil.
+    # TODO: try something similar to python dictionary .get method instead
+    if @settings['waggle_sets']['gaf'] && @settings['waggle_sets']['gaf']['Gauge Flow']
+      DRCA.cast_spell(@settings['waggle_sets']['gaf']['Gauge Flow'], @settings)
+    else
+      DRC.message("Using min prep. Make a waggle_set called 'gaf' with Gauge Flow in it if you want more control")
+      DRCA.cast_spell({ 'abbrev' => 'gaf', 'mana' => 5}, @settings)
+    end
+  end
+
+  def get_args
+    arg_definitions = [
+      [
+        { name: 'skill',
+          options: %w[
+            attunement augmentation energy field fundamental
+            sorcery spell stream utility warding
+          ], 
+          description: 'What skill or type of research do you want to do?'}
+      ],
+      [
+        { name: 'symbiosis', regex: /symbiosis/i, description: "Do symbiosis research?"},
+        { name: 'sym_type', options: %w[
+          activate avoid cast discern endure
+          examine explore harness harvest
+          heal impress learn perform remember
+          resolve spell spring strengthen watch
+          ], 
+          description: "Which symbiosis do you want to research?"}
+      ],
+      [
+        { name: 'guild', regex: /guild/i, description: "Perform guild specific research"},
+        {
+          name: 'guild_skill', 
+          options: %w[
+            astrology astro plane
+            summoning summon planes
+            theurgy cleric road
+          ],
+          description: "which guild skill?"
+        }
+      ]
+    ]
+    DRC.parse_args(arg_definitions)
+  end
+
+end
+
+Researcher.new

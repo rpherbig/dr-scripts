@@ -11,20 +11,33 @@ class HuntingBuddy
     args = parse_args(arg_definitions, true)
 
     @settings = get_settings
+
+    @town_data = get_data('town')[@settings.hometown]
+    @hunting_data = get_data('hunting')
+    @escort_zones = @hunting_data.escort_zones
+    @hunting_zones = @hunting_data.hunting_zones
+
     @stop_on_familiar_drag = @settings.stop_on_familiar_drag
-    data = get_data('hunting')
-    @escort_zones = data.escort_zones
-    @hunting_zones = data.hunting_zones
+    echo("  @stop_on_familiar_drag: #{@stop_on_familiar_drag}") if $debug_mode_hunting
+
     @stop_on_low_threshold = @settings.stop_on_low_threshold
+    echo("  @stop_on_low_threshold: #{@stop_on_low_threshold}") if $debug_mode_hunting
+
     @stop_on_high_threshold = @settings.stop_on_high_threshold
+    echo("  @stop_on_high_threshold: #{@stop_on_high_threshold}") if $debug_mode_hunting
+
     @magic_exp_threshold = @settings.magic_exp_training_max_threshold
     @magic_skills = ['Arcane Magic', 'Holy Magic', 'Life Magic', 'Elemental Magic',\
                      'Lunar Magic', 'Attunement', 'Arcana', 'Targeted Magic', 'Inner Fire',\
                      'Inner Magic', 'Augmentation', 'Debilitation', 'Utility', 'Warding', 'Sorcery']
+    echo("  @magic_exp_threshold: #{@magic_exp_threshold}") if $debug_mode_hunting
+
     @hunting_buddies_max = @settings.hunting_buddies_max
+    echo("  @hunting_buddies_max: #{@hunting_buddies_max}") if $debug_mode_hunting
 
     # Will deprecate prehunt_buffs tag as a room
-    @buff_room = @settings.prehunt_buffing_room || @settings.prehunt_buffs
+    @prehunt_buffing_room = @settings.prehunt_buffing_room || @settings.prehunt_buffs
+    echo("  @prehunt_buffing_room: #{@prehunt_buffing_room}") if $debug_mode_hunting
 
     hunting_info = []
     if @settings.hunting_file_list || args.flex.any?
@@ -57,7 +70,35 @@ class HuntingBuddy
     check_bundling_rope
     DRC.wait_for_script_to_complete('restock') unless @settings.sell_loot_skip_bank
 
-    @hunting_info.each do |info|
+    @hunting_info.each_with_index do |info, index|
+
+      args = info['args'] # list of args to pass to combat-trainer
+      before_actions = info['before'] # list of script names
+      after_actions = info['after'] # list of script names
+      during_actions = info['during'] # list of script names
+      duration = info[:duration] # number of minutes to hunt
+      stop_on_high_skills = info['stop_on'] # list of skill names
+      stop_on_low_skills = info['stop_on_low'] # list of skill names
+      stop_on_boxes = info['boxes'] || info['stop_on_boxes'] # boolean
+      stop_on_no_moons = info['moons'] || info['stop_on_moons'] # boolean
+      hunting_zones = [info[:zone]].flatten.compact # string or list of hunting zones
+      waiting_room = info['full_waiting_room'] || @settings.safe_room # room id
+
+      if $debug_mode_hunting
+        echo("Processing hunting info number #{index + 1}")
+        echo("  args: #{args}")
+        echo("  before_actions: #{before_actions}")
+        echo("  after_actions: #{after_actions}")
+        echo("  during_actions: #{during_actions}")
+        echo("  duration: #{duration}")
+        echo("  stop_on_high_skills: #{stop_on_high_skills}")
+        echo("  stop_on_low_skills: #{stop_on_low_skills}")
+        echo("  stop_on_boxes: #{stop_on_boxes}")
+        echo("  stop_on_no_moons: #{stop_on_no_moons}")
+        echo("  hunting_zones: #{hunting_zones}")
+        echo("  waiting_room: #{waiting_room}")
+      end
+
       if @stop_hunting
         DRC.message("***STATUS*** Stopping all hunting because manual intervention")
         stop_actions(during_actions)
@@ -72,17 +113,6 @@ class HuntingBuddy
         execute_actions(after_actions)
         break
       end
-
-      args = info['args']
-      before_actions = info['before']
-      after_actions = info['after']
-      during_actions = info['during']
-      duration = info[:duration]
-      stop_on_skills = info['stop_on']
-      stop_on_low_skills = info['stop_on_low']
-      stop_on_boxes = info['boxes']
-      stop_on_no_moons = info['moons']
-      waiting_room = info['full_waiting_room'] || @settings.safe_room
 
       if stop_on_boxes && !need_boxes?
         DRC.message("***STATUS*** Skipping hunt because have enough boxes")
@@ -101,15 +131,15 @@ class HuntingBuddy
           next
         end
 
-      if all_skills_at_cap?(stop_on_skills)
-        DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold")
+      if all_skills_at_cap?(stop_on_high_skills)
+        DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold: #{stop_on_high_skills}")
         stop_actions(during_actions)
         execute_actions(after_actions)
         next
       end
 
       if stop_on_low_skills_too_low?(stop_on_low_skills)
-        DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold")
+        DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold: #{stop_on_low_skills}")
         stop_actions(during_actions)
         execute_actions(after_actions)
         next
@@ -117,7 +147,7 @@ class HuntingBuddy
 
       check_prehunt_buffs
 
-      next unless find_hunting_room?(info[:zone], waiting_room)
+      next unless find_hunting_room?(hunting_zones, waiting_room)
 
       args.each_with_index do |arg, index|
         if @stopped_for_bleeding
@@ -133,7 +163,7 @@ class HuntingBuddy
         hunt(
           arg,
           duration ? duration[index] : nil,
-          stop_on_skills ? stop_on_skills[index] : nil,
+          stop_on_high_skills ? stop_on_high_skills[index] : nil,
           stop_on_low_skills ? stop_on_low_skills[index] : nil,
           stop_on_boxes ? stop_on_boxes[index] : nil,
           stop_on_no_moons ? stop_on_no_moons[index] : nil
@@ -191,9 +221,8 @@ class HuntingBuddy
     return if DRCI.wearing?('bundle')
     return if DRCI.exists?('bundling rope')
 
-    tannery_data = get_data('town')[@settings.hometown]['tannery']
-    tanner_room = tannery_data['id']
-    tanner_name = tannery_data['name']
+    tanner_room = @town_data['tannery']['id'],
+    tanner_name = @town_data['tannery']['name'],
 
     DRCT.walk_to(tanner_room)
     DRC.bput("ask #{tanner_name} for bundling rope", 'hands you')
@@ -203,7 +232,7 @@ class HuntingBuddy
   def check_prehunt_buffs
     return unless @settings.waggle_sets['prehunt_buffs']
 
-    DRCT.walk_to(@buff_room)
+    DRCT.walk_to(@prehunt_buffing_room)
 
     DRC.wait_for_script_to_complete('buff', ['prehunt_buffs'])
   end
@@ -271,8 +300,8 @@ class HuntingBuddy
     true
   end
 
-  def all_skills_at_cap?(stop_on_skills)
-    stop_on_skills && !stop_on_skills.empty? && stop_on_skills.flatten.all? { |skill| DRSkill.getxp(skill) >= (@magic_skills.include?(skill) ? @magic_exp_threshold : @stop_on_high_threshold) }
+  def all_skills_at_cap?(stop_on_high_skills)
+    stop_on_high_skills && !stop_on_high_skills.empty? && stop_on_high_skills.flatten.all? { |skill| DRSkill.getxp(skill) >= (@magic_skills.include?(skill) ? @magic_exp_threshold : @stop_on_high_threshold) }
   end
 
   def stop_on_low_skills_too_low?(stop_on_low_skills)
@@ -283,7 +312,7 @@ class HuntingBuddy
     $COMBAT_TRAINER.get_process('loot').at_box_limit?
   end
 
-  def hunt(args, duration, stop_on_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
+  def hunt(args, duration, stop_on_high_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
     $COMBAT_TRAINER = nil
     hunting_room = Room.current.id
     Flags.add('hunting-buddy-familiar-drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
@@ -320,8 +349,8 @@ class HuntingBuddy
         DRC.message("***STATUS*** Stopping because no moons")
         break
       end
-      if all_skills_at_cap?(stop_on_skills)
-        DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_skills}")
+      if all_skills_at_cap?(stop_on_high_skills)
+        DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_high_skills}")
         break
       end
       if stop_on_low_skills_too_low?(stop_on_low_skills)
@@ -351,13 +380,13 @@ class HuntingBuddy
       end
       if (counter % 60).zero?
         if duration
-          if stop_on_skills
-            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          if stop_on_high_skills
+            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_high_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
           else
             DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining")
           end
         else
-          DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_high_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
         end
       end
       counter += 1

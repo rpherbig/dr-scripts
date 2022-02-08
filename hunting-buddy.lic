@@ -2,13 +2,9 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#hunting-buddy
 =end
 
-custom_require.call(%w[common common-arcana common-items common-travel drinfomon events spellmonitor equipmanager])
+custom_require.call(%w[common common-arcana common-items common-travel drinfomon equipmanager events spellmonitor])
 
 class HuntingBuddy
-  include DRC
-  include DRCA
-  include DRCI
-  include DRCT
 
   def initialize
     arg_definitions = [[]]
@@ -59,17 +55,22 @@ class HuntingBuddy
 
   def main
     check_bundling_rope
-    wait_for_script_to_complete('restock') unless @settings.sell_loot_skip_bank
+    DRC.wait_for_script_to_complete('restock') unless @settings.sell_loot_skip_bank
 
     @hunting_info.each do |info|
       if @stop_hunting
-        message('***STATUS*** stopping all hunting due to manual intervention')
+        DRC.message("***STATUS*** Stopping all hunting because manual intervention")
+        stop_actions(during_actions)
+        execute_actions(after_actions)
         break
       end
 
       if @stopped_for_bleeding
-        retreat
+        DRC.message("***STATUS*** Stopping all hunting because bleeding")
+        DRC.retreat
         stop_script('tendme') if Script.running?('tendme')
+        stop_actions(during_actions)
+        execute_actions(after_actions)
         break
       end
 
@@ -85,7 +86,9 @@ class HuntingBuddy
       waiting_room = info['full_waiting_room'] || @settings.safe_room
 
       if stop_on_boxes && !need_boxes?
-        message('***STATUS*** Skipping hunt because of current boxes is more than the minimum.')
+        DRC.message("***STATUS*** Skipping hunt because have enough boxes")
+        # This purposefully does not perform any actions as an efficiency
+        # to move into the next hunt as quickly as possible.
         next
       end
 
@@ -93,23 +96,22 @@ class HuntingBuddy
       execute_actions(before_actions)
 
       if stop_on_no_moons && !DRCA.moons_visible?
-          message('***STATUS*** Skipping hunt due to no moons')
-          stop_actions(during_actions)
-          # Execute scripts to run after the hunt
-          execute_actions(after_actions)
+        DRC.message("***STATUS*** Skipping hunt because no moons")
+        stop_actions(during_actions)
+        execute_actions(after_actions)
           next
         end
 
       if all_skills_at_cap?(stop_on_skills)
+        DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold")
         stop_actions(during_actions)
-        # Execute scripts to run after the hunt
         execute_actions(after_actions)
         next
       end
 
       if stop_on_low_skills_too_low?(stop_on_low_skills)
+        DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold")
         stop_actions(during_actions)
-        # Execute scripts to run after the hunt
         execute_actions(after_actions)
         next
       end
@@ -120,72 +122,91 @@ class HuntingBuddy
 
       args.each_with_index do |arg, index|
         if @stopped_for_bleeding
-          retreat
+          DRC.message("***STATUS*** Stopping all hunting because bleeding")
+          DRC.retreat
           stop_script('tendme') if Script.running?('tendme')
           break
         end
+
+        # Execute background scripts to run during the hunt
         execute_nonblocking_actions(during_actions)
-        hunt(arg, duration ? duration[index] : nil, stop_on_skills ? stop_on_skills[index] : nil, stop_on_low_skills ? stop_on_low_skills[index] : nil, stop_on_boxes ? stop_on_boxes[index] : nil, stop_on_no_moons ? stop_on_no_moons[index] : nil)
+
+        hunt(
+          arg,
+          duration ? duration[index] : nil,
+          stop_on_skills ? stop_on_skills[index] : nil,
+          stop_on_low_skills ? stop_on_low_skills[index] : nil,
+          stop_on_boxes ? stop_on_boxes[index] : nil,
+          stop_on_no_moons ? stop_on_no_moons[index] : nil
+        )
       end
 
+      # Stop background scripts that ran during the hunt
       stop_actions(during_actions)
+
       DRCI.stow_hand('left') unless !DRC.right_hand || !DRC.left_hand
       while DRC.bput('stow feet', /You pick up/, /Stow what/) =~ /You pick up/
       end
-      wait_for_script_to_complete('bescort', @exit) if @exit
-      release_cyclics(@settings.cyclic_no_release)
+
+      DRC.wait_for_script_to_complete('bescort', @exit) if @exit
+      DRCA.release_cyclics(@settings.cyclic_no_release)
 
       # Execute scripts to run after the hunt
       execute_actions(after_actions)
     end
-    walk_to(@settings.safe_room)
-    EquipmentManager.new.wear_equipment_set?('standard')
+
+    DRC.message("***STATUS*** Returning to safe room: #{@settings.safe_room}")
+    DRCT.walk_to(@settings.safe_room)
+    EquipmentManager.new(@settings).wear_equipment_set?('standard')
   end
 
   def execute_actions(actions)
     actions.each do |action|
-      message "***STATUS*** EXECUTE #{action}"
-      action_parts = action.split(' ')
-      script_name = action_parts.shift
-      wait_for_script_to_complete(script_name, action_parts)
+      DRC.message("***STATUS*** EXECUTE #{action}")
+      script_args = action.split(' ')
+      script_name = script_args.shift
+      DRC.wait_for_script_to_complete(script_name, script_args)
     end
   end
 
   def execute_nonblocking_actions(actions)
     actions.each do |action|
-      message "***STATUS*** EXECUTE #{action}"
-      action_parts = action.split(' ')
-      script_name = action_parts.shift
-      start_script(script_name, action_parts)
+      DRC.message("***STATUS*** EXECUTE #{action}")
+      script_args = action.split(' ')
+      script_name = script_args.shift
+      start_script(script_name, script_args)
     end
   end
 
   def stop_actions(actions)
-    actions.each do |script_name|
+    actions.each do |action|
+      DRC.message("***STATUS*** STOP #{action}")
+      script_args = action.split(' ')
+      script_name = script_args.shift
       stop_script(script_name) if Script.running?(script_name)
     end
   end
 
   def check_bundling_rope
     return unless @settings.skinning['skin']
-    return if wearing?('bundle')
-    description = 'bundling rope'
-    return if exists?(description)
+    return if DRCI.wearing?('bundle')
+    return if DRCI.exists?('bundling rope')
 
-    room = get_data('town')[@settings.hometown]['tannery']['id']
-    name = get_data('town')[@settings.hometown]['tannery']['name']
+    tannery_data = get_data('town')[@settings.hometown]['tannery']
+    tanner_room = tannery_data['id']
+    tanner_name = tannery_data['name']
 
-    walk_to(room)
-    bput("ask #{name} for #{description}", 'hands you')
-    bput("stow my #{description}", 'You put')
+    DRCT.walk_to(tanner_room)
+    DRC.bput("ask #{tanner_name} for bundling rope", 'hands you')
+    DRC.stow_item?('bundling rope')
   end
 
   def check_prehunt_buffs
     return unless @settings.waggle_sets['prehunt_buffs']
 
-    walk_to(@buff_room)
+    DRCT.walk_to(@buff_room)
 
-    wait_for_script_to_complete('buff', ['prehunt_buffs'])
+    DRC.wait_for_script_to_complete('buff', ['prehunt_buffs'])
   end
 
   def find_hunting_room?(zone_name, waiting_room)
@@ -199,12 +220,12 @@ class HuntingBuddy
         message "FAILED TO FIND THE HUNTING ZONE(S) #{zones} IN BASE.YAML"
         return false
       end
-      walk_to(escort_info['base'])
+      DRCT.walk_to(escort_info['base'])
       wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
       @exit = [escort_info['area'], 'exit']
     else
       @exit = nil
-      return find_empty_room(rooms, waiting_room,
+      return DRCT.find_empty_room(rooms, waiting_room,
         lambda do |search_attempt|
           # Skip room if has more people than your max limit
           return false if DRRoom.pcs.size > @hunting_buddies_max
@@ -233,7 +254,7 @@ class HuntingBuddy
             end
             true
           when /You're not in any condition to be searching around/i
-            DRC.message("You're too injured to hunt!")
+            DRC.message("***STATUS*** You're too injured to hunt!")
             @stop_hunting = true
             @stopped_for_bleeding = bleeding?
             # Ironically, return true so the search for a suitable hunting room
@@ -268,7 +289,7 @@ class HuntingBuddy
     hunting_room = Room.current.id
     Flags.add('familiar_drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
 
-    message("***STATUS*** beginning hunt '#{args}' for '#{duration}' minutes")
+    DRC.message("***STATUS*** Beginning hunt '#{args}' for '#{duration}' minutes")
 
     verify_script('combat-trainer')
     start_script('combat-trainer', args)
@@ -283,47 +304,47 @@ class HuntingBuddy
     loop do
       clear
       if health < @settings.health_threshold
-        message('***STATUS*** exiting due to low health')
+        DRC.message("***STATUS*** Exiting because low health: #{health} < #{@settings.health_threshold}")
         fput('avoid all')
         fput('exit')
       end
       if @settings.stop_hunting_if_bleeding && bleeding?
-        message('***STATUS*** stopping due to bleeding')
+        DRC.message("***STATUS*** Stopping because bleeding")
         @stopped_for_bleeding = true
         break
       end
       if stop_on_boxes && over_box_limit?
-        message('***STATUS*** stopping due to boxes')
+        DRC.message("***STATUS*** Stopping hunt because have enough boxes")
         break
       end
       if stop_on_no_moons && !DRCA.moons_visible?
-          message('***STATUS*** stopping due to no moons')
-          break
+        DRC.message("***STATUS*** Stopping because no moons")
+        break
       end
       if all_skills_at_cap?(stop_on_skills)
-        message('***STATUS*** stopping due to capped skills')
+        DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_skills}")
         break
       end
       if stop_on_low_skills_too_low?(stop_on_low_skills)
-        message("***STATUS*** stopping due to low skills: #{stop_on_low_skills}")
+        DRC.message("***STATUS*** Stopping because skills dropped below learning threshold: #{stop_on_low_skills}")
         break
       end
       if @stop_hunting || @next_hunt
-        message('***STATUS*** stopping due to manual intervention')
+        DRC.message("***STATUS*** Stopping because manual intervention")
         @next_hunt = false
         break
       end
       if duration && (counter / 60) >= duration
-        message('***STATUS*** stopping due to time')
+        DRC.message("***STATUS*** Stopping because time")
         break
       end
       if Flags['familiar_drag'] && @bail_on_familiar
-        message('***STATUS*** stopping due to familiar dragging from stun')
+        DRC.message("***STATUS*** Stopping because familiar drug while stunned")
         Flags.reset('familiar_drag')
         break
       end
       if Flags['familiar_drag'] && !@bail_on_familiar
-        message('***STATUS*** heading back to room - familiar drug while stunned')
+        DRC.message("***STATUS*** Heading back to room because familiar drug while stunned")
         pause_script('combat-trainer') if Script.running?('combat-trainer')
         DRCT.walk_to(hunting_room)
         unpause_script('combat-trainer') if Script.running?('combat-trainer')
@@ -332,12 +353,12 @@ class HuntingBuddy
       if (counter % 60).zero?
         if duration
           if stop_on_skills
-            message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
           else
-            message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining")
+            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining")
           end
         else
-          message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
         end
       end
       counter += 1
@@ -345,7 +366,7 @@ class HuntingBuddy
     end
     $COMBAT_TRAINER.stop
     pause 1 while $COMBAT_TRAINER.running || Script.running?('combat-trainer')
-    retreat
+    DRC.retreat
   end
 
   def format_hunting_info(hunting_info_raw)

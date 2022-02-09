@@ -283,19 +283,25 @@ class DRStats
 end
 
 class DRSkill
-  @@skills_data = nil
+  @@skills_data ||= get_data('skills')
   @@gained_skills ||= []
   @@start_time ||= Time.now
   @@list ||= []
+  @@exp_modifiers ||= {}
+
+  # Use this to silence the initial output
+  # of calling 'exp mods' command to populate our data.
+  @@silence_exp_mods_hook = false
+  @@grabbing_exp_mods = false
 
   attr_reader :name, :rank, :exp, :percent, :current, :baseline, :skillset
   attr_writer :rank, :exp, :percent, :current, :baseline
 
   def initialize(name, rank, exp, percent)
     @name = name
-    @rank = rank
-    @exp = exp
-    @percent = percent
+    @rank = rank.to_i
+    @exp = exp.to_i
+    @percent = percent.to_i
     @baseline = rank.to_i + (percent.to_i / 100.0)
     @current = rank.to_i + (percent.to_i / 100.0)
     @skillset = lookup_skillset(@name)
@@ -330,11 +336,19 @@ class DRSkill
   def self.update(name, rank, exp, percent)
     skill = self.find_skill(name)
     if skill
-      skill.rank = rank
-      skill.exp = exp
-      skill.percent = percent
+      skill.rank = rank.to_i
+      skill.exp = exp.to_i
+      skill.percent = percent.to_i
       skill.current = rank.to_i + (percent.to_i / 100.0)
     end
+  end
+
+  def self.update_mods(name, rank)
+    self.exp_modifiers[self.lookup_alias(name)] = rank.to_i
+  end
+
+  def self.exp_modifiers
+    @@exp_modifiers
   end
 
   def self.clear_mind(val)
@@ -345,13 +359,22 @@ class DRSkill
     self.find_skill(val).rank.to_i
   end
 
+  def self.getmodrank(val)
+    skill = self.find_skill(val)
+    if skill
+      rank = skill.rank.to_i
+      modifier = self.exp_modifiers[skill.name].to_i
+      rank + modifier
+    end
+  end
+
   def self.getxp(val)
     skill = self.find_skill(val)
     skill.rank.to_i >= 1750 ? 34 : skill.exp.to_i
   end
 
   def self.getpercent(val)
-    self.find_skill(val).percent
+    self.find_skill(val).percent.to_i
   end
 
   def self.getskillset(val)
@@ -366,6 +389,30 @@ class DRSkill
 
   def self.list
     @@list
+  end
+
+  def self.grabbing_exp_mods
+    @@grabbing_exp_mods
+  end
+
+  def self.grabbing_exp_mods=(val)
+    @@grabbing_exp_mods = val
+  end
+
+  def self.silence_exp_mods_hook
+    @@silence_exp_mods_hook
+  end
+
+  def self.silence_exp_mods_hook=(val)
+    @@silence_exp_mods_hook = val
+  end
+
+  # Call this method to cause the script to recheck for experience modifiers.
+  def self.refresh_exp_mods
+    @@silence_exp_mods_hook = true
+    fput('exp mods')
+    pause 0.25
+    @@silence_exp_mods_hook = false
   end
 
   private
@@ -386,11 +433,6 @@ class DRSkill
   # When it was defined as a class method then the initialize method
   # complained that this method didn't yet exist.
   def lookup_skillset(skill)
-    # To mitigate slowing down drinfomon loading up, the skills
-    # data is lazily loaded instead of loaded as part of the class variable
-    # initialization. The delay caused other scripts to complain that `DRRoom`
-    # had not been initialized yet.
-    @@skills_data ||= get_data('skills')
     @@skills_data.skillsets.find { |skillset, skills| skills.include?(skill) }.first
   end
 end
@@ -719,6 +761,48 @@ end
 UserVars.XPSquelch = true unless UserVars.drinfomon_debug
 DownstreamHook.add('xp_action', xp_action)
 
+xp_modifier_action = proc do |server_string|
+  # Sample XML:
+  # Note, "speech" presets are positive modifiers and use one `+` plus sign.
+  # and "thought" presets are negative modifiers and use two `-` minus signs.
+  # ---
+  # The following skills are currently under the influence of a modifier:
+  # <output class="mono"/>
+  # <preset id="speech">+78 Athletics</preset>
+  # <preset id="speech">+84 Perception</preset>
+  # <preset id="thought">--11 First Aid</preset>
+  # <output class=""/>
+  # ---
+  # The following skills are currently under the influence of a modifier:
+  # <output class="mono"/>
+  #   None
+  # <output class=""/>
+  # ---
+  case server_string
+  when /^The following skills are currently under the influence of a modifier/
+    DRSkill.grabbing_exp_mods = true
+    DRSkill.exp_modifiers.clear
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when %r{^<preset id="speech">}, %r{^<preset id="thought">}
+    if DRSkill.grabbing_exp_mods
+      server_string =~ /(?<sign>\+|\-)+(?<value>\d+) \b(?<skill>[\w\s]+)\b/
+      sign = Regexp.last_match[:sign]
+      value = Regexp.last_match[:value].to_i
+      skill = Regexp.last_match[:skill]
+
+      value = (value * -1) if sign == '-'
+      DRSkill.update_mods(skill, value)
+    end
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when /None/
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when  %r{^<output class=""/>}
+    DRSkill.grabbing_exp_mods = false
+  end
+  server_string
+end
+DownstreamHook.add('xp_modifier_action', xp_modifier_action)
+
 info_silence = proc do |server_string|
   if server_string.strip.empty?
     server_string = nil
@@ -798,6 +882,7 @@ before_dying do
   save_proc.call
   UpstreamHook.remove('drinfomon')
   DownstreamHook.remove('xp_action')
+  DownstreamHook.remove('xp_modifier_action')
   DownstreamHook.remove('status_action')
   DownstreamHook.remove('premiumcheck_silence')
   DownstreamHook.remove('info_silence')
@@ -841,8 +926,18 @@ fput('ltb info')
 # For commoners, we continue to check on an interval so that when they
 # join a guild we will pick up their new info.
 # And for characters who play as commoners, the interval reduces spam.
-info_check_interval = 30 # seconds
+info_check_interval = get_settings.drinfomon_passive_delay
 info_check_time = Time.now - info_check_interval
+
+exp_mods_check_interval = info_check_interval
+exp_mods_check_time = Time.now - exp_mods_check_interval
+
+# Now silence any commands the script is running
+# to reduce spam to the player. We don't do this at top of script
+# because not everything is easily squelched so it ends up looking
+# like random output shown to screen but no clues to the user as to why.
+# Waiting until now to silence the script avoids that ambiguity.
+silence_me
 
 while line = script.gets
   begin
@@ -1001,6 +1096,10 @@ while line = script.gets
       fput('info')
       info_check_time = Time.now
       pause 0.25
+    end
+    if Time.now - exp_mods_check_time > exp_mods_check_interval
+      DRSkill.refresh_exp_mods
+      exp_mods_check_time = Time.now
     end
   rescue
     echo $ERROR_INFO

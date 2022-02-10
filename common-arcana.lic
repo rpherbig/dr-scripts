@@ -23,7 +23,7 @@ module DRCA
     failure = ['as if it hungers for more', 'Your infusion fails completely', 'You don\'t have enough harnessed mana to infuse that much', 'You have no harnessed']
 
     loop do
-      pause 5 while mana <= amount
+      pause 5 while mana <= 40
       harness_mana([amount]) if harness
       break if success.include?(DRC.bput("infuse om #{amount}", success, failure))
       pause 0.5
@@ -46,22 +46,42 @@ module DRCA
 
   def start_khris(khris, settings)
     khris
-      .map { |name| "Khri #{name}" }
-      .each do |name|
-        activate_khri?(settings.kneel_khri, name)
+      .each do |khri_set|
+        activate_khri?(settings.kneel_khri, khri_set)
       end
   end
 
+  # Needs to handle (based on current usage):
+  # - Hasten
+  # - Delay Hasten
+  # - Hasten Focus
+  # - Delay Hasten Focus
+  # - Khri Hasten
+  # - Khri Delay Hasten
+  # - Khri Delay Hasten Focus
   def activate_khri?(settings_kneel, ability)
-    return false if DRSpells.active_spells[ability]
-    kneel = kneel_for_khri?(settings_kneel, ability)
+    abilities = ability.split.map(&:capitalize)
+
+    # Standardize for with/without 'Khri' on the front
+    abilities = abilities.drop(1) if abilities.first.casecmp('khri') == 0
+
+    # Handling for 'Delay'
+    should_delay = abilities.first.casecmp('delay') == 0
+    abilities = abilities.drop(1) if should_delay
+
+    # Check each khri in the list against Active Spells, Drop any that are active
+    needed_abilities = abilities.select { |ability_to_check| DRSpells.active_spells["Khri #{ability_to_check}"].nil? }
+    return true if needed_abilities.empty?
+
+    kneel = needed_abilities.any? { |ability_to_check| kneel_for_khri?(settings_kneel, ability_to_check) }
     DRC.retreat if kneel
-    DRC.bput('kneel', 'You kneel', 'You are already', 'You rise') if kneel && !kneeling?
-    result = DRC.bput(ability, get_data('spells').khri_preps)
+    DRC.bput('kneel', 'You kneel', 'You are already', 'You rise', "While swimming?  Don't be silly") if kneel && !kneeling?
+
+    result = DRC.bput("Khri #{should_delay ? 'Delay ' : ''}#{needed_abilities.join(' ')}", get_data('spells').khri_preps)
     waitrt?
     DRC.fix_standing
 
-    ['Your body is willing', 'You have not recovered'].include?(result)
+    return ['Your mind and body are willing', 'Your body is willing', 'You have not recovered'].none?(result)
   end
 
   def kneel_for_khri?(kneel, ability)
@@ -73,15 +93,19 @@ module DRCA
   end
 
   def start_barb_abilities(abilities, settings)
-    abilities.each { |name| activate_barb_buff?(name, settings.meditation_pause_timer) }
+    abilities.each { |name| activate_barb_buff?(name, settings.meditation_pause_timer, settings.sit_to_meditate) }
   end
 
-  def activate_barb_buff?(name, meditation_pause_timer = 20)
+  def activate_barb_buff?(name, meditation_pause_timer = 20, sit_to_meditate = false)
     # Note, you must know Power meditation or Powermonger mastery
     # for your active abilities to be detected by DRSpells.
     return true if DRSpells.active_spells[name]
     activated = false
     ability_data = get_data('spells').barb_abilities[name]
+    if ability_data['type'].eql?('meditation') && sit_to_meditate
+      DRC.retreat
+      DRC.bput('sit', 'You sit', 'You are already', 'You rise', 'While swimming?')
+    end
     case DRC.bput(ability_data['start_command'], ability_data['activated_message'], 'You have not been trained', 'But you are already', 'Your inner fire lacks', 'find yourself lacking the inner fire', 'You should stand', 'You must be sitting', 'You must be unengaged', 'While swimming?')
     when 'You must be unengaged'
       DRC.retreat
@@ -116,7 +140,7 @@ module DRCA
   def prepare?(abbrev, mana, symbiosis = false, command = 'prepare', tattoo_tm = false, runestone_name = nil, runestone_tm = false)
     return false unless abbrev
 
-    DRC.bput('prep symb', 'You recall the exact details of the', 'But you\'ve already prepared') if symbiosis
+    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared', 'Please don\'t do that here') if symbiosis
 
     if runestone_name.nil?
       match = DRC.bput("#{command} #{abbrev} #{mana}", get_data('spells').prep_messages)
@@ -127,8 +151,8 @@ module DRCA
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
-    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now'
-      DRC.bput('rel symb', 'You release the', 'But you haven\'t') if symbiosis
+    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts', 'Please don\'t do that here'
+      DRC.bput('release symbiosis', 'You release the', 'But you haven\'t') if symbiosis
       return false
     when 'Well, that was fun'
       DRCI.dispose_trash(runestone_name)
@@ -140,6 +164,24 @@ module DRCA
     DRC.bput("target", get_data('spells').prep_messages) if tattoo_tm || runestone_tm
 
     match
+  end
+
+  # Returns true if preparing a spell, false otherwise.
+  def spell_preparing?
+    !spell_preparing.nil?
+  end
+
+  # Returns true if you're prepared to cast your spell.
+  # Infers this if you're preparing a spell and there's no more prep time to wait.
+  def spell_prepared?
+    spell_preparing? && checkcastrt <= 0
+  end
+
+  # Returns name of the spell being prepared, or nil if not preparing one.
+  def spell_preparing
+    name = XMLData.prepared_spell
+    name = nil if name.empty? || name.eql?('None')
+    name
   end
 
   def ritual(spell, settings)
@@ -187,7 +229,7 @@ module DRCA
     before.each { |action| DRC.bput(action['message'], action['matches']) }
 
     Flags.add('unknown-command', "Please rephrase that command")
-    Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that")
+    Flags.add('barrage-fail', "That was an invalid attack choice.", "Wouldn't it be better if you used a melee weapon?", "You'll need to be using a weapon to BARRAGE your target", "You must have a fully developed target matrix to make a barrage attack", "You are unable to muster the energy to do that", "You do not know how to manipulate that pathway.", "You cannot BARRAGE with that spell.")
     Flags.add('spell-fail', 'Currently lacking the skill to complete the pattern', 'backfires', 'Something is interfering with the spell', 'There is nothing else to face')
     Flags.add('cyclic-too-recent', 'The mental strain of initiating a cyclic spell so recently prevents you from formulating the spell pattern')
     Flags.add('spell-full-prep', /^This pattern may only be cast with full preparation/)
@@ -377,11 +419,12 @@ module DRCA
     return charged
   end
 
-  def release_cyclics
+  def release_cyclics(cyclic_no_release = [])
     get_data('spells')
       .spell_data
       .select { |_name, properties| properties['cyclic'] }
       .select { |name, _properties| DRSpells.active_spells.keys.include?(name) }
+      .reject { |name| cyclic_no_release.include?(name) }
       .map { |_name, properties| properties['abbrev'] }
       .each { |abbrev| fput("release #{abbrev}") }
   end
@@ -535,32 +578,50 @@ module DRCA
       data['cast'] = "cast #{cast_on}"
       return data
     end
-    echo 'Could not find any planets to cast on'
+    echo "No planet available to cast #{data['abbrev']}"
     nil
   end
 
   def set_moon_data(data)
     return data unless data['moon']
 
-    check_moonwatch
-    # Look for a moon that will be up for the next few minutes
-    moon = UserVars.moons.find { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }.first
-    unless moon
+    moon = visible_moons.first
+    if moon
+      data['cast'] = "cast #{moon}"
+    else
       echo "No moon available to cast #{data['abbrev']}"
-      return nil # Return nil to indicate that setting moon casting data failed
+      data = nil
     end
-    data['cast'] = "cast #{moon}"
     data
   end
 
+  # Returns true if at least one moon (e.g. katamba, yavash, xibar)
+  # is above the horizon and won't set for at least another ~4 minutes.
+  def moons_visible?
+    !visible_moons.empty?
+  end
+
+  # Returns list of moon names (e.g. katamba, yavash, xibar)
+  # that are above the horizon and won't set for at least another ~4 minutes.
+  def visible_moons
+    check_moonwatch
+    UserVars.moons.select { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }
+                  .map { |moon_name, moon_data| moon_name }
+  end
+
   def check_moonwatch
-    return if Script.running? 'moonwatch'
+    return if Script.running?('moonwatch')
 
     echo 'moonwatch is not running. Starting it now'
     UserVars.moons = {}
     custom_require.call('moonwatch')
     echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
     pause 0.5 while UserVars.moons.empty?
+  end
+
+  def cast_spell?(data, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
+    result = cast_spell(data, settings, force_cambrinth, cast_lifecycle_lambda)
+    result ? true : false
   end
 
   def cast_spell(data, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
@@ -574,18 +635,10 @@ module DRCA
       cast_spell({ 'abbrev' => 'cv', 'mana' => 1, 'prep_time' => 5 }, settings)
     end
 
-    release_cyclics if data['cyclic']
-    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
-    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
-
     if data['ritual']
       ritual(data, settings)
       return
     end
-
-    command = 'prep'
-    command = data['prep'] if data['prep']
-    command = data['prep_type'] if data['prep_type']
 
     if data['runestone_name']
       if !prepare_to_cast_runestone?(data, settings)
@@ -594,6 +647,19 @@ module DRCA
     end
 
     cast_lifecycle_lambda.call('pre-prep', data, settings) if cast_lifecycle_lambda != nil
+
+    command = 'prep'
+    command = data['prep'] if data['prep']
+    command = data['prep_type'] if data['prep_type']
+
+    if command == 'segue'
+      return if segue?(data['abbrev'], data['mana'])
+      command = 'prep'
+    end
+
+    release_cyclics if data['cyclic']
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
 
     return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
     DRCI.put_away_item?(data['runestone_name'], settings.runestone_storage) if DRCI.in_hands?(data['runestone_name'])
@@ -628,8 +694,18 @@ module DRCA
     end
 
     cast_lifecycle_lambda.call('pre-cast', data, settings) if cast_lifecycle_lambda != nil
-    cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+    spell_cast = cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
     cast_lifecycle_lambda.call('post-cast', data, settings) if cast_lifecycle_lambda != nil
+
+    return spell_cast
+  end
+
+  def segue?(abbrev,mana)
+    case DRC.bput("segue #{abbrev} #{mana}", get_data('spells').segue_messages)
+    when 'You must be performing a cyclic spell to segue from','It is too soon to segue','You are lacking the bardic flair'
+      return false
+    end
+    true
   end
 
   def check_discern(data, settings)
@@ -745,25 +821,12 @@ module DRCA
     return unless data
     return unless settings
 
+    # Skip preparing lunar spell if no moons available
+    return unless set_moon_data(data)
+
     release_cyclics if data['cyclic']
     DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
     DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
-
-    if data['moon']
-      check_moonwatch
-      moon = UserVars.moons['visible'].first
-      unless moon
-        weather ||= bput('weather', 'inside', 'You glance up at the sky.')
-        if weather =~ /inside/
-          echo "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
-        end
-
-        unless moon = UserVars.moons['visible'].first
-          return
-        end
-        data['cast'] = "cast #{moon}"
-      end
-    end
 
     command = 'prep'
     command = data['prep'] if data['prep']
@@ -774,6 +837,7 @@ module DRCA
 
   def crafting_magic_routine(settings)
     training_spells = settings.crafting_training_spells
+
     return if training_spells.empty?
     return if DRStats.mana <= settings.waggle_spells_mana_threshold
 
@@ -785,10 +849,15 @@ module DRCA
     end
 
     return if checkcastrt > 0
+
     needs_training = %w[Warding Utility Augmentation]
-                     .select { |skill| training_spells[skill] }
-                     .select { |skill| DRSkill.getxp(skill) < 31 }
-                     .sort_by { |skill| DRSkill.getxp(skill) }.first
+    needs_training.append("Sorcery") if (settings.crafting_training_spells_enable_sorcery && !Script.running?('forge')) ||
+                                        (settings.crafting_training_spells_enable_sorcery && settings.crafting_training_spells_enable_sorcery_forging)
+    needs_training = needs_training.select { |skill| training_spells[skill] }
+                                   .select { |skill| DRSkill.getxp(skill) < 31 }
+                                   .sort_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+                                   .first
+
     return unless needs_training
 
     crafting_prepare_spell(training_spells[needs_training], settings)
@@ -875,5 +944,20 @@ module DRCA
     ]
     result = DRC.bput("pathway sense", *charge_levels)
     charge_levels.find_index { |pattern| pattern =~ result }
+  end
+  
+  # check which symbiotic research is active
+  def perc_symbiotic_research
+    case DRC.bput('perceive', /combine the weaves of the (\w+) symbiosis/, /Roundtime/)
+    when /combine the weaves of the (\w+) symbiosis/
+      Regexp.last_match(1)
+    else
+      nil
+    end
+  end
+
+  # release symbiotic research
+  def release_magical_research
+    2.times { DRC.bput("release symbiosis", "Are you sure", "You intentionally wipe", "But you haven't") }
   end
 end

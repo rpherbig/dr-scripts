@@ -1,11 +1,10 @@
-# quiet
 =begin
   Documentation: https://elanthipedia.play.net/Lich_script_development#drinfomon
 =end
 
 no_kill_all
 no_pause_all
-# hide_me
+
 setpriority(0)
 
 class DRStats
@@ -284,19 +283,28 @@ class DRStats
 end
 
 class DRSkill
+  @@skills_data ||= get_data('skills')
   @@gained_skills ||= []
   @@start_time ||= Time.now
   @@list ||= []
-  attr_reader :name, :rank, :exp, :percent, :current, :baseline
+  @@exp_modifiers ||= {}
+
+  # Use this to silence the initial output
+  # of calling 'exp mods' command to populate our data.
+  @@silence_exp_mods_hook = false
+  @@grabbing_exp_mods = false
+
+  attr_reader :name, :rank, :exp, :percent, :current, :baseline, :skillset
   attr_writer :rank, :exp, :percent, :current, :baseline
+
   def initialize(name, rank, exp, percent)
-    # UserVars.athletics = ra.to_i if name == 'Athletics'
     @name = name
-    @rank = rank
-    @exp = exp
-    @percent = percent
+    @rank = rank.to_i
+    @exp = exp.to_i
+    @percent = percent.to_i
     @baseline = rank.to_i + (percent.to_i / 100.0)
     @current = rank.to_i + (percent.to_i / 100.0)
+    @skillset = lookup_skillset(@name)
     @@list.push(self) unless @@list.find { |skill| skill.name == @name }
   end
 
@@ -315,67 +323,117 @@ class DRSkill
   end
 
   def self.gained_exp(val)
-    ary = @@list.collect(&:name)
-    if i = ary.index(val)
-      return @@list[i].current ? (@@list[i].current - @@list[i].baseline).round(2) : 0.00
+    skill = self.find_skill(val)
+    if skill
+      return skill.current ? (skill.current - skill.baseline).round(2) : 0.00
     end
   end
 
   def self.include?(val)
-    ary = @@list.collect(&:name)
-    ary.include?(val)
+    !self.find_skill(val).nil?
   end
 
-  def self.update(name, ra, xp, per)
-    # UserVars.athletics = ra.to_i if name == 'Athletics'
-    ary = @@list.collect(&:name)
-    if i = ary.index(name)
-      @@list[i].rank = ra
-      @@list[i].exp = xp
-      @@list[i].percent = per
-      @@list[i].current = ra.to_i + (per.to_i / 100.0)
+  def self.update(name, rank, exp, percent)
+    skill = self.find_skill(name)
+    if skill
+      skill.rank = rank.to_i
+      skill.exp = exp.to_i
+      skill.percent = percent.to_i
+      skill.current = rank.to_i + (percent.to_i / 100.0)
     end
   end
 
-  def self.clear_mind(name)
-    ary = @@list.collect(&:name)
-    if i = ary.index(name)
-      @@list[i].exp = 0
-    end
+  def self.update_mods(name, rank)
+    self.exp_modifiers[self.lookup_alias(name)] = rank.to_i
+  end
+
+  def self.exp_modifiers
+    @@exp_modifiers
+  end
+
+  def self.clear_mind(val)
+    self.find_skill(val).exp = 0
   end
 
   def self.getrank(val)
-    ary = @@list.collect(&:name)
-    if i = ary.index(val)
-      return @@list[i].rank.to_i
+    self.find_skill(val).rank.to_i
+  end
+
+  def self.getmodrank(val)
+    skill = self.find_skill(val)
+    if skill
+      rank = skill.rank.to_i
+      modifier = self.exp_modifiers[skill.name].to_i
+      rank + modifier
     end
-    0
   end
 
   def self.getxp(val)
-    ary = @@list.collect(&:name)
-    return 34 if getrank(val) == 1750
-    if i = ary.index(val)
-      return @@list[i].exp.to_i
-    end
-    0
+    skill = self.find_skill(val)
+    skill.rank.to_i >= 1750 ? 34 : skill.exp.to_i
   end
 
   def self.getpercent(val)
-    ary = @@list.collect(&:name)
-    if i = ary.index(val)
-      return @@list[i].percent
-    end
+    self.find_skill(val).percent.to_i
+  end
+
+  def self.getskillset(val)
+    self.find_skill(val).skillset
   end
 
   def self.listall
     @@list.each do |i|
-      puts i.name + ': ' + i.rank + '.' + i.percent + '% [' + i.exp + '/34] --'
+      echo "#{i.name}: #{i.rank}.#{i.percent}% [#{i.exp}/34]"
     end
   end
 
   def self.list
     @@list
+  end
+
+  def self.grabbing_exp_mods
+    @@grabbing_exp_mods
+  end
+
+  def self.grabbing_exp_mods=(val)
+    @@grabbing_exp_mods = val
+  end
+
+  def self.silence_exp_mods_hook
+    @@silence_exp_mods_hook
+  end
+
+  def self.silence_exp_mods_hook=(val)
+    @@silence_exp_mods_hook = val
+  end
+
+  # Call this method to cause the script to recheck for experience modifiers.
+  def self.refresh_exp_mods
+    @@silence_exp_mods_hook = true
+    fput('exp mods')
+    pause 0.25
+    @@silence_exp_mods_hook = false
+  end
+
+  private
+
+  def self.find_skill(val)
+    @@list.find { |data| data.name == self.lookup_alias(val) }
+  end
+
+  # Some guilds rename skills, like Barbarians call "Primary Magic" as "Inner Fire".
+  # Given the canonical or colloquial name, this method returns the value
+  # that's usable with the other methods like `getxp(skill)` and `getrank(skill)`.
+  def self.lookup_alias(skill)
+    @@skills_data.guild_skill_aliases[DRStats.guild][skill] || skill
+  end
+
+  # This is an instance method, do not prefix with `self`.
+  # It is called from the initialize method (constructor).
+  # When it was defined as a class method then the initialize method
+  # complained that this method didn't yet exist.
+  def lookup_skillset(skill)
+    @@skills_data.skillsets.find { |skillset, skills| skills.include?(skill) }.first
   end
 end
 
@@ -588,8 +646,8 @@ vault_titles = {
   "Muspar'i"           => ["[[Muspar'i, Carousel Square]]"],
   "Ratha"              => ["[[Ratha, Carousel Square]]"],
   "Riverhaven"         => ["[[Riverhaven, Carousel Chamber]]"],
-  "Shard"              => ["[[Shard, Carousel Square]]"],
-  "Therenborough"      => ["[[Therenborough, Carousel Square]]"]
+  "Shard"              => ["[[Shard, Carousel Chamber]]"],
+  "Therenborough"      => ["[[Therenborough, Carousel Chamber]]"]
 }
 #
 # Register ;banks ;vault commands
@@ -703,6 +761,48 @@ end
 UserVars.XPSquelch = true unless UserVars.drinfomon_debug
 DownstreamHook.add('xp_action', xp_action)
 
+xp_modifier_action = proc do |server_string|
+  # Sample XML:
+  # Note, "speech" presets are positive modifiers and use one `+` plus sign.
+  # and "thought" presets are negative modifiers and use two `-` minus signs.
+  # ---
+  # The following skills are currently under the influence of a modifier:
+  # <output class="mono"/>
+  # <preset id="speech">+78 Athletics</preset>
+  # <preset id="speech">+84 Perception</preset>
+  # <preset id="thought">--11 First Aid</preset>
+  # <output class=""/>
+  # ---
+  # The following skills are currently under the influence of a modifier:
+  # <output class="mono"/>
+  #   None
+  # <output class=""/>
+  # ---
+  case server_string
+  when /^The following skills are currently under the influence of a modifier/
+    DRSkill.grabbing_exp_mods = true
+    DRSkill.exp_modifiers.clear
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when %r{^<preset id="speech">}, %r{^<preset id="thought">}
+    if DRSkill.grabbing_exp_mods
+      server_string =~ /(?<sign>\+|\-)+(?<value>\d+) \b(?<skill>[\w\s]+)\b/
+      sign = Regexp.last_match[:sign]
+      value = Regexp.last_match[:value].to_i
+      skill = Regexp.last_match[:skill]
+
+      value = (value * -1) if sign == '-'
+      DRSkill.update_mods(skill, value)
+    end
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when /None/
+    server_string = nil if DRSkill.silence_exp_mods_hook
+  when  %r{^<output class=""/>}
+    DRSkill.grabbing_exp_mods = false
+  end
+  server_string
+end
+DownstreamHook.add('xp_modifier_action', xp_modifier_action)
+
 info_silence = proc do |server_string|
   if server_string.strip.empty?
     server_string = nil
@@ -782,18 +882,17 @@ before_dying do
   save_proc.call
   UpstreamHook.remove('drinfomon')
   DownstreamHook.remove('xp_action')
+  DownstreamHook.remove('xp_modifier_action')
   DownstreamHook.remove('status_action')
   DownstreamHook.remove('premiumcheck_silence')
   DownstreamHook.remove('info_silence')
 end
 
-put('exp all')
+fput('exp all')
 pause 0.25
-info_check_time = Time.now - 30
 unless dead?
   DownstreamHook.add('info_silence', info_silence) unless UserVars.drinfomon_debug
-  put('info')
-  info_check_time = Time.now
+  fput('info')
   pause 0.25
 end
 
@@ -820,13 +919,31 @@ premiumcheck_silence = proc do |server_string|
 end
 
 DownstreamHook.add('premiumcheck_silence', premiumcheck_silence)
-fput 'ltb info'
+fput('ltb info')
+
+# To track when the last time was we checked experience/info.
+# The first time we check is to determine your guild and initial exp/stats.
+# For commoners, we continue to check on an interval so that when they
+# join a guild we will pick up their new info.
+# And for characters who play as commoners, the interval reduces spam.
+info_check_interval = get_settings.drinfomon_passive_delay
+info_check_time = Time.now - info_check_interval
+
+exp_mods_check_interval = info_check_interval
+exp_mods_check_time = Time.now - exp_mods_check_interval
+
+# Now silence any commands the script is running
+# to reduce spam to the player. We don't do this at top of script
+# because not everything is easily squelched so it ends up looking
+# like random output shown to screen but no clues to the user as to why.
+# Waiting until now to silence the script avoids that ambiguity.
+silence_me
 
 while line = script.gets
   begin
     if line =~ /^\* Log-on system converted \d+% of your character/
       UserVars.XPSquelch = true unless UserVars.drinfomon_debug
-      put('exp all')
+      fput('exp all')
     elsif line =~ /^#{$lich_char}banks$/
       if CharSettings['bank_accounts'].empty?
         respond
@@ -971,14 +1088,18 @@ while line = script.gets
         end
       end
     end
-    if DRStats.guild.nil? && !dead? && Time.now - info_check_time > 30
+    if DRStats.guild.nil? && !dead? && Time.now - info_check_time > info_check_interval
       UserVars.XPSquelch = true unless UserVars.drinfomon_debug
       DownstreamHook.add('info_silence', info_silence) unless UserVars.drinfomon_debug
-      put('exp all')
+      fput('exp all')
       pause 0.25
-      put('info')
+      fput('info')
       info_check_time = Time.now
       pause 0.25
+    end
+    if Time.now - exp_mods_check_time > exp_mods_check_interval
+      DRSkill.refresh_exp_mods
+      exp_mods_check_time = Time.now
     end
   rescue
     echo $ERROR_INFO

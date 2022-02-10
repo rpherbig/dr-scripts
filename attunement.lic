@@ -11,10 +11,24 @@ class Attunement
 
   LUNAR_PERCEIVE_COMMANDS = ['mana', 'moons', 'planets']
 
+  PRIMARY_SIGILS_PATTERN = /\b(?:abolition|congruence|induction|permutation|rarefaction) sigil\b/
+  SECONDARY_SIGILS_PATTERN = /\b(?:antipode|ascension|clarification|decay|evolution|integration|metamorphosis|nurture|paradox|unity) sigil\b/
+
   def initialize
     arg_definitions = [
       [
-        { name: 'health', regex: /health/, optional: true, description: 'As an Empath, will do PERCEIVE HEALTH instead of PERCEIVE to train empathy.' },
+        { 
+          name: 'health', 
+          regex: /health/, 
+          optional: true, 
+          description: 'As an Empath, will do PERCEIVE HEALTH instead of PERCEIVE to train empathy.'
+        },
+        {
+          name: 'sigil',
+          regex: /sigil/,
+          optional: true,
+          description: 'Do sigil walking (scholarship training) instead of regular attunement walking'
+        }
       ]
     ]
     args = parse_args(arg_definitions, true)
@@ -23,21 +37,20 @@ class Attunement
     @hometown = settings.hometown
     @attunement_rooms = settings.attunement_rooms
     @perceive_health_rooms = settings.perceive_health_rooms
-    @skill_to_train = (DRStats.empath? && args.health) ? 'Empathy' : 'Attunement'
+    @sigil_walk_rooms = settings.sigil_walk_rooms
+    @skill_to_train = if (DRStats.empath? && args.health) 
+                        'Empathy' 
+                      elsif args.sigil
+                        'Scholarship'
+                      else
+                        'Attunement'
+                      end
     @exp_max_threshold = settings.crossing_training_max_threshold
     @exp_target_increment = settings.attunement_target_increment
     @exp_start_mindstate = DRSkill.getxp(@skill_to_train)
-    @exp_stop_mindstate = get_target_mindstate(@exp_start_mindstate, @exp_target_increment, @exp_max_threshold)
+    @exp_stop_mindstate = [@exp_start_mindstate + @exp_target_increment, @exp_max_threshold, 34].min
     @lunar_perceive_index = -1
     train_skill(settings)
-  end
-
-  # Determines the target mind state to train to
-  # based on the starting value of `mindstate` and
-  # a target goal of increasing by `increment` without
-  # exceeding a max mind state of `threshold`.
-  def get_target_mindstate(mindstate, increment, threshold)
-    mindstate + [increment, [threshold - mindstate, 0].max].min
   end
 
   def is_lunar_mage?
@@ -48,15 +61,21 @@ class Attunement
     @skill_to_train == 'Empathy'
   end
 
+  def is_sigil_walk?
+    @skill_to_train == 'Scholarship'
+  end
+
   def get_next_lunar_perceive_index
     @lunar_perceive_index = (@lunar_perceive_index + 1) % LUNAR_PERCEIVE_COMMANDS.length
   end
 
   def get_perceive_command
-    if is_lunar_mage?
-      "perceive #{LUNAR_PERCEIVE_COMMANDS[get_next_lunar_perceive_index]}"
-    elsif is_health_walk?
+    if is_health_walk?
       "perceive health"
+    elsif is_sigil_walk?
+      "perceive sigil"
+    elsif is_lunar_mage?
+      "perceive #{LUNAR_PERCEIVE_COMMANDS[get_next_lunar_perceive_index]}"
     else
       "perceive"
     end
@@ -64,9 +83,7 @@ class Attunement
 
   def get_rooms
     rooms = []
-    if @stationary_skills_only || is_lunar_mage?
-      rooms = [Room.current.id]
-    elsif is_health_walk?
+    if is_health_walk?
       rooms = @perceive_health_rooms
       if rooms.nil? || rooms.empty?
         rooms = get_data('town')[@hometown]['perceive_health_rooms']
@@ -75,7 +92,17 @@ class Attunement
         DRC.message("No room ids defined for 'perceive_health_rooms' in your yaml nor in base-town.yaml for #{@hometown}.")
         exit
       end
-    else
+    elsif is_sigil_walk?
+      rooms = @sigil_walk_rooms
+      if rooms.nil? || rooms.empty?
+        rooms = get_data('town')[@hometown]['sigil_walk_rooms']
+      end
+    elsif @stationary_skills_only || is_lunar_mage?
+        rooms = [Room.current.id]  
+    end
+
+    # fall back to attunement rooms if still nothing set
+    if rooms.nil? || rooms.empty?
       rooms = @attunement_rooms
       if rooms.nil? || rooms.empty?
         rooms = get_data('town')[@hometown]['attunement_rooms']
@@ -123,6 +150,12 @@ class Attunement
   end
 
   def perceived?
+    if is_sigil_walk?
+      while /Roundtime/ =~ bput(get_perceive_command, SECONDARY_SIGILS_PATTERN,'Having recently been searched, this area contains no traces of sigils',"Roundtime",)
+        waitrt?
+      end
+      return true
+    end
     case bput(get_perceive_command, "You fail to sense", "You're not ready to do that again, yet", "You reach out", "You sense:", "Roundtime")
     when "You reach out", "You sense:"
       true

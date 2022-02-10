@@ -107,7 +107,7 @@ class TestCommon < Minitest::Test
     @test.join # wait for bput to timeout and finish
 
     assert_includes($displayed_messages, 'bput.message=a test message')
-    assert_includes($displayed_messages, 'bput.options={"debug"=>true, "timeout"=>15}')
+    assert_includes($displayed_messages, 'bput.options={"debug"=>true, "timeout"=>15, "ignore_rt"=>false}')
     assert_includes($displayed_messages, 'bput.matches=["result"]')
   end
 

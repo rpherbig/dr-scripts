@@ -57,10 +57,22 @@ class DRYamlValidator
     warn('You have no weapons configured in weapon_training: this will likely cause problems.')
   end
 
+  def assert_that_cyclic_no_release_spell_is_invalid_unless_listed_in_base_spells(settings)
+    return if !settings.cyclic_no_release
+    
+    spell_data = get_data('spells').spell_data
+
+    settings.cyclic_no_release
+      .reject { |spell_name| spell_data.include?(spell_name) }
+      .each { |spell_name| error("#{spell_name} in cyclic_no_release is not a valid spell name.") }
+  end 
+
   def assert_that_holy_weapon_charging_has_valid_hometown_unless_using_icon(settings)
+    return unless DRStats.paladin?
+    return unless settings.holy_weapon['weapon_name']
     return if settings.hometown.include?'Crossing'
     return if settings.hometown.include?'Shard'
-    return unless settings.holy_weapon['icon_name']
+    return if settings.holy_weapon['icon_name']
 
     error('Only Crossing and Shard Chadatru altars are valid for charging a holy weapon without an icon.')
   end
@@ -73,6 +85,15 @@ class DRYamlValidator
 
     warn("You have the following invalid appraisal_training settings: #{bad_settings}\nValid appraisal_training settings are: #{valid_settings}")
   end
+
+  def assert_that_sorcery_is_dangerous(settings)
+    return unless settings.crafting_training_spells_enable_sorcery
+    return if settings.crafting_training_spells_enable_sorcery_squelch_warning
+
+    warn('You have Sorcery casting whilst crafting, check JUSTICE in your crafting room')
+    warn('Set crafting_training_spells_enable_sorcery_squelch_warning: true to make this message go away')
+  end
+
 
   def assert_that_pouch_appraisal_has_defined_container(settings)
     return unless settings.appraisal_training.include?('pouches')
@@ -93,6 +114,16 @@ class DRYamlValidator
     return if @neutral_aspects.include?(settings.favor_god.capitalize)
 
     error("The favor_god: #{settings.favor_god} you have set requires use_favor_altars: true, only neutral aspects can use the puzzle for orbs")
+  end
+
+  def assert_that_theurgy_prayer_mat_room_should_be_an_int_and_warn_about_deprecation(settings)
+      return if settings.theurgy_prayer_mat_room.is_a?(Integer) || !settings.theurgy_use_prayer_mat
+
+      if settings.theurgy_prayer_mat_room.is_a?(Hash) && settings.theurgy_prayer_mat_room.has_key?('id')
+        warn("theurgy_prayer_mat_room is set as a key value pair id: #{settings.theurgy_prayer_mat_room['id']} this is deprecated. It should be set as a room number \"theurgy_prayer_mat_room: #{settings.theurgy_prayer_mat_room['id']}\" ")
+      else
+        warn("theurgy_prayer_mat_room does not contain valid settings. A valid setting looks like \"theurgy_prayer_mat_room: 1900\"")
+      end
   end
 
   def assert_that_hometown_has_altar_if_using_altars(settings)
@@ -145,7 +176,7 @@ class DRYamlValidator
   def assert_that_combat_spell_training_spells_are_skills(settings)
     return unless settings.combat_spell_training
 
-    valid_combat_spell_training_skills = %w[Augmentation Sorcery Utility Warding]
+    valid_combat_spell_training_skills = ['Augmentation', 'Sorcery', 'Utility', 'Warding', 'Debilitation', 'Targeted Magic']
 
     settings.combat_spell_training
             .keys
@@ -156,12 +187,16 @@ class DRYamlValidator
   def assert_that_crafting_training_spells_are_skills(settings)
     return unless settings.crafting_training_spells
 
-    valid_crafting_training_spells_skills = %w[Augmentation Utility Warding]
+    valid_crafting_training_spells_skills = %w[Augmentation Utility Warding] 
+    valid_crafting_training_spells_skills.append("Sorcery") if settings.crafting_training_spells_enable_sorcery
 
     settings.crafting_training_spells
             .keys
             .reject { |skill_name| valid_crafting_training_spells_skills.include?(skill_name) }
             .each { |skill_name| error("Invalid crafting_training_spells: skill name '#{skill_name}'. Valid skill names are '#{valid_crafting_training_spells_skills}'") }
+    if (settings.crafting_training_spells.include?('Sorcery')  && !settings.crafting_training_spells_enable_sorcery)
+      warn("To remove this error, remove Sorcery from crafting_training_spells, or set crafting_training_spells_enable_sorcery: true")
+    end
   end
 
   def assert_that_crafting_training_spells_have_no_cambrinth(settings)
@@ -447,6 +482,7 @@ class DRYamlValidator
       'Astro',
       'Barb Research Augmentation',
       'Barb Research Debilitation',
+      'Barb Research Utility',
       'Barb Research Warding',
       'Charged Maneuver',
       'Collect',
@@ -701,6 +737,12 @@ class DRYamlValidator
     warn('***YOU HAVE OUTDATED SETTINGS*** THE SETTING lockpick_buffs IS NO LONGER USED. Please make a waggle_set called \'pick\'')
   end
 
+  def assert_that_component_container_is_deprecated(settings)
+    return if !settings.component_container || settings.component_container.empty?
+
+    warn('component_container is deprecated, please nest the setting under pick settings. https://elanthipedia.play.net/Lich_script_repository#pick')
+  end
+
   def assert_that_sell_loot_money_on_hand_is_correct(settings)
     settings.sell_loot_money_on_hand =~ /(\d+) (\w+)/
     amount = Regexp.last_match(1)
@@ -853,6 +895,21 @@ class DRYamlValidator
     end
   end
 
+  def assert_that_cornmaze_containers_is_an_array(settings)
+    return if settings.cornmaze_containers.empty? or settings.cornmaze_containers.is_a?(Array)
+
+    list = <<~END
+      cornmaze_containers:
+                 - haversack
+                 - portal
+                 - hip pouch
+
+    END
+
+    error("cornmaze_containers should be a list of containers like this works:")
+    echo("#{list}")
+  end
+
   def assert_that_crossing_training_config_is_valid(settings)
     return unless settings.crossing_training
     unless settings.crossing_training_max_threshold.is_a? Numeric
@@ -885,8 +942,8 @@ class DRYamlValidator
     return if settings.wands.empty?
 
     settings.wands.each do |wand_name,wand_settings|
-      error("You do not have an activation message for #{wand_name}.  This means it will not be possible to detect when the wand was activated successfully.") if wand_settings['activation message'] == nil 
-      error("You do not have a container set for #{wand_name} in wands:.  This will prevent it from working.") if wand_settings['container'] == nil 
+      error("You do not have an activation message for #{wand_name}.  This means it will not be possible to detect when the wand was activated successfully.") if wand_settings['activation message'] == nil
+      error("You do not have a container set for #{wand_name} in wands:.  This will prevent it from working.") if wand_settings['container'] == nil
     end
   end
 

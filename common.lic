@@ -3,34 +3,47 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#common
 =end
 
-$HOMETOWN_LIST = ["Arthe Dale",
-                  "Crossing",
-                  "Darkling Wood",
-                  "Dirge",
-                  "Fayrin's Rest",
-                  "Leth Deriel",
-                  "Shard",
-                  "Steelclaw Clan",
-                  "Stone Clan",
-                  "Tiger Clan",
-                  "Wolf Clan",
-                  "Riverhaven",
-                  "Rossman's Landing",
-                  "Therenborough",
-                  "Langenfirth",
-                  "Fornsted",
-                  "Hvaral",
-                  "Ratha",
-                  "Aesry",
-                  "Mer'Kresh",
-                  "Throne City",
-                  "Hibarnhvidar",
-                  "Raven's Point",
-                  "Boar Clan",
-                  "Fang Cove",
-                  "Muspar'i",
-                  "Ain Ghazal"
-                ]
+# Map of canonical town names to regular expressions that matches them.
+# The regular expressions support colloquial shorthands.
+# Utility to help identify the canonical town name based on arbitrary text.
+# For example, "Theren" for "Therenborough" and "Haven" for "Riverhaven".
+# It also handles missing apostrophes and the occasional space between names
+# like "merkresh" or "Mer'Kresh" or "ainghazal" or "Ain Ghazal".
+$HOMETOWN_REGEX_MAP = {
+  "Arthe Dale" => /^(arthe( dale)?)$/i,
+  "Crossing" => /^(cross(ing)?)$/i,
+  "Darkling Wood" => /^(darkling( wood)?)$/i,
+  "Dirge" => /^(dirge)$/i,
+  "Fayrin's Rest" => /^(fayrin'?s?( rest)?)$/i,
+  "Leth Deriel" => /^(leth( deriel)?)$/i,
+  "Shard" => /^(shard)$/i,
+  "Steelclaw Clan" => /^(steel( )?claw( clan)?|SCC)$/i,
+  "Stone Clan" => /^(stone( clan)?)$/i,
+  "Tiger Clan" => /^(tiger( clan)?)$/i,
+  "Wolf Clan" => /^(wolf( clan)?)$/i,
+  "Riverhaven" => /^(river|haven|riverhaven)$/i,
+  "Rossman's Landing" => /^(rossman'?s?( landing)?)$/i,
+  "Therenborough" => /^(theren(borough)?)$/i,
+  "Langenfirth" => /^(lang(enfirth)?)$/i,
+  "Fornsted" => /^(fornsted)$/i,
+  "Hvaral" => /^(hvaral)$/i,
+  "Ratha" => /^(ratha)$/i,
+  "Aesry" => /^(aesry)$/i,
+  "Mer'Kresh" => /^(mer'?kresh)$/i,
+  "Throne City" => /^(throne( city)?)$/i,
+  "Hibarnhvidar" => /^(hib(arnhvidar)?)$/i,
+  "Raven's Point" => /^(raven'?s?( point)?)$/i,
+  "Boar Clan" => /^(boar( clan)?)$/i,
+  "Fang Cove" => /^(fang( cove)?)$/i,
+  "Muspar'i" => /^(muspar'?i)$/i,
+  "Ain Ghazal" => /^(ain( )?ghazal)$/i
+}
+
+# List of canonical town names, like 'Therenborough' and 'Langenfirth'.
+$HOMETOWN_LIST = $HOMETOWN_REGEX_MAP.keys
+
+# Union of regular expressions that match town names, like /^(theren(borough)?)$/i
+$HOMETOWN_REGEX = Regexp.union($HOMETOWN_REGEX_MAP.values)
 
 $ORDINALS = %w[first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth twentieth]
 
@@ -94,11 +107,17 @@ module DRC
   # Like `fput` but better because will wait for RT
   # before performing command and do smart retries.
   # Will wait for matching text up to 15 seconds then timeout.
+  # Also recovers from some limited failures wherein we want to
+  # simply fix the issue and retry the bput, like when we're prone
+  # and need to be standing. Complex handling should be done within
+  # the calling script.
   def bput(message, *matches)
     options = (matches.shift if matches.first.is_a?(Hash)) || {}
     options['timeout'] ||= 15
+    options['ignore_rt'] ||= false
 
     timeout = options['timeout']
+    ignore_rt = options['ignore_rt']
     suppress = options['suppress_no_match']
 
     if options['debug']
@@ -107,7 +126,7 @@ module DRC
       echo "bput.matches=#{matches}"
     end
 
-    waitrt?
+    waitrt? unless ignore_rt
     log = []
     matches.flatten!
     matches.map! { |item| item.is_a?(Regexp) ? item : /#{item}/i }
@@ -125,13 +144,20 @@ module DRC
 
       case response
       when /(?:\.\.\.wait |Wait |\.\.\. wait )([0-9]+)/
-        pause(Regexp.last_match(1).to_i - 0.9)
-        waitrt?
-        put message
-        timer = Time.now
+        unless ignore_rt
+          pause(Regexp.last_match(1).to_i - 0.9)
+          waitrt?
+          put message
+          timer = Time.now
+        end
         next
       when /Sorry, you may only type ahead/
         pause 1
+        put message
+        timer = Time.now
+        next
+      when /^You can't do that while you are asleep./
+        put 'wake'
         put message
         timer = Time.now
         next
@@ -148,6 +174,12 @@ module DRC
         next
       when /^You are still stunned/, /^You can't do that while entangled in a web/
         pause 0.5
+        put message
+        timer = Time.now
+        next
+      when /^You must be standing/, /^You should stand up first/, /^You'll need to stand up first/, /^You can't do that while (sitting|kneeling|lying)/, /^You should be sitting up/, /^You really should be standing to play/
+        fix_standing
+        waitrt?
         put message
         timer = Time.now
         next
@@ -262,18 +294,6 @@ module DRC
     end
   end
 
-  def get_boxes(container)
-    rummage('B', container)
-  end
-
-  def count_boxes(settings)
-    current_box_count = get_boxes(settings.picking_box_source).size
-    if settings.picking_pet_box_source != settings.picking_box_source
-      current_box_count += get_boxes(settings.picking_pet_box_source).size
-    end
-    current_box_count
-  end
-
   def get_skins(container)
     rummage('S', container)
   end
@@ -314,16 +334,16 @@ module DRC
 
   def remove_flavor_text(item)
     # link is to online regex expression tester
-    # https://regex101.com/r/4lGY6u/10
-    item.sub(/\s?\b(?:(?:colorfully and )?(?:artfully|artistically|attractively|beautifully|bl?ack-|cleverly|clumsily|crudely|deeply|delicately|edged|elaborately|faintly|flamboyantly|front-|fully|gracefully|heavily|held|intricately|lavishly|masterfully|plentifully|prominantly|roughly|securely|sewn|shabbily|shadow-|simply|somberly|skillfully|sloppily|starkly|stitched|tied and|tightly|well-)\s?)?(?:accented|accentuated|acid-etched|adorned|affixed|appliqued|assembled|attached|augmented|awash|backed|back-laced|balanced|banded|batiked|beaded|bearded|bearing|bedazzled|bedecked|bejeweled|beset|bestrewn|blazoned|bordered|bound|braided|branded|brocaded|bristling|brushed|buckled|burned|buttoned|caked|camouflaged|capped|carved|caught|centered|chased|chiseled|cinched|circled|clasped|cloaked|closed|coated|cobbled together|coiled|colored|composed|connected|constructed|countoured|covered|crafted|crested|crisscrossed|crowded|crowned|cuffed|cut|dappled|decorated|deformed|depicting|designed|detailed|discolored|displaying|divided|done|dotted|draped|drawn|drizzled|dusted|edged|elaborately|embedded|embell?ished|emblazed|emblazoned|embossed|embroidered(?: all over| painstakingly)?|enameled(?: across)?|encircled|encrusted|engraved|engulfed|enhanced|entwined|equipped|etched|fashioned(?: so)?|fastened|feathered|featuring|festooned|fettered|filed|filled|firestained|fit|fitted|fixed|flecked|fletched|forged|formed|framed|fringed|frosted|full|gathered|gleaming|glimmering|glittering|goldworked|growing|gypsy-set|hafted|hand-tooled|hanging|heavily(?:-beaded| covered)?|held fast|hemmed|hewn|hideously|highlighted|hilted|honed|hung|impressed|incised|ingeniously repurposed|inscribed|inlaid|inset|interlaced|interspersed|interwoven|jeweled|joined|laced(?: up)?|lacquered|laden|layered|limned|lined|linked|looped|knotted|made|marbled|marked|marred|meshed|mosaicked|mottled|mounted|oiled|oozing|outlined|ornamented|overlai(?:d|n)|padded|painted|paired|patched|pattern-welded|patterned|pinned|plumed|polished|printed|reinforced|reminiscent|rendered|revealing|riddled|ridged|rimed|ringed|riveted|sashed|scarred|scattered|scorched|sculpted|sealed|seamed|secured|securely|set|sewn|shaped|shimmering|shod|shot|shrouded|side-laced|slashed|slung|smeared|smudged|spangled|speckled|spiraled|splatter-dyed|splattered|spotted|sprinkled|stacked|surmounted|surrounded|suspended|stained|stamped|starred|stenciled|stippled|stitched(?: together)?|strapped|streaked|strengthened|strewn|striated|striped|strung|studded|swathed|swirled|tailored|tangled|tapered|tethered|textured|threaded|tied|tightly|tinged|tinted|tipped|tooled|topped|traced|trimmed|twined|veined|vivified|washed|webbed|weighted|whorled|worked|worn|woven|wrapped|wreathed|wrought)?\b ["]?\b(?:a hand-tooled|across|along|an|around|atop|bearing|belted|bright streaks|designed|detailing|down (?:each leg|one side)|dyed (?:a|and|deep|in|night|rust|shimmering|the|to|with)|engravings|entitled|errant pieces|featuring|flaunting|frescoed|from|Gnomish Pride|(?:encased |quartered )?in(?: the)?|into|labeled|leading|like|matching|on|out|overlayed gleaming silver|resembling|shades of color|sporting|surrounding|that|the|through|tinged somber black|titled|to|upon|WAR MONGER|with|within|\b(?:at|bearing|(?:accented |held |secured )?by|carrying|clutching|colored|cradling|dangling|depicting|(?:prominently )?displaying|embossed|etched|featuring|for(?:ming)?|holding|of|over|patterned|striped|suspending|textured|that)\b \b(?:a (?:band|beaded|brass|cascade|cluster|coral|crown|dead|.+ (?:ingot|boulder|stone|rock|nugget)|fierce|fanged|fringe|glowing|golden|grinning|howling|large|lotus|mosaic|pair|poorly|rainbow|roaring|row|silver(?:y|weave)?|small|snarling|spray|tailored|thick|tiny|trio|turquoise|yellowed)|(?:squared )?agonite (?:links|decorated)|alternating|an|(?:purple |blue )?and|ash|beaded fringe|blackened (?:steel(?: accents| bearing| with|$)|ironwood)|blue (?:gold|steel)|burnished golden|cascading layers|carved ivory|chain-lined|chitinous|(?:deep red|dull black|pale blue) cloth|cloudberry blossoms|colorful tightly|cotton candy|crimson steel|crisscrossed|curious design|curved|crystaline charm|dark (?:blue|green|grey|metals|windsteel) (?:and|exuding|glaes|hues|khor'vela|muracite|pennon|with)|dark supple|deepest|deeply blending|delicate|dusky (?:dreamweave|green-grey)|ebonwood$|emblazoned|enamel?led (?:steel|bronze)|etched|fine(?:-grained| black| crushed)|finely wrought|flame-kissed|forest|fused-together|fuzzy grey|gauze atop|gilded steel|glass eyeballs|glistening green|golden oak|grey fur|hammered|haralun|has|heavy (?:grey|pearl|silver)|horn|Ilithi cedar|inky black|interlocking silver|interwoven|iridescent|jagged interlocking plates|(?:soft dark|supple|thick|woven) (?:bolts|leather)|lightweight|long swaths|lustrous|kertig ravens|made|metal cogs|mirror-finished|mottled|multiple woods|naphtha|oak|oblong sanguine|one|onyx buttons|opposing images|overlapping|pale cerulean|pallid links|pastel-hued|pins|pitted (?:black iron|steel)|plush velvet|polished (?:bronze|hemlock|steel)|raccoon tails|ram's horns|rat pelts|raw|red and blue|rich (?:purple|golden)|riveted bindings|roughened|rowan|sanguine thornweave|scattered star|scorch marks|sculpted|shadows|shark cartilage|shifting (?:celadon|shades)|shipboard|(?:braided |cobalt |deep black |desert-tan |dusky red Taisidon |ebony |exquisite spider|fine leaf-green |flowing night|glimmering ebony |heavy |marigold |pale gold marquisette and virid |rich copper |spiral-braided |steel|unadorned black Musparan )?silk(?:cress)?|(?:coiled |shimmering )?silver(?:steel| and |y)?|sirese blue spun glitter|six crossed|slender|small bones|smoothly interlocking|snow leopard|soft brushed|somber black|sprawled|sun-bleached|steel links|stones|strips of|sunny yellow|teardrop plates|telothian|the|tiny (?:golden|indurium|scales|skull)|tightly braided|tomiek|torn|twists|two|undyed|vibrant multicolored|viscous|waves of|weighted|well-cured|white ironwood|windstorm gossamer|wintry faeweave|woven diamondwood))\b.*/, '')
+    # https://regex101.com/r/4lGY6u/13
+    item.sub(/\s?\b(?:(?:colorfully and )?(?:artfully|artistically|attractively|beautifully|bl?ack-|cleverly|clumsily|crudely|deeply|delicately|edged|elaborately|faintly|flamboyantly|front-|fully|gracefully|heavily|held|intricately|lavishly|masterfully|plentifully|prominantly|roughly|securely|sewn|shabbily|shadow-|simply|somberly|skillfully|sloppily|starkly|stitched|tied and|tightly|well-)\s?)?(?:accented|accentuated|acid-etched|adorned|affixed|appliqued|assembled|attached|augmented|awash|backed|back-laced|balanced|banded|batiked|beaded|bearded|bearing|bedazzled|bedecked|bejeweled|beset|bestrewn|blazoned|bordered|bound|braided|branded|brocaded|bristling|brushed|buckled|burned|buttoned|caked|camouflaged|capped|carved|caught|centered|chased|chiseled|cinched|circled|clasped|cloaked|closed|coated|cobbled together|coiled|colored|composed|connected|constructed|countoured|covered|crafted|crested|crisscrossed|crowded|crowned|cuffed|cut|dangling|dappled|decked|decorated|deformed|depicting|designed|detailed|discolored|displaying|divided|done|dotted|draped|drawn|dressed|drizzled|dusted|edged|elaborately|embedded|embell?ished|emblazed|emblazoned|embossed|embroidered(?: all over| painstakingly)?|enameled(?: across)?|encircled|encrusted|engraved|engulfed|enhanced|entwined|equipped|etched|fashioned(?: so)?|fastened|feathered|featuring|festooned|fettered|filed|filled|firestained|fit|fitted|fixed|flecked|fletched|forged|formed|framed|fringed|frosted|full|gathered|gleaming|glimmering|glittering|goldworked|growing|gypsy-set|hafted|hand-tooled|hanging|heavily(?:-beaded| covered)?|held fast|hemmed|hewn|hideously|highlighted|hilted|honed|hung|impressed|incised|ingeniously repurposed|inscribed|inlaid|inset|interlaced|interspersed|interwoven|jeweled|joined|laced(?: up)?|lacquered|laden|layered|limned|lined|linked|looped|knotted|made|marbled|marked|marred|meshed|mosaicked|mottled|mounted|oiled|oozing|outlined|ornamented|overlai(?:d|n)|padded|painted|paired|patched|pattern-welded|patterned|pinned|plumed|polished|printed|reinforced|reminiscent|rendered|revealing|riddled|ridged|rimed|ringed|riveted|sashed|scarred|scattered|scorched|sculpted|sealed|seamed|secured|securely|set|sewn|shaped|shimmering|shod|shot|shrouded|side-laced|slashed|slung|smeared|smudged|spangled|speckled|spiraled|splatter-dyed|splattered|spotted|sprinkled|stacked|surmounted|surrounded|suspended|stained|stamped|starred|stenciled|stippled|stitched(?: together)?|strapped|streaked|strengthened|strewn|striated|striped|strung|studded|swathed|swirled|tailored|tangled|tapered|tethered|textured|threaded|tied|tightly|tinged|tinted|tipped|tooled|topped|traced|trimmed|twined|veined|vivified|washed|webbed|weighted|whorled|worked|worn|woven|wrapped|wreathed|wrought)?\b ["]?\b(?:a hand-tooled|across|along|an|around|atop|bearing|belted|bright streaks|dangling|designed|detailing|down (?:each leg|one side)|dyed (?:a|and|deep|of|in|night|rust|shimmering|the|to|with)|engravings|entitled|errant pieces|featuring|flaunting|frescoed|from|Gnomish Pride|(?:encased |quartered )?in(?: the)?|into|labeled|leading|like|lining|matching|(?<!slice |chunk |hunk |series |set |pair |piece )of|on|out|overlayed gleaming silver|resembling|shades of color|sporting|surrounding|that|the|through|tinged somber black|titled|to|upon|WAR MONGER|with|within|\b(?:at|bearing|(?:accented |held |secured )?by|carrying|clutching|colored|cradling|dangling|depicting|(?:prominently )?displaying|embossed|etched|featuring|for(?:ming)?|holding|(?<!slice |chunk |hunk |series |set |pair |piece )of|over|patterned|striped|suspending|textured|that)\b \b(?:a (?:band|beaded|brass|cascade|cluster|coral|crown|dead|.+ (?:ingot|boulder|stone|rock|nugget)|fierce|fanged|fringe|glowing|golden|grinning|howling|large|lotus|mosaic|pair|poorly|rainbow|roaring|row|silver(?:y|weave)?|small|snarling|spray|tailored|thick|tiny|trio|turquoise|yellowed)|(?:squared )?agonite (?:links|decorated)|alternating|an|(?:purple |blue )?and|ash|beaded fringe|blackened (?:steel(?: accents| bearing| with|$)|ironwood)|blue (?:gold|steel)|burnished golden|cascading layers|carved ivory|chain-lined|chitinous|(?:deep red|dull black|pale blue) cloth|cloudberry blossoms|colorful tightly|cotton candy|crimson steel|crisscrossed|curious design|curved|crystaline charm|dark (?:blue|green|grey|metals|windsteel) (?:and|exuding|glaes|hues|khor'vela|muracite|pennon|with)|dark supple|deepest|deeply blending|delicate|dusky (?:dreamweave|green-grey)|ebonwood$|emblazoned|enamel?led (?:steel|bronze)|etched|fine(?:-grained| black| crushed)|finely wrought|flame-kissed|forest|fused-together|fuzzy grey|gauze atop|gilded steel|glass eyeballs|glistening green|golden oak|grey fur|hammered|haralun|has|heavy (?:grey|pearl|silver)|horn|Ilithi cedar|inky black|interlocking silver|interwoven|iridescent|jagged interlocking plates|(?:soft dark|supple|thick|woven) (?:bolts|leather)|lightweight|long swaths|lustrous|kertig ravens|made|metal cogs|mirror-finished|mottled|multiple woods|naphtha|oak|oblong sanguine|one|onyx buttons|opposing images|overlapping|pale cerulean|pallid links|pastel-hued|pins|pitted (?:black iron|steel)|plush velvet|polished (?:bronze|hemlock|steel)|raccoon tails|ram's horns|rat pelts|raw|red and blue|rich (?:purple|golden)|riveted bindings|roughened|rowan|sanguine thornweave|scattered star|scorch marks|sculpted|shadows|shark cartilage|shifting (?:celadon|shades)|shipboard|(?:braided |cobalt |deep black |desert-tan |dusky red Taisidon |ebony |exquisite spider|fine leaf-green |flowing night|glimmering ebony |heavy |marigold |pale gold marquisette and virid |rich copper |spiral-braided |steel|unadorned black Musparan )?silk(?:cress)?|(?:coiled |shimmering )?silver(?:steel| and |y)?|sirese blue spun glitter|six crossed|slender|small bones|smoothly interlocking|snow leopard|soft brushed|somber black|sprawled|sun-bleached|steel links|stones|strips of|sunny yellow|teardrop plates|telothian|the|tiny (?:golden|indurium|scales|skull)|tightly braided|tomiek|torn|twists|two|undyed|vibrant multicolored|viscous|waves of|weighted|well-cured|white ironwood|windstorm gossamer|wintry faeweave|woven diamondwood))\b.*/, '')
   end
 
   # Items class. Name is the noun of the object. Leather/metal boolean. Is the item worn (defaults to true). Does it hinder lockpicking? (false)
   # Item.new(name:'gloves', leather:true, worn:true, hinders_locks:true, adjective:'ring', bound:true)
   class Item
-    attr_accessor :name, :leather, :worn, :hinders_lockpicking, :container, :swappable, :tie_to, :adjective, :bound, :wield, :transforms_to, :transform_verb, :transform_text, :lodges, :skip_repair
+    attr_accessor :name, :leather, :worn, :hinders_lockpicking, :container, :swappable, :tie_to, :adjective, :bound, :wield, :transforms_to, :transform_verb, :transform_text, :lodges, :skip_repair, :ranged, :needs_unloading
 
-    def initialize(name: nil, leather: nil, worn: false, hinders_locks: nil, container: nil, swappable: false, tie_to: nil, adjective: nil, bound: false, wield: false, transforms_to: nil, transform_text: nil, transform_verb: nil, lodges: true, skip_repair: false)
+    def initialize(name: nil, leather: nil, worn: false, hinders_locks: nil, container: nil, swappable: false, tie_to: nil, adjective: nil, bound: false, wield: false, transforms_to: nil, transform_text: nil, transform_verb: nil, lodges: true, skip_repair: false, ranged: nil, needs_unloading: nil)
       @name = name
       @leather = leather
       @worn = worn
@@ -339,6 +359,8 @@ module DRC
       @transform_text = transform_text
       @lodges = lodges.nil? ? true : lodges
       @skip_repair = skip_repair
+      @ranged = ranged.nil? ? is_ranged_weapon?(name) : ranged
+      @needs_unloading = needs_unloading.nil? ? @ranged : needs_unloading
     end
 
     def short_name
@@ -348,6 +370,50 @@ module DRC
     def short_regex
       @adjective ? /\b#{adjective}.*\b#{@name}/i : /\b#{@name}/i
     end
+
+    def is_ranged_weapon?(noun)
+      # Common ranged weapon names
+      return true if noun =~ /^(bow|shortbow|longbow|crossbow|stonebow|latchbow|slurbow|lockbow|pelletbow|arbalest|sling|slingshot|blowgun)$/i
+      # Gamgweth or racial ranged weapon names
+      # https://elanthipedia.play.net/Genie_racial_language_item_subs
+      # https://elanthipedia.play.net/Category:Language_Book
+      return true if noun =~ /^(jranoki|uku'uan|uku'uanstaho|chunenguti|hhr'ibu|guti|mahil|taisgwelduan|chyeb|sverfil|tangara|alaer|kari|wami|usus|srigos|href|vrope|falocisana|stof|dzelt)$/i
+      # Not a ranged weapon we're aware of
+      return false
+    end
+
+    # Convenience method to parse the text of an item as shown when in your hands, with or without an adjective,
+    # into an Item class instance. Originally designed to support DRCI and equipmanager methods.
+    def self.from_text(text)
+      text = text
+        .sub('.', ' ') # convert 'foo.bar' => 'foo bar' so more easily split into adjective and noun
+        .squeeze(' ') # condense repeated runs of whitespace with a single space
+        .strip # remove leading/trailing whitespace
+      parts = text.split
+      if text.nil? || text.empty?
+        nil
+      elsif parts.size > 1
+        DRC::Item.new(adjective: parts.first, name: parts.last)
+      else
+        DRC::Item.new(name: text)
+      end
+    end
+  end
+
+  # Looks up the canonical name of the town based on the given text.
+  # Utility to help identify the canonical town name based on arbitrary text.
+  # For example, "Theren" for "Therenborough" and "Haven" for "Riverhaven".
+  # It also handles missing apostrophes and the occasional space between names
+  # like "merkresh" or "Mer'Kresh" or "ainghazal" or "Ain Ghazal".
+  # Returns nil if unable to find a match.
+  def get_town_name(text)
+    towns = $HOMETOWN_REGEX_MAP.select { |town, regex| regex =~ text }.keys
+    if towns.length > 1
+      DRC.message("Found multiple towns that match '#{text}': #{towns}")
+      DRC.message("Using first town that matched: #{towns.first}")
+      DRC.message("To avoid ambiguity, please use the town's full name: https://elanthipedia.play.net/Category:Cities")
+    end
+    towns.first
   end
 
   # windows only I believe.
@@ -407,7 +473,7 @@ module DRC
 
   def hide?(hide_type = 'hide')
     unless hiding?
-      case bput(hide_type, 'Roundtime', 'too busy performing', 'can\'t see any place to hide yourself', 'Stalk what', 'You\'re already stalking', 'Stalking is an inherently stealthy', 'You haven\'t had enough time')
+      case bput(hide_type, 'Roundtime', 'too busy performing', 'can\'t see any place to hide yourself', 'Stalk what', 'You\'re already stalking', 'Stalking is an inherently stealthy', 'You haven\'t had enough time', 'You search but find no place to hide')
       when 'too busy performing'
         bput('stop play', 'You stop playing', 'In the name of')
         return hide?(hide_type)
@@ -459,16 +525,46 @@ module DRC
   end
 
   def check_encumbrance(refresh = true)
-    bput('encumbrance', 'Encumbrance : .*') if refresh
-    $ENC_MAP[DRStats.encumbrance]
+    encumbrance = DRStats.encumbrance
+    if refresh
+      encumbrance_pattern = /(Encumbrance)\s:\s(?<encumbrance>.*)/
+      case bput('encumbrance', encumbrance_pattern)
+      when encumbrance_pattern
+        encumbrance = Regexp.last_match[:encumbrance]
+      end
+    end
+    $ENC_MAP[encumbrance]
   end
 
   def retreat(ignored_npcs = [])
     return if (DRRoom.npcs - ignored_npcs).empty?
 
-    escape_messages = ['You are already as far away as you can get', 'You retreat from combat', 'You sneak back out of combat']
-    until escape_messages.include?(DRC.bput('retreat', *(escape_messages + ['retreat', 'You try to back ', 'sneak', 'grip remains solid', 'You must stand first', 'grip on you', 'You stop advancing', 'You are already'])))
-      DRC.fix_standing
+    escape_messages = [
+      /You are already as far away as you can get/,
+      /You retreat from combat/,
+      /You sneak back out of combat/,
+      /Retreat to where/,
+      /There's no place to retreat to/
+    ]
+
+    retreat_messages = [
+      /retreat/,
+      /sneak/,
+      /grip on you/,
+      /grip remains solid/,
+      /You try to back/,
+      /You must stand first/,
+      /You stop advancing/,
+      /You are already/
+    ]
+
+    loop do
+      case DRC.bput("retreat", *escape_messages, *retreat_messages)
+      when *escape_messages
+        return true
+      else
+        DRC.fix_standing
+      end
     end
   end
 
@@ -659,6 +755,13 @@ module DRC
              end
 
     DRC.bput("stance set #{stance}", /Setting your/)
+  end
+
+  def atmo(text)
+    _respond(
+      "<pushStream id=\"atmospherics\"/>" + text,
+      "<popStream id=\"atmospherics\" /><prompt time=\"#{Time.now.to_i}\">&gt;</prompt>"
+    )
   end
 
   def message(text)

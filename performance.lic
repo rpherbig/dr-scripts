@@ -2,41 +2,55 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#performance
 =end
 
-custom_require.call(%w[common drinfomon spellmonitor events])
+custom_require.call(%w[common common-items drinfomon spellmonitor events])
 
 class Performance
-  include DRC
 
   def initialize
     no_pause_all
     start_time = Time.new.to_i
     arg_definitions = [
       [
-        { name: 'noclean', regex: /noclean/i, optional: true, description: 'Skip cleaning your instrument' }
+        { name: 'noclean', regex: /noclean/i, optional: true, description: 'Skip cleaning your instrument' },
+        { name: 'checksong', regex: /checksong/i, optional: true, description: 'Only check what song to play for best learning then exit.' },
+        { name: 'mindstate_goal', regex: /(\d+)/, optional: true, description: 'Train until mindstate >= mindstate_goal' }
       ]
     ]
 
     args = parse_args(arg_definitions)
 
     @settings = get_settings
-    @song_list = get_data('perform').perform_options
+    song_list = get_data('perform').perform_options
+    @mindstate_goal = (args.mindstate_goal || @settings.performance_mindstate_goal).to_i
     skip_clean = args.noclean
+    check_song_only = args.checksong
 
-    instrument = @settings.instrument
-    is_instrument_worn = instrument.nil?
+    worn_instrument = @settings.worn_instrument
+    @instrument = @settings.instrument
+    is_instrument_worn = @instrument.nil?
+    @instrument_out = false
 
-    exit unless instrument || @settings.worn_instrument
+    @hand_armor = @settings.hand_armor
+    @hand_armor_removed = false
 
-    hand_armor = @settings.hand_armor
-    if instrument
-      bput("get my #{instrument}", 'You get', 'You are already holding')
-      if hand_armor
-        bput("remove my #{hand_armor}", 'You pull off', 'You tug', 'you manage to loosen', 'Remove what')
-        bput("stow my #{hand_armor}", 'You put', 'Stow what')
+    if worn_instrument
+      unless DRCI.exists?(worn_instrument)
+        DRC.message("Could not find #{worn_instrument}")
+        exit
       end
     end
 
-    return unless DRC.play_song?(@settings, @song_list, is_instrument_worn, skip_clean)
+    if @instrument
+      if DRCI.exists?(@instrument)
+        remove_hand_armor_and_get_instrument
+      else
+        DRC.message("Could not find #{@instrument}")
+        exit
+      end
+    end
+
+    return unless DRC.play_song?(@settings, song_list, is_instrument_worn, skip_clean)
+    exit if check_song_only
 
     loop do
       run_time = Time.new.to_i - start_time
@@ -49,27 +63,54 @@ class Performance
       when /muster the strength to perform/
         pause 30
       when /You begin (.*)/, /You continue (.*)/, /You find yourself relaxing (.*)/, /You concentrate on your sense of rhythm (.*)/, /You cannot use the/
-        exit if done_training?
+        if done_training?
+          wear_hand_armor_and_put_away_instrument
+          exit
+        end
       when /You finish (.*)/
         if done_training?
+          wear_hand_armor_and_put_away_instrument
           exit
         else
-          play_song?(@settings, @song_list, is_instrument_worn, skip_clean)
+          DRC.play_song?(@settings, song_list, is_instrument_worn, skip_clean)
         end
       when /Perhaps you should find somewhere drier/
+        wear_hand_armor_and_put_away_instrument
         exit
       end
     end
   end
 
+  def remove_hand_armor_and_get_instrument
+    if DRCI.remove_item?(@hand_armor) && DRCI.stow_item?(@hand_armor)
+      @hand_armor_removed = true
+    else
+      DRC.message("Could not remove or stow #{hand_armor}, exiting")
+      exit
+    end
+    if DRCI.get_item?(@instrument)
+      @instrument_out = true
+    else
+      DRC.message("Could not get #{@instrument}, exiting")
+      exit
+    end
+  end
+
+  def wear_hand_armor_and_put_away_instrument
+    if @instrument_out
+      DRCI.stow_item?(@instrument)
+    end
+    if @hand_armor_removed
+      DRCI.get_item?(@hand_armor)
+      DRCI.wear_item?(@hand_armor)
+    end
+  end
+
   def done_training?
-    DRSkill.getxp('Performance') > 30
+      DRSkill.getxp('Performance') >= @mindstate_goal
   end
 
   def stop_play
-    return unless @did_play
-    return if @no_instrument
-    @did_play = false
     DRC.stop_playing
     Flags['ct-song'] = true
   end
@@ -77,9 +118,6 @@ end
 
 before_dying do
   fput('stop play')
-
-  instrument = get_settings.instrument
-  DRC.bput("stow #{instrument}", 'You put') if instrument
 end
 
 Performance.new

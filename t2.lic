@@ -2,55 +2,70 @@
         Alternative trainer script which kicks off sub-scripts based on
         current mindstates.  See Leustyin-setup and Chuno-setup for examples
         This script uses the `training_list` key to define the skills to train
-        and thresholds in which the scrips should be started
+        and thresholds in which the scripts should be started
 =end
 
-custom_require.call(%w[common drinfomon common-travel equipmanager])
+custom_require.call(%w[common common-arcana drinfomon equipmanager])
 
 class T2
-  include DRC
-  include DRCT
 
   def initialize
+    @shutdown = false
     fput('awaken')
 
     @counter = 0
     @settings = get_settings
     UserVars.t2_timers ||= {}
 
-    t2_avoids = @settings.t2_avoids
-    t2_avoids.each do |avoid|
+    @settings.t2_avoids.each do |avoid|
       if avoid['state']
         fput("avoid !#{avoid['type']}")
       else
         fput("avoid #{avoid['type']}")
       end
     end
+  end
 
+  def run
     loop do
+      break if @shutdown
       trainables = @settings['training_list']
       EquipmentManager.new.empty_hands
 
       trainables.each do |trainable|
-        if trainable['skill'].is_a? Array
+        # Skip if learning rate is above start threshold for this trainable
+        if trainable['skill'].is_a?(Array)
           next if trainable['skill'].each.reject { |skill| DRSkill.getxp(skill) >= trainable['start'] }.empty?
         elsif DRSkill.getxp(trainable['skill']) >= trainable['start']
           next
-        elsif has_cooldown? trainable['skill']
-          next unless cooldown_expired? trainable['skill']
         end
 
+        # Skip if the skill is still on cooldown between trainings
+        next if has_cooldown?(trainable['skill']) && !cooldown_expired?(trainable['skill'])
+
+        # Skip if no moons are available
+        # Lunar mages can use this setting to skip skills that require moons
+        next if trainable['moons'] && !DRCA.moons_visible?
+
         # At this point we know that we need to train the skill
-        echo "***STATUS*** Starting #{trainable['skill']}"
+        if trainable['name'].nil?
+          echo "***STATUS*** Starting (#{trainable['start']}) #{trainable['skill']}"
+        else
+          echo "***STATUS*** Starting (#{trainable['start']}) #{trainable['name']}"
+        end
         execute_actions(trainable['scripts'])
-        update_cooldown trainable['skill'] if has_cooldown? trainable['skill']
+        update_cooldown(trainable['skill']) if has_cooldown?(trainable['skill'])
         break
       end
+    end
+    if !@settings.t2_after_shutdown.empty?
+      echo '***STATUS*** Controlled shutdown, executing shutdown actions.'
+      execute_actions(@settings.t2_after_shutdown)
     end
   end
 
   def has_cooldown?(skill)
-    @settings.exp_timers.keys.include? skill
+    @settings.exp_timers.keys.include?(skill)
   end
 
   def cooldown_expired?(skill)
@@ -67,9 +82,42 @@ class T2
       echo "***STATUS*** EXECUTE #{action}"
       action_parts = action.split(' ')
       script_name = action_parts.shift
-      wait_for_script_to_complete(script_name, action_parts)
+      DRC.wait_for_script_to_complete(script_name, action_parts)
     end
   end
+
+  def shutdown
+    if @shutdown
+      DRC.message("T2 already set to shutdown.  Use '#{$clean_lich_char}e $T2.noshutdown' to cancel.")
+    else
+      @shutdown = true
+      DRC.message("Shutting down T2 on next check.  Use '#{$clean_lich_char}e $T2.noshutdown' to cancel.")
+    end
+  end
+
+  def noshutdown
+    if @shutdown
+      @shutdown = false
+      DRC.message('Canceling shutdown of T2.')
+    else
+      DRC.message("T2 not set to shutdown.  Use '#{$clean_lich_char}e $T2.shutdown' to shutdown.")
+    end
+  end
+
+  def reload_settings(debug = false)
+    temp_settings = get_settings
+
+    if temp_settings.training_list.nil? ||
+       temp_settings.training_list.class != Array ||
+       temp_settings.training_list.empty?
+      DRC.message("Detected invalid T2 settings - please double check your config")
+      return
+    end
+    @settings = temp_settings
+    DRC.message("T2 training_list reloaded.")
+    echo @settings.training_list.to_yaml if debug
+  end
+
 end
 
 before_dying do
@@ -77,7 +125,9 @@ before_dying do
   scripts.each do |script_name|
     stop_script(script_name) if Script.running?(script_name)
   end
-  fput('release cyclic')
+  DRCA.release_cyclics(get_settings.cyclic_no_release)
 end
 
-T2.new
+$T2 = T2.new
+$T2.run
+$T2 = nil

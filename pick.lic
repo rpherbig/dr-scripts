@@ -1,909 +1,933 @@
+# quiet
 =begin
-  Documentation: https://elanthipedia.play.net/Lich_script_repository#pick
+  Documentation: https://elanthipedia.play.net/Lich_script_development#common-items
 =end
 
-custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel drinfomon equipmanager events spellmonitor])
+# This module should be 'bottom-level' and only depend on common.
+# Any modules that deal with items and <something> should be somewhere else
+custom_require.call(%w[common])
 
-class Pick
+module DRCI
+  module_function
 
-  def initialize
-    arg_definitions = [
-      [
-        { name: 'debug', regex: /debug/, optional: true, description: ''},
-        { name: 'refill', regex: /refill/, optional: true, description: 'Refills your lockpick ring.' },
-        { name: 'source', regex: /(source=(\w+))/, optional: true, description: 'Container with boxes to pick.'},
-        { name: 'all', regex: /all/, optional: true, description: 'Overwrite for @stop_pick_on_mindlock to keep picking'},
-        { name: 'assume', regex: /(quick|normal|careful)/, optional: true, description: 'Skips identification - assumes given difficulty'},
-        { name: 'stand', regex: /stand/i, optional: true, description: 'Stand to pop boxes. Default is sit.'}
-      ]
-    ]
+  @@trash_storage = %w[basket bin gloop barrel bucket urn log arms stump tree statue chamberpot birdbath turtle]
 
-    args = parse_args(arg_definitions, true)
+  @@drop_trash_success_patterns = [
+    /^You drop/,
+    /^You put/,
+    /^You spread .* on the ground/,
+    /smashing it to bits/,
+    # The next message is when item crumbles when leaves your hand, like a moonblade.
+    /^As you open your hand to release the/
+  ]
 
-    @settings = get_settings()
-    @debug = args.debug || @settings.pick['debug'] || false
+  @@drop_trash_failure_patterns = [
+    /^What were you referring to/,
+    /^I could not find/,
+    /^But you aren't holding that/,
+    /^You're kidding, right/,
+    /^You can't do that/,
+    /^No littering/,
+    /^Where do you want to put that/,
+    /^You really shouldn't be loitering/,
+    # You may get the next message if you've been cursed and unable to let go of items.
+    # Find a Cleric to uncurse you.
+    /^Oddly, when you attempt to stash it away safely/,
+    /^You need something in your right hand/
+  ]
 
-    if args.source
-      @sources = [ args.source.split('=')[1] ]
-    elsif @settings.pick['picking_box_sources']
-      @sources = @settings.pick['picking_box_sources']
-    elsif @settings.picking_box_source
-      @sources = [ @settings.picking_box_source ]
-    end
+  # Messages that when trying to drop an item you're warned.
+  # To continue you must retry the command.
+  @@drop_trash_retry_patterns = [
+    # You may get the next message if the item would be damaged upon dropping.
+    /^If you still wish to drop it/,
+    /would damage it/,
+    # You may get the next messages when an outdated item is updated upon use.
+    # "Something appears different about the <item>, perhaps try doing that again."
+    # Example: https://elanthipedia.play.net/Item:Leather_lotion
+    /^Something appears different about/,
+    /perhaps try doing that again/
+  ]
 
-    if @sources.nil?
-      DRC.message('No valid configuration was found for box source. Exiting.')
-      exit
-    end
+  @@worn_trashcan_verb_patterns = [
+    /^You drum your fingers/,
+    /^You pull a lever/,
+    /^You poke your finger around/
+  ]
 
-    check_deprecated_settings
+  @@get_item_success_patterns = [
+    /^You get/,
+    /^You pick/,
+    /^You pluck/,
+    /^You slip/,
+    /^You deftly remove/,
+    /^You are already holding/,
+    /^You fade in for a moment as you/
+  ]
 
-    @stand = args.stand
+  @@get_item_failure_patterns = [
+    /^You need a free hand/,
+    /^You can't pick that up with your hand that damaged/,
+    /^Your (left|right) hand is too injured/,
+    /^You just can't/,
+    /^You stop as you realize the .* is not yours/,
+    /^You can't reach that from here/, # on a mount like a flying carpet
+    /^Get what/,
+    /^I could not/,
+    /^What were you/,
+    /already in your inventory/, # wearing it
+    /needs to be tended to be removed/, # ammo lodged in you
+    /push you over the item limit/, # you're at item capacity
+    /rapidly decays away/, # item disappears when try to get it
+    /cracks and rots away/ # item disappears when try to get it
+  ]
 
-    @use_lockpick_ring = @settings.use_lockpick_ring
-    @lockpick_container = @settings.lockpick_container
-    @balance_lockpick_container = @settings.pick['balance_lockpick_container']
+  @@wear_item_success_patterns = [
+    /^You put/,
+    /^You pull/,
+    /^You sling/,
+    /^You attach/,
+    /^You strap/,
+    /^You slide/,
+    /^You spin/,
+    /^You slip/,
+    /^You place/,
+    /^You hang/,
+    /^You tug/,
+    /^You struggle/,
+    /^You squeeze/,
+    /^You manage/,
+    /^You gently place/,
+    /^You toss one strap/,
+    /^You carefully loop/,
+    /^You work your way into/,
+    /^You are already wearing/,
+    /^Gritting your teeth, you grip/,
+    /slide effortlessly onto your/
+  ]
 
-    @tie_gem_pouches = @settings.tie_gem_pouches
-    @stop_pick_on_mindlock = args.all ? false : @settings.stop_pick_on_mindlock
+  @@wear_item_failure_patterns = [
+    /^You can't wear/,
+    /^You (need to|should) unload/,
+    /close the fan/,
+    /^You don't seem to be able to move/,
+    /^Wear what/,
+    /^I could not/,
+    /^What were you/
+  ]
 
-    @loot_nouns = @settings.lootables
-    @trash_nouns = get_data('items').trash_nouns
+  @@remove_item_success_patterns = [
+    /^You remove/,
+    /^You detach/,
+    /^You sling/,
+    /^You slide/,
+    /^You take/,
+    /^You loosen/,
+    /^You untie/,
+    /^You tug/,
+    /^You struggle/,
+    /^The .* slide/,
+    /^You .* slide/,
+    /^Dropping your shoulder/,
+    /^Without any effort/,
+    /as you remove/,
+    /you manage to loosen/,
+    /slide themselves off of your/
+  ]
 
-    @has_glance = DRStats.thief? && DRStats.circle >= 13
-    @use_glance = @settings.pick['use_glance'].nil? ? @has_glance : @settings.pick['use_glance']
+  @@remove_item_failure_patterns = [
+    /^You need a free hand/,
+    /^You aren't wearing/,
+    /^You don't seem to be able to move/,
+    /^Remove what/,
+    /^I could not/,
+    /^What were you/
+  ]
 
-    @trash_empty_boxes = @settings.pick['trash_empty_boxes'] || false
-    @worn_trashcan = @settings.worn_trashcan
-    @worn_trashcan_verb = @settings.worn_trashcan_verb
+  @@put_away_item_success_patterns = [
+    /^You put your .* in/,
+    /^You hold out/,
+    /^You tuck/,
+    /^You open your pouch and put/,
+    # The next message is when item crumbles when stowed, like a moonblade.
+    /^As you open your hand to release the/,
+    # You're a thief and you binned a stolen item.
+    /nods toward you as your .* falls into the .* bin/,
+    /^You add/,
+    /^You rearrange/,
+    /^You combine the stacks/,
+    # The following are success messages for putting an item in a container OFF your person.
+    /^You drop/i,
+    /^You set/i,
+    /^You put/i
+  ]
 
-    @dismantle_type = @settings.lockpick_dismantle
+  @@put_away_item_failure_patterns = [
+    /^Stow what/,
+    /^Please rephrase that command/,
+    /^What were you referring to/,
+    /^I could not find what you were referring to/,
+    /^There isn't any more room in/,
+    /^There's no room/,
+    /^(The|That).* too heavy to go in there/,
+    /^You (need to|should) unload/,
+    /^You can't do that/,
+    /^You just can't get/,
+    /^You can't put items/,
+    /^You can only take items out/,
+    /^Perhaps you should be holding that first/,
+    /^Containers can't be placed in/,
+    /^The .* is not designed to carry anything/,
+    /^You can't put that.*there/,
+    /even after stuffing it/,
+    /is too .* to (fit|hold)/,
+    /no matter how you arrange it/,
+    /close the fan/,
+    /to fit in the/,
+    # You may get the next message if you've been cursed and unable to let go of items.
+    # Find a Cleric to uncurse you.
+    /Oddly, when you attempt to stash it away safely/,
+    /completely full/,
+    /That doesn't belong in there!/,
+    /exerts a steady force preventing/
+  ]
 
-    @pick_buff_bot_name = @settings.lockpick_buff_bot
-    @pick_buff_bot_buff = @settings.pick['buff_bot_buff'] || 'hol'
+  # Messages that when trying to put away an item you're warned.
+  # To continue you must retry the command.
+  @@put_away_item_retry_patterns = [
+    # You may get the next messages when an outdated item is updated upon use.
+    # "Something appears different about the <item>, perhaps try doing that again."
+    # Example: https://elanthipedia.play.net/Item:Leather_lotion
+    /Something appears different about/,
+    /perhaps try doing that again/
+  ]
 
-    @has_pick_waggle = @settings.waggle_sets['pick']
+  @@stow_item_success_patterns = [
+    *@@get_item_success_patterns,
+    *@@put_away_item_success_patterns
+  ]
 
-    picking_data = get_data('picking').picking
-    @lockpick_costs = picking_data['lockpick_costs'][@settings.hometown]
+  @@stow_item_failure_patterns = [
+    *@@get_item_failure_patterns,
+    *@@put_away_item_failure_patterns,
+  ]
 
-    @pick_identify_messages = picking_data['pick_messages_by_difficulty'];
-    @pick_retry = picking_data['pick_retry']
-    @pick_quick_threshold = @settings.pick['pick_quick_threshold'] || 2
-    @pick_normal_threshold = @settings.pick['pick_normal_threshold'] || 4
-    @pick_careful_threshold = @settings.pick['pick_careful_threshold'] || 7
+  @@stow_item_retry_patterns = [
+    *@@put_away_item_retry_patterns
+  ]
 
-    @disarm_identify_messages = picking_data['disarm_messages_by_difficulty']
+  @@rummage_success_patterns = [
+    /^You rummage through .* and see (.*)\./,
+    /^In the .* you see (.*)\./,
+    /there is nothing/i
+  ]
 
-    @disarm_succeeded = picking_data['disarm_succeeded'].values
-    @trap_sprung_matches = picking_data['trap_sprung']
-    @disarm_retry = picking_data['disarm_retry']
-    @disarm_lost_box_matches = ["You'll need to have the item in your hands or placed on the ground."]
-    @disarm_identify_failed = picking_data['disarm_identify_failed']
-    @disarm_quick_threshold = @settings.pick['disarm_quick_threshold'] || 0
-    @disarm_normal_threshold = @settings.pick['disarm_normal_threshold'] || 2
-    @disarm_careful_threshold = @settings.pick['disarm_careful_threshold'] || 5
-    @disarm_too_hard_threshold = @settings.pick['disarm_too_hard_threshold'] || 10
-    @too_hard_container = @settings.pick['too_hard_container']
-    @autoloot_container = @settings.autoloot_container
+  @@rummage_failure_patterns = [
+    /^I could not find/,
+    /^I don't know what you are referring to/,
+    /^What were you referring to/
+  ]
 
-    @gem_nouns = get_data('items').gem_nouns
+  @@tap_success_patterns = [
+    /^You tap .*/, # The `.*` is needed to capture entire phrase. Methods parse it to know if an item is worn, stowed, etc.
+    /^You (thump|drum) your finger/, # You tapped an item with fancy verbiage, ohh la la!
+    /^The orb is delicate/, # You tapped a favor orb
+    /^You .* on the shoulder/ # You tapped someone
+  ]
 
-    @assumed_difficulty = args.assume || @settings.pick['assumed_difficulty']
+  @@tap_failure_patterns = [
+    /^I could not find/,
+    /^I don't know what you are referring to/,
+    /^What were you referring to/
+  ]
 
-    @trap_blacklist = @settings.pick['trap_blacklist'] || []
-    @blacklist_container = @settings.pick['blacklist_container']
-    
-    @trap_greylist = @settings.pick['trap_greylist'] || []
+  @@open_container_success_patterns = [
+    /^You open/,
+    /^You slowly open/,
+    /^The .* opens/,
+    /^You unbutton/,
+    /is already open/,
+    /^You spread your arms, carefully holding your bag well away from your body/
+  ]
 
-    @all_trap_messages = picking_data['traps']
-    @disarmed_trap_messages = picking_data['disarmed_traps']
+  @@open_container_failure_patterns = [
+    /^Please rephrase that command/,
+    /^What were you referring to/,
+    /^I could not find what you were referring to/,
+    /^You don't want to ruin your spell just for that do you/,
+    /^It would be a shame to disturb the silence of this place for that/,
+    /^This is probably not the time nor place for that/,
+    /^There is no way to do that/,
+    /^You can't do that/,
+    /^Open what/
+  ]
 
-    @harvest_traps = @settings.pick['harvest_traps'] || @settings.harvest_traps
-    @component_container = @settings.pick['component_container'] || @settings.component_container
-    @trap_parts = picking_data['trap_parts']
+  @@close_container_success_patterns = [
+    /^You close/,
+    /^You quickly close/,
+    /^You pull/,
+    /is already closed/
+  ]
 
-    @tend_own_wounds = @settings.pick['tend_own_wounds'] || false
+  @@close_container_failure_patterns = [
+    /^Please rephrase that command/,
+    /^What were you referring to/,
+    /^I could not find what you were referring to/,
+    /^You don't want to ruin your spell just for that do you/,
+    /^It would be a shame to disturb the silence of this place for that/,
+    /^This is probably not the time nor place for that/,
+    /^There is no way to do that/,
+    /^You can't do that/
+  ]
 
-    @picking_room_id = Room.current.id
+  @@container_is_closed_patterns = [
+    /^But that's closed/,
+    /^That is closed/,
+    /^While it's closed/
+  ]
 
-    if @debug
-      echo "Settings..."
-      echo "- Sources: #{@sources}"
-      echo "- use_lockpick_ring: #{@use_lockpick_ring}"
-      echo "- lockpick_container: #{@lockpick_container}"
-      echo "- balance_lockpick_container: #{@balance_lockpick_container}"
-      echo "- harvest_traps: #{@harvest_traps}"
-      echo "- component_container: #{@component_container}"
-      echo "- stop_pick_on_mindlock: #{@stop_pick_on_mindlock}"
-      echo "- pick_buff_bot_name: #{@pick_buff_bot_name}"
-      echo "- pick_buff_bot_buff: #{@pick_buff_bot_buff}"
-      echo "- has_glance: #{@has_glance}"
-      echo "- use_glance: #{@use_glance}"
-      echo "- loot_nouns: #{@loot_nouns}"
-      echo "- trash_nouns: #{@trash_nouns}"
-      echo "- tend_own_wounds: #{@tend_own_wounds}"
-      echo "- disarm_quick: #{@disarm_quick_threshold}"
-      echo "- disarm_normal: #{@disarm_normal_threshold}"
-      echo "- disarm_careful: #{@disarm_careful_threshold}"
-      echo "- disarm_too_hard: #{@disarm_too_hard_threshold}"
-      echo "- too_hard_container: #{@too_hard_container}"
-      echo "- trap_blacklist: #{@trap_blacklist}"
-      echo "- blacklist_container: #{@blacklist_container}"
-      echo "- trap_greylist: #{@trap_greylist}"
-      echo "- pick_quick: #{@pick_quick_threshold}"
-      echo "- pick_normal: #{@pick_normal_threshold}"
-      echo "- pick_careful: #{@pick_careful_threshold}"
-      echo "- assumed_difficulty: #{@assumed_difficulty}"
-      echo "- autoloot_container: #{@autoloot_container}"
-      echo "- @gem_nouns: #{@gem_nouns}"
-    end
+  @@lower_success_patterns = [
+    /^You lower/,
+    # The next message is when item crumbles when leaves your hand, like a moonblade.
+    /^As you open your hand to release the/
+  ]
 
-    if args.refill
-      refill_ring
-    elsif stop_picking?
-      echo 'Exiting due to mindstate...'
-    else
-      @equipment_manager = EquipmentManager.new
-      setup_flags
-      open_containers
-      check_for_boxes
-      remove_hindering_gear
-      crack_boxes
-      stop_buffs
-      wear_normal_gear
-      refill_ring
-    end
-  end
+  @@lower_failure_patterns = [
+    /^But you aren't holding anything/,
+    /^Please rephrase that command/,
+    /^What were you referring to/,
+    /^I could not find what you were referring to/
+  ]
 
-  def check_deprecated_settings
-    # remove this warning after a while 8/2021
-    if @settings.picking_box_storage
-      DRC.message('Please remove picking_box_storage and instead set pick.too_hard_container and/or pick.blacklist_container')
-      pause 10
-    end
+  #########################################
+  # TRASH ITEM
+  #########################################
 
-    # remove this warning after a while 8/2021
-    if @settings.always_pick_blind
-      DRC.message('Please remove always_pick_blind and instead set pick.pick_quick_threshold to 16')
-      pause 10
-    end
+  def dispose_trash(item, worn_trashcan = nil, worn_trashcan_verb = nil)
+    return if item.nil?
 
-    # remove this warning after a while 8/2021
-    if @settings.never_pick_blind
-      DRC.message('Please remove never_pick_blind and instead set pick.pick_quick_threshold to 0')
-      pause 10
-    end
-
-    # remove this warning after a while 8/2021
-    if @settings.lockpick_ignore_difficulty
-      DRC.message('Please remove lockpick_ignore_difficulty and instead set pick.assumed_difficulty to "careful"')
-      pause 10
-    end
-
-    # remove this warning after a while 8/2021
-    if @settings.lockpick_force_disarm_careful
-      DRC.message('Please remove lockpick_force_disarm_careful and instead set pick.disarm_careful_threshold to 0')
-      pause 10
-    end
-  end
-
-  def open_containers
-    @sources.each do |source_container|
-      DRCI.open_container?(source_container)
-    end
-    DRCI.open_container?(@too_hard_container) if @too_hard_container
-    DRCI.open_container?(@blacklist_container) if @blacklist_container
-    DRCI.open_container?(@component_container) if @component_container
-  end
-
-  def check_for_boxes
-    @boxes_by_bag = {}
-    @sources.each do |source_container|
-      @boxes_by_bag[source_container] = DRCI.get_box_list_in_container(source_container)
-    end
-    if @boxes_by_bag.values.flatten.empty?
-      echo "No boxes to pop"
-      exit
-    end
-  end
-
-  def remove_hindering_gear
-    @equipment_manager.empty_hands
-
-    @removed_items = @equipment_manager.remove_gear_by(&:hinders_lockpicking)
-
-    if DRC.left_hand || DRC.right_hand
-      DRC.message('***ITEMS ARE STILL IN HANDS, EXITING***')
-      @equipment_manager.wear_items(@removed_items)
-      exit
-    end
-  end
-
-  def wear_normal_gear
-    @equipment_manager.wear_equipment_set?('standard')
-  end
-
-  def setup_flags
-    Flags.add('disarm-shift', 'something to shift')
-    Flags.add('disarm-trap-type', *@all_trap_messages.values)
-    Flags.add('more-traps', 'not fully disarmed', 'not yet fully disarmed', 'still has more to torment you with')
-    Flags.add('more-locks', 'You discover another lock protecting')
-    Flags.add('glance-no-traps', 'It looks like there are no traps left on')
-    Flags.add('glance-no-locks', 'It looks like there are no locks left on')
-    Flags.add('full-lootpouch', 'A (.*) is full\!  There\'s no room for loot\!')
-  end
-
-  def crack_boxes
-    @boxes_by_bag.each do |source, boxes|
-      boxes.each do |box_noun|
-        break if stop_picking?
-
-        do_buffs
-
-        if @stand
-          DRC.fix_standing
-        else
-          DRC.bput('sit', 'You sit', 'You are already sitting', 'You rise', 'While swimming?') unless sitting?
+    if worn_trashcan
+      case DRC.bput("put my #{item} in my #{worn_trashcan}", @@drop_trash_retry_patterns, @@drop_trash_success_patterns, @@drop_trash_failure_patterns)
+      when *@@drop_trash_retry_patterns
+        return true if dispose_trash(item, worn_trashcan, worn_trashcan_verb)
+      when *@@drop_trash_success_patterns
+        if worn_trashcan_verb
+          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
+          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
         end
-
-        DRCI.get_item?(box_noun, source)
-        balance_lockpick_container
-        attempt_open(box_noun)
+        return true
       end
-      break if stop_picking?
     end
 
-    DRC.fix_standing
-    @equipment_manager.wear_items(@removed_items)
-  end
+    trashcans = DRRoom.room_objs
+                      .reject { |obj| obj =~ /azure \w+ tree/ }
+                      .map { |long_name| DRC.get_noun(long_name) }
+                      .select { |obj| @@trash_storage.include?(obj) }
 
-  def balance_lockpick_container
-    return unless @use_lockpick_ring and @balance_lockpick_container
-    DRC.bput("turn my #{@settings.lockpick_container} to best", "You fiddle with", "You think about it")
-  end
+    trashcans.each do |trashcan|
+      if trashcan == 'gloop'
+        trashcan = 'bucket' if DRRoom.room_objs.include?('bucket of viscous gloop')
+        trashcan = 'cauldron' if DRRoom.room_objs.include?('small bubbling cauldron of viscous gloop')
+      elsif trashcan == 'bucket'
+        trashcan = 'sturdy bucket' if DRRoom.room_objs.include?('sturdy bucket')
+      elsif trashcan == 'basket'
+        trashcan = 'waste basket' if DRRoom.room_objs.include?('waste basket')
+      elsif trashcan == 'bin'
+        trashcan = 'waste bin' if DRRoom.room_objs.include?('waste bin')
+      elsif trashcan == 'arms'
+        trashcan = 'statue'
+      elsif trashcan == 'birdbath'
+        trashcan = 'alabaster birdbath'
+      elsif trashcan == 'turtle'
+        trashcan = 'stone turtle'
+      elsif trashcan == 'tree'
+        trashcan = 'hollow' if DRRoom.room_objs.include?('dead tree with a darkened hollow near its base')
+      elsif XMLData.room_title == '[[A Junk Yard]]'
+        trashcan = 'bin'
+      end
 
-  def stop_picking?
-    @stop_pick_on_mindlock && DRSkill.getxp('Locksmithing') >= 30
-  end
-
-  def do_buffs
-    if @pick_buff_bot_name && DRRoom.pcs.include?(@pick_buff_bot_name)
-      DRC.bput("whisper #{@pick_buff_bot_name} buff #{@pick_buff_bot_buff}", "You whisper")
+      case DRC.bput("put my #{item} in #{trashcan}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns)
+      when *@@drop_trash_retry_patterns
+        # If still didn't dispose of trash after retry
+        # then don't return yet, will try to drop it later.
+        return true if dispose_trash(item)
+      when *@@drop_trash_success_patterns
+        return true
+      end
     end
 
-    if @has_pick_waggle
-      DRC.wait_for_script_to_complete('buff', ['pick'])
-    end
-  end
-
-  def stop_buffs
-    drca_stop_buffs(@settings, 'pick') if DRStats.barbarian? || DRStats.thief?
-  end
-
-  # TODO - Move to DRCA
-  def drca_stop_buffs(settings, set_name)
-    return unless settings.waggle_sets[set_name]
-
-    spells = settings.waggle_sets[set_name]
-
-    if DRStats.barbarian?
-      stop_barb_abilities
-    elsif DRStats.thief?
-      stop_khris(spells)
+    # No trash bins or not able to put item in a bin, just drop it.
+    case DRC.bput("drop my #{item}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns)
+    when *@@drop_trash_retry_patterns
+      return dispose_trash(item)
+    when *@@drop_trash_success_patterns
+      return true
     else
-      release_spells(spells)
+      return false
     end
   end
 
-  # TODO - Move to DRCA
-  def stop_barb_abilities
-    DRC.bput('meditate stop', '.*')
+  #########################################
+  # SEARCH FOR ITEM
+  #########################################
+
+  def search?(item)
+    /Your .* is in/ =~ DRC.bput("inv search #{item}", /^You can't seem to find anything/, /Your .* is in/)
   end
 
-  # TODO - Move to DRCA
-  def stop_khris(spells)
-    spells.each { |name| DRC.bput("khri stop #{name}", "You attempt to relax your mind from some of its meditative states") }
+  # Taps items to check if you're wearing it.
+  def wearing?(item)
+    tap(item) =~ /wearing/
   end
 
-  # TODO - Move to DRCA
-  def release_spells(spells)
-    spells.each { |spell| DRC.bput("release #{spell.abbrev}") }
+  # Taps item to determine if it's in the given container.
+  def inside?(item, container = nil)
+    tap(item, container) =~ /inside/
   end
 
-  def refill_ring
-    return unless @use_lockpick_ring
-    return if @settings.skip_lockpick_ring_refill
-
-    lockpicks_needed = DRCI.count_lockpick_container(@lockpick_container)
-    return if lockpicks_needed < 15
-
-    cost = @lockpick_costs[@settings.lockpick_type]
-    if cost.nil?
-      DRC.message("***UNKNOWN LOCKPICK TYPE: #{@settings.lockpick_type}, UNABLE TO REFILL YOUR LOCKPICK RING***")
-      return
+  # Taps an item to confirm it exists.
+  def exists?(item, container = nil)
+    case tap(item, container)
+    when *@@tap_success_patterns
+      true
+    else
+      false
     end
-
-    DRCM.ensure_copper_on_hand(cost * lockpicks_needed, @settings)
-    DRCT.refill_lockpick_container(@settings.lockpick_type, @settings.hometown, @lockpick_container, lockpicks_needed)
   end
 
-  def attempt_open(box_noun)
-    echo "attempt_open(#{box_noun})" if @debug
+  # Taps an item and returns the match string.
+  # If no container specified then generically taps whatever's in your immediate inventory.
+  def tap(item, container = nil)
+    from = container
+    from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
+    DRC.bput("tap my #{item} #{from}", *@@tap_success_patterns, *@@tap_failure_patterns)
+  end
 
-    current_box = {
-      'noun' => box_noun,
-      'trap_difficulty' => nil,
-      'trap' => nil,
-      'trapped' => true,
-      'lock_difficulty' => nil,
-      'locked' => true
+  def in_hands?(item)
+    in_hand?(item, 'either')
+  end
+
+  def in_left_hand?(item)
+    in_hand?(item, 'left')
+  end
+
+  def in_right_hand?(item)
+    in_hand?(item, 'right')
+  end
+
+  # Checks if the item is in one or more hands.
+  # Hand options are: left, right, either, both.
+  def in_hand?(item, which_hand = 'either')
+    return false unless item
+    item = DRC::Item.from_text(item) if item.is_a?(String)
+    case which_hand.downcase
+    when 'left'
+      DRC.left_hand =~ item.short_regex
+    when 'right'
+      DRC.right_hand =~ item.short_regex
+    when 'either'
+      in_left_hand?(item) || in_right_hand?(item)
+    when 'both'
+      in_left_hand?(item) && in_right_hand?(item)
+    else
+      DRC.message("Unknown hand: #{which_hand}. Valid options are: left, right, either, both")
+      false
+    end
+  end
+
+  def have_item_by_look?(item, container)
+    return false unless item
+
+    item = item.delete_prefix('my ')
+    preposition = 'in my' if container && !(container =~ /^((in|on|under|behind|from) )?my /i)
+
+    case DRC.bput("look at my #{item} #{preposition} #{container}", item, /^You see nothing unusual/, /^I could not find/, /^What were you referring to/)
+    when /You see nothing unusual/, item
+      true
+    else
+      false
+    end
+  end
+
+  #########################################
+  # COUNT ITEMS
+  #########################################
+
+  def count_item_parts(item)
+    match_messages = [
+      /and see there (?:is|are) (.+) left\./,
+      /There (?:is|are) (?:only )?(.+) parts? left/,
+      /There's (?:only )?(.+) parts? left/,
+      /There are enough left to create (.+) more/
+    ]
+    count = 0
+    $ORDINALS.each do |ordinal|
+      case DRC.bput("count my #{ordinal} #{item}",
+                    'I could not find what you were referring to.',
+                    'tell you much of anything.',
+                    *match_messages)
+      when 'I could not find what you were referring to.'
+        break
+      when 'tell you much of anything.'
+        echo "ERROR: count_item_parts called on non-stackable item: #{item}"
+        count = count_items(item)
+        break
+      when *match_messages
+        count += DRC.text2num(Regexp.last_match(1).tr('-', ' '))
+      end
+      waitrt?
+    end
+    count
+  end
+
+  # Counts items in a container that is inferred by first tapping the item.
+  # If you want to count items in a specific container, use `count_items_in_container(item, container)`
+  def count_items(item)
+    /inside your (.*)/ =~ tap(item)
+    container = Regexp.last_match(1)
+    return 0 if container.nil?
+    count_items_in_container(item, container)
+  end
+
+  # Counts items in a container.
+  # If you don't know which container the items are in, use `count_items(item)` to infer it.
+  def count_items_in_container(item, container)
+    contents = DRC.bput("rummage /C #{item.split.last} in my #{container}", /^You rummage .*/, /That would accomplish nothing/)
+    # This regexp avoids counting the quoted item name in the message, as
+    # well as avoiding finding the item as a substring of other items.
+    contents.scan(/ #{item}\W/).size
+  end
+
+  # Identifies how many more lockpicks that the container can hold.
+  # Designed to work on lockpick stackers.
+  # https://elanthipedia.play.net/Lockpick_rings
+  def count_lockpick_container(container)
+    count = DRC.bput("appraise my #{container} quick", /it appears to be full/, /it might hold an additional \d+/, /\d+ lockpicks would probably fit/).scan(/\d+/).first.to_i
+    waitrt?
+    count
+  end
+
+  def get_box_list_in_container(container)
+    DRC.rummage('B', container)
+  end
+
+  def count_all_boxes(settings)
+    current_box_count = 0
+
+    containers = [
+      settings.picking_box_source,
+      settings.pick['picking_box_sources'],
+      settings.pick['blacklist_container'],
+      settings.pick['too_hard_container']
+    ].flatten.uniq.reject { |container|
+      container.to_s.empty?
+    }.each { |container|
+      current_box_count += get_box_list_in_container(container).size
     }
 
-    if @settings.use_skeleton_key
-      try_unlock_box_with_key(current_box)
-    end
+    current_box_count
+  end
 
-    while holding_box?(current_box) && (current_box['trapped'] || current_box['locked'])
+  #########################################
+  # STOW ITEM
+  #########################################
 
-      while holding_box?(current_box) && current_box['trapped']
-        echo "Starting disarm for #{current_box['noun']}..." if @debug
+  def stow_hands
+    (!DRC.left_hand  || stow_hand('left')) &&
+    (!DRC.right_hand || stow_hand('right'))
+  end
 
-        current_box['trap_difficulty'] = 0 if @assumed_difficulty
-
-        while current_box['trap_difficulty'].nil?
-          glance(current_box) if @use_glance
-          identify_trap(current_box)
-        end
-
-        if current_box['trap'] && @trap_blacklist.include?(current_box['trap'])
-          echo 'identified blacklisted trap on box' if @debug
-          handle_trap_too_hard_or_blacklisted(current_box, @blacklist_container)
-          return
-        end
-
-        if current_box['trap_difficulty'] >= @disarm_too_hard_threshold
-          echo 'identified box trap as too hard' if @debug
-          handle_trap_too_hard_or_blacklisted(current_box, @too_hard_container)
-          return
-        end
-
-        while holding_box?(current_box) && current_box['trapped'] && !current_box['trap_difficulty'].nil?
-          if current_box['trap'] && @trap_greylist.include?(current_box['trap'])
-            # force disarm careful on specific trap_greylist of traps types.
-            current_box['trap_difficulty'] = @disarm_careful_threshold
-          end        
-          disarm_trap(current_box)
-        end
-
-        if holding_box?(current_box) && @harvest_traps
-          analyze_and_harvest(current_box)
-        end
-      end
-
-      # Make sure we still have the box in hand, cause sometimes failed disarms make that not true...
-      while holding_box?(current_box) && !current_box['trapped'] && current_box['locked']
-        echo "Starting lockpicking for #{current_box['noun']}..." if @debug
-
-        current_box['lock_difficulty'] = 0 if @assumed_difficulty
-
-        while current_box['lock_difficulty'].nil?
-          glance(current_box) if @use_glance
-          find_lockpick unless @use_lockpick_ring
-          identify_lock(current_box)
-        end
-
-        while !current_box['trapped'] && current_box['locked'] && !current_box['lock_difficulty'].nil?
-          find_lockpick unless @use_lockpick_ring
-          pick(current_box)
-        end
-      end
-    end
-
-    if holding_box?(current_box)
-      stow_hands_except(current_box['noun'])
-      loot(current_box['noun'])
-      dispose_empty_box(current_box)
+  def stow_hand(hand)
+    braid_regex = /The braided (.+) is too long/
+    case DRC.bput("stow #{hand}", braid_regex, @@container_is_closed_patterns, @@stow_item_success_patterns, @@stow_item_failure_patterns, @@stow_item_retry_patterns)
+    when braid_regex
+      dispose_trash(DRC.get_noun(Regexp.last_match(1)))
+    when *@@stow_item_retry_patterns
+      stow_hand(hand)
+    when *@@stow_item_success_patterns
+      true
     else
-      echo "You lost your box somehow." if @debug
+      false
     end
   end
 
-  def try_unlock_box_with_key(box)
-    return unless @settings.use_skeleton_key
-    return unless DRCI.get_item_if_not_held?(@settings.skeleton_key)
+  #########################################
+  # GET ITEM
+  #########################################
 
-    result = DRC.bput("turn my #{@settings.skeleton_key} at my #{box['noun']}", "^You turn", "that doesn't seem to do much", "I could not find", "What were you referring")
-    waitrt?
-    key_worked = result =~ /^You turn/
-    if key_worked
-      box['trapped'] = false
-      box['locked'] = false
-    end
+  # Gets an item unless you are already hold it.
+  # Use this method to avoid having two of an item
+  # in your hands when you only want one.
+  #
+  # Returns true if the item is in your hand
+  # or we were able to get it to your hand.
+  def get_item_if_not_held?(item, container = nil)
+    return false unless item
+    return true if in_hands?(item)
+    return get_item(item, container)
   end
 
-  def holding_box?(box)
-    return DRCI.in_hands?(box['noun'])
+  # Provide a predicate-named method to follow convention.
+  def get_item?(item, container = nil)
+    get_item(item, container)
   end
 
-  def glance(box)
-    Flags.reset('glance-no-traps')
-    Flags.reset('glance-no-locks')
-
-    DRC.bput("glance my #{box['noun']}", "Looking more closely you see", "It looks like there are no locks")
-
-    box['trapped'] = false if Flags['glance-no-traps']
-    box['locked'] = false if Flags['glance-no-locks']
-  end
-
-  def identify_trap(box)
-    echo "identify_trap(#{box})" if @debug
-
-    Flags.reset('more-traps')
-    Flags.reset('disarm-trap-type')
-
-    disarm_identify_match = DRC.bput("disarm my #{box['noun']} identify",
-      'Thanks to an instinct provided by your sense of security',
-      @disarm_lost_box_matches,
-      @trap_sprung_matches,
-      @disarm_identify_failed,
-      @disarm_identify_messages,
-      @disarmed_trap_messages.values)
-
-    trapped = true
-    trap = nil
-    difficulty = nil
-
-    case disarm_identify_match
-    when 'Thanks to an instinct provided by your sense of security'
-      echo 'Dodged a trap with Safe...'
-      trapped = false
-    when *@disarm_lost_box_matches
-      DRC.message('Lost your box somehow...')
-      trapped = false # Flag the box as not trapped, so it will fall through and move on...
-    when *@trap_sprung_matches
-      handle_trap_sprung(nil)
-      trapped = false
-    when *@disarm_identify_failed
-      echo "Failed to identify trap" if @debug
-    when *@disarmed_trap_messages.values
-      echo "Identified already disarmed trap: #{disarm_identify_match}"
-      trap = @disarmed_trap_messages.key("#{disarm_identify_match}")
-      trapped = false
-      difficulty = 0
-    else
-      echo "Identified trap: #{Flags['disarm-trap-type']} - #{disarm_identify_match}" if @debug
-      trap = @all_trap_messages.key("#{Flags['disarm-trap-type']}")
-      difficulty = @disarm_identify_messages.find_index(disarm_identify_match)
-    end
-
-    box['trapped'] = trapped
-    box['trap'] = trap
-    box['trap_difficulty'] = difficulty
-
-    # Handle Triggering During Identify and Finding Another...
-    if Flags['more-traps']
-      echo "Saw another trap after disarming/tripping one..." if @debug
-      box['trapped'] = true
-      box['trap_difficulty'] = nil
-    end
-  end
-
-  def disarm_trap(box)
-    echo "disarm_trap(#{box})" if @debug
-
-    if @assumed_difficulty.nil?
-      case box['trap_difficulty']
-      when 0..(@disarm_quick_threshold-1)
-        echo 'identified box trap as blind difficulty' if @debug
-        speed = 'blind'
-      when @disarm_quick_threshold..(@disarm_normal_threshold-1)
-        echo 'identified box trap as quick difficulty' if @debug
-        speed = 'quick'
-      when @disarm_normal_threshold..(@disarm_careful_threshold-1)
-        echo 'identified box trap as normal difficulty' if @debug
-        speed = ''
-      when @disarm_careful_threshold..Float::INFINITY
-        echo 'identified box trap as careful difficulty' if @debug
-        speed = 'careful'
+  # Gets an item, optionally from a specific container.
+  # If no container specified then generically grabs from the room/your person.
+  # Can provide an array of containers to try, too, in case some might be empty.
+  def get_item(item, container = nil)
+    if container.is_a?(Array)
+      container.each do |c|
+        return true if get_item_safe(item, c)
       end
+      return false
+    end
+    get_item_safe(item, container)
+  end
+
+  # Same as 'get_item_unsafe' but ensures that
+  # the container argument is prefixed with 'my' qualifier.
+  def get_item_safe?(item, container = nil)
+    item = "my #{item}" if item && !(item =~ /^my /i)
+    container = "my #{container}" if container && !(container =~ /^((in|on|under|behind|from) )?my /i)
+    get_item_unsafe(item, container)
+  end
+
+  def get_item_safe(item, container = nil)
+    get_item_safe?(item, container)
+  end
+
+  # Gets an item, optionally from a specific container.
+  # If no container specified then generically grabs from the room/your person.
+  def get_item_unsafe(item, container = nil)
+    from = container
+    from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
+    case DRC.bput("get #{item} #{from}", @@get_item_success_patterns, @@get_item_failure_patterns)
+    when *@@get_item_success_patterns
+      return true
     else
-      echo "using assumed difficulty: #{@assumed_difficulty}" if @debug
-      speed = @assumed_difficulty if @assumed_difficulty
-    end
-
-    Flags.reset('more-traps')
-    Flags.reset('disarm-shift')
-
-    disarm_result = DRC.bput("disarm my #{box['noun']} #{speed}",
-      'Thanks to an instinct provided by your sense of security',
-      @trap_sprung_matches,
-      @disarmed_trap_messages.values,
-      @disarm_retry,
-      @disarm_succeeded)
-
-    echo "disarm_result: #{disarm_result}" if @debug
-
-    trapped = true
-    case disarm_result
-    when *@trap_sprung_matches
-      handle_trap_sprung(box['trap'])
-      trapped = false
-    when *@disarmed_trap_messages.values
-      echo "Identified already disarmed trap: #{disarm_result}" if @debug
-      trapped = false
-    when *@disarm_retry
-      echo 'Failed to disarm trap' if @debug
-      trapped = true
-    when 'Thanks to an instinct provided by your sense of security'
-      echo 'Dodged a trap with Safe...' if @debug
-      trapped = false
-    when *@disarm_succeeded
-      echo 'Successfully disarmed trap' if @debug
-      trapped = false
-    end
-
-    box['trapped'] = trapped
-    box['trap_difficulty'] += 1 if Flags['disarm-shift']
-
-    if Flags['more-traps']
-      echo "Saw another trap after disarming/tripping one..." if @debug
-      box['trapped'] = true
-      box['trap_difficulty'] = nil
-    end
-
-    echo "Updated box after disarm attempt: #{box}" if @debug
-  end
-
-  def handle_trap_sprung(trap_type)
-    DRC.message('**SPRUNG TRAP**')
-    DRC.message('**SPRUNG TRAP**')
-    DRC.message("  TRAP: #{trap_type}") if trap_type
-
-    # TODO - This doesn't seem to work reliably...
-    pause 1 while stunned?
-
-    health = DRCH.check_health
-    echo "health: #{health.to_yaml}" if @debug
-    if health['bleeders'].any? || health['poisoned'] || health['diseased'] || health['score'] > @settings.saferoom_health_threshold
-      echo "Trying to tend wounds..." if @debug && @tend_own_wounds
-      DRC.wait_for_script_to_complete('tendme') if @tend_own_wounds
-
-      echo "Things are bad enough to go heal..." if @debug
-      DRC.wait_for_script_to_complete('safe-room')
-
-      echo "handle_trap_sprung: safe-room finished - returning to picking room" if @debug
-    end
-
-    # come back from safe-room and/or teleport
-    DRCT.walk_to(@picking_room_id) if Room.current.id != @picking_room_id
-
-    echo "handle_trap_sprung: danger handled" if @debug
-  end
-
-  def handle_trap_too_hard_or_blacklisted(box, container)
-    if container
-      return if DRCI.put_away_item?(box['noun'], container)
-      DRC.message("Throwing away box cause it was not disarmed and stowing in #{container} failed")
-    end
-
-    DRCI.dispose_trash(box['noun'], @worn_trashcan, @worn_trashcan_verb)
-  end
-
-  def identify_lock(box)
-    echo "identify_lock(#{box})" if @debug
-
-    pick_identify_match = DRC.bput("pick my #{box['noun']} ident",
-      @trap_sprung_matches,
-      @pick_identify_messages,
-      @pick_retry,
-      'better have an empty hand first',
-      /Find a more appropriate tool and try again/,
-      /It's not even locked, why bother/)
-
-    case pick_identify_match
-    when 'better have an empty hand first'
-      stow_hands_except(box['noun'])
-    when *@trap_sprung_matches
-      handle_trap_sprung(nil)
-    when /Find a more appropriate tool and try again/
-      box['locked'] = true
-      box['lock_difficulty'] = nil
-      @use_lockpick_ring = false
-    when *@pick_retry
-      box['locked'] = true
-      box['lock_difficulty'] = nil
-    when /It's not even locked, why bother/
-      box['locked'] = false
-      box['lock_difficulty'] = 0
-    when *@pick_identify_messages
-      echo "Identified lock: #{pick_identify_match}" if @debug
-      box['lock_difficulty'] = @pick_identify_messages.find_index(pick_identify_match)
-    end
-  end
-
-  def pick(box)
-    if @assumed_difficulty.nil?
-      case box['lock_difficulty']
-      when 0..(@pick_quick_threshold-1)
-        echo 'identified box lock as blind difficulty' if @debug
-        speed = 'blind'
-      when @pick_quick_threshold..(@pick_normal_threshold-1)
-        echo 'identified box lock as quick difficulty' if @debug
-        speed = 'quick'
-      when @pick_normal_threshold..(@pick_careful_threshold-1)
-        echo 'identified box lock as normal difficulty' if @debug
-        speed = ''
-      when @pick_careful_threshold..Float::INFINITY
-        echo 'identified box lock as careful difficulty' if @debug
-        speed = 'careful'
-      end
-    else
-      echo "using assumed difficulty: #{@assumed_difficulty}" if @debug
-      speed = @assumed_difficulty if @assumed_difficulty
-    end
-
-    Flags.reset('more-locks')
-    Flags.reset('more-traps')
-    locked = true
-
-    pick_result = DRC.bput("pick my #{box['noun']} #{speed}", @trap_sprung_matches, 'not even locked',
-                      'you remove your lockpick and open and remove the lock', 'You discover another lock protecting',
-                      'You are unable to make any progress towards opening the lock', 'Find a more appropriate tool and try again',
-                      'better have an empty hand first', /Pick what/)
-    echo "Pick Result: #{pick_result}" if @debug
-
-    case pick_result
-    when 'Find a more appropriate tool and try again'
-      @use_lockpick_ring = false
-    when 'better have an empty hand first'
-      stow_hands_except(box['noun'])
-    when *@trap_sprung_matches
-      handle_trap_sprung(nil)
-    when 'you remove your lockpick and open and remove the lock', 'not even locked'
-      locked = false
-    when /Pick what/
-      # Edge case, probably lost the box to a trap or messed with stuff manually.
-      # Just mark the box unlocked so that it checks and continues
-      DRC.message('You are missing a box, either due to manual intervention or trap failure.')
-      locked = false
-    end
-
-    box['locked'] = locked
-
-    if Flags['more-traps']
-      box['trapped'] = true
-      box['trap_difficulty'] = nil
-    end
-    if Flags['more-locks']
-      box['lock_difficulty'] = nil
-      box['locked'] = true
-    end
-  end
-
-  def stow_hands_except(item)
-    # Put loose lockpicks back where we were told to get them from
-    DRCI.put_away_item?('lockpick', @lockpick_container) if DRCI.in_hands?('lockpick')
-
-    # Clean up whatever other random crap we have
-    DRCI.stow_hand('left') unless DRC.left_hand.nil? || DRCI.in_left_hand?(item)
-    DRCI.stow_hand('right') unless DRC.right_hand.nil? || DRCI.in_right_hand?(item)
-  end
-
-  def dispose_empty_box(box)
-    if @trash_empty_boxes
-      DRCI.dispose_trash(box['noun'], @worn_trashcan, @worn_trashcan_verb)
-    else
-      dismantle(box)
-    end
-  end
-
-  def dismantle(box)
-    DRC.release_invisibility
-    command = "dismantle my #{box['noun']} #{@dismantle_type}"
-    case DRC.bput(command, 'repeat this request in the next 15 seconds', 'Roundtime', 'You must be holding the object you wish to dismantle', 'Your hands are too full for that', 'You can not dismantle that')
-    when 'repeat this request in the next 15 seconds'
-      dismantle(box)
-    when 'Your hands are too full for that'
-      stow_hands_except(box['noun'])
-      dismantle(box)
-    when 'You can not dismantle that'
-      DRCI.dispose_trash(box['noun'], @worn_trashcan, @worn_trashcan_verb)
-    end
-  end
-
-  def loot(box_noun)
-    echo "Looting #{box_noun}..." if @debug
-    if DRC.bput("open my #{box_noun}", /^In the .* you see .*\./, 'That is already open', 'It is locked') == 'It is locked'
-      echo 'Bug: Tried to loot locked box...'
-      return
-    end
-
-    # pouch full, fill from lootpouch then try again
-    if Flags['full-lootpouch']
-      Flags.reset('full-lootpouch')
-
-      case DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{@settings.autoloot_container}", /You open/, /is too full to fit another gem/, /is too full to fit any more gems/, /You'd better tie it up before putting/, /You'll need to tie it up before/)        
-      when /is too full to fit another gem/, /is too full to fit any more gems/
-        swap_out_full_gempouch
-        # fill pouch from container
-        DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{@settings.autoloot_container}", /You open/, /You fill your/)
-      end
-
-    # fill pouch from box
-      case DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{box_noun}", 'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)      
-      when /you'd better tie it up/, /you'll need to tie it up before/
-        # tie pouch once there is some gems in it
-        drc.bput("tie my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", 'you tie', "it's empty?", 'has already been tied off') if @tie_gem_pouches
-        drc.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{@settings.autoloot_container}", /you open/, /is too full to fit another gem/, /is too full to fit any more gems/, /you'd better tie it up before putting/, /you'll need to tie it up before/)    		
+      if container =~ /\bportal\b/i
+        return get_item_from_eddy_portal?(item, container)
+      else
+        return false
       end
     end
-
-    if (@settings.fill_pouch_with_box || @settings.loot_specials.empty?) && !(@settings.fill_pouch_with_box == false) 
-      # Don't handle full pouches here, cause if we do, we can't tie them (when they're empty)
-      DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{box_noun}", 'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)
-    end
-
-    box_items = DRCI.get_item_list(box_noun, 'look');	
-    echo("boxitems = #{box_items}") if @debug
-
-    if box_items == 'There is nothing in there\.'
-      echo 'All loot gathered, dumping box'
-      return
-    end
-
-    # loot each item if there is anything left.
-    loot = box_items.map { |item| item }
-    echo "box items: #{box_items} - loot: #{loot}" if @debug
-    loot.each { |item| loot_item(item, box_noun) }
-
-    # Recurse for very full boxes
-    loot(box_noun) if loot.last() =~ /stuff/i
-
   end
 
-  def loot_item(item, box)
-    
-    item_long = item
-    item = DRC.get_noun(item)
-
-    echo("loot_item = #{item}") if @debug
-    echo("item_long = #{item_long}") if @debug
-
-    # We don't touch glowing fragments, since we took off all our armor...
-    return if item =~ /fragment/i
-    # Stuff happens for very full boxes, and isn't really loot
-    return if item =~ /stuff/i
-
-    #search for loose gems
-    if @gem_nouns.find { |thing| thing =~ /\b#{item}\b/i }
-      echo "gem found, getting and stowing it"
-        DRC.bput("get #{item} from my #{box}", 'You get (.*) from inside', 'You pick up \d* \w* (?:lirum|dokora|kronar)s?')
-        case DRC.bput("stow my #{item}", /You put/, /You open/, /is too full to fit another gem/, /You'd better tie it up before putting/)
-      when /You put/, /You open/
-        return
-      when /You'd better tie it up/, /is too full to fit another gem/
-        swap_out_full_gempouch
-      end
-      return
-    end
-
-    #search for special items
-    special = @settings.loot_specials.find { |x| /\b#{x['name']}\b/i =~ item_long }
-    if special
-      echo "special item identified #{item}"
-      DRCI.put_away_item?(item, special['bag'])
-      return
-    end
-
-    #if its trash leave it in the box and exit
-    if @trash_nouns.find { |thing| item =~ /\b#{item}\b/i }
-      echo "trash item identified, left it in the box for trashing: #{item}"
-      return
-    end
-
-    #get any loose other items	
-    case DRC.bput("get #{item} from my #{box}", 'You get (.*) from inside', 'You pick up \d* \w* (?:lirum|dokora|kronar)s?')
-    when /You pick up/ # Coins
-      return
-    when /You get (.*) from inside/
-      item_long = Regexp.last_match(1)
-      echo "Looted: #{item_long}" if @debug
-    end
-
-    #stow the items if its in loot_nouns
-    if @loot_nouns.find { |thing| item_long.include?(thing) && !item_long.include?('sunstone runestone') }
-      case DRC.bput("stow my #{item}", /You put/, /You open/, /is too full to fit another gem/, /You'd better tie it up before putting/)
-      when /You put/, /You open/
-        return
-      when /You'd better tie it up/, /is too full to fit another gem/
-        swap_out_full_gempouch
-      end
-      return
-    end
-
-    #possible unrecognized item log it & trash manually just in case.
-    if @trash_nouns.find { |thing| item_long =~ /\b#{thing}\b/i }
-      DRCI.dispose_trash(item, @worn_trashcan, @worn_trashcan_verb)
+  # Workaround to game changes where you must periodically look in
+  # the portal for the contents to be available.
+  # http://forums.play.net/forums/DragonRealms/Discussions%20with%20DragonRealms%20Staff%20and%20Players/Game%20Master%20and%20Official%20Announcements/view/1899
+  def get_item_from_eddy_portal?(item, container)
+    # Ensure the eddy is open then look in it to force the contents to be loaded.
+    return false unless DRCI.open_container?('my eddy') && DRCI.look_in_container(container)
+    from = container
+    from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
+    case DRC.bput("get #{item} #{from}", @@get_item_success_patterns, @@get_item_failure_patterns)
+    when *@@get_item_success_patterns
+      return true
     else
-      DRC.message("***Unrecognized Item: #{item_long} - trashing it.***")
-      DRCI.dispose_trash(item, @worn_trashcan, @worn_trashcan_verb)
+      return false
     end
   end
 
-  def swap_out_full_gempouch
-    if @settings.spare_gem_pouch_container.nil?
-      DRC.message('You should set spare_gem_pouch_container to swap out your full pouch for you...')
-      pause 10
-      return
-    end
+  #########################################
+  # WEAR ITEM
+  #########################################
 
-    lowered_item = DRC.left_hand
-    DRCI.lower_item?(DRC.left_hand) if lowered_item
+  # Wears an item from your hands.
+  def wear_item?(item)
+    wear_item_safe?(item)
+  end
 
-    DRCI.remove_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
-    if @settings.full_pouch_container
-      DRCI.put_away_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", @settings.full_pouch_container)
+  # Same as 'wear_item_unsafe?' but ensures that
+  # the item name is prefixed with 'my' qualifier.
+  def wear_item_safe?(item)
+    item = "my #{item}" if item && !(item =~ /^my /i)
+    wear_item_unsafe?(item)
+  end
+
+  # Wears an item from your hands.
+  def wear_item_unsafe?(item)
+    case DRC.bput("wear #{item}", @@wear_item_success_patterns, @@wear_item_failure_patterns)
+    when *@@wear_item_success_patterns
+      return true
     else
-      DRCI.stow_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
-    end
-
-    DRCI.get_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", @settings.spare_gem_pouch_container)
-    DRCI.wear_item?("#{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}")
-    DRCI.get_item?(lowered_item) if lowered_item
-    DRCI.stow_item?(lowered_item) if lowered_item
-    DRC.bput("tie my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun}", 'You tie', "it's empty?", 'has already been tied off') if @tie_gem_pouches
-  end
-
-  def find_lockpick
-    return if DRC.left_hand
-
-    if !DRCI.get_item?('lockpick', @lockpick_container)
-      DRC.message('***OUT OF LOCKPICKS***')
-      DRCI.stow_hands
-      exit
+      return false
     end
   end
 
-  def analyze_and_harvest(box)
-    echo "Analyze and Harvest: #{box}" if @debug
+  #########################################
+  # REMOVE ITEM
+  #########################################
 
-    case DRC.bput("disarm my #{box['noun']} analyze", /You've already analyzed/, /You are unable to determine a proper method/, 'Roundtime')
-    when /You are unable to determine a proper method/
-      return analyze_and_harvest(box)
-    end
-
-    harvest(box)
+  # Removes an item you're wearing.
+  def remove_item?(item)
+    remove_item_safe?(item)
   end
 
-  def harvest(box)
-    echo "Harvesting: #{box} - container: #{@component_container}" if @debug
+  # Same as 'remove_item_unsafe?' but ensures that
+  # the item name is prefixed with 'my' qualifier.
+  def remove_item_safe?(item)
+    item = "my #{item}" if item && !(item =~ /^my /i)
+    remove_item_unsafe?(item)
+  end
 
-    harvest_result = DRC.bput("disarm my #{box['noun']} harvest",
-      /You fumble around with the trap apparatus/, /much for it to be successfully harvested/,
-      /completely unsuitable for harvesting/, /previous trap have already been completely harvested/, 'Roundtime')
-    echo "Harvest Result: #{harvest_result}" if @debug
-
-    case harvest_result
-    when /You fumble around with the trap apparatus/
-      harvest(box)
-    when 'Roundtime'
-      echo "Harvested item: #{DRC.left_hand} - trap part? #{@trap_parts.include?(DRC.left_hand)}" if @debug
-
-      DRCI.put_away_item?(DRC.left_hand, @component_container) if @component_container
-      DRCI.dispose_trash(DRC.left_hand, @worn_trashcan, @worn_trashcan_verb) if @trap_parts.include?(DRC.left_hand)
+  # Removes an item you're wearing.
+  def remove_item_unsafe?(item)
+    case DRC.bput("remove #{item}", @@remove_item_success_patterns, @@remove_item_failure_patterns)
+    when *@@remove_item_success_patterns
+      return true
+    else
+      return false
     end
   end
+
+  #########################################
+  # STOW ITEM
+  #########################################
+
+  # Stows an item into its default container. See STORE HELP for details.
+  # Same as 'stow_item_safe?'.
+  def stow_item?(item)
+    stow_item_safe?(item)
+  end
+
+  # Stows an item into its default container. See STORE HELP for details.
+  # Same as 'stow_item_unsafe?' but ensures that
+  # the item argument is prefixed with 'my '.
+  def stow_item_safe?(item)
+    item = "my #{item}" if item && !(item =~ /^my /i)
+    stow_item_unsafe?(item)
+  end
+
+  # Stows an item into its default container. See STORE HELP for details.
+  # Unless you include the 'my ' prefix in the item then this may
+  # try to stow an item on the ground rather than something in your inventory.
+  def stow_item_unsafe?(item)
+    case DRC.bput("stow #{item}", @@container_is_closed_patterns, @@stow_item_success_patterns, @@stow_item_failure_patterns, @@stow_item_retry_patterns)
+    when *@@stow_item_retry_patterns
+      return stow_item_unsafe?(item)
+    when *@@stow_item_success_patterns
+      return true
+    else
+      return false
+    end
+  end
+
+  #########################################
+  # LOWER ITEM
+  #########################################
+
+  # Lowers the item to the ground.
+  # Determines which hand is holding the item then lowers it to your feet slot.
+  def lower_item?(item)
+    return false unless in_hands?(item)
+    item_regex = /\b#{item}\b/
+    hand = (DRC.left_hand =~ item_regex) ? 'left' : 'right'
+    case DRC.bput("lower ground #{hand}", *@@lower_success_patterns, *@@lower_failure_patterns)
+    when *@@lower_success_patterns
+      true
+    else
+      false
+    end
+  end
+
+  #########################################
+  # CHECK CONTAINER CONTENTS
+  #########################################
+
+  # Checks if the container is empty.
+  # Returns true if certain the container is empty.
+  # Returns false if certain the container is not empty.
+  # Returns nil if unable to determine either way (e.g. can't open container or look in it).
+  def container_is_empty?(container)
+    look_in_container(container).empty?
+  end
+
+  # Returns a list of item descriptions from the `INVENTORY <type|slot>` verb output.
+  # Where <type> can be armor, weapon, fluff, container, or combat.
+  # Where <slot> can be any phrase from INV SLOTS LIST command.
+  def get_inventory_by_type(type = 'combat', line_count = 40)
+    case DRC.bput("inventory #{type}", /Use INVENTORY HELP for more options/, /The INVENTORY command is the best way/, /You can't do that/)
+    when /The INVENTORY command is the best way/, /You can't do that/
+      DRC.message("Unrecognized inventory type: #{type}. Valid options are ARMOR, WEAPON, FLUFF, CONTAINER, COMBAT, or any slot from INVENTORY SLOTS LIST.")
+      return []
+    end
+    # Multiple lines may have been printed to the game window,
+    # grab the last several lines for analysis.
+    snapshot = reget(line_count)
+    # Unless you're looking for items at your feet, this is noise.
+    items_at_feet = snapshot.grep(/(^Lying at your feet)/).any?
+    # If the snapshot found all the inventory then begin processing.
+    if snapshot.grep(/^All of your (#{type}|items)|^You aren't wearing anything like that|Both of your hands are empty/).any? && snapshot.grep(/Use INVENTORY HELP/).any?
+      snapshot
+      .map(&:strip)
+      .reverse
+      .take_while { |line| [/^All of your (#{type}|items)/, /^You aren't wearing anything like that/, /Both of your hands are empty/].none? { |phrase| phrase =~ line } }
+      .drop_while { |line| !line.start_with?('[Use INVENTORY HELP for more options.]') }
+      .drop(1)
+      .reverse
+      .take_while { |line| !items_at_feet || !line.start_with?('Lying at your feet') }
+      .map { |item| item.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '') }
+    else
+      # Otherwise, retry the command. Other actions may have flooded the game window.
+      get_inventory_by_type(type, line_count + 40)
+    end
+  end
+
+  # Gets a list of items found in a container via RUMMAGE or LOOK.
+  # Default is 'rummage' which returns the full item tap descriptions (e.g. some grey ice skates with black laces)
+  # You can pass in 'LOOK' to get back the short item names, which is easier to parse to know the adjective and noun (e.g. some grey ice skates)
+  def get_item_list(container, verb = 'rummage')
+    case verb
+    when /^(r|rummage)$/i
+      rummage_container(container)
+    when /^(l|look)$/i
+      look_in_container(container)
+    end
+  end
+
+  # Gets a list of items by RUMMAGE the container.
+  # Returns a list (empty or otherwise) if able to rummage the container.
+  # Returns nil if unable to determine if container's contents (e.g. can't open it or rummage it).
+  def rummage_container(container)
+    container = "my #{container}" unless container.nil? || container =~ /^my /i
+    contents = DRC.bput("rummage #{container}", @@container_is_closed_patterns, @@rummage_success_patterns, @@rummage_failure_patterns)
+    case contents
+    when *@@rummage_failure_patterns
+      return nil
+    when *@@container_is_closed_patterns
+      return nil unless open_container?(container)
+      rummage_container(container)
+    else
+      # Get string of just the comma separated item list
+      contents = contents.match(/You rummage through .* and see (?:a|an|some) (?<items>.*)\./)[:items]
+
+      # Split at a, an, or some, but only when it follows a comma
+      # The last two items in the rummage list are never comma delimited, handle shortly
+      contents = contents.split(/, (?:a|an|some) /)
+
+      # Grab the last array element which is the final two items that are never comma
+      # delimited in game output, split them into their item descriptions
+      sub_contents = contents.pop.split(/ and (?:a|an|some) /)
+
+      # Tack those last two items back onto our item list array
+      contents = contents.concat(sub_contents)
+    end
+  end
+
+  # Gets a list of items by LOOK in the container.
+  # Returns a list (empty or otherwise) if able to look in the container.
+  # Returns nil if unable to determine if container's contents (e.g. can't open it or look in it).
+  def look_in_container(container)
+    container = "my #{container}" unless container.nil? || container =~ /^my /i
+    contents = DRC.bput("look in #{container}", @@container_is_closed_patterns, @@rummage_success_patterns, @@rummage_failure_patterns)
+    case contents
+    when *@@rummage_failure_patterns
+      return nil
+    when *@@container_is_closed_patterns
+      return nil unless open_container?(container)
+      look_in_container(container)
+    else
+      contents
+        .match(/In the .* you see (?:some|an|a) (?<items>.*)\./)[:items]
+        .split(/(?:,|and) (?:some|an|a)/)
+        .map(&:strip)
+    end
+  end
+
+  #########################################
+  # PUT AWAY ITEM
+  #########################################
+
+  # Puts away an item, optionally into a specific container.
+  # If no container specified then uses the default stow location.
+  # Can provide an array of containers to try, too, in case some might be full.
+  def put_away_item?(item, container = nil)
+    if container.is_a?(Array)
+      container.each do |c|
+        return true if put_away_item_safe?(item, c)
+      end
+      return false
+    end
+    put_away_item_safe?(item, container)
+  end
+
+  # Same as 'put_away_item_unsafe?' but ensures that
+  # the container argument is prefixed with 'my' qualifier.
+  def put_away_item_safe?(item, container = nil)
+    item = "my #{item}" if item && !(item =~ /^my /i)
+    container = "my #{container}" unless container.nil? || container =~ /^my /i
+    put_away_item_unsafe?(item, container)
+  end
+
+  # Puts away an item, optionally into a specific container, optionally
+  # using a container preposition (e.g. "ON shelf")
+  # If no container specified then uses the default stow location.
+  # If no preposition specified, defaults to "in" (e.g. "IN cabinet")
+  def put_away_item_unsafe?(item, container = nil, preposition = "in")
+    command = "put #{item} #{preposition} #{container}" if container
+    command = "stow #{item}" unless container
+    result = DRC.bput(command, @@container_is_closed_patterns, @@put_away_item_success_patterns, @@put_away_item_failure_patterns, @@put_away_item_retry_patterns)
+    case result
+    when *@@container_is_closed_patterns
+      return false unless container && open_container?(container)
+      return put_away_item_unsafe?(item, container)
+    when *@@put_away_item_retry_patterns
+      return put_away_item_unsafe?(item, container)
+    when *@@put_away_item_success_patterns
+      return true
+    when *@@put_away_item_failure_patterns
+      return false
+    else
+      return false
+    end
+  end
+
+  #########################################
+  # OPEN/CLOSE CONTAINERS
+  #########################################
+
+  def open_container?(container)
+    case DRC.bput("open #{container}", @@open_container_success_patterns, @@open_container_failure_patterns)
+    when *@@open_container_success_patterns
+      return true
+    end
+    return false
+  end
+
+  def close_container?(container)
+    case DRC.bput("close #{container}", @@close_container_success_patterns, @@close_container_failure_patterns)
+    when *@@close_container_success_patterns
+      return true
+    end
+    return false
+  end
+
+  #########################################
+  # GIVE/ACCEPT ITEM
+  #########################################
+
+  def give_item?(target, item)
+    # An offer expires after 30 seconds.
+    # The timeout is set to 35 to give some buffer for clock skew.
+    case DRC.bput("give my #{item} to #{target}", { 'timeout' => 35 }, "has accepted your offer", "has declined the offer", "Your offer to .* has expired", "You may only have one outstanding offer at a time", "What is it you're trying to give", "There's nothing in your right hand to give away")
+    when "has accepted your offer"
+      true
+    else
+      false
+    end
+  end
+
+  # If you accept then returns the name of the person whose offer you accepted. This serves as a "truthy" value, too.
+  # If you don't, or aren't able to, accept then returns false.
+  def accept_item?
+    case DRC.bput("accept", "You accept .* offer and are now holding", "You have no offers", "Both of your hands are full", "would push you over your item limit")
+    when /You accept (?<name>\w+)'s offer and are now holding/
+      Regexp.last_match[:name]
+    else
+      false
+    end
+  end
+
 end
-
-before_dying do
-  Flags.delete('disarm-trap-type')
-  Flags.delete('disarm-shift')
-  Flags.delete('more-traps')
-  Flags.delete('more-locks')
-  Flags.delete('glance-no-traps')
-  Flags.delete('glance-no-locks')
-  Flags.delete('full-lootpouch')
-end
-
-Pick.new

@@ -1,0 +1,205 @@
+custom_require.call(%w[common common-arcana common-items common-travel drinfomon events spellmonitor equipmanager])
+
+class SigilRecorder
+  include DRC
+  include DRCA
+  include DRCI
+  include DRCT
+
+	def initialize
+		require 'yaml'
+		@data = YAML.load(File.read("./scripts/data/base-sigils.yaml"))
+		@city_list = ['shard', 'crossing', 'riverhaven', 'other']
+		@sigil_list = ['abolition','congruence','induction','permutation','rarefaction', 'antipode','ascension','clarification','decay','evolution','integration','metamorphosis','nurture','paradox','unity']
+		@settings = get_settings
+		get_region
+		get_season #make sure we're recording sigils to the correct season
+		region_room_list #generate the walk_list array
+		generate_nogo_list
+		
+		Flags.add('danger-room', /.*begins to advance on you.*|You weave back and forth in a dance-like motion|You must be closer to use tactical abilities on your opponent/)
+		@walk_list.each do |roomid|
+			@data['nogo'].include?(roomid) ? next : (travel_result = walk_to(roomid, false))
+			respond("Travel Debug: #{travel_result} | Room Target: #{roomid}")
+			if Room.current.id == nil
+			  respond("Adding #{roomid} to nogo due to lack of visible room number in LOOK.")
+			  add_to_nogo(roomid)
+			  unstuck_me(roomid)
+			  next
+			end
+			if travel_result == true
+				@current_room = Room.current.id
+				DRCA.do_buffs(@settings, 'outdoors')
+				if check_room_data < 2
+				  @room_sigils = []
+				  get_season
+				  if find_sigil?
+				    next #skip this room because something went wrong or it is dangerous
+				  end
+				  respond("This room contains the following sigils #{@room_sigils}")
+				else
+				  respond("Sigils in this room already known")
+				end #if
+			else
+				respond('Unable to reach target room. Adding to no-go list and moving to next room.')
+				add_to_nogo(Room.current.id)
+				next
+			end #if
+			
+			write_to_file
+		end #do
+	end #initialize
+		
+		
+	def get_season
+		/^It is currently (\w+) and it is.*$/ =~ bput('time', /^It is currently.*/)
+		@season = $1
+	end #get_season
+	
+	
+	def get_region
+		case Room.current.image.downcase
+		when /ilithi|shard/
+		  @region = 'shard'
+		when /zoluren|crossing/
+		  @region = 'crossing'
+		when /therengia|riverhaven/
+		  @region = 'riverhaven'
+		else
+		  @region = 'other'
+		end #case
+		respond("Region detected: #{@region.capitalize}")
+	end
+	
+	
+	def check_room_data
+		room_array = []
+		room_matches = 0
+		@city_list.each do |city|
+		  @sigil_list.each do |sigil|
+		    @data.dig(city, sigil, @season).each do |number|
+			  if number != nil
+			    room_array.push(number)
+			  end
+			next
+			end
+		  next
+		  end
+		next
+		end
+		
+		room_array.compact
+		#respond("Full Room List: #{room_array}")
+		room_matches = room_array.count(@current_room)
+
+		respond("Current room (#{@current_room}) matches in data = #{room_matches}")
+		
+		return room_matches
+		
+	end #check_room_data
+	
+	def unstuck_me(target_room)
+		exit_list = Map[target_room].wayto
+		exit_list.each do |rnum, dir|
+		  Flags.add('room-detected', /Room Number: \d+/)
+		  fput("peer #{dir}")
+		  pause
+		  if Flags['room-detected']
+		    fput('retreat')
+		    fput(way)
+			Flags.delete('room-detected')
+			return
+		  end
+		end
+		respond('Cannot find a way out. Exiting script.')
+		write_to_file
+		exit
+	end #unstuck_me
+	
+	
+	def find_sigil? 
+		bput('weave', /You weave back and forth in a dance-like motion/, /You must be closer to use tactical abilities on your opponent/, /There is nothing else to face/)
+		if Flags['danger-room']
+		  add_to_nogo(Room.current.id)
+		  return true
+		end 
+		case line = bput('perceive sigil', @sigil_list, 'Roundtime', /^You recall.*/, /^Having recently been searched/, /You are too distracted/, /Something about/)
+		when /^You recall.*/
+		  respond('Room searched too recently')
+		  return true
+		when /You are too distracted/
+		  add_to_nogo(Room.current.id)
+		  return true
+		when /Something about/
+		  add_to_nogo(Room.current.id)
+		  return true
+		when /^Having recently been searched/
+		  return true
+		when *@sigil_list
+		  @room_sigils.push(line)
+		  respond("Found: #{@room_sigils}")
+		end
+		
+		respond("Array Length: #{@room_sigils.length}")
+		(@room_sigils.length == 2) ? (return false) : find_sigil?
+	end
+	
+	def region_room_list
+		data = Map.list.select do |room|
+		  room.image == Room.current.image
+		end
+
+		roomlist = []
+		data.each do |room|
+		  roomlist.push(room.id)
+		end
+
+		File.write('filtered_map.yaml', roomlist.to_yaml);
+		@walk_list = YAML.load(File.read("filtered_map.yaml"))
+		respond("Loaded #{@walk_list.length} rooms from YAML")
+	end #region_room_list
+	
+	def add_to_nogo(banroom)
+		@data['nogo'].push(banroom)
+		@data['nogo'].uniq
+		respond("Unsuitable room for sigil harvesting. Adding Room #{banroom} to no-go list.")
+		Flags.reset('danger-room')
+		pause 0.2
+	end #add_to_nogo
+	
+	
+	def generate_nogo_list
+	  respond("Pruning walk list to avoid combat. Current list size: #{@walk_list.length}")
+	  nogo_list = []
+	  @avoids = get_data('hunting').hunting_zones.values
+	  @data['nogo'] = (@data['nogo'] + nogo_list).uniq
+	  respond("No-go List: #{@data['nogo'].length}")
+	  @walk_list -= @data['nogo']
+	  respond("Walk list has been pruned. New list size: #{@walk_list.length}")
+	  respond('Starting in 10 seconds...')
+	  pause 10
+	end #generate_nogo_list
+	
+	
+	def write_to_file
+		@room_sigils.each do |sigil|
+		  if @data[@region][sigil][@season] == nil
+		    @data[@region][sigil][@season] = []
+		  end #if
+		  @data[@region][sigil][@season].push(@current_room)
+		  @data[@region][sigil][@season].uniq
+		  #respond("Adding to YAML: #{@data['shard'][sigil][@season]}")
+		next
+		end
+		
+		File.open("./scripts/data/base-sigils.yaml", "w") { |file| file.write(@data.to_yaml) }
+	end #write_to_file
+	
+end #SigilFinder
+
+before_dying do
+  Flags.delete('danger-room')
+  Flags.delete('room-detected')
+end
+
+SigilRecorder.new

@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#drinfomon
 =end
 
-$DRINFOMON_VERSION = '2.0.7'
+$DRINFOMON_VERSION = '2.0.8'
 
 no_kill_all
 no_pause_all
@@ -643,6 +643,10 @@ end
 parsing_info_output = false
 squelch_info_output = !UserVars.drinfomon_debug
 
+# For parsing `ltb info` output
+parsing_ltb_info_output = false
+squelch_ltb_info_output = !UserVars.drinfomon_debug
+
 # For parsing `played` output
 parsing_played_output = false
 squelch_played_output = !UserVars.drinfomon_debug
@@ -661,10 +665,6 @@ drinfomon_passive_delay = get_settings.drinfomon_passive_delay
 # To track when the last time was we checked experience/info.
 info_check_interval = drinfomon_passive_delay
 info_check_time = Time.now
-
-# To track when the last time was we checked experience modifiers.
-exp_mods_check_interval = drinfomon_passive_delay
-exp_mods_check_time = Time.now
 
 # Experience learning rates in order from 0/34 to 34/34
 learning_rates = [
@@ -834,6 +834,8 @@ exp_hook = proc do |server_string|
     if parsing_exp_output
       parsing_exp_output = false
       squelch_exp_output = false
+      # Don't remove the `exp all` hook here, leave it active.
+      # It's designed to parse the continuous stream of exp pulses.
     end
   end
 
@@ -885,6 +887,8 @@ exp_mods_hook = proc do |server_string|
     if parsing_exp_mods_output
       parsing_exp_mods_output = false
       squelch_exp_mods_output = false
+      # We've parsed what we need, remove this hook for performance.
+      DownstreamHook.remove('exp_mods_hook')
     end
   end
   if parsing_exp_mods_output && squelch_exp_mods_output
@@ -896,6 +900,7 @@ end
 # This hook parses `info` to track your stats.
 #
 # Sample XML:
+#
 # ---
 # <output class="mono"/>
 # Name: Agonar Dokona   Race: Human   Guild: Barbarian
@@ -968,9 +973,74 @@ info_hook = proc do |server_string|
     if parsing_info_output
       parsing_info_output = false
       squelch_info_output = false
+      # Don't remove the `info` hook here, leave it active.
+      # It's designed to parse the data anytime `info` command runs.
     end
   end
   if parsing_info_output && squelch_info_output
+    server_string = nil
+  end
+  server_string
+end
+
+# This hook parses `ltb info` to determine your premium benefits.
+#
+# Note, if you were premium but now aren't then `played` may still
+# show your account subscription level as premium (ugh).
+#
+# Sample XML:
+#
+# ---
+# As of your last logon:
+#   Your premium service has been<pushBold/> continuous (consecutive)<popBold/> since 10/14/2021.
+#   You have a cumulative Premium time of 18 months.
+#   You have a cumulative Platinum time of 5 months.
+#
+#   Premium Points Earned: 1800
+#    Platinum Points Earned: 500
+#       Total Points Earned: 2300
+#
+#       Total Points Spent: 900
+#
+#  Unfinished Scroll Points: 0
+# Available Points to Spend: 1400
+#
+# For more information on LTBs, please check <d cmd="PREMIUM 7">PREMIUM 7</d>.
+# ---
+# You are not currently a Premium or Platinum subscriber.  Join today to take to advantage of the benfits!
+# Premium: http://www.play.net/dr/premium/
+# Platinum: http://www.play.net/dr/platinum/
+# You have a cumulative Premium time of 11 months.
+# ---
+ltb_info_hook = proc do |server_string|
+  case server_string
+  when /^As of your last logon:/
+    parsing_ltb_info_output = true
+    # This needs to be the string 'true' or 'false', not the boolean
+    # because it's used in the map.json like `UserVars.premium == 'true'`.
+    # So, right or wrong, the path of least resistance is to just
+    # set the variable to a string here even if you think it should be boolean.
+    #
+    # Special case, The Fallen is considered premium because they have
+    # access to Fang Cove and in order for maps.json paths to use Fang Cove
+    # then you need this variable set.
+    UserVars.premium = (XMLData.game == 'DRF').to_s
+  when /Your premium service has been/
+    if parsing_ltb_info_output
+      UserVars.premium = 'true'
+    end
+  when /^For more information on LTBs/
+    if parsing_ltb_info_output && squelch_ltb_info_output
+      server_string = nil
+    end
+    if parsing_ltb_info_output
+      parsing_ltb_info_output = false
+      squelch_ltb_info_output = false
+      # We've parsed what we need, remove this hook for performance.
+      DownstreamHook.remove('ltb_info_hook')
+    end
+  end
+  if parsing_ltb_info_output && squelch_ltb_info_output
     server_string = nil
   end
   server_string
@@ -1007,11 +1077,6 @@ played_hook = proc do |server_string|
     if parsing_played_output
       subscription = Regexp.last_match[:subscription]
       UserVars.subscription = subscription
-      # This needs to be the string 'true' or 'false', not the boolean
-      # because it's used in the map like `UserVars.premium == 'true'`.
-      # So, right or wrong, the path of least resistance is to just
-      # set the variable to a string here even if you think it should be boolean.
-      UserVars.premium = (subscription == 'Premium' || XMLData.game == 'DRF').to_s
     end
   when /In-game staff has no control over these dates or totals/
     if parsing_played_output && squelch_played_output
@@ -1020,6 +1085,8 @@ played_hook = proc do |server_string|
     if parsing_played_output
       parsing_played_output = false
       squelch_played_output = false
+      # We've parsed what we need, remove this hook for performance.
+      DownstreamHook.remove('played_hook')
     end
   end
   if parsing_played_output && squelch_played_output
@@ -1097,6 +1164,7 @@ before_dying do
   DownstreamHook.remove('exp_hook')
   DownstreamHook.remove('exp_mods_hook')
   DownstreamHook.remove('info_hook')
+  DownstreamHook.remove('ltb_info_hook')
   DownstreamHook.remove('played_hook')
   DownstreamHook.remove('status_hook')
 end
@@ -1105,6 +1173,7 @@ UpstreamHook.add('drinfomon', drinfomon_upstream_hook)
 DownstreamHook.add('exp_hook', exp_hook)
 DownstreamHook.add('exp_mods_hook', exp_mods_hook)
 DownstreamHook.add('info_hook', info_hook)
+DownstreamHook.add('ltb_info_hook', ltb_info_hook)
 DownstreamHook.add('played_hook', played_hook)
 DownstreamHook.add('status_hook', status_hook)
 
@@ -1115,28 +1184,101 @@ DownstreamHook.add('status_hook', status_hook)
 # Waiting until now to silence the script avoids that ambiguity.
 silence_me
 
-# Now that the hooks are registered,
-# do an initial parse of all the info!
-
-unless dead?
+# Checks `info`, squelching the output to the user.
+# A downstream hook defined above parses the data.
+check_info = proc do
+  DownstreamHook.add('info_hook', info_hook)
   squelch_info_output = !UserVars.drinfomon_debug
   fput('info')
 end
 
-squelch_exp_output = !UserVars.drinfomon_debug
-fput('exp all')
+# Designed to be called by other scripts
+# that want `info` to be parsed.
+# We use this method because it has access to
+# set the squelch variable to reduce spamming the player.
+define_singleton_method(:check_info) do
+  check_info.call
+end
 
-squelch_exp_mods_output = !UserVars.drinfomon_debug
-fput('exp mods')
+# Checks `ltb info`, squelching the output to the user.
+# A downstream hook defined above parses the data.
+check_ltb_info = proc do
+  DownstreamHook.add('ltb_info_hook', ltb_info_hook)
+  squelch_ltb_info_output = !UserVars.drinfomon_debug
+  fput('ltb info')
+end
 
-squelch_played_output = !UserVars.drinfomon_debug
-fput('played')
+# Designed to be called by other scripts
+# that want `ltb info` to be parsed.
+# We use this method because it has access to
+# set the squelch variable to reduce spamming the player.
+define_singleton_method(:check_ltb_info) do
+  check_ltb_info.call
+end
 
+# Checks `played`, squelching the output to the user.
+# A downstream hook defined above parses the data.
+check_played = proc do
+  DownstreamHook.add('played_hook', played_hook)
+  squelch_played_output = !UserVars.drinfomon_debug
+  fput('played')
+end
+
+# Designed to be called by other scripts
+# that want `played` to be parsed.
+# We use this method because it has access to
+# set the squelch variable to reduce spamming the player.
+define_singleton_method(:check_played) do
+  check_played.call
+end
+
+# Checks `exp all`, squelching the output to the user.
+# A downstream hook defined above parses the data.
+check_exp_all = proc do
+  DownstreamHook.add('exp_hook', exp_hook)
+  squelch_exp_output = !UserVars.drinfomon_debug
+  fput('exp all')
+end
+
+# Designed to be called by other scripts
+# that want `exp all` to be parsed.
+# We use this method because it has access to
+# set the squelch variable to reduce spamming the player.
+define_singleton_method(:check_exp_all) do
+  check_exp_all.call
+end
+
+# Checks `exp mods`, squelching the output to the user.
+# A downstream hook defined above parses the data.
+check_exp_mods = proc do
+  DownstreamHook.add('exp_mods_hook', exp_mods_hook)
+  squelch_exp_mods_output = !UserVars.drinfomon_debug
+  fput('exp mods')
+end
+
+# Designed to be called by other scripts
+# that want `exp mods` to be parsed to learn
+# current buffs/curses affecting effective ranks.
+# We use this method because it has access to
+# set the squelch variable to reduce spamming the player.
+# For example, `skill-recorder` script.
+define_singleton_method(:check_exp_mods) do
+  check_exp_mods.call
+end
+
+# Now call our procs to do an initial parsing
+# of the character's info, experience, and subscritpion level.
+# However, don't call `check_exp_mods` here; that's handled by `skill-recorder` script.
+check_info.call unless dead?
+check_ltb_info.call
+check_played.call
+check_exp_all.call
+
+# Start loop to process incoming data.
 while line = script.gets
   begin
     if line =~ /^\* Log-on system converted \d+% of your character/
-      squelch_exp_output = !UserVars.drinfomon_debug
-      fput('exp all')
+      check_exp_all.call
     elsif line =~ /^#{$lich_char}banks$/
       if CharSettings['bank_accounts'].empty?
         respond
@@ -1256,17 +1398,9 @@ while line = script.gets
     # The polling interval reduces spamming commands while new characters
     # work on joining a guild or while commoners thrive guildless.
     if DRStats.guild.nil? && !dead? && (Time.now - info_check_time > info_check_interval)
-      squelch_exp_output = !UserVars.drinfomon_debug
-      fput('exp all')
-      squelch_info_output = !UserVars.drinfomon_debug
-      fput('info')
+      check_exp_all.call
+      check_info.call
       info_check_time = Time.now
-    end
-    # Periodically check for any exp modifiers (buffs or curses)
-    if (Time.now - exp_mods_check_time > exp_mods_check_interval)
-      squelch_exp_mods_output = !UserVars.drinfomon_debug
-      fput('exp mods')
-      exp_mods_check_time = Time.now
     end
   rescue
     echo $ERROR_INFO

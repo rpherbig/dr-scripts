@@ -8,16 +8,28 @@ class SigilRecorder
 	require 'yaml'
 
 	def initialize
+    arg_definitions = [
+      [
+        { name: 'debug', regex: /debug/i, optional: true, description: 'Show debug messaging' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+
+    args.debug == 'debug' ? @debug = true : @debug = false
+
 		#initialize arrays for supported towns, sigils, and seasons
 		@city_list = ['Crossing', 'Riverhaven', 'Shard']
 		@sigil_list = ['abolition','congruence','induction','permutation','rarefaction', 'antipode','ascension','clarification','decay','evolution','integration','metamorphosis','nurture','paradox','unity']
 		@season_list = ['summer', 'fall', 'winter', 'spring']
+    @start_room = Room.current.id
 
 		#pull data and settings and store the current region and season
 		@data = get_data('sigils')
 		@settings = get_settings
 		@region = get_region #parse Room.current.image for which region/city we're in
 		@season = get_season #make sure we're recording sigils to the correct season
+    @hunting_zones = get_data('hunting').hunting_zones.values.flatten.uniq!
 		
 		#generate an array of all the room numbers associated with the current room's Room.current.image value
 		region_list = region_room_list
@@ -25,11 +37,11 @@ class SigilRecorder
 		walk_list = generate_nogo_list(region_list)
 		
 		#debug info
-		DRC.message("Region detected: #{@region}")
-		DRC.message("Season detected: #{@season.capitalize}")
+		DRC.message("Region detected: #{@region}") if @debug
+		DRC.message("Season detected: #{@season.capitalize}") if @debug
 
 		#perform any outdoorsmanship buffs as this is the skill that governs sigil hunting
-		DRC.message("Checking for \"outdoors\" waggle set...")
+		DRC.message("Checking for 'outdoors' waggle set...") if @debug
 		DRCA.do_buffs(@settings, 'outdoors') #perc sigil uses Outdoorsmanship
 		
 		#flag known patterns that suggest the room is unsuitable for sigil hunting or harvesting
@@ -41,9 +53,9 @@ class SigilRecorder
 			#check if the room title is in the 'banpatterns' array before travelling there. Skip and add to nogo if a match is found
 			banflag = false
 			@data.SigilInfo['banpatterns'].each do |pattern|
-				if Map[roomid].title.to_s.include? pattern
-					add_to_nogo(roomid, @data)
-					DRC.message("Match found in 'banpatterns'. Adding #{roomid} to nogo.")
+				if Map[roomid].title.to_s.include?(pattern)
+					prune_walk_list(roomid, @data)
+					DRC.message("Match found in 'banpatterns'. Adding #{roomid} to nogo.") if @debug
 					banflag = true
 				end
 			end
@@ -51,7 +63,7 @@ class SigilRecorder
 
 			#store whether the attempt to travel to the target room was successful
 			if check_room_data(roomid) >= 2 #Checking for known sigils for this room. If 2 are known, skip room.
-				DRC.message("Sigils in target room (#{roomid}) already known. Skipping...") 
+				DRC.message("Sigils in target room (#{roomid}) already known. Skipping...") if @debug
 				pause 0.1
 				next
 			else
@@ -61,12 +73,12 @@ class SigilRecorder
 			#check buffs in the event they're running low
 			DRCA.do_buffs(@settings, 'outdoors')
 			#debug info
-			DRC.message("Travel Success? #{travel_result} | Room Target: #{roomid}")
+			DRC.message("Travel Success? #{travel_result} | Room Target: #{roomid}") if @debug
 
 			#if the current room is lacking a roomid or associated image file then we're likely in a bad room, banlist the room and attempt to navigate out
 			if Room.current.id == nil || Room.current.image == nil
-			  DRC.message("Adding #{roomid} to nogo due to lack of visible room number in LOOK.")
-			  add_to_nogo(roomid, @data)
+			  DRC.message("Adding #{roomid} to nogo due to lack of detected room number.") if @debug
+			  prune_walk_list(roomid, @data)
 			  unstuck_me(roomid)
 			  next
 			end
@@ -77,24 +89,26 @@ class SigilRecorder
 				record_sigil(sigils, @data) #write found sigils to file
 			else
 				#if the room was not reached successfully we assume it is unreachable and banlist it
-				DRC.message('Unable to reach target room. Adding to no-go list and moving to next room.')
-				add_to_nogo(roomid, @data) #write to nogo list in file
+				DRC.message('Unable to reach target room. Adding to no-go list and moving to next room.') if @debug
+				prune_walk_list(roomid, @data) #write to nogo list in file
 			end #if
 		end #do
 
+    #do one more round of pruning to remove any rooms on the nogo list from sigil data then walk back to where the script was started and exit
 		prune_final_list
+    DRCT.walk_to(@start_room)
 	end #initialize
 		
 	#returns the current season by parsing results of 'time' verb
 	def get_season
 		timestring = DRC.bput('time', /^It is currently.*/, /^The clerk says/)
 		if /^The clerk says/ =~ timestring #Annoyingly, this verb does something when near some NPCs. SIGH.
-		  DRC.message("The TIME verb does not work in this room.")
-		  add_to_nogo(Room.current.id, @data) #banlist annoying rooms where the 'time' verb works differently
+		  DRC.message("The TIME verb does not work in this room.") if @debug
+		  prune_walk_list(Room.current.id, @data) #banlist annoying rooms where the 'time' verb works differently
 		  return false
 		end
 		/^It is currently (\w+) and it is.*$/ =~ timestring
-		return $1
+		return $1.downcase
 	end #get_season
 	
 	#detects the current region by comparing Room.current.image with region and city name patterns
@@ -107,7 +121,7 @@ class SigilRecorder
 		when /therengia|Riverhaven/i
 		  region = 'Riverhaven'
 		else
-		  DRC.message("Unsupported area. Sigilrecorder only supports areas where the associated map image file references Crossing, Shard, Riverhaven or their associated provinces. Current map image:#{Room.current.image}")
+		  DRC.message("Unsupported area. Sigilrecorder only supports areas where the associated map image file references Crossing, Shard, Riverhaven or their associated provinces. Current map image:#{Room.current.image}") if @debug
 		  exit
 		end #case
 		return region
@@ -129,32 +143,31 @@ class SigilRecorder
 		room_array.compact
 		room_matches = room_array.count(roomid)
 
-		DRC.message("Target room (#{roomid}) matches in data = #{room_matches}")
+		DRC.message("Target room (#{roomid}) matches in data = #{room_matches}") if @debug
 		
 		#return the number of instances of roomid
 		return room_matches
 	end #check_room_data
 	
-	#attempts to navigate out of a room lacking important data
-	def unstuck_me(target_room)
-		#Check the exits to the room we think we're in in Mapdb. Store the exits in an array then loop through it.
-		exit_list = Map[target_room].wayto
-		exit_list.each do |rnum, dir|
-		  #flag to listen for room numbers appearing in 'peer' info
-		  Flags.add('sigil-room-detected', /Room Number: \d+/)
-		  DRC.bput("peer #{dir}", /You peer/, /You see/, /\[Usage:/)
-		  pause 0.5
-		  #if we detected a room nubmer, move in that direction and return
-		  if Flags['sigil-room-detected']
-		    DRC.retreat
-		    fput(way)
-			Flags.reset('sigil-room-detected')
-			return
-		  end
-		end
-		#If we are unable to find a mapped exit, write the original target room to nogo and disconnect as a safety measure
+	#attempts to navigate out of a room lacking a roomid (something that confuses go2 on which we rely) most often caused by day/night issues in a room
+	def unstuck_me(stuck_room)
+		#Use the room we think we're in to plot a path back to our starting point, if at any point along the path Room.current.id becomes recognized again, return and resume the script
+    prune_walk_list(stuck_room, @data) #add the detected bad room to nogo
+		escape_list = Map[stuck_room].path_to(@start_room)
+    current_room = stuck_room
+		escape_list.each do |roomid|
+      DRC.message("We might be in room #{current_room.to_s}.")
+      direction = Map[current_room].wayto[roomid.to_s]
+      DRC.message("Trying move command: #{direction.to_s}.")
+      move direction
+      waitrt?
+      pause 1
+      current_room = roomid
+      return if Room.current.id != nil
+    end
+    return if Room.current.id != nil
+    #If we are unable to find a mapped exit give up and exit the script
 		DRC.message('Cannot find a way out. Exiting script.')
-		add_to_nogo(target_room, @data)
 		exit
 	end #unstuck_me
 	
@@ -165,26 +178,26 @@ class SigilRecorder
 			#weave is a 0 RT way of detecting enemies in the room. It will auto face enemies but will not harass players or NPCs. After weaving check if the danger-room flag has tripped
 			DRC.bput('weave', /You weave back and forth in a dance-like motion/, /You must be closer to use tactical abilities on your opponent/, /There is nothing else to face/)
 			if Flags['sigil-danger-room']
-			  add_to_nogo(Room.current.id, @data) unless Room.current.id == nil
+			  prune_walk_list(Room.current.id, @data) unless Room.current.id == nil
 			  return nil
 			end 
 
 			#main 'perc sigil' DRC.bput and case statement. When sigils are detected they're added to an array
 			case line = DRC.bput('perceive sigil', @sigil_list, 'Roundtime', /^You recall.*/, /^Having recently been searched/, /You are too distracted/, /Something about|This is not an appropriate place for that/)
 			when /^You recall.*/
-			  DRC.message('Room searched too recently')
+			  DRC.message('Room searched too recently') if @debug
 			  return nil
 			when /You are too distracted/
-			  add_to_nogo(Room.current.id, @data)
+			  prune_walk_list(Room.current.id, @data)
 			  return nil
 			when /Something about|This is not an appropriate place for that/
-			  add_to_nogo(Room.current.id, @data)
+			  prune_walk_list(Room.current.id, @data)
 			  return nil
 			when /^Having recently been searched/
 			  return nil
 			when *@sigil_list
 			  room_sigils.push(line)
-			  DRC.message("Found: #{room_sigils}")
+			  DRC.message("Found: #{room_sigils}") if @debug
 			end
 		end #while
 
@@ -199,49 +212,43 @@ class SigilRecorder
 		end
 
 		#generate the array
-		roomlist = []
-		data.each do |room|
-		  roomlist.push(room.id)
-		end
+		roomlist = Map.list.select { |room| room.image == Room.current.image }.map(&:id)
 
 		#return the full list of rooms
 		return roomlist
 	end #region_room_list
 	
 	#writes a roomid to the nogo list which is subtracted from the walk_list when the script is run in the future
-	def add_to_nogo(banroom, file_data)
+	def prune_walk_list(banroom, file_data)
 		#initialize a new array if nogo is empty
-		if file_data.SigilInfo['nogo'] == nil
-		  file_data.SigilInfo['nogo'] = []
-		end
+		file_data.SigilInfo['nogo'] ||= []
 
 		#push the roomid to the array and remove any duplicates
-		file_data.SigilInfo['nogo'].push(banroom)
-		file_data.SigilInfo['nogo'].uniq
+		file_data.SigilInfo['nogo'].push(banroom) unless file_data.SigilInfo['nogo'].include?(banroom)
 
 		#alert the player which room has been added to the nogo list
-		DRC.message("Unsuitable room for sigil harvesting. Adding Room #{banroom} to no-go list.")
+		DRC.message("Unsuitable room for sigil harvesting. Adding Room #{banroom} to no-go list.") if @debug
 		File.open("scripts/data/base-sigils.yaml", "w") { |file| file.write(file_data.to_yaml) } #write roomid to file
 		Flags.reset('sigil-danger-room')
 		pause 0.2
-	end #add_to_nogo
+	end #prune_walk_list
 	
 	#reads base hunting data and combines all rooms with rooms from nogo into a single array
 	def generate_nogo_list(room_list)
-		DRC.message("Pruning walk list to avoid combat. Current list size: #{room_list.length}")
-		ban_list = get_data('hunting').hunting_zones.values.flatten.uniq
-		ban_list += @data.SigilInfo['nogo']
+		DRC.message("Pruning walk list to avoid combat. Current list size: #{room_list.length}") if @debug
+		ban_list = @hunting_zones
+		ban_list += @data.SigilInfo['nogo'] unless @data.SigilInfo['nogo'] == nil
 
 		#subtract array of potentially dangerous rooms from the room list that was passed in
 		room_list -= ban_list
-		DRC.message("Walk list has been pruned. New list size: #{room_list.length}")
+		DRC.message("Walk list has been pruned. New list size: #{room_list.length}") if @debug
 		pause 1
 		return room_list #pruned, safer roomlist is returned
 	end #generate_nogo_list
 
 	#remove any rooms in the nogo list from recorded sigil locations before the script exits
 	def prune_final_list
-		ban_list = get_data('hunting').hunting_zones.values.flatten.uniq
+		ban_list = @hunting_zones
 		ban_list += @data.SigilInfo['nogo']
 
 		@city_list.each do |city|
@@ -257,7 +264,8 @@ class SigilRecorder
 	def record_sigil(found_sigils, file_data)
 
 		#check to make sure the sigil array passed in is not empty
-		DRC.message("Writing following data to base-sigils: #{found_sigils}") unless found_sigils.length == 0
+
+    DRC.message("Writing following data to base-sigils: #{found_sigils}") if @debug
 
 		#loop through the sigils and place them in the correct spot in @data
 		found_sigils.each do |sigil|
@@ -266,8 +274,7 @@ class SigilRecorder
 		    file_data.SigilInfo[@region][sigil][@season] = []
 		  end
 		  #push the current roomid into the hash/array under the correct region, sigil, and season keys
-		  file_data.SigilInfo[@region][sigil][@season].push(Room.current.id)
-		  file_data.SigilInfo[@region][sigil][@season].to_set
+		  file_data.SigilInfo[@region][sigil][@season].push(Room.current.id) unless file_data.SigilInfo[@region][sigil][@season].include?(Room.current.id)
 		end
 		
 		#before writing, ensure the season has not changed resulting in potentially invalid data

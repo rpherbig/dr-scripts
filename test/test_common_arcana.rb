@@ -40,7 +40,7 @@ class TestDRCA < Minitest::Test
       DRCA.const_set("DRC", DRC) unless defined?(DRCA::DRC)
       DRCA.const_set("DRCI", DRCI) unless defined?(DRCA::DRCI)
 
-      seen_planets = DRCA.find_visible_planets(['a planet', 'another planet'])
+      seen_planets = DRCMM.find_visible_planets(['a planet', 'another planet'])
       assert_empty(seen_planets)
     end)
   end

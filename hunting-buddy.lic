@@ -26,11 +26,14 @@ class HuntingBuddy
     @stop_on_high_threshold = @settings.stop_on_high_threshold
     echo("  @stop_on_high_threshold: #{@stop_on_high_threshold}") if $debug_mode_hunting
 
-    @magic_exp_threshold = @settings.magic_exp_training_max_threshold
-    @magic_skills = ['Arcane Magic', 'Holy Magic', 'Life Magic', 'Elemental Magic',\
-                     'Lunar Magic', 'Attunement', 'Arcana', 'Targeted Magic', 'Inner Fire',\
-                     'Inner Magic', 'Augmentation', 'Debilitation', 'Utility', 'Warding', 'Sorcery']
-    echo("  @magic_exp_threshold: #{@magic_exp_threshold}") if $debug_mode_hunting
+    @skillset_exp_thresholds = {
+      'Armor' => @settings.armor_exp_training_max_threshold,
+      'Weapon' => @settings.weapon_exp_training_max_threshold,
+      'Magic' => @settings.magic_exp_training_max_threshold,
+      'Survival' => @settings.survival_exp_training_max_threshold,
+      'Lore' => @settings.lore_exp_training_max_threshold
+    }
+    echo("  @skillset_exp_thresholds: #{@skillset_exp_thresholds}") if $debug_mode_hunting
 
     @hunting_buddies_max = @settings.hunting_buddies_max
     echo("  @hunting_buddies_max: #{@hunting_buddies_max}") if $debug_mode_hunting
@@ -132,14 +135,14 @@ class HuntingBuddy
           next
         end
 
-      if all_skills_at_cap?(stop_on_high_skills)
+      if should_stop_for_high_skills?(stop_on_high_skills)
         DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold: #{stop_on_high_skills}")
         stop_actions(during_actions)
         execute_actions(after_actions)
         next
       end
 
-      if stop_on_low_skills_too_low?(stop_on_low_skills)
+      if should_stop_for_low_skills?(stop_on_low_skills)
         DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold: #{stop_on_low_skills}")
         stop_actions(during_actions)
         execute_actions(after_actions)
@@ -301,17 +304,76 @@ class HuntingBuddy
     true
   end
 
-  def all_skills_at_cap?(stop_on_high_skills)
-    stop_on_high_skills && !stop_on_high_skills.empty? && stop_on_high_skills.flatten.all? { |skill| DRSkill.getxp(skill) >= (@magic_skills.include?(skill) ? @magic_exp_threshold : @stop_on_high_threshold) }
+  # ------------------------------------------------------------
+
+  # Identify if every skill in the given list has a learning rate
+  # at or above the desired threshold for their skillset.
+  def should_stop_for_high_skills?(stop_on_high_skills = [])
+    stop_on_high_skills && !stop_on_high_skills.empty? && stop_on_high_skills.flatten.all? do |skill|
+      DRSkill.getxp(skill) >= get_skill_exp_high_threshold(skill)
+    end
   end
 
-  def stop_on_low_skills_too_low?(stop_on_low_skills)
-    stop_on_low_skills && stop_on_low_skills.flatten.any? { |skill| DRSkill.getxp(skill) < @stop_on_low_threshold }
+  # Identify if at least one skill in the given list has a learning rate
+  # at or below the desired threshold for their skillset.
+  def should_stop_for_low_skills?(stop_on_low_skills = [])
+    stop_on_low_skills && !stop_on_low_skills.empty? && stop_on_low_skills.flatten.any? do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_low_threshold(skill)
+    end
   end
+
+  # ------------------------------------------------------------
+
+  # Identify the skills in the given list
+  # that have not yet met their learning rate thresholds
+  # and so we should continue hunting.
+  def get_skills_below_high_threshold(stop_on_high_skills = [])
+    stop_on_high_skills.flatten.select do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_high_threshold(skill)
+    end
+  end
+
+  # Identify the skills in the given list
+  # that have fallen below their learning rate thresholds
+  # and so we should stop hunting to go work on them.
+  # Usually, these are non-combat skills like locksmithing or crafting.
+  def get_skills_below_low_threshold(stop_on_low_skills = [])
+    stop_on_low_skills.flatten.select do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_low_threshold(skill)
+    end
+  end
+
+  # ------------------------------------------------------------
+
+  # What is the learning rate high threshold at which point we should stop hunting?
+  def get_skill_exp_high_threshold(skill)
+    get_skillset_exp_high_threshold(DRSkill.getskillset(skill))
+  end
+
+  # What is the learning rate high threshold at which point we should stop hunting?
+  def get_skillset_exp_high_threshold(skillset)
+    @skillset_exp_thresholds[skillset] || @stop_on_high_threshold
+  end
+
+  # ------------------------------------------------------------
+
+  # What is the learning rate low threshold at which point we should stop hunting?
+  def get_skill_exp_low_threshold(skill)
+    get_skillset_exp_low_threshold(DRSkill.getskillset(skill))
+  end
+
+  # What is the learning rate low threshold at which point we should stop hunting?
+  def get_skillset_exp_low_threshold(skillset)
+    @stop_on_low_threshold
+  end
+
+  # ------------------------------------------------------------
 
   def over_box_limit?
     $COMBAT_TRAINER.get_process('loot').at_box_limit?
   end
+
+  # ------------------------------------------------------------
 
   def hunt(args, duration, stop_on_high_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
     $COMBAT_TRAINER = nil
@@ -350,11 +412,11 @@ class HuntingBuddy
         DRC.message("***STATUS*** Stopping because no moons")
         break
       end
-      if all_skills_at_cap?(stop_on_high_skills)
+      if should_stop_for_high_skills?(stop_on_high_skills)
         DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_high_skills}")
         break
       end
-      if stop_on_low_skills_too_low?(stop_on_low_skills)
+      if should_stop_for_low_skills?(stop_on_low_skills)
         DRC.message("***STATUS*** Stopping because skills dropped below learning threshold: #{stop_on_low_skills}")
         break
       end
@@ -382,12 +444,16 @@ class HuntingBuddy
       if (counter % 60).zero?
         if duration
           if stop_on_high_skills
-            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_high_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{get_skills_below_high_threshold(stop_on_high_skills).join(', ')}")
           else
             DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining")
           end
         else
-          DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_high_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          if stop_on_high_skills
+            DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{get_skills_below_high_threshold(stop_on_high_skills).join(', ')}")
+          else
+            DRC.message("***STATUS*** #{counter / 60} minutes of hunting")
+          end
         end
       end
       counter += 1

@@ -79,6 +79,7 @@ class HuntingBuddy
       stop_on_low_skills = info['stop_on_low'] # list of skill names
       stop_on_boxes = info['boxes'] || info['stop_on_boxes'] # boolean
       stop_on_no_moons = info['moons'] || info['stop_on_moons'] # boolean
+      stop_on_encumbrance = info['stop_on_encumbrance'] # numeric threshold
       hunting_zones = [info[:zone]].flatten.compact # string or list of hunting zones
       waiting_room = info['full_waiting_room'] || @settings.safe_room # room id
 
@@ -93,6 +94,7 @@ class HuntingBuddy
         echo("  stop_on_low_skills: #{stop_on_low_skills}")
         echo("  stop_on_boxes: #{stop_on_boxes}")
         echo("  stop_on_no_moons: #{stop_on_no_moons}")
+        echo("  stop_on_encumbrance: #{stop_on_encumbrance}")
         echo("  hunting_zones: #{hunting_zones}")
         echo("  waiting_room: #{waiting_room}")
       end
@@ -127,8 +129,15 @@ class HuntingBuddy
         DRC.message("***STATUS*** Skipping hunt because no moons")
         stop_actions(during_actions)
         execute_actions(after_actions)
-          next
-        end
+        next
+      end
+
+      if encumbered?(stop_on_encumbrance)
+        DRC.message("***STATUS*** Skipping hunt because encumbrance: #{DRStats.encumbrance}, threshold: #{stop_on_encumbrance}")
+        stop_actions(during_actions)
+        execute_actions(after_actions)
+        next
+      end
 
       if should_stop_for_high_skills?(stop_on_high_skills)
         DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold: #{stop_on_high_skills}")
@@ -165,7 +174,8 @@ class HuntingBuddy
           stop_on_high_skills ? stop_on_high_skills[index] : nil,
           stop_on_low_skills ? stop_on_low_skills[index] : nil,
           stop_on_boxes ? stop_on_boxes[index] : nil,
-          stop_on_no_moons ? stop_on_no_moons[index] : nil
+          stop_on_no_moons ? stop_on_no_moons[index] : nil,
+          stop_on_encumbrance ? stop_on_encumbrance[index] : nil
         )
       end
 
@@ -364,6 +374,16 @@ class HuntingBuddy
 
   # ------------------------------------------------------------
 
+  # Is your current encumbrance at or higher than the threshold?
+  # Threshold is a number from 0 (None) to 11 (It's amazing you aren't squashed!)
+  def encumbered?(threshold)
+    return false unless threshold
+    threshold = [[0, threshold.to_i].max, 11].min # ensure in range
+    return DRC.check_encumbrance >= threshold
+  end
+
+  # ------------------------------------------------------------
+
   # Have you reached your lower bound for box count?
   # Designed to be called before combat-trainer starts
   # as a way to avoid hunting if you already have enough boxes.
@@ -381,7 +401,7 @@ class HuntingBuddy
 
   # ------------------------------------------------------------
 
-  def hunt(args, duration, stop_on_high_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
+  def hunt(args, duration, stop_on_high_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons, stop_on_encumbrance)
     $COMBAT_TRAINER = nil
     hunting_room = Room.current.id
     Flags.add('hunting-buddy-familiar-drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
@@ -448,6 +468,12 @@ class HuntingBuddy
         Flags.reset('hunting-buddy-familiar-drag')
       end
       if (counter % 60).zero?
+        # To avoid spamming encumbrance checks, this logic is inside
+        # the one minute status update section so it's done only periodically.
+        if encumbered?(stop_on_encumbrance)
+          DRC.message("***STATUS*** Stopping because encumbrance: #{DRStats.encumbrance}, threshold: #{stop_on_encumbrance}")
+          break
+        end
         if duration
           if stop_on_high_skills
             DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{get_skills_below_high_threshold(stop_on_high_skills).join(', ')}")

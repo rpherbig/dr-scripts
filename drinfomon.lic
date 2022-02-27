@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#drinfomon
 =end
 
-$DRINFOMON_VERSION = '2.0.14'
+$DRINFOMON_VERSION = '2.0.20'
 
 no_kill_all
 no_pause_all
@@ -301,10 +301,10 @@ class DRSkill
   attr_writer :rank, :exp, :percent, :current, :baseline
 
   def initialize(name, rank, exp, percent)
-    @name = name
-    @rank = rank.to_i
-    @exp = exp.to_i
-    @percent = percent.to_i
+    @name = name # skill name like 'Evasion'
+    @rank = rank.to_i # earned ranks in the skill
+    @exp = exp.to_i # learning rate in the skill from 0 to 34
+    @percent = percent.to_i # percent to next rank from 0 to 100
     @baseline = rank.to_i + (percent.to_i / 100.0)
     @current = rank.to_i + (percent.to_i / 100.0)
     @skillset = lookup_skillset(@name)
@@ -317,18 +317,41 @@ class DRSkill
     @@list.each { |skill| skill.baseline = skill.current }
   end
 
+  # Primarily used by `learned` script to track how long it's
+  # been tracking your experience gains this session.
   def self.start_time
     @@start_time
   end
 
+  # List of skills that have increased their learning rates.
+  # Primarily used by `exp-monitor` script to echo which skills
+  # gained experience after you performed an action.
   def self.gained_skills
     @@gained_skills
   end
 
+  # Returns the amount of ranks that have been gained since
+  # the baseline was last reset. This allows you to track
+  # rank gain for a given play session.
+  #
+  # Note, don't confuse the 'exp' in this method name with DRSkill.getxp(..)
+  # which returns the current learning rate of the skill.
   def self.gained_exp(val)
     skill = self.find_skill(val)
     if skill
       return skill.current ? (skill.current - skill.baseline).round(2) : 0.00
+    end
+  end
+
+  # Updates DRStats.gained_skills if the learning rate increased.
+  # The original consumer of this data is the `exp-monitor` script.
+  def self.handle_exp_change(name, new_exp)
+    return unless UserVars.echo_exp
+
+    old_exp = DRSkill.getxp(name)
+    change = new_exp.to_i - old_exp.to_i
+    if change > 0
+      DRSkill.gained_skills << { skill: name, change: change }
     end
   end
 
@@ -337,6 +360,7 @@ class DRSkill
   end
 
   def self.update(name, rank, exp, percent)
+    self.handle_exp_change(name, exp)
     skill = self.find_skill(name)
     if skill
       skill.rank = rank.to_i
@@ -741,21 +765,21 @@ balance_values = [
 # The examples below show both variants.
 #
 # FLAG BRIEFEXP ON
-regex_flag_briefexp_on = %r{<component id='exp .*?<d cmd='skill (?<skill>[\w\s]+)'.*:\s+(?<rank>\d+)\s+(?<percent>\d+)%\s*\[\s?(?<rate>\d+)\/34\].*?<\/component>}
+regex_flag_briefexp_on = %r{<component id='exp .*?<d cmd='skill (?<skill>[a-zA-Z\s]+)'.*:\s+(?<rank>\d+)\s+(?<percent>\d+)%\s*\[\s?(?<rate>\d+)\/34\].*?<\/component>}
 # <component id='exp Augmentation'><preset id='whisper'><d cmd='skill Augmentation'>     Aug</d>:  565 39%  [ 2/34]</preset></component>
 # <component id='exp Utility'><d cmd='skill Utility'>    Util</d>:  562 56%  [ 3/34]</component>
 # ---
 # FLAG BRIEFEXP OFF
-regex_flag_briefexp_off = %r{<component id='exp .*?\b(?<skill>[\w\s]+)\b:\s+(?<rank>\d+)\s+(?<percent>\d+)%\s+\b(?<rate>[\w\s]+)\b.*?<\/component>}
+regex_flag_briefexp_off = %r{<component id='exp .*?\b(?<skill>[a-zA-Z\s]+)\b:\s+(?<rank>\d+)\s+(?<percent>\d+)%\s+\b(?<rate>[a-zA-Z\s]+)\b.*?<\/component>}
 # <component id='exp Augmentation'><preset id='whisper'>    Augmentation:  565 39% learning     </preset></component>
 # <component id='exp Utility'>         Utility:  562 57% learning     </component>
 # ---
 # Empty mindstate
-regex_exp_clear_mindstate = %r{<component id='exp (?<skill>.*)'><\/component>}
+regex_exp_clear_mindstate = %r{<component id='exp (?<skill>[a-zA-Z\s]+)'><\/component>}
 # <component id='exp Augmentation'></component>
 # ---
 # EXP ALL
-regex_exp_columns = /(\s*(?<skill>[\w\s]+)\b:\s*(?<rank>\d+)\s+(?<percent>\d+)%\s+(?<rate>[\w\s]+)\b)/
+regex_exp_columns = /(\s*(?<skill>[a-zA-Z\s]+)\b:\s*(?<rank>\d+)\s+(?<percent>\d+)%\s+(?<rate>[a-zA-Z\s]+)\b)/
 # <output class="mono"/>
 # Circle: 80
 # Showing all skills that you have skill in.
@@ -795,21 +819,23 @@ regex_exp_columns = /(\s*(?<skill>[\w\s]+)\b:\s*(?<rank>\d+)\s+(?<percent>\d+)%\
 # <output class=""/>
 # ---
 exp_hook = proc do |server_string|
-  # This conditional is for the `exp-monitor` script.
-  if UserVars.echo_exp && (server_string =~ regex_flag_briefexp_on || server_string =~ regex_flag_briefexp_off)
-    skill = Regexp.last_match[:skill]
-    DRSkill.gained_skills << skill
-  end
+  # Due to non-thread safe issues with Ruby, Regexp.last_match, and procs,
+  # explicit match variables are defined and used instead.
+  # https://github.com/psu-libraries/psulib_traject/issues/132
+  # https://github.com/traject/traject/issues/139
+  match_briefexp_on         = regex_flag_briefexp_on.match(server_string)
+  match_briefexp_off        = regex_flag_briefexp_off.match(server_string)
+  match_exp_columns         = regex_exp_columns.match(server_string)
+  match_exp_clear_mindstate = regex_exp_clear_mindstate.match(server_string)
 
   # These sections are parsing xml tags sent to experience window.
   # The game sends these tags automatically and we don't need
   # to conditionally parse them based on value of `parsing_exp_output`.
-  case server_string
-  when regex_flag_briefexp_on
-    skill = Regexp.last_match[:skill]
-    rank = Regexp.last_match[:rank]
-    rate = Regexp.last_match[:rate] # already a number
-    percent = Regexp.last_match[:percent]
+  if match_briefexp_on
+    skill = match_briefexp_on[:skill]
+    rank = match_briefexp_on[:rank]
+    rate = match_briefexp_on[:rate] # already a number
+    percent = match_briefexp_on[:percent]
     DRSkill.update(skill, rank, rate, percent)
     # Show to the right of the experience learning rate the gained ranks this session.
     if UserVars.track_exp || UserVars.track_exp.nil?
@@ -824,19 +850,19 @@ exp_hook = proc do |server_string|
       UserVars.track_exp ||= true
       server_string.sub!(/(\/34\])/, "\\1 #{sprintf('%0.2f', DRSkill.gained_exp(skill))}")
     end
-  when regex_flag_briefexp_off
-    skill = Regexp.last_match[:skill]
-    rank = Regexp.last_match[:rank]
-    rate_word = Regexp.last_match[:rate]
+  elsif match_briefexp_off
+    skill = match_briefexp_off[:skill]
+    rank = match_briefexp_off[:rank]
+    rate_word = match_briefexp_off[:rate]
     rate = learning_rates.index(rate_word) # convert word to number
-    percent = Regexp.last_match[:percent]
+    percent = match_briefexp_off[:percent]
     DRSkill.update(skill, rank, rate, percent)
     # Show to the right of the experience learning rate the gained ranks this session.
     if UserVars.track_exp
       server_string.sub!(/(%\s+)(#{rate_word})/, "\\1 #{rate_word.ljust(longest_learning_rate_length)} #{sprintf('%0.2f', DRSkill.gained_exp(skill))}")
     end
-  when regex_exp_clear_mindstate
-    skill = Regexp.last_match[:skill]
+  elsif match_exp_clear_mindstate
+    skill = match_exp_clear_mindstate[:skill]
     DRSkill.clear_mind(skill)
   end
 
@@ -844,7 +870,7 @@ exp_hook = proc do |server_string|
   when /^(Circle: (\d+)|Showing all skills that you have skill in)/
     parsing_exp_output = true
   when regex_exp_columns
-    if parsing_exp_output = true
+    if parsing_exp_output
       server_string.scan(regex_exp_columns) do |skill, rank, percent, rate|
         rate = learning_rates.index(rate) # convert word to number
         DRSkill.update(skill, rank, rate, percent)
@@ -903,13 +929,14 @@ exp_mods_hook = proc do |server_string|
     DRSkill.exp_modifiers.clear
   when %r{^<preset id="speech">}, %r{^<preset id="thought">}
     if parsing_exp_mods_output
-      server_string =~ /(?<sign>\+|\-)+(?<value>\d+) \b(?<skill>[\w\s]+)\b/
-      sign = Regexp.last_match[:sign]
-      value = Regexp.last_match[:value].to_i
-      skill = Regexp.last_match[:skill]
-
-      value = (value * -1) if sign == '-'
-      DRSkill.update_mods(skill, value)
+      match = /(?<sign>\+|\-)+(?<value>\d+) \b(?<skill>[\w\s]+)\b/.match(server_string)
+      if match
+        skill = match[:skill]
+        sign = match[:sign]
+        value = match[:value].to_i
+        value = (value * -1) if sign == '-'
+        DRSkill.update_mods(skill, value)
+      end
     end
   when %r{^<output class=""/>}
     # This signals the end of `exp mods` but
@@ -922,6 +949,7 @@ exp_mods_hook = proc do |server_string|
       DownstreamHook.remove('exp_mods_hook')
     end
   end
+
   if parsing_exp_mods_output && squelch_exp_mods_output
     server_string = nil
   end
@@ -972,33 +1000,45 @@ regex_info_gender_age_circle = /^Gender:\s+\b(?<gender>.+)\b\s+Age:\s+\b(?<age>.
 # Note, in the following regex do not capture 'Concentration' because you'll get your literal amount available, like 419,
 # but what our scripts operate on is the percentage which comes through as an xml tag parsed by the `status_hook`.
 regex_info_stat_value = /(?<stat>Strength|Agility|Discipline|Intelligence|Reflex|Charisma|Wisdom|Stamina|Favors|TDPs)\s+:\s+(?<value>\d+)/
-regex_info_encumbrance = /^\s*Encumbrance\s+:\s+(?<encumbrance>[\w\s]+)/
+regex_info_encumbrance = /^\s*Encumbrance\s+:\s+(?<encumbrance>[\w\s'?!]+)$/
 regex_info_balance = /^(?:You are|\[You're) (?<balance>#{Regexp.union(balance_values)}) balanced?/
 # ---
 info_hook = proc do |server_string|
-  case server_string
-  when regex_info_name_race_guild
+  # Due to non-thread safe issues with Ruby, Regexp.last_match, and procs,
+  # explicit match variables are defined and used instead.
+  # https://github.com/psu-libraries/psulib_traject/issues/132
+  # https://github.com/traject/traject/issues/139
+  match_info_name_race_guild   = regex_info_name_race_guild.match(server_string)
+  match_info_gender_age_circle = regex_info_gender_age_circle.match(server_string)
+  match_info_stat_value        = regex_info_stat_value.match(server_string)
+  match_info_encumbrance       = regex_info_encumbrance.match(server_string)
+  match_info_balance           = regex_info_balance.match(server_string)
+
+  if match_info_name_race_guild
     parsing_info_output = true
     if parsing_info_output
-      DRStats.race = Regexp.last_match[:race]
-      DRStats.guild = Regexp.last_match[:guild]
+      DRStats.race = match_info_name_race_guild[:race]
+      DRStats.guild = match_info_name_race_guild[:guild]
     end
-  when regex_info_gender_age_circle
+  elsif match_info_gender_age_circle
     if parsing_info_output
-      DRStats.gender = Regexp.last_match[:gender]
-      DRStats.age = Regexp.last_match[:age].to_i
-      DRStats.circle = Regexp.last_match[:circle].to_i
+      DRStats.gender = match_info_gender_age_circle[:gender]
+      DRStats.age = match_info_gender_age_circle[:age].to_i
+      DRStats.circle = match_info_gender_age_circle[:circle].to_i
     end
-  when regex_info_stat_value
+  elsif match_info_stat_value
     if parsing_info_output
       server_string.scan(regex_info_stat_value) do |stat, value|
         DRStats.send("#{stat.downcase}=", value.to_i)
       end
     end
-  when regex_info_encumbrance
+  elsif match_info_encumbrance
     if parsing_info_output
-      DRStats.encumbrance = Regexp.last_match[:encumbrance]
+      DRStats.encumbrance = match_info_encumbrance[:encumbrance]
     end
+  end
+
+  case server_string
   when %r{^<output class=""/>}
     # This signals the end of `info` but
     # don't squelch this line because the frontends (e.g. Genie)
@@ -1010,6 +1050,7 @@ info_hook = proc do |server_string|
       # It's designed to parse the data anytime `info` command runs.
     end
   end
+
   if parsing_info_output && squelch_info_output
     server_string = nil
   end
@@ -1073,6 +1114,7 @@ ltb_info_hook = proc do |server_string|
       DownstreamHook.remove('ltb_info_hook')
     end
   end
+
   if parsing_ltb_info_output && squelch_ltb_info_output
     server_string = nil
   end
@@ -1122,6 +1164,7 @@ played_hook = proc do |server_string|
       DownstreamHook.remove('played_hook')
     end
   end
+
   if parsing_played_output && squelch_played_output
     server_string = nil
   end
@@ -1307,6 +1350,17 @@ check_ltb_info.call
 check_played.call
 check_exp_all.call
 
+# Wait for exp/info to have been parsed before we continue
+# otherwise scripts that rely on this data will error.
+pause 0.05 while DRSkill.list.empty?
+# Note, while dead we cannot check your info, so we skip in that scenario.
+# If you're alive, we wait til a reasonable sample of info has been populated.
+# Race and Guild represent the start of info lines, Favors and TDPs represent the end.
+pause 0.05 while !dead? && (DRStats.race.nil? || DRStats.guild.nil? || DRStats.favors.nil? || DRStats.tdps.nil?)
+# Formally signal that we've loaded so that other scripts can start.
+# See `bootstrap` script for more details about the constants logic.
+Object.const_set(:DRINFOMON, true) unless constant_defined?(:DRINFOMON)
+
 # Start loop to process incoming data.
 while line = script.gets
   begin
@@ -1428,8 +1482,8 @@ while line = script.gets
       end
     end
     # If we don't know the character's guild yet, keep checking.
-    # The polling interval reduces spamming commands while new characters
-    # work on joining a guild or while commoners thrive guildless.
+    # The polling interval reduces spamming commands while we wait
+    # for your dead body to be resurrected so that we can run `info` again.
     if DRStats.guild.nil? && !dead? && (Time.now - info_check_time > info_check_interval)
       check_exp_all.call
       check_info.call

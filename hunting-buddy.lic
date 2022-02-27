@@ -11,54 +11,100 @@ class HuntingBuddy
     args = parse_args(arg_definitions, true)
 
     @settings = get_settings
-    @bail_on_familiar = @settings.stop_on_familiar_drag
-    data = get_data('hunting')
-    @escort_zones = data.escort_zones
-    @hunting_zones = data.hunting_zones
+
+    @town_data = get_data('town')[@settings.hometown]
+    @hunting_data = get_data('hunting')
+    @escort_zones = @hunting_data.escort_zones
+    @hunting_zones = @hunting_data.hunting_zones
+
+    @stop_on_familiar_drag = @settings.stop_on_familiar_drag
+    echo("  @stop_on_familiar_drag: #{@stop_on_familiar_drag}") if $debug_mode_hunting
+
     @stop_on_low_threshold = @settings.stop_on_low_threshold
+    echo("  @stop_on_low_threshold: #{@stop_on_low_threshold}") if $debug_mode_hunting
+
     @stop_on_high_threshold = @settings.stop_on_high_threshold
-    @magic_exp_threshold = @settings.magic_exp_training_max_threshold
-    @magic_skills = ['Arcane Magic', 'Holy Magic', 'Life Magic', 'Elemental Magic',\
-                     'Lunar Magic', 'Attunement', 'Arcana', 'Targeted Magic', 'Inner Fire',\
-                     'Inner Magic', 'Augmentation', 'Debilitation', 'Utility', 'Warding', 'Sorcery']
-    @hunting_buddies_max = @settings.hunting_buddies_max
+    echo("  @stop_on_high_threshold: #{@stop_on_high_threshold}") if $debug_mode_hunting
 
     # Will deprecate prehunt_buffs tag as a room
     @buff_room = @settings.prehunt_buffing_room || @settings.prehunt_buffs
     @after_hunt_room = @settings.force_after_hunt_room || @settings.safe_room
 
-    hunting_info = []
-    if @settings.hunting_file_list || args.flex.any?
-      (args.flex.any? ? args.flex : @settings.hunting_file_list).each do |file|
-        if file == 'setup'
-          hunting_info += get_settings.hunting_info
-        else
-          # Hunting info from extra config needs the config name passed on in args.
-          infos = get_settings([file]).hunting_info
-          infos.each do |info|
-            info['args'] = info['args'] || []
-            (info['args'] << file) unless info['args'].include? file
-          end
-          hunting_info += infos
+    @skillset_exp_thresholds = {
+      'Armor' => @settings.armor_exp_training_max_threshold,
+      'Weapon' => @settings.weapon_exp_training_max_threshold,
+      'Magic' => @settings.magic_exp_training_max_threshold,
+      'Survival' => @settings.survival_exp_training_max_threshold,
+      'Lore' => @settings.lore_exp_training_max_threshold
+    }
+    echo("  @skillset_exp_thresholds: #{@skillset_exp_thresholds}") if $debug_mode_hunting
+
+    @hunting_buddies_max = @settings.hunting_buddies_max
+    echo("  @hunting_buddies_max: #{@hunting_buddies_max}") if $debug_mode_hunting
+
+    @prehunt_buffing_room = @settings.prehunt_buffing_room || @settings.prehunt_buffs
+    echo("  @prehunt_buffing_room: #{@prehunt_buffing_room}") if $debug_mode_hunting
+
+    # After checking all hunting files to use, this array
+    # will be the combined set of hunting infos to execute.
+    @hunting_info = []
+
+    # Identify any other files to parse for hunting info.
+    # The values in `hunting_file_list` or `args.flex` are the suffixes
+    # in filename patterns that match "{character}-{suffix}.yaml" format.
+    hunting_files = (args.flex.any? ? args.flex : @settings.hunting_file_list) || []
+    hunting_files << 'setup' if hunting_files.empty?
+    echo("  hunting_files: #{hunting_files}") if $debug_mode_hunting
+
+    hunting_files.each do |character_file_suffix|
+      infos = get_settings([character_file_suffix]).hunting_info
+      infos.each do |info|
+        info['args'] ||= []
+        # Hunting info from extra config needs the config name passed on in args
+        # so that it can be further passed to other scripts like combat-trainer.
+        if character_file_suffix != 'setup' && !info['args'].include?(character_file_suffix)
+          info['args'] << character_file_suffix
         end
       end
-    else
-      hunting_info = @settings.hunting_info
+      @hunting_info += infos
     end
-
-    @hunting_info = format_hunting_info(hunting_info)
-  end
-
-  def need_boxes?
-    return false unless @settings.box_hunt_minimum
-    DRCI.count_all_boxes(@settings) <= @settings.box_hunt_minimum
   end
 
   def main
     check_bundling_rope
     DRC.wait_for_script_to_complete('restock') unless @settings.sell_loot_skip_bank
 
-    @hunting_info.each do |info|
+    @hunting_info.each_with_index do |info, index|
+
+      args = info['args'] # list of args to pass to combat-trainer
+      before_actions = info['before'] # list of script names
+      after_actions = info['after'] # list of script names
+      during_actions = info['during'] # list of script names
+      duration = info[:duration] # number of minutes to hunt
+      stop_on_high_skills = info['stop_on'] # list of skill names
+      stop_on_low_skills = info['stop_on_low'] # list of skill names
+      stop_on_boxes = info['boxes'] || info['stop_on_boxes'] # boolean
+      stop_on_no_moons = info['moons'] || info['stop_on_moons'] # boolean
+      stop_on_encumbrance = info['stop_on_encumbrance'] # numeric threshold
+      hunting_zones = [info[:zone]].flatten.compact # string or list of hunting zones
+      waiting_room = info['full_waiting_room'] || @settings.safe_room # room id
+
+      if $debug_mode_hunting
+        echo("Processing hunting info number #{index + 1}")
+        echo("  args: #{args}")
+        echo("  before_actions: #{before_actions}")
+        echo("  after_actions: #{after_actions}")
+        echo("  during_actions: #{during_actions}")
+        echo("  duration: #{duration}")
+        echo("  stop_on_high_skills: #{stop_on_high_skills}")
+        echo("  stop_on_low_skills: #{stop_on_low_skills}")
+        echo("  stop_on_boxes: #{stop_on_boxes}")
+        echo("  stop_on_no_moons: #{stop_on_no_moons}")
+        echo("  stop_on_encumbrance: #{stop_on_encumbrance}")
+        echo("  hunting_zones: #{hunting_zones}")
+        echo("  waiting_room: #{waiting_room}")
+      end
+
       if @stop_hunting
         DRC.message("***STATUS*** Stopping all hunting because manual intervention")
         stop_actions(during_actions)
@@ -75,17 +121,6 @@ class HuntingBuddy
         break
       end
 
-      args = info['args']
-      before_actions = info['before']
-      after_actions = info['after']
-      during_actions = info['during']
-      duration = info[:duration]
-      stop_on_skills = info['stop_on']
-      stop_on_low_skills = info['stop_on_low']
-      stop_on_boxes = info['boxes']
-      stop_on_no_moons = info['moons']
-      waiting_room = info['full_waiting_room'] || @settings.safe_room
-
       if stop_on_boxes && !need_boxes?
         DRC.message("***STATUS*** Skipping hunt because have enough boxes")
         # This purposefully does not perform any actions as an efficiency
@@ -100,18 +135,25 @@ class HuntingBuddy
         DRC.message("***STATUS*** Skipping hunt because no moons")
         stop_actions(during_actions)
         execute_actions(after_actions)
-          next
-        end
+        next
+      end
 
-      if all_skills_at_cap?(stop_on_skills)
-        DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold")
+      if encumbered?(stop_on_encumbrance)
+        DRC.message("***STATUS*** Skipping hunt because encumbrance: #{DRStats.encumbrance}, threshold: #{stop_on_encumbrance}")
         stop_actions(during_actions)
         execute_actions(after_actions)
         next
       end
 
-      if stop_on_low_skills_too_low?(stop_on_low_skills)
-        DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold")
+      if should_stop_for_high_skills?(stop_on_high_skills)
+        DRC.message("***STATUS*** Skipping hunt because skills reached learning threshold: #{stop_on_high_skills}")
+        stop_actions(during_actions)
+        execute_actions(after_actions)
+        next
+      end
+
+      if should_stop_for_low_skills?(stop_on_low_skills)
+        DRC.message("***STATUS*** Skipping hunt because skills dropped below learning threshold: #{stop_on_low_skills}")
         stop_actions(during_actions)
         execute_actions(after_actions)
         next
@@ -119,28 +161,35 @@ class HuntingBuddy
 
       check_prehunt_buffs
 
-      next unless find_hunting_room?(info[:zone], waiting_room)
-
-      args.each_with_index do |arg, index|
-        if @stopped_for_bleeding
-          DRC.message("***STATUS*** Stopping all hunting because bleeding")
-          DRC.retreat
-          stop_script('tendme') if Script.running?('tendme')
-          break
-        end
-
-        # Execute background scripts to run during the hunt
-        execute_nonblocking_actions(during_actions)
-
-        hunt(
-          arg,
-          duration ? duration[index] : nil,
-          stop_on_skills ? stop_on_skills[index] : nil,
-          stop_on_low_skills ? stop_on_low_skills[index] : nil,
-          stop_on_boxes ? stop_on_boxes[index] : nil,
-          stop_on_no_moons ? stop_on_no_moons[index] : nil
-        )
+      # We need to find a hunting room when we start our first hunt
+      # or on subsequent hunts if where we currently are isn't where
+      # that next hunt wants to be. These checks help reduce moving
+      # around if it's be fine for us to start the next hunt in same spot.
+      if index == 0 || !hunting_zones.include?(current_hunting_zone)
+        next unless find_hunting_room?(hunting_zones, waiting_room)
       end
+
+      if @stopped_for_bleeding
+        DRC.message("***STATUS*** Stopping all hunting because bleeding")
+        DRC.retreat
+        stop_script('tendme') if Script.running?('tendme')
+        stop_actions(during_actions)
+        execute_actions(after_actions)
+        break
+      end
+
+      # Execute background scripts to run during the hunt
+      execute_nonblocking_actions(during_actions)
+
+      hunt(
+        args,
+        duration,
+        stop_on_high_skills,
+        stop_on_low_skills,
+        stop_on_boxes,
+        stop_on_no_moons,
+        stop_on_encumbrance
+      )
 
       # Stop background scripts that ran during the hunt
       stop_actions(during_actions)
@@ -188,107 +237,217 @@ class HuntingBuddy
     end
   end
 
+  # ------------------------------------------------------------
+
+  # Ensures you have a bundling rope unless you're not skinning.
   def check_bundling_rope
     return unless @settings.skinning['skin']
     return if DRCI.wearing?('bundle')
     return if DRCI.exists?('bundling rope')
 
-    tannery_data = get_data('town')[@settings.hometown]['tannery']
-    tanner_room = tannery_data['id']
-    tanner_name = tannery_data['name']
-
-    DRCT.walk_to(tanner_room)
-    DRC.bput("ask #{tanner_name} for bundling rope", 'hands you')
-    DRC.stow_item?('bundling rope')
+    DRCT.ask_for_item?(
+      @town_data['tannery']['id'],
+      @town_data['tannery']['name'],
+      'bundling rope'
+    )
+    DRCI.stow_item?('bundling rope')
   end
 
   def check_prehunt_buffs
     return unless @settings.waggle_sets['prehunt_buffs']
 
-    DRCT.walk_to(@buff_room)
+    DRCT.walk_to(@prehunt_buffing_room)
 
     DRC.wait_for_script_to_complete('buff', ['prehunt_buffs'])
   end
 
-  def find_hunting_room?(zone_name, waiting_room)
+  # ------------------------------------------------------------
+
+  # Returns the hunting zone that you are currently in.
+  # If you aren't in a known hunting zone then returns nil.
+  def current_hunting_zone(room_id = Room.current.id)
+    # Returns a list with only the key-value pairs that meet the criteria.
+    zones = @hunting_zones.select { |name, rooms| rooms.include?(room_id) }
+    # Get the first matching result.
+    zone = zones.first
+    # As a list of data, a hash becomes a list of two-element arrays [key, value].
+    # Return the first element to return the key, which is the zone name.
+    zone_name = zone.first
+  end
+
+  def find_hunting_room?(zones_to_search, waiting_room)
     UserVars.friends = @settings.hunting_buddies || []
     UserVars.hunting_nemesis = @settings.hunting_nemesis || []
-    zones = Array(zone_name).flatten.compact
-    rooms = @hunting_zones.values_at(*zones.select { |name| @hunting_zones.include?(name) }).flatten.compact unless @escort_zones.include?(zones.first)
-    if rooms.empty? || rooms.nil?
-      escort_info = @escort_zones[zones.first]
-      unless escort_info
-        DRC.message("FAILED TO FIND THE HUNTING ZONE(S) #{zones} IN BASE.YAML")
-        return false
+
+    return zones_to_search.any? do |zone_to_search|
+      escort_info = @escort_zones[zone_to_search]
+      if escort_info
+        DRCT.walk_to(escort_info['base'])
+        DRC.wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
+        @exit = [escort_info['area'], 'exit']
+        return true
+      else
+        @exit = nil
+        rooms_to_search = []
+
+        # After grabbing the list of hunting zones specified in the user's yaml, we'll iterate
+        # through each and aggregate the room numbers from base-hunting.yaml.
+        # NOTE: Be sure to preserve the order we aggregate the room numbers to match the order
+        # of the :zone: list in the yaml. Users expect the :zone: list to be a priority order.
+        # If they list prereni first, they want to try there first.
+        zones_to_search.each do |zone|
+          rooms_to_search += @hunting_zones["#{zone}"] unless @hunting_zones["#{zone}"] == nil
+        end
+
+        # Make sure our aggregated room list isn't empty. If it is, warn and don't go hunting.
+        if rooms_to_search.empty?
+          DRC.message("Unable to look up hunting rooms for your yaml-specified hunting :zone: list.")
+          DRC.message("Check your yaml syntax and ensure your :zone:'s match base-hunting.yaml.")
+          exit
+        end
+
+        return DRCT.find_empty_room(rooms_to_search, waiting_room,
+          lambda do |search_attempt|
+            # Skip room if has more people than your max limit
+            return false if DRRoom.pcs.size > @hunting_buddies_max
+            # Skip if one of your nemesis is in the room
+            return false if (DRRoom.pcs & UserVars.hunting_nemesis).any?
+            # Continue if one of your friends is in the room
+            return true if (DRRoom.pcs & UserVars.friends).any?
+            # Skip if anyone not in your group is in the room
+            return false if (DRRoom.pcs - DRRoom.group_members).any?
+            # No visible friends in the room and no visible people
+            UserVars.friends.each { |friend| Flags.add("hunting-buddy-room-check-#{friend}", friend) }
+            Flags.add('hunting-buddy-room-check', 'says, ', 'say, ', 'You hear', 'Someone snipes a')
+            case DRC.bput('search', 'roundtime', "You're not in any condition to be searching around")
+            when /roundtime/i
+              data = reget(40).reverse.take_while { |x| x !~ /You search around/ }
+              if data.grep(/vague silhouette|You notice \w+, who is|see signs that/).any?
+                pause
+                waitrt?
+                return UserVars.friends.find { |friend| Flags["hunting-buddy-room-check-#{friend}"] }
+              end
+              fput("say #{@settings.empty_hunting_room_messages.sample}") unless @settings.empty_hunting_room_messages.empty?
+              20.times do |_|
+                pause 0.5
+                return true if UserVars.friends.find { |friend| Flags["hunting-buddy-room-check-#{friend}"] }
+                return false if Flags['hunting-buddy-room-check'] || !(DRRoom.pcs - DRRoom.group_members - UserVars.friends).empty?
+              end
+              true
+            when /You're not in any condition to be searching around/i
+              DRC.message("***STATUS*** You're too injured to hunt!")
+              @stop_hunting = true
+              @stopped_for_bleeding = bleeding?
+              # Ironically, return true so the search for a suitable hunting room
+              # stops and then the hunting buddy loop will detect that you need help
+              # sooner rather than later.
+              true
+            end
+          end,
+          @settings.hunting_room_min_mana,
+          @settings.hunting_room_strict_mana,
+          @settings.hunting_room_max_searches
+        )
       end
-      DRCT.walk_to(escort_info['base'])
-      DRC.wait_for_script_to_complete('bescort', [escort_info['area'], escort_info['enter']])
-      @exit = [escort_info['area'], 'exit']
-    else
-      @exit = nil
-      return DRCT.find_empty_room(rooms, waiting_room,
-        lambda do |search_attempt|
-          # Skip room if has more people than your max limit
-          return false if DRRoom.pcs.size > @hunting_buddies_max
-          # Skip if one of your nemesis is in the room
-          return false if (DRRoom.pcs & UserVars.hunting_nemesis).any?
-          # Continue if one of your friends is in the room
-          return true if (DRRoom.pcs & UserVars.friends).any?
-          # Skip if anyone not in your group is in the room
-          return false if (DRRoom.pcs - DRRoom.group_members).any?
-          # No visible friends in the room and no visible people
-          UserVars.friends.each { |friend| Flags.add("room-check-#{friend}", friend) }
-          Flags.add('room-check', 'says, ', 'say, ', 'You hear', 'Someone snipes a')
-          case DRC.bput('search', 'roundtime', "You're not in any condition to be searching around")
-          when /roundtime/i
-            data = reget(40).reverse.take_while { |x| x !~ /You search around/ }
-            if data.grep(/vague silhouette|You notice \w+, who is|see signs that/).any?
-              pause
-              waitrt?
-              return UserVars.friends.find { |friend| Flags["room-check-#{friend}"] }
-            end
-            fput("say #{@settings.empty_hunting_room_messages.sample}") unless @settings.empty_hunting_room_messages.empty?
-            20.times do |_|
-              pause 0.5
-              return true if UserVars.friends.find { |friend| Flags["room-check-#{friend}"] }
-              return false if Flags['room-check'] || !(DRRoom.pcs - DRRoom.group_members - UserVars.friends).empty?
-            end
-            true
-          when /You're not in any condition to be searching around/i
-            DRC.message("***STATUS*** You're too injured to hunt!")
-            @stop_hunting = true
-            @stopped_for_bleeding = bleeding?
-            # Ironically, return true so the search for a suitable hunting room
-            # stops and then the hunting buddy loop will detect that you need help
-            # sooner rather than later.
-            true
-          end
-        end,
-        @settings.hunting_room_min_mana,
-        @settings.hunting_room_strict_mana,
-        @settings.hunting_room_max_searches
-      )
     end
-
-    true
   end
 
-  def all_skills_at_cap?(stop_on_skills)
-    stop_on_skills && !stop_on_skills.empty? && stop_on_skills.flatten.all? { |skill| DRSkill.getxp(skill) >= (@magic_skills.include?(skill) ? @magic_exp_threshold : @stop_on_high_threshold) }
+  # ------------------------------------------------------------
+
+  # Identify if every skill in the given list has a learning rate
+  # at or above the desired threshold for their skillset.
+  def should_stop_for_high_skills?(stop_on_high_skills = [])
+    stop_on_high_skills && !stop_on_high_skills.empty? && stop_on_high_skills.flatten.all? do |skill|
+      DRSkill.getxp(skill) >= get_skill_exp_high_threshold(skill)
+    end
   end
 
-  def stop_on_low_skills_too_low?(stop_on_low_skills)
-    stop_on_low_skills && stop_on_low_skills.flatten.any? { |skill| DRSkill.getxp(skill) < @stop_on_low_threshold }
+  # Identify if at least one skill in the given list has a learning rate
+  # at or below the desired threshold for their skillset.
+  def should_stop_for_low_skills?(stop_on_low_skills = [])
+    stop_on_low_skills && !stop_on_low_skills.empty? && stop_on_low_skills.flatten.any? do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_low_threshold(skill)
+    end
   end
 
+  # ------------------------------------------------------------
+
+  # Identify the skills in the given list
+  # that have not yet met their learning rate thresholds
+  # and so we should continue hunting.
+  def get_skills_below_high_threshold(stop_on_high_skills = [])
+    stop_on_high_skills.flatten.select do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_high_threshold(skill)
+    end
+  end
+
+  # Identify the skills in the given list
+  # that have fallen below their learning rate thresholds
+  # and so we should stop hunting to go work on them.
+  # Usually, these are non-combat skills like locksmithing or crafting.
+  def get_skills_below_low_threshold(stop_on_low_skills = [])
+    stop_on_low_skills.flatten.select do |skill|
+      DRSkill.getxp(skill) <= get_skill_exp_low_threshold(skill)
+    end
+  end
+
+  # ------------------------------------------------------------
+
+  # What is the learning rate high threshold at which point we should stop hunting?
+  def get_skill_exp_high_threshold(skill)
+    get_skillset_exp_high_threshold(DRSkill.getskillset(skill))
+  end
+
+  # What is the learning rate high threshold at which point we should stop hunting?
+  def get_skillset_exp_high_threshold(skillset)
+    @skillset_exp_thresholds[skillset] || @stop_on_high_threshold
+  end
+
+  # ------------------------------------------------------------
+
+  # What is the learning rate low threshold at which point we should stop hunting?
+  def get_skill_exp_low_threshold(skill)
+    get_skillset_exp_low_threshold(DRSkill.getskillset(skill))
+  end
+
+  # What is the learning rate low threshold at which point we should stop hunting?
+  def get_skillset_exp_low_threshold(skillset)
+    @stop_on_low_threshold
+  end
+
+  # ------------------------------------------------------------
+
+  # Is your current encumbrance at or higher than the threshold?
+  # Threshold is a number from 0 (None) to 11 (It's amazing you aren't squashed!)
+  def encumbered?(threshold)
+    return false unless threshold
+    threshold = [[0, threshold.to_i].max, 11].min # ensure in range
+    return DRC.check_encumbrance >= threshold
+  end
+
+  # ------------------------------------------------------------
+
+  # Have you reached your lower bound for box count?
+  # Designed to be called before combat-trainer starts
+  # as a way to avoid hunting if you already have enough boxes.
+  def need_boxes?
+    return false unless @settings.box_hunt_minimum
+    DRCI.count_all_boxes(@settings) <= @settings.box_hunt_minimum
+  end
+
+  # Have you reached the upper bound for box count?
+  # Designed to be called while combat-trainer is running
+  # as a way to know when to stop once you have enough boxes.
   def over_box_limit?
     $COMBAT_TRAINER.get_process('loot').at_box_limit?
   end
 
-  def hunt(args, duration, stop_on_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons)
+  # ------------------------------------------------------------
+
+  def hunt(args, duration, stop_on_high_skills, stop_on_low_skills, stop_on_boxes, stop_on_no_moons, stop_on_encumbrance)
     $COMBAT_TRAINER = nil
     hunting_room = Room.current.id
-    Flags.add('familiar_drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
+    Flags.add('hunting-buddy-familiar-drag', /^Your .+ grabs ahold of you and drags you .+, out of combat.+$/)
 
     DRC.message("***STATUS*** Beginning hunt '#{args}' for '#{duration}' minutes")
 
@@ -322,11 +481,11 @@ class HuntingBuddy
         DRC.message("***STATUS*** Stopping because no moons")
         break
       end
-      if all_skills_at_cap?(stop_on_skills)
-        DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_skills}")
+      if should_stop_for_high_skills?(stop_on_high_skills)
+        DRC.message("***STATUS*** Stopping because skills reached learning threshold: #{stop_on_high_skills}")
         break
       end
-      if stop_on_low_skills_too_low?(stop_on_low_skills)
+      if should_stop_for_low_skills?(stop_on_low_skills)
         DRC.message("***STATUS*** Stopping because skills dropped below learning threshold: #{stop_on_low_skills}")
         break
       end
@@ -339,27 +498,37 @@ class HuntingBuddy
         DRC.message("***STATUS*** Stopping because time")
         break
       end
-      if Flags['familiar_drag'] && @bail_on_familiar
+      if Flags['hunting-buddy-familiar-drag'] && @stop_on_familiar_drag
         DRC.message("***STATUS*** Stopping because familiar drug while stunned")
-        Flags.reset('familiar_drag')
+        Flags.reset('hunting-buddy-familiar-drag')
         break
       end
-      if Flags['familiar_drag'] && !@bail_on_familiar
+      if Flags['hunting-buddy-familiar-drag'] && !@stop_on_familiar_drag
         DRC.message("***STATUS*** Heading back to room because familiar drug while stunned")
         pause_script('combat-trainer') if Script.running?('combat-trainer')
         DRCT.walk_to(hunting_room)
         unpause_script('combat-trainer') if Script.running?('combat-trainer')
-        Flags.reset('familiar_drag')
+        Flags.reset('hunting-buddy-familiar-drag')
       end
       if (counter % 60).zero?
+        # To avoid spamming encumbrance checks, this logic is inside
+        # the one minute status update section so it's done only periodically.
+        if encumbered?(stop_on_encumbrance)
+          DRC.message("***STATUS*** Stopping because encumbrance: #{DRStats.encumbrance}, threshold: #{stop_on_encumbrance}")
+          break
+        end
         if duration
-          if stop_on_skills
-            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          if stop_on_high_skills
+            DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining or waiting on #{get_skills_below_high_threshold(stop_on_high_skills).join(', ')}")
           else
             DRC.message("***STATUS*** #{duration - (counter / 60)} minutes of hunting remaining")
           end
         else
-          DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{stop_on_skills.select { |skill| DRSkill.getxp(skill) < (@magic_skills.include?(skill) ? @magic_exp_threshold : 32) }.join(', ')}")
+          if stop_on_high_skills
+            DRC.message("***STATUS*** #{counter / 60} minutes of hunting, still waiting on #{get_skills_below_high_threshold(stop_on_high_skills).join(', ')}")
+          else
+            DRC.message("***STATUS*** #{counter / 60} minutes of hunting")
+          end
         end
       end
       counter += 1
@@ -368,35 +537,6 @@ class HuntingBuddy
     $COMBAT_TRAINER.stop
     pause 1 while $COMBAT_TRAINER.running || Script.running?('combat-trainer')
     DRC.retreat
-  end
-
-  def format_hunting_info(hunting_info_raw)
-    hunting_info = []
-    hunting_info_raw.each do |info|
-      if hunting_info.empty? || hunting_info.last[:zone] != info[:zone]
-        if info['args'].flatten == info['args']
-          info['args'] = [info['args'] || []]
-          info[:duration] = [info[:duration]]
-          info['stop_on'] = [info['stop_on']]
-          info['stop_on_low'] = [info['stop_on_low']] if info['stop_on_low']
-          info['before'] = info['before']
-          info['after'] = info['after']
-          info['during'] = info['during']
-          info['boxes'] = info['boxes']
-        end
-        hunting_info << info
-      else
-        hunting_info.last['args'] << info['args']
-        hunting_info.last[:duration] << info[:duration]
-        hunting_info.last['stop_on'] << info['stop_on']
-        hunting_info.last['stop_on_low'] << info['stop_on_low']
-        hunting_info.last['before'] ||= info['before']
-        hunting_info.last['after'] ||= info['after']
-        hunting_info.last['during'] ||= info['during']
-        hunting_info.last['boxes'] ||= info['boxes']
-      end
-    end
-    hunting_info
   end
 
   def stop_hunting
@@ -413,8 +553,9 @@ before_dying do
     stop_script(script_name) if Script.running?(script_name)
   end
   DRCA.release_cyclics(get_settings.cyclic_no_release)
-  Flags.delete('room-check')
-  Flags.delete('familiar_drag')
+  Flags.flags.keys
+    .select { |flag_name| flag_name.start_with?('hunting-buddy-') }
+    .each   { |flag_name| Flags.delete(flag_name) }
 end
 
 $HUNTING_BUDDY = HuntingBuddy.new

@@ -151,7 +151,7 @@ module DRCA
     when 'Your desire to prepare this offensive spell suddenly slips away'
       pause 1
       return prepare?(abbrev, mana, symbiosis, command, tattoo_tm, runestone_name, runestone_tm)
-    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts', 'Please don\'t do that here'
+    when 'Something in the area interferes with your spell preparations', 'You shouldn\'t disrupt the area right now', 'You have no idea how to cast that spell', 'You have yet to receive any training in the magical arts', 'Please don\'t do that here', 'You cannot use the tattoo while maintaining the effort to stay hidden'
       DRC.bput('release symbiosis', 'You release the', 'But you haven\'t') if symbiosis
       return false
     when 'Well, that was fun'
@@ -184,25 +184,31 @@ module DRCA
     name
   end
 
-  def ritual(spell, settings)
-    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
+  def ritual(data, settings)
+    DRC.retreat(settings.ignored_npcs) unless data['skip_retreat']
     DRC.release_invisibility
     DRC.set_stance('shield')
 
     command = 'prepare'
-    command = spell['prep'] if spell['prep']
-    command = spell['prep_type'] if spell['prep_type']
+    command = data['prep'] if data['prep']
+    command = data['prep_type'] if data['prep_type']
 
-    return unless prepare?(spell['abbrev'], spell['mana'], spell['symbiosis'], command, spell['tattoo_tm'], spell['runestone_name'], spell['runestone_tm'])
-    find_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'], spell['sheathed_focus'])
+    return unless prepare?(data['abbrev'], data['mana'], data['symbiosis'], command, data['tattoo_tm'], data['runestone_name'], data['runestone_tm'])
+    prepare_time = Time.now
+    find_focus(data['focus'], data['worn_focus'], data['tied_focus'], data['sheathed_focus'])
 
-    invoke(spell['focus'], nil, nil)
-    stow_focus(spell['focus'], spell['worn_focus'], spell['tied_focus'], spell['sheathed_focus'])
-    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
+    invoke(data['focus'], nil, nil)
+    stow_focus(data['focus'], data['worn_focus'], data['tied_focus'], data['sheathed_focus'])
+    DRC.retreat(settings.ignored_npcs) unless data['skip_retreat']
 
-    waitcastrt?
-    return unless cast?(spell['cast'], spell['symbiosis'], spell['before'], spell['after'])
-    DRC.retreat(settings.ignored_npcs) unless spell['skip_retreat']
+    if data['prep_time']
+      pause until Time.now - prepare_time >= data['prep_time']
+    else
+      waitcastrt?
+    end
+
+    return unless cast?(data['cast'], data['symbiosis'], data['before'], data['after'])
+    DRC.retreat(settings.ignored_npcs) unless data['skip_retreat']
   end
 
   def prepare_to_cast_runestone?(spell, settings)
@@ -537,88 +543,6 @@ module DRCA
     end
   end
 
-  def update_astral_data(data)
-    if data['moon']
-      data = set_moon_data(data)
-    elsif data['stats']
-      data = set_planet_data(data)
-    end
-    data
-  end
-
-  def find_visible_planets(planets)
-    return if DRC.bput('get my telescope', 'You get', 'What were you', 'You are already') == 'What were you'
-
-    Flags.add('planet-not-visible', 'turns up fruitless')
-    observed_planets = []
-
-    planets.each do |planet|
-      case DRC.bput("center telescope on #{planet}", 'You put your eye', 'The pain is too much', "That's a bit tough to do when you can't see the sky")
-      when 'The pain is too much', "That's a bit tough to do when you can't see the sky"
-        break
-      end
-      observed_planets << planet unless Flags['planet-not-visible']
-      Flags.reset('planet-not-visible')
-    end
-
-    Flags.delete('planet-not-visible')
-    DRC.bput('stow telescope', 'You put')
-    observed_planets
-  end
-
-  def set_planet_data(data)
-    return data unless data['stats']
-
-    planets = get_data('constellations')[:constellations].select { |planet| planet['stats'] }
-    planet_names = planets.map { |planet| planet['name'] }
-    visible_planets = find_visible_planets(planet_names)
-    data['stats'].each do |stat|
-      cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
-      next unless cast_on
-      data['cast'] = "cast #{cast_on}"
-      return data
-    end
-    echo "No planet available to cast #{data['abbrev']}"
-    nil
-  end
-
-  def set_moon_data(data)
-    return data unless data['moon']
-
-    moon = visible_moons.first
-    if moon
-      data['cast'] = "cast #{moon}"
-    else
-      echo "No moon available to cast #{data['abbrev']}"
-      data = nil
-    end
-    data
-  end
-
-  # Returns true if at least one moon (e.g. katamba, yavash, xibar)
-  # is above the horizon and won't set for at least another ~4 minutes.
-  def moons_visible?
-    !visible_moons.empty?
-  end
-
-  # Returns list of moon names (e.g. katamba, yavash, xibar)
-  # that are above the horizon and won't set for at least another ~4 minutes.
-  def visible_moons
-    check_moonwatch
-    UserVars.moons.select { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }
-                  .map { |moon_name, moon_data| moon_name }
-  end
-
-  def check_moonwatch
-    return if Script.running?('moonwatch')
-
-    echo 'moonwatch is not running. Starting it now'
-    UserVars.moons = {}
-    custom_require.call('moonwatch')
-    echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
-    pause 0.5 while UserVars.moons.empty?
-  end
-
   def cast_spell?(data, settings, force_cambrinth = false, cast_lifecycle_lambda = nil)
     result = cast_spell(data, settings, force_cambrinth, cast_lifecycle_lambda)
     result ? true : false
@@ -629,7 +553,7 @@ module DRCA
     return unless settings
 
     data = DRCMM.update_astral_data(data, settings)
-    return unless data # update_astral_data returns nil on failure
+    return unless data # DRCMM.update_astral_data returns nil on failure
 
     if (data['abbrev'] =~ /locat/i) && !DRSpells.active_spells['Clear Vision']
       cast_spell({ 'abbrev' => 'cv', 'mana' => 1, 'prep_time' => 5 }, settings)
@@ -688,7 +612,7 @@ module DRCA
     cast_lifecycle_lambda.call('post-prep', data, settings) if cast_lifecycle_lambda != nil
 
     if data['prep_time']
-      pause 0.1 until checkcastrt.zero? || Time.now - prepare_time >= data['prep_time']
+      pause until Time.now - prepare_time >= data['prep_time']
     else
       waitcastrt?
     end
@@ -945,7 +869,7 @@ module DRCA
     result = DRC.bput("pathway sense", *charge_levels)
     charge_levels.find_index { |pattern| pattern =~ result }
   end
-  
+
   # check which symbiotic research is active
   def perc_symbiotic_research
     case DRC.bput('perceive', /combine the weaves of the (\w+) symbiosis/, /Roundtime/)

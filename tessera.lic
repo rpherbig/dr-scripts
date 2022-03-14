@@ -1,72 +1,100 @@
 =begin
-  Documentation:  Tessera script based upon concept around Almanac.lic.
+  Documentation: https://elanthipedia.play.net/Lich_script_repository#tessera
 =end
 
 custom_require.call(%w[common common-items drinfomon])
 
 class Tessera
 
+  #def for initialization of startupitems.
   def initialize
     settings = get_settings
-    tessera_retry_interval = settings.tessera_retry_interval
     startup_delay = settings.tessera_startup_delay
+    @tessera_retry_interval = settings.tessera_retry_interval   
 
-    UserVars.tessera_last_use ||= Time.now - tessera_retry_interval
+    UserVars.tessera_last_use ||= Time.now - "#{@tessera_retry_interval}"
     @no_use_scripts = settings.tessera_no_use_scripts 
+    @no_use_rooms = settings.tessera_no_use_rooms
     @tessera = settings.tessera_noun
+    
+    #Startup messaging
+    DRC.message(
+	<<~STARTUP
+      Tessera Startup Options:
 
-    DRC.message("Tessera Startup Options:")
-    DRC.message("[tessera_noun: #{@tessera}]\n[tessera_startup_delay: #{startup_delay} (seconds)]\n[tessera_retry_interval: #{tessera_retry_interval} (seconds)]\n[tessera last attempt: #{UserVars.tessera_last_use}]\n[tessera_no_use_scripts: #{@no_use_scripts}]")
+      tessera_noun: #{@tessera}
+      tessera_startup_delay: #{startup_delay} (seconds)
+      tessera_retry_interval: #{@tessera_retry_interval} (seconds)
+      tessera last attempt: #{UserVars.tessera_last_use}  
+      tessera_no_use_scripts: #{@no_use_scripts}
+      tessera_no_use_rooms: #{@no_use_rooms}
+    STARTUP
+    )
 
     pause startup_delay
     passive_loop
   end
 
-  def use_tessera
-    settings = get_settings
-    tessera_retry_interval = settings.tessera_retry_interval
-
-    return if Time.now - UserVars.tessera_last_use < tessera_retry_interval
-    return if @no_use_scripts.any? { |name| Script.running?(name) }
-    return if XMLData.room_title.include? 'Carousel Chamber'
-    return if XMLData.room_title.include? 'Carousel Booth'
-    return if XMLData.room_title.include? 'Family Vault'
-    return if hidden?
-    return if invisible?
-    return if checkleft
-
-    pause 1 until DRC.pause_all
-    waitrt?
-    DRC.bput('retreat', 'You get', 'You retreat', 'You are already')
-    waitrt?
-    DRC.bput('retreat', 'You get', 'You retreat', 'You are already')
-    waitrt?
-    DRC.bput('retreat', 'You get', 'You retreat', 'You are already')
-    waitrt?
-    case DRC.bput("get my #{@tessera}", 'You get', 'What were', 'You are already', 'You need a free')
-    when 'What were'
-      echo('Tessera not found, exiting.')
-      DRC.unpause_all
-      exit
-    when 'You need a free'
-      unless DRCI.in_hands?(@tessera)
-        DRC.unpause_all
-        return
-      end
-    end
-    DRC.bput("ask my #{@tessera} about invest", 'You send your', 'You cannot do that while focusing on combat')
-    waitrt?
-    DRC.bput("stow my #{@tessera}", 'You put', 'Stow what', 'You hold out')
-    waitrt?
-    UserVars.tessera_last_use = Time.now
-    DRC.unpause_all
-  end
-
+  #Uses the tessera if should_use_tessera conditions are true. Checks every 20 seconds.
   def passive_loop
     loop do
-      use_tessera
+      use_tessera if should_use_tessera?
       pause 20
     end
+  end
+
+  #def for usage of the tessera.
+  def use_tessera
+    #Smart pause of scripts first prior to run cycle.
+    scripts_to_unpause = []
+    scripts_to_unpause = DRC.smart_pause_all
+    waitrt?
+    pause 1
+    clear
+
+    #Safe actions to use tessera, retreats first, then asks tessera about invest.
+    DRC.retreat
+    waitrt?
+    
+    #If it cannot find the tessera (bags may be closed, not in inventory), then the script exits.
+    unless DRCI.get_item_if_not_held?(@tessera) && DRCI.in_hands?(@tessera)
+      DRC.message('Tessera not found, exiting')
+      DRC.unpause_all_list(scripts_to_unpause)
+      exit
+    end
+
+    #command to use the tessera, then stow it away and set the time once it was last attempted. Unpauses scripts at end.
+    DRC.bput("ask my #{@tessera} about invest", 'You send your', 'You cannot do that while focusing on combat')
+    waitrt?
+    DRCI.put_away_item?(@tessera)
+    UserVars.tessera_last_use = Time.now
+    DRC.unpause_all_list(scripts_to_unpause)
+  end
+
+  #def to make sure when to use the tessera. The following conditions must NOT be true: hidden, invisible, cooldown active, hands full, not allowed scripts running and not standing in rooms that are not allowed.
+  def should_use_tessera?
+    !(hidden? || invisible? || tessera_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
+  end
+
+  #def for checking if no_use_scripts (from yaml) are running. Used in should_use_tessera?.
+  def running_no_use_scripts?
+    @no_use_scripts.any? { |name| Script.running?(name) }
+  end
+
+  #def for checking if inside no_use_room (from yaml). Used in should_use_tessera?.
+  def inside_no_use_room?
+    @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
+  end
+
+  #def for defining cooldown period. If the time now, minus the last time i've used the tessera is less than the interval period i've assigned (from yaml). Used in should_use_tessera?.
+  def tessera_on_cooldown?
+    tessera_retry_timer = @tessera_retry_interval
+    (Time.now - UserVars.tessera_last_use) < tessera_retry_timer
+  end
+
+  #def to check if my hands are full and that one item is not my tessera. Used in should_use_tessera?.
+  def hands_full?
+    DRC.left_hand && DRC.right_hand && !DRCI.in_hands?(@tessera)
   end
   
 end

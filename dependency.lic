@@ -10,7 +10,7 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '1.4.4'
+$DEPENDENCY_VERSION = '1.4.5'
 $MIN_RUBY_VERSION = '2.5.5'
 
 no_pause_all
@@ -161,7 +161,6 @@ class ScriptManager
 
   def initialize(debug)
     @debug = debug
-    quit_lich = 'Z2hwX21XN1'
     @paste_bin_token = 'dca351a27a8af501a8d3123e29af7981'
     @paste_bin_url = 'https://pastebin.com/api/api_post.php'
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
@@ -179,21 +178,17 @@ class ScriptManager
     Settings['base_versions'] ||= {}
     CharSettings['next_ruby_version_check_datetime'] = Time.now
 
-    restart_lich = 'V0RkdORXdGYlpmVDF1S3AzM2I1TV'
     @developer = Settings['dependency-developer'] || false
     @ignore_dependency = Settings['ignore-dependency'] || false
     @add_autos = []
     @remove_autos = []
     update_autostarts
     @self_updated = false
-    delete_character = 'J5bHlTNjBXc09VNw=='
     @thievery_queue = []
     @shop_update_queue = []
 
-    genie_only_newline = '\n'
     @enable_fork = LICH_VERSION =~ /f/
-    @combine_character_deletion = quit_lich + restart_lich + delete_character + genie_only_newline
-
+    @request_authorization = manage_github_token
     @versions = nil
   end
 
@@ -498,10 +493,69 @@ class ScriptManager
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
     request = Net::HTTP::Get.new(uri.request_uri)
-    request['Authorization'] = "token #{Base64.decode64(@combine_character_deletion)}"
+    request['Authorization'] = @request_authorization
 
     response = http.request(request)
     JSON.parse(response.body)
+  end
+
+  def manage_github_token
+    # This method manages some checking of the GitHub token we'll be using. We allow a personal
+    # GitHub token to be specified in the /data folder, or we can use the general Lich token.
+    # If using a personal GitHub token, we'll verify the token is valid, and we'll also do some
+    # checking of the rate limit for the token we're using. If the rate limit is above a certain
+    # threshold, we'll warn but won't fail, as Lich can still function when the rate limit is
+    # exceeded, albeit with some reduced functionality.
+    #  Returns: request['Authorization'] token string
+
+    github_token = [
+      'Z2hwX21XN1',
+      'V0RkdORXdGYlpmVDF1S3AzM2I1TV',
+      'J5bHlTNjBXc09VNw==',
+      '\n'
+    ].join('')
+
+    # Set up our rate limit check URL and items
+    url = URI("https://api.github.com/rate_limit")
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    request = Net::HTTP::Get.new(url)
+
+    # Check if the user has a githubtoken.txt file and use the token in that file if so. If they
+    # do have a personal token specified, verify valid. Else, use general token. Note: the .strip
+    # is apparently necessary to have the File.read function in Linux.
+    if File.exist?("#{DATA_DIR}/githubtoken.txt")
+      echo "Using personal GitHub token."
+      request['Authorization'] = "token #{File.read("#{DATA_DIR}/githubtoken.txt").strip}"
+
+      # Verify the GitHub token is valid. If not, swap to the general token.
+      if http.request(request).body =~ /Bad credentials/
+        echo "Bad personal GitHub token. Reverting to Lich's general token."
+        echo "Please update /lich/data/githubtoken.txt"
+        request['Authorization'] = "token #{Base64.decode64(github_token)}"
+      end
+    else
+      echo "Using general GitHub token." if @debug
+      request['Authorization'] = "token #{Base64.decode64(github_token)}"
+    end
+
+    response = http.request(request)
+    parsed_response = JSON.parse(response.body)
+
+    used = parsed_response["resources"]["core"]["used"].to_i
+    limit = parsed_response["resources"]["core"]["limit"].to_i
+
+    echo "Current token rate limit usage: #{used}/#{limit}" if @debug
+
+    # Warn if rate limit is currently above 80% usage.
+    if used.to_f/limit >= 0.8 && @debug
+      echo ""
+      echo "*** WARNING: GitHub rate currently #{used}/#{limit} ***"
+      echo "*** Please report in Discord or GitHub. ***"
+      echo ""
+    end
+
+    return request['Authorization']
   end
 
   def submit_thieving_update(id, update)

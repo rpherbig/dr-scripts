@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#forge
 =end
 
-custom_require.call(%w[common common-arcana common-crafting common-travel events drinfomon])
+custom_require.call(%w[common common-arcana common-crafting common-money common-travel events drinfomon])
 
 class Forge
 
@@ -56,15 +56,15 @@ class Forge
     @shovel = @settings.forging_tools.find { |item| /shovel/ =~ item }
     @training_spells = @settings.crafting_training_spells
     @adjustable_tongs = @settings.adjustable_tongs
+    @next_spin = Time.now
     
-    
-
     @item = args.noun
-    wait_for_script_to_complete('buff', ['forge'])
+    DRC.wait_for_script_to_complete('buff', ['forge'])
 
     Flags.add('forge-assembly', 'another finished \S+ shield (handle)', 'another finished wooden (hilt|haft)', 'another finished (long|short|small|large) leather (cord|backing)', 'another finished (small|large) cloth (padding)', 'another finished (long|short) wooden (pole)', 'ready to be woven into and around the material')
     Flags.add('hone-done', 'the metal now needs protection by pouring oil on it')
     if args.temper
+      @temper = true
       temper
     elsif args.hone
       hone
@@ -81,16 +81,17 @@ class Forge
       @instruction = args.instruction
       @recipe_name = args.recipe_name
       @metal = args.metal
+      @pound = true
       smith
     end
   end
 
   def get_item(name)
-    get_crafting_item(name, @bag, @bag_items, @belt)
+    DRCC.get_crafting_item(name, @bag, @bag_items, @belt)
   end
 
   def stow_item(name)
-    stow_crafting_item(name, @bag, @belt)
+    DRCC.stow_crafting_item(name, @bag, @belt)
   end
 
   def turn_to(section)
@@ -104,19 +105,19 @@ class Forge
   end
 
   def temper
-    unless left_hand =~ /#{@item}/i || right_hand =~ /#{@item}/i
+    unless DRC.left_hand =~ /#{@item}/i || DRC.right_hand =~ /#{@item}/i
       echo('***Please hold the item to temper.***')
       magic_cleanup
       exit
     end
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     DRC.bput("put my #{@item} on the forge", 'Put your item onto the forge')
     temper_turn(true)
   end
 
   def hone
-    find_grindstone(@hometown)
-    crafting_magic_routine(@settings)
+    DRCC.find_grindstone(@hometown)
+    DRCA.crafting_magic_routine(@settings)
     get_item('weaponsmithing book')
     turn_to("page #{find_recipe(10, 'metal weapon honing')}")
     DRC.bput('study my book', 'Roundtime')
@@ -126,8 +127,8 @@ class Forge
   end
 
   def balance
-    find_grindstone(@hometown)
-    crafting_magic_routine(@settings)
+    DRCC.find_grindstone(@hometown)
+    DRCA.crafting_magic_routine(@settings)
     get_item('weaponsmithing book')
     turn_to("page #{find_recipe(10, 'metal weapon balancing')}")
     DRC.bput('study my book', 'Roundtime')
@@ -137,8 +138,8 @@ class Forge
   end
 
   def lighten
-    find_grindstone(@hometown)
-    crafting_magic_routine(@settings)
+    DRCC.find_grindstone(@hometown)
+    DRCA.crafting_magic_routine(@settings)
     get_item('armorsmithing book')
     turn_to("page #{find_recipe(5, 'metal armor lightening')}")
     DRC.bput('study my book', 'Roundtime')
@@ -157,34 +158,37 @@ class Forge
   end
 
   def spin_grindstone
-    until DRC.bput('turn grind', 'keeping it spinning fast', 'Roundtime') == 'keeping it spinning fast'
-      pause
-      waitrt?
+    return if Time.now <= @next_spin
+    case DRC.bput('turn grind', 
+      'keeping it spinning fast', 
+      'making it spin even faster', 
+      'Roundtime')
+    when 'Roundtime'
+      spin_grindstone
     end
+    @next_spin = Time.now + 20
   end
 
   def do_hone
     spin_grindstone
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     case DRC.bput("push grind with #{@item}", 'The grinding has left many nicks and burs in the metal that should be cleaned away', 'roundtime')
     when /nicks and burs/
       get_item('wire brush')
       DRC.bput("rub #{@item} with my brush", 'roundtime')
       stow_item('brush')
     end
-    pause
-    waitrt?
     if Flags['hone-done']
       pour_oil
     else
-      crafting_magic_routine(@settings)
+      DRCA.crafting_magic_routine(@settings)
       do_hone
     end
   end
 
   def do_lighten
     spin_grindstone
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     case DRC.bput("push grind with #{@item}", 'With the grinding complete', 'roundtime')
     when 'With the grinding complete'
       DRC.bput("put #{@item} on anvil", 'You put')
@@ -199,14 +203,13 @@ class Forge
       stow_item('plier')
       pour_oil
     else
-      crafting_magic_routine(@settings)
+      DRCA.crafting_magic_routine(@settings)
       do_lighten
     end
   end
 
   def temper_turn(first = false)
-    waitrt?
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     command = first ? "put my #{@item} on the forge" : "turn #{@item} on forge with my tong"
 
     case DRC.bput(command,
@@ -215,57 +218,28 @@ class Forge
               'Roundtime',
               'metal looks to be in need of some oil to preserve', 'to be cleaned')
     when 'needs more fuel', 'need some more fuel'
-      if @adjustable_tongs 
-        case DRC.bput("adjust my tongs", 'alongside the tong', 'You cannot adjust', 'You have no idea how')
-        when 'You cannot adjust', 'You have no idea how'
-          DRC.message('Tongs are not adjustable, reverting. Please change yaml to reflect adjustable_tongs: false')
-          @adjustable_tongs = false
-          get_item(@shovel)
-          DRC.bput('push fuel with my shovel', 'Roundtime')
-          waitrt?
-          stow_item(@shovel)
-        when /alongside the tong/
-          case DRC.bput('push fuel with my tongs', 'Roundtime', 'That tool does not seem')
-          when 'That tool does not seem'
-            DRC.bput("adjust my tongs", 'alongside the tong')
-            analyze_item
-          else
-            waitrt?
-            DRC.bput("adjust my tongs", 'alongside the tong')
-            DRC.bput('push fuel with my tongs', 'Roundtime')
-            waitrt?
-            DRC.bput("adjust my tongs", 'alongside the tong')
-            temper_turn
-          end
-        end
-      else 
-        get_item(@shovel)
-        DRC.bput('push fuel with my shovel', 'Roundtime')
-        waitrt?
-        stow_item(@shovel)
-      end
+      add_fuel
     when 'As you finish working the fire dims and produces less heat', 'As you finish the fire flickers and is unable to consume its fuel'
       get_item('bellows')
       DRC.bput('push my bellows', 'Roundtime')
-      waitrt?
       stow_item('bellows')
     when 'metal looks to be in need of some oil to preserve', 'to be cleaned'
       temper_finish
       return
     end
-    get_item('tongs') unless right_hand
+    get_item('tongs') unless DRC.right_hand
     temper_turn
   end
 
   def temper_finish
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     stow_item('tong')
     fput("get #{@item} from forge")
     pour_oil
   end
 
   def smith
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     if @chapter
       get_item("#{@book_type} book")
       echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Forging') == 175
@@ -287,8 +261,7 @@ class Forge
   end
 
   def pound(item = @item)
-    waitrt?
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     case DRC.bput("pound #{item} on anvil with my #{@hammer}",
               /You must be holding .* to do that.$/,
               /You must be holding some metal tongs in your other hand to do that/,
@@ -307,7 +280,7 @@ class Forge
       get_item(@hammer)
       pound(item)
     when /You must be holding some metal tongs in your other hand to do that/
-      get_item('tongs')
+      get_item('tongs') unless DRC.left_hand
       DRC.bput("adjust my tongs", 'alongside the tong', 'You cannot adjust') if @adjustable_tongs
       pound(item)
     when 'needs more fuel', 'need some more fuel'
@@ -340,7 +313,6 @@ class Forge
       stow_item('tongs')
       exit
     else
-      crafting_magic_routine(@settings)
       pound
     end
   end
@@ -352,40 +324,39 @@ class Forge
         DRC.message('Tongs are not adjustable, reverting. Please change yaml to reflect adjustable_tongs: false')
         @adjustable_tongs = false
         add_fuel
-      when /alongside the tong/
-        case DRC.bput('push fuel with my tongs', 'Roundtime', 'That tool does not seem')
-        when 'That tool does not seem'
-          DRC.bput("adjust my tongs", 'alongside the tong')
-          analyze_item
-        when 'Roundtime'
-          waitrt?
-          DRC.bput("adjust my tongs", 'alongside the tong')
-          pound
-        end
+      when 'With a yank you fold the shovel'
+        DRC.bput("adjust my tongs", 'alongside the tong')
       end
     else
-      stow_item('tongs')
+      stow_item('tongs') if pound
       get_item(@shovel)
-      case DRC.bput('push fuel with my shovel', 'Roundtime', 'That tool does not seem')
-      when 'That tool does not seem'
-        analyze_item
-      else
-        waitrt?
-        stow_item(@shovel)
-        get_item('tongs')
-        pound
-      end
     end
+    push_fuel
+  end
+
+  def push_fuel
+    DRCA.crafting_magic_routine(@settings)
+    noun = GameObj.left_hand.noun
+    DRC.bput("push fuel with my #{noun}", 'Roundtime', 'That tool does not seem')
+    case noun
+    when 'shovel'
+      stow_item('shovel')
+      get_item('tongs') if pound
+    when 'tongs'
+      DRC.bput("adjust my tongs", 'alongside the tong')
+    end
+    temper_turn if @temper
+    pound if @pound
   end
 
   def bellows
+    DRCA.crafting_magic_routine(@settings)
     stow_item(@hammer)
     get_item('bellows')
     case DRC.bput('push my bellows', 'Roundtime', 'That tool does not seem')
     when 'That tool does not seem'
       analyze_item
     else
-      waitrt?
       stow_item('bellows')
       get_item(@hammer)
       pound
@@ -393,8 +364,7 @@ class Forge
   end
 
   def turn_item
-    waitrt?
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     case DRC.bput("turn #{@item} on anvil with my tongs",
               'ready for cooling in the slack tub', 'ready for a quench hardening in the slack tub',
               'Roundtime',
@@ -413,7 +383,6 @@ class Forge
     stow_item('tongs')
     Flags.reset('forge-assembly')
     DRC.bput('push slack tub', 'Roundtime')
-    waitrt?
     DRC.bput("get #{@item} from anvil", 'You get')
 
     assemble_part
@@ -431,18 +400,14 @@ class Forge
         when 'need of some oil'
           break
         end
-        pause
-        waitrt?
         stow_item('pliers')
         assemble_part
         get_item('pliers')
       end
       stow_item('pliers')
-
     elsif 'weaponsmithing'.include? @book_type
       grind_item
     end
-
     add_oil
   end
 
@@ -455,29 +420,29 @@ class Forge
                Flags['forge-assembly'].to_a[1..-1].join('.')
              end
       Flags.reset('forge-assembly')
-      fput("get my #{part}")
-      if /not required/ =~ DRC.bput("assemble my #{@item} with my #{part}", 'affix it securely in place', 'and tighten the pommel to secure it', 'carefully mark where it will attach when you continue crafting', 'is not required to continue crafting')
-        fput("stow my #{part}")
+      if /referring/ =~ DRC.bput("get my #{part}", 'You get', 'What were you referring to?')
+        DRC.message("missing #{part}, exiting")
+        exit
       end
-      waitrt?
+      if /not required/ =~ DRC.bput("assemble my #{@item} with my #{part}", 'affix it securely in place', 'and tighten the pommel to secure it', 'carefully mark where it will attach when you continue crafting', 'is not required to continue crafting')
+        DRC.bput("stow my #{part}")
+      end
     end
   end
 
   def grind_item
-    find_grindstone(@hometown)
+    DRCC.find_grindstone(@hometown)
     spin_grindstone
     DRC.bput("push grind with my #{@item}", 'Roundtime', 'needs protection')
-    waitrt?
   end
 
   def pour_oil
     ords = %w[second third fourth fifth sixth]
-    crafting_magic_routine(@settings)
+    DRCA.crafting_magic_routine(@settings)
     get_item('oil')
     while ords.any?
       case DRC.bput("pour my oil on my #{@item}", 'Roundtime', 'Applying the final touches', "You can't pour", 'You pour all of')
       when 'Roundtime', 'Applying the final touches'
-        waitrt?
         stow_item('oil')
         break
       when 'You pour all of'
@@ -494,18 +459,15 @@ class Forge
 
     return unless @stamp
     get_item('stamp')
-    fput("mark my #{@item} with my stamp")
-    pause
-    waitrt?
+    DRC.bput("mark my #{@item} with my stamp", 'Roundtime')
     stow_item('stamp')
     magic_cleanup
   end
 
   def analyze_item
-    waitrt?
-    crafting_magic_routine(@settings)
-    stow_item(left_hand) # store contents of both hands, reacquire hammer and tongs
-    stow_item(right_hand)
+    DRCA.crafting_magic_routine(@settings)
+    stow_item(DRC.left_hand) # store contents of both hands, reacquire hammer and tongs
+    stow_item(DRC.right_hand)
     get_item(@hammer)
     get_item('tongs')
 
@@ -517,8 +479,8 @@ class Forge
     when 'ready for more pounding', 'ready to be pounded', 'ready for pounding', 'would obstruct pounding'
       pound
     when 'metal will quickly rust'
-      stow_item(left_hand)
-      stow_item(right_hand)
+      stow_item(DRC.left_hand)
+      stow_item(DRC.right_hand)
       DRC.bput("get #{@item} from anvil", 'You get')
       add_oil
     when 'The forge fire has died down'

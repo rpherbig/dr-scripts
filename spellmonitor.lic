@@ -2,10 +2,13 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#spellmonitor
 =end
 
+$SPELLMONITOR_VERSION = '2.0.0'
+
 custom_require.call(%w[drinfomon])
 
 no_kill_all
 no_pause_all
+silence_me
 
 setpriority(0)
 
@@ -76,7 +79,11 @@ class DRSpells
   # Example scenarios: learning from a guild leader, Ozursus, scrolls, Throne City, rerolling, death.
   def self.refresh_known_spells
     @@silence_known_spells_hook = true
-    fput('spells')
+    if DRStats.barbarian? || DRStats.thief?
+      fput('ability')
+    else
+      fput('spells')
+    end
     pause 1
     @@silence_known_spells_hook = false
   end
@@ -196,7 +203,9 @@ active_spells_hook = proc do |server_string|
   server_string
 end
 
-known_spells_hook = proc do |server_string|
+# This method parses the output from `spells` command for magic users
+# and populates the known spells/feats based on the output.
+known_mage_spells_hook = proc do |server_string|
   case server_string
   when /^You recall the spells you have learned/
     DRSpells.grabbing_known_spells = true
@@ -239,6 +248,111 @@ known_spells_hook = proc do |server_string|
   when /^You can use SPELL STANCE|^You have (no|yet to receive any) training in the magical arts|You have no desire to soil yourself with magical trickery|^You really shouldn't be loitering here|\(Use SPELL|\(Use PREPARE/
     DRSpells.grabbing_known_spells = false
     server_string = nil if DRSpells.silence_known_spells_hook
+  end
+  server_string
+end
+
+# This method parses the output from `ability` command for Barbarians
+# and populates the known spells/feats based on the known abilities/masteries.
+#
+# The XML stream for DragonRealms is whack at best.
+#
+# Examples of the data we're looking for:
+#     You know the Berserks:<pushBold/> Avalanche, Drought.
+#     <popBold/>You know the Forms:<pushBold/> Monkey.
+#     <popBold/>You know the Roars:<pushBold/> Anger the Earth.
+#     <popBold/>You know the Meditations:<pushBold/> Flame, Power, Contemplation.
+#     <popBold/>You know the Masteries:<pushBold/> Juggernaut, Duelist.
+#     <popBold/>
+#     You recall that you have 0 training sessions remaining with the Guild.
+#
+known_barbarian_abilities_hook = proc do |server_string|
+  # The first line from the `ability` output is your known berserks.
+  # To keep code and conditions organized, this is pulled out to its own block.
+  if server_string =~ /^You know the (Berserks:)/
+    DRSpells.grabbing_known_spells = true
+    DRSpells.known_spells.clear()
+    DRSpells.known_feats.clear()
+  end
+
+  case server_string
+  when /^(<(push|pop)Bold\/>)?You know the (Berserks|Forms|Roars|Meditations):(<(push|pop)Bold\/>)?/
+    if DRSpells.grabbing_known_spells
+      server_string
+        .sub(/^(<(push|pop)Bold\/>)?You know the (Berserks|Forms|Roars|Meditations):(<(push|pop)Bold\/>)?/, '')
+        .sub('.', '')
+        .split(',')
+        .map(&:strip)
+        .reject { |ability| ability.nil? || ability.empty? }
+        .each { |ability| DRSpells.known_spells[ability] = true }
+    end
+    server_string = nil if DRSpells.silence_known_spells_hook
+  when /^(<(push|pop)Bold\/>)?You know the (Masteries):(<(push|pop)Bold\/>)?/
+    # Barbarian masteries are the equivalent of magical feats.
+    if DRSpells.grabbing_known_spells
+      server_string
+        .sub(/^(<(push|pop)Bold\/>)?You know the (Masteries):(<(push|pop)Bold\/>)?/, '')
+        .sub('.', '')
+        .split(',')
+        .map(&:strip)
+        .reject { |mastery| mastery.nil? || mastery.empty? }
+        .each { |mastery| DRSpells.known_feats[mastery] = true }
+    end
+    server_string = nil if DRSpells.silence_known_spells_hook
+  when /^You recall that you have (\d+) training sessions? remaining with the Guild/
+    DRSpells.grabbing_known_spells = false
+    server_string = nil if DRSpells.silence_known_spells_hook
+  end
+  server_string
+end
+
+# This method parses the output from `ability` command for Thieves
+# and populates the known spells/feats based on the known khri.
+#
+# The XML stream for DragonRealms is whack at best.
+#
+# Examples of the data we're looking for:
+#     From the Subtlety tree, you know the following khri: Darken (Aug), Dampen (Util/Ward), Strike (Aug), Silence (Util), Shadowstep (Util), Harrier (Aug)
+#     From the Finesse tree, you know the following khri: Hasten (Util), Safe (Aug), Avoidance (Aug), Plunder (Aug), Flight (Aug/Ward), Elusion (Aug), Slight (Util)
+#     From the Potence tree, you know the following khri: Focus (Aug), Prowess (Debil), Sight (Aug), Calm (Util), Steady (Aug), Eliminate (Debil), Serenity (Ward), Sagacity (Ward), Terrify (Debil)
+#     You have 7 available slots.
+#
+known_thief_khri_hook = proc do |server_string|
+  # The first line from the `ability` output is what you know from the Subtlety tree.
+  # To keep code and conditions organized, this is pulled out to its own block.
+  if server_string =~ /^From the Subtlety tree, you know the following khri:/
+    DRSpells.grabbing_known_spells = true
+    DRSpells.known_spells.clear()
+    DRSpells.known_feats.clear()
+  end
+
+  case server_string
+  when /^From the (Subtlety|Finesse|Potence) tree, you know the following khri:/
+    if DRSpells.grabbing_known_spells
+      server_string
+        .sub(/^From the (Subtlety|Finesse|Potence) tree, you know the following khri:/, '')
+        .sub('.', '')
+        .gsub(/\(.+?\)/, '')
+        .split(',')
+        .map(&:strip)
+        .reject { |ability| ability.nil? || ability.empty? }
+        .each { |ability| DRSpells.known_spells[ability] = true }
+    end
+    server_string = nil if DRSpells.silence_known_spells_hook
+  when /^You have (\d+) available slots?/
+    DRSpells.grabbing_known_spells = false
+    server_string = nil if DRSpells.silence_known_spells_hook
+  end
+  server_string
+end
+
+known_spells_hook = proc do |server_string|
+  if DRStats.barbarian?
+    server_string = known_barbarian_abilities_hook.call(server_string)
+  elsif DRStats.thief?
+    server_string = known_thief_khri_hook.call(server_string)
+  else
+    server_string = known_mage_spells_hook.call(server_string)
   end
   server_string
 end

@@ -853,11 +853,12 @@ class LootProcess
     end
   end
 
-  #not necromancer related - not to be confused with the necro rituals.  According to GMs this may change but for now they are two separate functions.
   def dissected?(mob_noun, game_state)
-    case bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing further",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That's going to be hard","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge')
-    when 'You succeed in dissecting the corpse'
+    case bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing further",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That's going to be hard","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge', 'This ritual may only be performed on a corpse', /You learn something/i, 'A failed or completed ritual has rendered')
+    when 'You succeed in dissecting the corpse', /You learn something/i
       return true
+    when 'This ritual may only be performed on a corpse', 'A failed or completed ritual has rendered'
+      return false
     when 'While likely a fascinating study',"That'd be a waste of time.",'You do not yet possess the knowledge'
       game_state.undissectable(mob_noun)
       return false
@@ -1907,12 +1908,14 @@ class SpellProcess
     if data['moon']
       DRCMM.check_moonwatch
       moon = UserVars.moons['visible'].first
-      unless moon
+      if !moon && data['abbrev'].downcase == 'col'
+        data['cast'] = "cast ambient"
+      elsif !moon
         echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
 
-        @weather ||= bput('weather', 'inside', 'You glance up at the sky.', 'You glance outside')
+        @weather ||= DRC.bput('weather', 'inside', 'You glance up at the sky.', 'You glance outside')
         if @weather =~ /inside/
-          message "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
+          DRC.message "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
         end
 
         unless moon = UserVars.moons['visible'].first
@@ -2085,6 +2088,9 @@ class AbilityProcess
     @battle_cry_cooldown = settings.battle_cry_cooldown
     echo("  @battle_cry_cooldown: #{@battle_cry_cooldown}") if $debug_mode_ct
 
+    @roar_helm_noun = settings.roar_helm_noun
+    echo("  @roar_helm_noun: #{@roar_helm_noun}") if $debug_mode_ct
+
     @barb_buffs = @buffs.delete('barb_buffs') || []
     echo("  @barb_buffs: #{@barb_buffs}") if $debug_mode_ct
 
@@ -2246,8 +2252,16 @@ class AbilityProcess
 
     if battle_cry_data
       echo "Selected battle cry: #{battle_cry_data}" if $debug_mode_ct
+      echo "Using roar helm: #{@roar_helm_noun}" if @roar_helm_noun && $debug_mode_ct
+
       command = battle_cry_data['command']
       command = (command + " at " + battle_cry_data['target_enemy']) if battle_cry_data['target_enemy']
+
+      # Use roar helm if specified
+      fput("scream #{@roar_helm_noun}") if @roar_helm_noun
+      pause
+      waitrt?
+
       fput(command)
       pause
       waitrt?
@@ -2351,10 +2365,9 @@ class TrainerProcess
       'App Quick' => 'Appraisal',
       'App' => 'Appraisal',
       'Astro' => 'Astrology',
-      'Barb Research Augmentation' => 'Augmentation',
-      'Barb Research Debilitation' => 'Debilitation',
-      'Barb Research Utility' => 'Utility',
-      'Barb Research Warding' => 'Warding',
+      'Barb Research Augmentation' => 'Augmentation', # Debilitation cannot be learned via meditate research
+      'Barb Research Utility' => 'Utility',           # because it is a combat skill and can only be learned by
+      'Barb Research Warding' => 'Warding',           # contesting your opponent, such as roaring against them.
       'Berserk Landslide' => 'Warding',
       'Berserk Avalanche' => 'Utility',
       'Charged Maneuver' => 'Expertise',
@@ -2556,21 +2569,15 @@ class TrainerProcess
     when /^Recall$/i
       bput("recall #{game_state.npcs.first}", 'Roundtime', 'You are far too occupied') unless game_state.npcs.empty?
     when /^Barb Research Augmentation$/i
-      bput('meditate research monkey', 'You clear ')
+      DRC.bput('meditate research monkey', /^You clear your mind and begin to meditate/, /^What did you want to research/)
     when /^Barb Research Warding$/i
-      bput('meditate research turtle', 'You clear ')
-    when /^Barb Research Debilitation$/i
-      bput('meditate research earthquake', 'You clear ')
+      DRC.bput('meditate research turtle', /^You clear your mind and begin to meditate/, /^What did you want to research/)
     when /^Barb Research Utility$/i
-      bput('meditate research prediction', 'You clear ')
+      DRC.bput('meditate research prediction', /^You clear your mind and begin to meditate/, /^What did you want to research/)
     when /^Berserk Landslide$/i
-      if DRStats.mana >= @barb_buffs_inner_fire_threshold
-        DRCA.activate_barb_buff?('Landslide')
-      end
+      DRCA.activate_barb_buff?('Landslide')
     when /^Berserk Avalanche$/i
-      if DRStats.mana >= @barb_buffs_inner_fire_threshold
-        DRCA.activate_barb_buff?('Avalanche')
-      end
+      DRCA.activate_barb_buff?('Avalanche')
     when /^Collect$/i
       game_state.sheath_whirlwind_offhand
       retreat
@@ -2930,6 +2937,7 @@ class TrainerProcess
 
   def check_ability(name, ability_info, game_state)
     return false if ['PercMana', 'App Careful'].include?(name) && game_state.casting
+    return false if (name =~ /^Berserk /) && (DRStats.mana < @barb_buffs_inner_fire_threshold)
 
     check = ability_info.is_a?(Hash) ? ability_info[:check] : @skill_map[name]
     check = [check].flatten

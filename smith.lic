@@ -6,11 +6,6 @@
 custom_require.call(%w[common common-crafting common-items common-money common-travel drinfomon])
 
 class Smith
-  include DRC
-  include DRCC
-  include DRCI
-  include DRCM
-  include DRCT
 
   def initialize
     arg_definitions = [
@@ -29,11 +24,14 @@ class Smith
     args = parse_args(arg_definitions)
 
     @settings = get_settings
+    @bag = @settings.crafting_container
+    @bag_items = @settings.crafting_items_in_container
+    @belt = @settings.forging_belt
     discipline = get_data('crafting')['blacksmithing'][@settings.hometown]
     @hometown = @settings.hometown
     @container = get_settings.crafting_container
     recipes = get_data('recipes').crafting_recipes.select { |recipe| recipe['type'] =~ /blacksmithing|weaponsmithing|armorsmithing/i }
-    recipe = recipe_lookup(recipes, args.item_name)
+    recipe = DRCC.recipe_lookup(recipes, args.item_name)
     return unless recipe
 
     parts = recipe['part'] || []
@@ -47,25 +45,27 @@ class Smith
       echo '***You will need to do so by hand and then call ;smith again.***'
       exit
     end
-
+    
     buy_parts(parts)
+    check_oil(discipline)
     buy_ingot(discipline) if buy
-    wait_for_script_to_complete('buff', ['smith'])
-    craft_item(recipe, discipline, material)
+    DRCC.find_anvil(@hometown)
+    DRC.wait_for_script_to_complete('buff', ['smith'])
+    DRC.wait_for_script_to_complete('forge', [recipe['type'], recipe['chapter'], recipe['name'], material, recipe['noun']])
     stamp_item(recipe) if stamp
-    temper_item(discipline, recipe) if temper
-    hone_item(discipline, recipe) if hone
-    balance_item(discipline, recipe) if balance
-    lighten_item(discipline, recipe) if lighten
+    DRC.wait_for_script_to_complete('forge', ['temper', recipe['noun']])  if temper
+    DRC.wait_for_script_to_complete('forge', ['hone', recipe['noun']])    if hone
+    DRC.wait_for_script_to_complete('forge', ['balance', recipe['noun']]) if balance
+    DRC.wait_for_script_to_complete('forge', ['lighten', recipe['noun']]) if lighten
     dispose_scrap(discipline, recipe) if buy
+    dispose_parts(discipline, parts)
   end
 
   def buy_parts(parts)
-    ensure_copper_on_hand(700, @settings)
-    stow_hands
+    DRCM.ensure_copper_on_hand(3000, @settings)
+    DRCI.stow_hands
 
     parts.each do |part|
-      next if exists?(part)
 
       data = get_data('crafting')['recipe_parts'][part][@hometown]
       if data['part-number']
@@ -73,79 +73,47 @@ class Smith
       else
         DRCT.buy_item(data['part-room'], part)
       end
-      bput("put #{part} in my #{@container}", 'You put')
+      DRCC.stow_crafting_item(part, @bag, @belt)
     end
   end
 
   def buy_ingot(discipline)
-    ensure_copper_on_hand(700, @settings)
     DRCT.order_item(discipline['stock-room'], discipline['stock-number'])
-    bput("put ingot in my #{@container}", 'You put')
-    stow_hands
-  end
-
-  def craft_item(recipe, discipline, material)
-    check_oil(discipline)
-    find_anvil(@hometown)
-    wait_for_script_to_complete('forge', [recipe['type'], recipe['chapter'], recipe['name'], material, recipe['noun']])
+    DRCC.stow_crafting_item('ingot', @bag, @belt)
+    DRCI.stow_hands
   end
 
   def check_oil(discipline)
-    $ORDINALS.each do |ord|
-      case bput("look my #{ord} oil in #{@container}", /thick and syrupy substance that easily coats and lubricates metal/, /You see nothing unusual/, /I could not find what you were referring to/, /There appears to be something written/, /(coal|lamp|fish) oil/, /The oil bottle is full/)
-      when /thick and syrupy substance that easily coats and lubricates metal/
-        return if ord == 'first'
-        bput("get my #{ord} oil in #{@container}", /You get/)
-        bput("put oil in my #{@container}", 'You put')
-        return
-      when /I could not find what you were referring to/
-        break
+    case DRC.bput('get my of oil', 'You get', 'What were you referring')
+    when 'You get'
+      /(\d+)/ =~ DRC.bput('count my of oil', 'The oil has \d+ uses remaining')
+      if Regexp.last_match(1).to_i < 3
+        DRCC.stow_crafting_item('of oil', @bag, @belt)
+        DRCT.dispose('of oil', discipline['trash-room'])
+        DRCT.order_item(discipline['finisher-room'], discipline['finisher-number'])
       end
+    else
+      DRCT.order_item(discipline['finisher-room'], discipline['finisher-number'])
     end
-
-    ensure_copper_on_hand(1000, @settings)
-    DRCT.order_item(discipline['finisher-room'], discipline['finisher-number'])
-    bput("put oil in my #{@container}", 'You put')
-    stow_hands
+    DRCC.stow_crafting_item('of oil', @bag, @belt)
   end
 
   def stamp_item(recipe)
-    fput('get my stamp')
-    fput("mark my #{recipe['noun']} with my stamp")
-    pause 1
-    waitrt?
-    fput("put my stamp in my #{@container}")
+    DRCC.get_crafting_item('stamp', @bag, @bag_items, @belt)
+    DRC.bput("mark my #{@noun} with my stamp", 'carefully hammer the stamp', 'You cannot figure out how to do that', 'too badly damaged')
+    DRCC.stow_crafting_item('stamp', @bag, @belt)
   end
 
-  def temper_item(discipline, recipe)
-    check_oil(discipline)
-    find_anvil(@hometown)
-    fput("get my #{recipe['noun']}")
-    wait_for_script_to_complete('forge', ['temper', recipe['noun']])
-  end
-
-  def hone_item(discipline, recipe)
-    check_oil(discipline)
-    fput("get my #{recipe['noun']}")
-    wait_for_script_to_complete('forge', ['hone', recipe['noun']])
-  end
-
-  def balance_item(discipline, recipe)
-    check_oil(discipline)
-    fput("get my #{recipe['noun']}")
-    wait_for_script_to_complete('forge', ['balance', recipe['noun']])
-  end
-
-  def lighten_item(discipline, recipe)
-    check_oil(discipline)
-    fput("get my #{recipe['noun']}")
-    wait_for_script_to_complete('forge', ['lighten', recipe['noun']])
+  def dispose_parts(discipline, parts)
+    parts.each do |part|
+      DRCT.dispose(part, discipline['trash-room'])
+    end
   end
 
   def dispose_scrap(discipline, recipe)
     return unless discipline['stock-volume'] > recipe['volume']
 
-    dispose(discipline['stock-name'], discipline['trash-room'])
+    DRCT.dispose(discipline['stock-name'], discipline['trash-room'])
   end
 end
 

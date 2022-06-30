@@ -3,7 +3,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#common-moonmage
 =end
 
-custom_require.call(%w[common])
+custom_require.call(%w[common common-items])
 
 module DRCMM
   module_function
@@ -22,6 +22,28 @@ module DRCMM
 
   def study_sky
     DRC.bput('study sky', 'You feel a lingering sense', 'You feel it is too soon', 'Roundtime', 'You are unable to sense additional information', 'detect any portents')
+  end
+
+  def get_telescope?(telescope_name = 'telescope', storage)
+    return true if DRCI.in_hands?(telescope_name)
+    if storage['tied']
+      DRCI.untie_item?(telescope_name, storage['tied'])
+    elsif storage['container']
+      DRCI.get_item?(telescope_name, storage['container'])
+    else
+      DRCI.get_item?(telescope_name)
+    end
+  end
+
+  def store_telescope?(telescope_name = "telescope", storage)
+    return true unless DRCI.in_hands?(telescope_name)
+    if storage['tied']
+      DRCI.tie_item?(telescope_name, storage['tied'])
+    elsif storage['container']
+      DRCI.put_away_item?(telescope_name, storage['container'])
+    else
+      DRCI.put_away_item?(telescope_name)
+    end
   end
 
   def get_telescope(storage)
@@ -72,6 +94,26 @@ module DRCMM
     DRC.bput("align #{skill}", 'You focus internally')
   end
 
+  def get_bones?(storage)
+    if storage['tied']
+      DRCI.untie_item?("bones", storage['tied'])
+    elsif storage['container']
+      DRCI.get_item?("bones", storage['container'])
+    else
+      DRCI.get_item?("bones")
+    end
+  end
+
+  def store_bones?(storage)
+    if storage['tied']
+      DRCI.tie_item?("bones", storage['tied'])
+    elsif storage['container']
+      DRCI.put_away_item?("bones", storage['container'])
+    else
+      DRCI.put_away_item?("bones")
+    end
+  end
+
   def get_bones(storage)
     if storage['tied']
       DRC.bput("untie bones from my #{storage['container']}", 'You untie', 'You remove')
@@ -95,6 +137,26 @@ module DRCMM
     waitrt?
 
     store_bones(storage)
+  end
+
+  def get_div_tool?(tool)
+    if tool['tied']
+      DRCI.untie_item?(tool['name'], tool['container'])
+    elsif tool['worn']
+      DRCI.remove_item?(tool['name'])
+    else
+      DRCI.get_item?(tool['name'], tool['container'])
+    end
+  end
+
+  def store_div_tool?(tool)
+    if tool['tied']
+      DRCI.tie_item?(tool['name'], tool['container'])
+    elsif tool['worn']
+      DRCI.wear_item?(tool['name'])
+    else
+      DRCI.put_away_item?(tool['name'], tool['container'])
+    end
   end
 
   def get_div_tool(tool)
@@ -205,6 +267,94 @@ module DRCMM
       end
     end
     return nil
+  end
+
+## Migrating prediction/planet/moon defs from common-arcana to here.
+#Delete this line, and the defs from common-arcana after they've been
+#merged here and things look good.
+
+  def update_astral_data(data, settings = nil)
+    if data['moon']
+      data = set_moon_data(data)
+    elsif data['stats']
+      data = set_planet_data(data, settings)
+    end
+    data
+  end
+
+  def find_visible_planets(planets, settings = nil)
+    unless get_telescope?(settings.telescope_name, settings.telescope_storage)
+      DRC.message("Coult not get telescope to find visible planets")
+      return
+    end
+
+    Flags.add('planet-not-visible', 'turns up fruitless')
+    observed_planets = []
+
+    planets.each do |planet|
+      case DRC.bput("center telescope on #{planet}", 'You put your eye', 'The pain is too much', "That's a bit tough to do when you can't see the sky")
+      when 'The pain is too much', "That's a bit tough to do when you can't see the sky"
+        break
+      end
+      observed_planets << planet unless Flags['planet-not-visible']
+      Flags.reset('planet-not-visible')
+    end
+
+    Flags.delete('planet-not-visible')
+    DRC.message("Could not store telescope after finding visible planets") unless store_telescope?(settings.telescope_name, settings.telescope_storage)
+    observed_planets
+  end
+
+  def set_planet_data(data, settings = nil)
+    return data unless data['stats']
+
+    planets = get_data('constellations')[:constellations].select { |planet| planet['stats'] }
+    planet_names = planets.map { |planet| planet['name'] }
+    visible_planets = find_visible_planets(planet_names, settings)
+    data['stats'].each do |stat|
+      cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
+      next unless cast_on
+      data['cast'] = "cast #{cast_on}"
+      return data
+    end
+    DRC.message("Could not set planet data. Cannot cast #{data['abbrev']}")
+  end
+
+  def set_moon_data(data)
+    return data unless data['moon']
+
+    moon = visible_moons.first
+    if moon
+      data['cast'] = "cast #{moon}"
+    else
+      echo "No moon available to cast #{data['abbrev']}"
+      data = nil
+    end
+    data
+  end
+
+  # Returns true if at least one moon (e.g. katamba, yavash, xibar)
+  # is above the horizon and won't set for at least another ~4 minutes.
+  def moons_visible?
+    !visible_moons.empty?
+  end
+
+  # Returns list of moon names (e.g. katamba, yavash, xibar)
+  # that are above the horizon and won't set for at least another ~4 minutes.
+  def visible_moons
+    check_moonwatch
+    UserVars.moons.select { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }
+                  .map { |moon_name, moon_data| moon_name }
+  end
+
+  def check_moonwatch
+    return if Script.running?('moonwatch')
+
+    echo 'moonwatch is not running. Starting it now'
+    UserVars.moons = {}
+    custom_require.call('moonwatch')
+    echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
+    pause 0.5 while UserVars.moons.empty?
   end
 
 end

@@ -10,7 +10,7 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '1.4.2'
+$DEPENDENCY_VERSION = '1.4.12'
 $MIN_RUBY_VERSION = '2.5.5'
 
 no_pause_all
@@ -26,7 +26,7 @@ end
 class ArgParser
   def parse_args(data, flex_args = false)
     raw_args = variable.first
-    baselist = variable.drop(1).dup
+    baselist = variable.drop(1).dup || []
 
     unless baselist.size == 1 && baselist.grep(/^help$|^\?$|^h$/).any?
 
@@ -49,10 +49,52 @@ class ArgParser
   end
 
   def display_args(data)
-    data.each do |def_set|
-      respond ''
-      respond "  ;#{Script.current.name} " + def_set.map { |x| format_item(x) }.join(' ')
-      def_set.each { |x| respond "   #{(x[:display] || x[:name]).ljust(12)} #{x[:description]} #{x[:options] ? '[' + x[:options].join(', ') + ']' : ''}"; }
+    # This section displays help output for a script. It recognizes when a script call has been given
+    # with the wrong number or incorrect arguments, or when a script has been called via
+    # ;script-name help. It outputs an example script call, including arguments, with optional
+    # arguments enclosed in brackets. If an optional script_summary argument has been specified within
+    # the script, it also outputs a summary of the script. Further, if yaml settings have been
+    # outlined in base-help.yaml, it will output help information for the yaml settings used.
+    # Example output when all help settings have been specified:
+    #
+    # >;circlecheck help
+    #   SCRIPT SUMMARY: Checks your circle and skills to next circle. Optionally checks skills for a target circle.
+    #
+    #   SCRIPT CALL FORMAT AND ARG DESCRIPTIONS (arguments in brackets are optional):
+    #    ;circlecheck [debug] [mode] [target] [script_summary]
+    #     debug        Runs the script with debug messages.
+    #     mode         Only display requirements you don't meet [brief, short, next]
+    #     target       See requirements for a specific circle
+    #
+    #   YAML SETTINGS USED:
+    #     circlecheck_prettyprint: Tells circlecheck to use the pretty print formatting for output. [Ex: true/false]
+    if Script.current.name != "bootstrap"
+      data.each do |def_set|
+        def_set
+          .select { |x| x[:name].to_s == "script_summary" }
+          .each { |x| respond " SCRIPT SUMMARY: #{x[:description]} " }
+        respond ''
+        respond " SCRIPT CALL FORMAT AND ARG DESCRIPTIONS (arguments in brackets are optional):"
+        respond "  ;#{Script.current.name} " + def_set.map { |x| format_item(x) unless x[:name].to_s == "script_summary"}.join(' ')
+        def_set
+          .reject { |x| x[:name].to_s == "script_summary" }
+          .each { |x| respond "   #{(x[:display] || x[:name]).ljust(12)} #{x[:description]} #{x[:options] ? '[' + x[:options].join(', ') + ']' : ''}" }
+      end
+
+      # Display help output for settings used in the script. Relies on base-help.yaml.
+      yaml_data = get_data('help').to_h
+      yaml_settings = yaml_data.select { |field, info| info["referenced_by"].include?(Script.current.name)}
+
+      unless yaml_settings.empty?
+        respond ''
+        respond " YAML SETTINGS USED:"
+        yaml_settings.each do |field, info|
+          setting_line += "   #{field}: #{info["description"]} #{info["specific_descriptions"][Script.current.name]}"
+          setting_line += " [Ex: #{info["example"]}]" unless info["example"].to_s.nil? || info["example"].to_s.empty?
+          respond setting_line
+        end
+        respond ""
+      end
     end
   end
 
@@ -161,7 +203,6 @@ class ScriptManager
 
   def initialize(debug)
     @debug = debug
-    @git_token = 'ghp_' + 'Z8AgbZCOYwmdG' + '9zgSr9MyQkFL' + 'exYYo2tROJO'
     @paste_bin_token = 'dca351a27a8af501a8d3123e29af7981'
     @paste_bin_url = 'https://pastebin.com/api/api_post.php'
     @firebase_url = 'https://dr-scripts.firebaseio.com/'
@@ -189,7 +230,7 @@ class ScriptManager
     @shop_update_queue = []
 
     @enable_fork = LICH_VERSION =~ /f/
-
+    @request_authorization = manage_github_token
     @versions = nil
   end
 
@@ -198,7 +239,7 @@ class ScriptManager
   end
 
   def update_autostarts
-    @autostarts = UserVars.autostart_scripts + Settings['autostart']
+    @autostarts = (UserVars.autostart_scripts + Settings['autostart']).uniq
   end
 
   def update_status_url
@@ -330,6 +371,11 @@ class ScriptManager
     @versions = nil
     repo_scripts.each { |(name, _)| get_script(name, force) }
     autostarts.each do |script|
+      if script == 'drinfomon'
+        respond "\n---\ndrinfomon found in autostarts. This method is no longer used. Attempting to remove it now. If unsuccessful, it can be safely removed with `#{$clean_lich_char}e stop_autostart('drinfomon')`\n---\n"
+        stop_autostart('drinfomon')
+        next
+      end
       custom_require.call(script)
       begin
         pause 0.2
@@ -367,7 +413,7 @@ class ScriptManager
     return if filename.nil? || filename.empty?
     if filename == 'dependency.lic' && @ignore_dependency
       respond 'ignoring dependency download due to ignore_dependency setting'
-      respond "use '#{$lich_char}e check_dependency' to check the value."
+      respond "use '#{$clean_lich_char}e check_dependency' to check the value."
       return
     end
     echo("downloading:#{filename}") if @debug
@@ -494,10 +540,69 @@ class ScriptManager
     http.verify_mode = OpenSSL::SSL::VERIFY_NONE
 
     request = Net::HTTP::Get.new(uri.request_uri)
-    request['Authorization'] = "token #{@git_token}"
+    request['Authorization'] = @request_authorization
 
     response = http.request(request)
     JSON.parse(response.body)
+  end
+
+  def manage_github_token
+    # This method manages some checking of the GitHub token we'll be using. We allow a personal
+    # GitHub token to be specified in the /data folder, or we can use the general Lich token.
+    # If using a personal GitHub token, we'll verify the token is valid, and we'll also do some
+    # checking of the rate limit for the token we're using. If the rate limit is above a certain
+    # threshold, we'll warn but won't fail, as Lich can still function when the rate limit is
+    # exceeded, albeit with some reduced functionality.
+    #  Returns: request['Authorization'] token string
+
+    github_token = [
+      'Z2hwX21XN1',
+      'V0RkdORXdGYlpmVDF1S3AzM2I1TV',
+      'J5bHlTNjBXc09VNw==',
+      '\n'
+    ].join('')
+
+    # Set up our rate limit check URL and items
+    url = URI("https://api.github.com/rate_limit")
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    request = Net::HTTP::Get.new(url)
+
+    # Check if the user has a githubtoken.txt file and use the token in that file if so. If they
+    # do have a personal token specified, verify valid. Else, use general token. Note: the .strip
+    # is apparently necessary to have the File.read function in Linux.
+    if File.exist?("#{DATA_DIR}/githubtoken.txt")
+      echo "Using personal GitHub token."
+      request['Authorization'] = "token #{File.read("#{DATA_DIR}/githubtoken.txt").strip}"
+
+      # Verify the GitHub token is valid. If not, swap to the general token.
+      if http.request(request).body =~ /Bad credentials/
+        echo "Bad personal GitHub token. Reverting to Lich's general token."
+        echo "Please update /lich/data/githubtoken.txt"
+        request['Authorization'] = "token #{Base64.decode64(github_token)}"
+      end
+    else
+      echo "Using general GitHub token." if @debug
+      request['Authorization'] = "token #{Base64.decode64(github_token)}"
+    end
+
+    response = http.request(request)
+    parsed_response = JSON.parse(response.body)
+
+    used = parsed_response["resources"]["core"]["used"].to_i
+    limit = parsed_response["resources"]["core"]["limit"].to_i
+
+    echo "Current token rate limit usage: #{used}/#{limit}" if @debug
+
+    # Warn if rate limit is currently above 80% usage.
+    if used.to_f/limit >= 0.8 && @debug
+      echo ""
+      echo "*** WARNING: GitHub rate currently #{used}/#{limit} ***"
+      echo "*** Please report in Discord or GitHub. ***"
+      echo ""
+    end
+
+    return request['Authorization']
   end
 
   def submit_thieving_update(id, update)
@@ -876,7 +981,15 @@ class SetupFiles
   private
 
   SCRIPTS_DATA_PATH = File.join('.', 'scripts', 'data')
-  SCRIPTS_PROFILES_PATH = File.join('.', 'scripts', 'profiles')
+
+  # use alternate location for settings to allow folks to use lich with
+  # alternate configurations in Test/Platinum/Fallen
+  if File.exist?("#{DATA_DIR}/#{XMLData.game}/base.yaml") && File.exist?("#{DATA_DIR}/#{XMLData.game}/base-empty.yaml") && File.exist?("#{DATA_DIR}/#{XMLData.game}/#{checkname}-setup.yaml")
+    echo("Detected game instance-specific files. Loading settings from #{File.join(DATA_DIR, XMLData.game)}")
+    SCRIPTS_PROFILES_PATH = File.join(DATA_DIR, XMLData.game)
+  else
+    SCRIPTS_PROFILES_PATH = File.join('.', 'scripts', 'profiles')
+  end
 
   # Reloads the base profiles plus any that match the filenames given.
   def reload_profiles(filenames = [])
@@ -995,7 +1108,6 @@ class SetupFiles
 
     battle_cries_data = base_data_spells.battle_cries
     spells_data = base_data_spells.spell_data
-    spells_data_values = spells_data.values
     empty_data = base_data_empty.empty_values
 
     # Populate nil settings with default empty arrays/hashes
@@ -1016,11 +1128,33 @@ class SetupFiles
       # Maps are treated as two-element arrays, first is the key, last is the value.
       # So we grab the last element which leaves us with map of spell properties.
       spell_data = spell_match.last
+      # Inject spell name into the spell properties.
+      # Some scripts check for either `abbrev` or `name`
+      # but our base spells data doesn't have name as a property, so we set it.
+      spell_data['name'] ||= spell_match.first
+
+      spell_data
     end
 
     # Find spell data by its abbreviation, case insensitive.
     get_spell_data_by_abbrev = lambda do |abbrev_to_find|
-      spells_data_values.find { |data| data['abbrev'].casecmp?(abbrev_to_find) }
+      # This creates a new map filtered to only the entries that match the spell abbreviation.
+      spell_matches = spells_data.select { |name, data| data['abbrev'].casecmp?(abbrev_to_find) }
+      # It's theoretically possible, though unlikely, that multiple
+      # entries were returned if base data had the same spell listed
+      # with different capitalization. Let's take the first entry we found.
+      spell_match = spell_matches.first
+      # We now have a map of spell name to map of spell properties.
+      # What we want to return is just the map of spell properties.
+      # Maps are treated as two-element arrays, first is the key, last is the value.
+      # So we grab the last element which leaves us with map of spell properties.
+      spell_data = spell_match.last
+      # Inject spell name into the spell properties.
+      # Some scripts check for either `abbrev` or `name`
+      # but our base spells data doesn't have name as a property, so we set it.
+      spell_data['name'] ||= spell_match.first
+
+      spell_data
     end
 
     # Given a hash for a single spell definition,
@@ -1124,6 +1258,14 @@ class SetupFiles
       # Because there is no other context to know which spell the setting is for
       # we have to assume the spell name or abbrev are defined in the setting.
       spells_list.map!(&enrich_spells_with_data_block)
+    end
+
+    # Spell settings that are configured as a map of a single spell's properties.
+    # Enrich each's spell definition by merging base spell data with spell settings.
+    [
+      'crossing_training_sorcery',
+    ].each do |key|
+      settings[key] = enrich_spells_with_data_block.call(settings[key])
     end
 
     # For TM spells, default their 'prep' command to 'target'
@@ -1380,7 +1522,7 @@ end
 def custom_require
   lambda do |script_names|
     script_names = [script_names] unless script_names.is_a?(Array)
-    respond("CR - starting:#{script_names}") if UserVars.bootstrap_debug
+    respond("CR:starting:#{script_names}") if UserVars.bootstrap_debug
     bootstrapper = force_start_script('bootstrap', script_names)
     pause 0.05
     while Script.running.include?(bootstrapper)
@@ -1444,7 +1586,7 @@ def replace_all
     .each do |script|
       if script == 'dependency.lic' && $manager.ignore_dependency
         respond 'ignoring replace dependency due to ignore_dependency setting'
-        respond "use '#{$lich_char}e check_dependency' to check the value."
+        respond "use '#{$clean_lich_char}e check_dependency' to check the value."
         next
       end
       new_name = "#{script}.#{Time.now.to_i}.bak"
@@ -1452,7 +1594,7 @@ def replace_all
       File.rename("./scripts/#{script}", "./scripts/#{new_name}")
     end
 
-  respond 'Downloading all scripts'
+  respond "Downloading all scripts (This may take a few minutes. Please wait until you see \"Finished Install\" before doing anything else"
   $manager.repo_scripts.each(&method(:get_script))
 end
 
@@ -1501,7 +1643,7 @@ def check_dev_mode
 end
 
 def toggle_developer_mode
-  echo "THIS METHOD IS NO LONGER USED. USE '#{$lich_char}e set_dev_mode' and '#{$lich_char}e unset_dev_mode'."
+  echo "THIS METHOD IS NO LONGER USED. USE '#{$clean_lich_char}e set_dev_mode' and '#{$clean_lich_char}e unset_dev_mode'."
 end
 
 def ignore_dependency
@@ -1518,7 +1660,7 @@ end
 
 def check_dependency
   echo "ignore_dependency is set to: #{$manager.ignore_dependency}"
-  echo "Use '#{$lich_char}e ignore_dependency' and '#{$lich_char}e unignore_dependency' to change."
+  echo "Use '#{$clean_lich_char}e ignore_dependency' and '#{$clean_lich_char}e unignore_dependency' to change."
 end
 
 def use_lich_fork
@@ -1546,7 +1688,7 @@ def use_lich_main
 end
 
 def toggle_lich_fork
-  echo "THIS METHOD IS NO LONGER USED. USE #{$lich_char}e use_lich_fork and #{$lich_char}e use_lich_main"
+  echo "THIS METHOD IS NO LONGER USED. USE #{$clean_lich_char}e use_lich_fork and #{$clean_lich_char}e use_lich_main"
 end
 
 def set_custom_status_repo(repo, branch='master')
@@ -1600,6 +1742,7 @@ def validate_supported_ruby_version
 end
 
 def remove_from_autostart(scripts)
+  return if Script.running?('autostart')
   scripts.each do |script|
     start_script('autostart', ['remove', '--global', File.basename(script, '.*')])
     pause 0.1 while Script.running?('autostart')
@@ -1609,8 +1752,9 @@ def remove_from_autostart(scripts)
 end
 
 def add_self_to_autostart
-  start_script('autostart', ['add', '--global', File.basename('dependency', '.*')])
-  pause 0.1 while Script.running?('autostart')
+  return if Script.running?('autostart')
+  start_script('autostart', ['add', '--global', 'dependency'])
+  pause while Script.running?('autostart')
 end
 
 def update_d
@@ -1620,6 +1764,7 @@ def update_d
     sleep 2
     force_start_script('dependency')
   end
+  stop_script('drinfomon') if Script.running?('drinfomon')
   stop_script('dependency')
 end
 
@@ -1666,6 +1811,13 @@ full_install if install
 
 force_start_script('bootstrap', ['wipe_constants'])
 
+# Proactively starting DRinfomon as script zero to prevent
+# race conditions involving this script which so many other
+# scripts depend on, and which is slow to start on its own
+echo("Starting DRinfomon, this will take a few seconds.")
+custom_require.call('drinfomon')
+echo("DRinfomon ready.")
+
 $manager.check_base_files
 $manager.check_data_files
 $manager.start_scripts
@@ -1677,6 +1829,7 @@ end
 
 before_dying do
   $moon_watch = nil
+  stop_script('drinfomon') if Script.running?('drinfomon')
 end
 
 $setupfiles.reload

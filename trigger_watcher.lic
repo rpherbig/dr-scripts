@@ -1,0 +1,138 @@
+####################################################################################################
+# =exec - "execute" - Execute a script
+# =execw - "execute wait" - Execute script and wait for it to end
+# =uvar - "user variable" - Set or delete a user variable based on a trigger
+# =log - "log" - log to a file in the Lich file tree
+####################################################################################################
+
+custom_require.call(%w[events common])
+
+no_pause_all
+no_kill_all
+
+# When trigger command =exec has been used
+def execute_script(name, args = [], flags = {})
+  echo "Calling script: #{name}"
+  verify_script(name)
+  waitrt?
+  start_script(name, args.map { |arg| arg =~ /\s/ ? "\"#{arg}\"" : arg }, flags)
+end
+
+# When trigger command =execw has been used
+def execute_script_wait(name, args = [])
+  echo "Calling script: #{name} and waiting"
+  verify_script(name)
+  waitrt?
+  DRC.wait_for_script_to_complete(name, args)
+end
+
+# When trigger command =uvar has been used
+def execute_uservar(data)
+  echo "In execute uservar"
+  echo "data is: #{data}"
+  if data[0] =~ /^set\b/i
+    echo "In set"
+    start_script('vars', ['set', data[1], '=', data[2]])
+  elsif data[0] =~ /^delete\b/i
+    echo "In delete"
+    start_script('vars', ['delete', data.drop(1)])
+  elsif data[0] =~ /^get\b/i
+    echo "In get"
+    usr_var = data[1]
+    echo usr_var
+    echo UserVars.usr_var
+  end
+end
+
+# Load our trigger(s) and response(s) from yaml file base-triggers.yaml.
+# Parse each of them and set a Flag based on the trigger.
+data = get_data('triggers').to_h
+data.each do | name, values |
+  echo "Trigger name:  #{name}" if $debug_mode_tw
+  echo "Triggers are:  #{values['triggers']}" if $debug_mode_tw
+  echo "Responses are: #{values['responses']}" if $debug_mode_tw
+
+  Flags.add(name.to_s, *values['triggers'])
+end
+
+# Primary trigger monitoring block. Keep script persistent. Monitor for Flags.
+# Did we trigger? If so, send the responses. Reset the flag for next trigger.
+until script.gets.nil?
+  data.each do | name, values |
+    if Flags[name.to_s]
+      # echo "Triggered: #{name.to_s}"
+      # echo "Trigger text is: #{values['triggers'].first}"
+      # echo "Flag is: #{Flags[name.to_s]}"
+      # echo "Matchers are: #{Flags.matchers[name.to_s]}"
+      # echo "Matchers are type #{Flags.matchers[name.to_s].is_a?(Array)}"
+      # echo "Matchdata for flag #{name.to_s} is: #{Flags.history[name.to_s][0][1]}"
+      # echo "History data type is array? #{Flags.history[name.to_s].is_a?(Array)}"
+      # echo "Number of elements in history: #{Flags.history[name.to_s].count}"
+      # echo "All history is: #{Flags.history}"
+      # echo "Flags are: #{Flags.flags}"
+      # echo "History for flag #{name.to_s} is: #{Flags.read_matches(name.to_s)}"
+      # echo "Is history array cleared? #{Flags.history[name.to_s]}"
+
+      responses = values['responses'].to_a
+
+      # Below we'll look for both regex and user variable subsitutions in trigger responses,
+      # and substitute appropriately if so.
+      num_subs = responses.join(' ').scan(/\$(\d)/)
+      echo num_subs
+
+      if num_subs
+        num_subs.each do |num|
+          echo "num is #{num.first}"
+          responses.map { |string| string.gsub!(/\$#{num.first}\b/, Flags[name.to_s][num.first.to_i]) }
+        end
+      end
+
+      echo responses
+
+      uvar_subs = responses.join(' ').scan(/\$(\w+\b)/)
+      echo uvar_subs
+
+      if uvar_subs
+        uvar_subs.each do |uvar|
+          echo uvar[0]
+          var_value = eval("UserVars." + "#{uvar[0].to_s}")
+          unless var_value == nil
+            responses.map { |string| string.gsub!(/\$#{uvar[0].to_s}\b/, "#{var_value.to_s}") }
+          else
+            DRC.message("  Warning, User Variable #{uvar[0]} is not set, but your trigger is attempting to use it.")
+          end
+        end
+      end
+
+      # Send our trigger responses. Parse any leading trigger commands.
+      responses.each do | string |
+        waitrt?
+        if string =~ /^=exec\b/i
+          echo "Found exec"
+          exec_script = string.gsub('=exec', '').split
+          echo exec_script[0]
+          echo exec_script.drop(1)
+          execute_script(exec_script[0], exec_script.drop(1))
+        elsif string =~ /^=execw\b/i
+          echo "Found exec"
+          exec_script = string.gsub('=execw', '').split
+          echo exec_script[0]
+          echo exec_script.drop(1)
+          execute_script_wait(exec_script[0], exec_script.drop(1))
+        elsif string =~ /^=uvar\b/i
+          echo "Found uvar"
+          exec_uvar = string.gsub('=uvar', '').split
+          echo exec_uvar
+          echo exec_uvar[0]
+          echo exec_uvar.drop(1)
+          execute_uservar(exec_uvar)
+        else
+          fput(string)
+        end
+      end
+
+      # Reset flag, ready for next occurrence of trigger
+      Flags.reset(name.to_s)
+    end
+  end
+end

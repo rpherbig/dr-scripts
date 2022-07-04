@@ -18,7 +18,7 @@ custom_require.call(%w[events common])
 no_pause_all
 no_kill_all
 
-# When trigger command =exec has been used
+# When trigger command =exec has been used. Executes a specified script.
 def execute_script(name, args = [], flags = {})
   echo "Calling script: #{name}"
   verify_script(name)
@@ -26,7 +26,7 @@ def execute_script(name, args = [], flags = {})
   start_script(name, args.map { |arg| arg =~ /\s/ ? "\"#{arg}\"" : arg }, flags)
 end
 
-# When trigger command =execw has been used
+# When trigger command =execw has been used. Executes a specified script and waits until complete.
 def execute_script_wait(name, args = [])
   echo "Calling script: #{name} and waiting"
   verify_script(name)
@@ -35,21 +35,22 @@ def execute_script_wait(name, args = [])
 end
 
 # When trigger command =uvar has been used
-# set - set or update a UserVar
-# delete - delete an existing UserVar
-# access a UserVar via $<UserVarName> in any trigger response
+#   set - set or update a UserVar
+#   delete - delete an existing UserVar
+#   Note: access a UserVar via $<UserVarName> in any trigger response
 def execute_uservar(data)
   echo "In execute uservar"
   echo "data is: #{data}"
   if data[0] =~ /^set\b/i
     echo "In set"
-    start_script('vars', ['set', data[1], '=', data[2]])
+    start_script('vars', ['set', data[1], '=', data[2..-1].join(' ')])
   elsif data[0] =~ /^delete\b/i
     echo "In delete"
     start_script('vars', ['delete', data.drop(1)])
   end
 end
 
+# When trigger command =logf has been used. Logs to a file of specified name.
 def execute_logf(data)
   echo data
   echo "In execute logf"
@@ -58,13 +59,93 @@ def execute_logf(data)
   open("#{data[0]}.txt", 'a') do |f|
     f.puts "#{Time.now.strftime("%Y-%m-%d %I:%M%P")} #{data[1..-1].join(' ')}"
   end
+  DRC.message("  Logged to file name: #{data[0]}")
 end
 
 def execute_logw(data)
   echo data
   echo "In execute logw"
   echo data[1..-1].join(' ')
-  DRC.log_window(data[1..-1].join(' '), data[0])
+  DRC.log_window(data[1..-1].join(' '), data[0], true, true, false)
+end
+
+def execute_pause(data)
+  echo "In execute pause"
+  echo data
+  echo "Pausing #{data[0]}"
+  pause data[0].to_i
+  echo "Done pausing"
+end
+
+def execute_if(data)
+  echo "In execute if"
+  echo data
+
+  # Split at each equals sign, reject empty array elements, strip whitespace from each element
+  new_data = data.split(/=/).reject(&:empty?).collect(&:strip)
+
+  # Break our if/elsif/else data apart
+  if_data = new_data.select { |n| n =~ /^if/ }
+                    .map { |n| n.gsub(/^if/, '')}
+                    .collect(&:strip)
+  elsif_data = new_data.select { |n| n =~ /^elsif/ }
+                    .map { |n| n.gsub(/^elsif/, '')}
+                    .collect(&:strip)
+  else_data = new_data.select { |n| n =~ /^else/ }
+                    .map { |n| n.gsub(/^else/, '')}
+                    .collect(&:strip)
+
+  echo "if data: #{if_data}"        # One if, should be array with 1 element, if to check, then responses
+  echo "elsif data: #{elsif_data}"    # Could be any number of elsif, array with multiple elements, elsif to check, then responses
+  echo "else data: #{else_data}"     # One else, array with single element, no else check, only responses
+
+  if_check = if_data[0].scan(/\{(.*?)\}/).flatten.first
+
+  echo "if_check: #{if_check}"
+
+  if_break_out = false
+
+  if eval(if_check)
+    echo "it's true"
+
+
+    if_break_out = true
+  end
+
+  unless if_break_out
+    if elsif_data
+      echo "In elsif"
+      echo "inside elsif unless"
+      elsif_data.each do |val|
+        echo "inside .each do"
+        echo "elsif val is: #{val}"
+        elsif_elements = val.scan(/\{(.*?)\}/)
+        unless if_break_out
+          echo "Inside lowest if_break_out"
+          echo "elsif_elements[0][0] is: #{elsif_elements[0][0]}"
+          if eval(elsif_elements[0][0].to_s)
+            if_break_out = true
+            elsif_elements.drop(1).each do |val|
+              echo "val is: #{val}"
+              eval(val[0])
+            end
+          end
+        end
+      end
+    end
+  end
+
+  unless if_break_out
+    if else_data
+      echo "In else data"
+      else_elements = else_data[0].scan(/\{(.*?)\}/)
+      echo else_elements
+      else_elements.each do |val|
+        echo val
+        eval(val[0])
+      end
+    end
+  end
 end
 
 # Load our trigger(s) and response(s) from yaml file base-triggers.yaml.
@@ -98,11 +179,12 @@ until script.gets.nil?
 
       responses = values['responses'].to_a
 
-      # Below we'll look for both regex and user variable subsitutions in trigger responses,
+      # Below we'll look for both regex and UserVar subsitutions in trigger responses,
       # and substitute appropriately if so.
       num_subs = responses.join(' ').scan(/\$(\d)/)
       echo num_subs
 
+      # Process regex substitutions
       if num_subs
         num_subs.each do |num|
           echo "num is #{num.first}"
@@ -115,6 +197,7 @@ until script.gets.nil?
       uvar_subs = responses.join(' ').scan(/\$(\w+\b)/)
       echo uvar_subs
 
+      # Process UserVar substitutions
       if uvar_subs
         uvar_subs.each do |uvar|
           echo uvar[0]
@@ -163,6 +246,18 @@ until script.gets.nil?
           echo exec_logw[0]
           echo exec_logw.drop(1)
           execute_logw(exec_logw)
+        elsif string =~ /^=pause\b/i
+          echo "Found pause"
+          exec_pause = string.gsub('=pause', '').split
+          echo exec_pause
+          echo exec_pause[0]
+          echo exec_pause.drop(1)
+          execute_pause(exec_pause)
+        elsif string =~ /^=if\b/i
+          echo "Found if"
+          # exec_if = string.gsub('=if', '')
+          echo string
+          execute_if(string)
         else
           fput(string)
         end

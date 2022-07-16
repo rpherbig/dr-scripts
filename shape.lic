@@ -19,14 +19,16 @@ class Shape
         { name: 'chapter', regex: /\d+/i, variable: true, description: 'Chapter containing the item.' },
         { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
         { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material.' },
-        { name: 'noun', regex: /\w+/i, variable: true }
+        { name: 'noun', regex: /\w+/i, variable: true },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (glue/stain)'}
       ],
       [
         { name: 'finish', options: %w[hold stow], description: 'What to do with the finished item.' },
         { name: 'instructions', regex: /instructions/i, description: 'Instructions if using instructions'},
         { name: 'recipe_name', regex: /\w+/i, variable: true, description: 'instruction noun' },
         { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material to use.' },
-        { name: 'debug', regex: /debug/i, optional: true, description: 'displays debug information' }
+        { name: 'noun', regex: /\w+/i, variable: true },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (glue/stain)'}
       ],
       [
         { name: 'resume', regex: /resume/i, variable: true, description: 'Attempts to continue an ongoing project, must be holding the item' },
@@ -36,11 +38,6 @@ class Shape
         { name: 'recipe_name', display: 'enhancement', options: %w[laminate lighten cable], description: 'Enhancements to crafted bows' },
         { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item being enhanced.' }
       ],
-      [
-        { name: 'noun', options: %w[arrowhead shaft], description: 'Arrowhead or Shaft?' },
-        { name: 'material', regex: /\w+/i, variable: true, description: 'Name of part (eg "boar tusk") or lumber (eg "pine lumber") in quotes if multiple words' },
-        { name: 'number', regex: /\d+/i, variable: true, optional: true, description: 'How many to make, not necessary for shafts' }
-      ]
     ]
 
     args = parse_args(arg_definitions)
@@ -50,30 +47,32 @@ class Shape
     args.recipe_name.sub!("laminate", "bow lamination")
     args.recipe_name.sub!("cable", "bow cable-backing")
     @recipe_name = args.recipe_name
-    args.noun.sub!("shaft", "arrow shaft")
-    @noun = args.noun == nil  ? args.recipe_name : args.noun
+    @noun = args.noun
     @material = args.material
-    @count = args.number.to_i    
-    @training_spells = @settings.crafting_training_spells
     @chapter = args.chapter == nil ? 6 : args.chapter.to_i
+    @info = get_data('crafting')['shaping'][@settings.hometown]
 
     DRC.wait_for_script_to_complete('buff', ['shape'])
     Flags.add('shaping-assembly', 'appears ready to be reinforced with some (backer)', 'appears ready to be strengthened with some leather (strips)', 'assembly with the (backing) material can begin', 'You need another bone, wood or horn (backing) material', 'another finished bow (string)', 'another finished (long|short) wooden (pole)', 'another finished (leather strips)', 'another .* (long|short) leather (cord)', 'You must assemble the (backer)', 'You must assemble the (strips)', 'another (arrow flights)', 'another (.* arrowheads)')
     Flags.add('shaping-done', 'Applying the final touches', 'from the successful (lamination|lightening|cable-backing) process')
-
+    
     if args.resume
-      shape("analyze my #{@noun}")
-    elsif args.noun == 'arrowhead'
-      shape_parts
-    elsif args.noun == 'shaft'
-      shape_parts
+      work("analyze my #{@noun}")
     else
-      shape_item
+      if @chapter.between?(2,4)
+        DRCC.check_consumables('glue', @info['tool-room'], @info['glue-number'], @bag, @bag_items, @belt) unless args.skip
+        DRCC.check_consumables('stain', @info['tool-room'], @info['stain-number'], @bag, @bag_items, @belt) unless args.skip
+      elsif @chapter == 10
+        DRCC.check_consumables('stain', @info['tool-room'], @info['stain-number'], @bag, @bag_items, @belt) unless args.skip
+      elsif @chapter == 5
+        DRCC.check_consumables('glue', @info['tool-room'], @info['glue-number'], @bag, @bag_items, @belt) unless args.skip
+      end
+      work(prep)
     end
   end
 
-  def check_hand
-    if DRCI.in_right_hand?( "lumber|shafts|#{@noun}" )
+  def check_hand(x)
+    if DRCI.in_right_hand?(x)
       DRC.bput('swap', 'You move', 'You have nothing')
     else
       DRC.message('***Please hold the item or material you wish to work on.***')
@@ -82,42 +81,7 @@ class Shape
     end
   end
 
-  def shape_parts
-    unless DRCI.exists?(@material)
-      DRC.message('***No specified stock on hand***')
-      magic_cleanup
-      exit
-    end
-    DRCI.stow_hands
-    DRCA.crafting_magic_routine(@settings)
-    DRCC.get_crafting_item('shaper', @bag, @bag_items, @belt)
-
-    @count.times do
-      case DRC.bput("get my #{@material}", 'You get', 'You carefully remove', 'What were you referring')
-      when 'You get', 'You carefully remove'
-        DRC.bput("shape #{@material} into #{@noun}", 'roundtime', 'You break the lumber')
-        DRCC.stow_crafting_item(@noun, @bag, @belt)
-      when 'What were you referring', 'You break the lumber'
-        DRC.message("Out of #{@material}.")
-        break
-      end
-    end
-
-    DRCC.stow_crafting_item('shaper', @bag, @belt)
-    if @noun == 'arrow shaft'
-      magic_cleanup
-      exit
-    end
-
-    @count.times do
-      DRCC.bput("get my #{@noun} from my #{@bag}", 'You get', 'What were you referring')
-      next if /You combine/i =~ DRC.bput('combine', 'You combine', 'You must be holding', 'You fumble around')
-    end
-    magic_cleanup
-    exit
-  end
-
-  def shape_item
+  def prep
     DRCA.crafting_magic_routine(@settings)
     if @instruction
       DRCC.get_crafting_item("#{@recipe_name} instructions", @bag, @bag_items, @belt)
@@ -138,27 +102,27 @@ class Shape
     end
     if @chapter == 6
       if @recipe_name.include?('burin')
-        DRCC.get_crafting_item("#{@material} lumber", @bag, @bag_items, @belt)
-        check_hand unless DRCI.in_left_hand?('lumber')
         swap_tool('drawknife')
-        shape('scrape my lumber with my drawknife')
+        DRCC.get_crafting_item("#{@material} lumber", @bag, @bag_items, @belt)
+        check_hand('lumber') unless DRCI.in_left_hand?('lumber')
+        return 'scrape my lumber with my drawknife'
       else
         @stamp = false
-        check_hand unless DRCI.in_left_hand?(@noun)
+        check_hand(@noun) unless DRCI.in_left_hand?(@noun)
         swap_tool('clamps')
-        shape("push my #{@noun} with my clamp")
+        return "push my #{@noun} with my clamp"
       end
     elsif @chapter == 5
       @stamp = false
+      swap_tool('shaper')
       DRCC.get_crafting_item("arrow #{@material}", @bag, @bag_items, @belt)
       check_hand unless DRCI.in_left_hand?('shafts')
-      swap_tool('shaper')
-      shape('shape my shafts with my shaper')
+      return 'shape my shafts with my shaper'
     else
-      DRCC.get_crafting_item("#{@material} lumber", @bag, @bag_items, @belt)
-      check_hand unless DRCI.in_left_hand?('lumber')
       swap_tool('drawknife')
-      shape('scrape my lumber with my drawknife')
+      DRCC.get_crafting_item("#{@material} lumber", @bag, @bag_items, @belt)
+      check_hand('lumber') unless DRCI.in_left_hand?('lumber')
+      return 'scrape my lumber with my drawknife'
     end
   end
 
@@ -181,77 +145,87 @@ class Shape
     swap_tool(tool)
   end
 
-  def shape(command)
-    waitrt?
-    DRCA.crafting_magic_routine(@settings)
-    assemble_part
-    result = DRC.bput(command,
-              'a wood shaper is needed', 'with a wood shaper',
-              'carved with a carving knife', 'further carving with a knife', 'continued knife carving', 'require carving with a knife', 'trimmed with a carving knife', 'carved with a knife',
-              'rubbed out with a rasp', 'A cluster of small knots',
-              'Applying the final touches', 'lamination process', 'lightening process', 'cable-backing process', 'to be a type of finished',
-              'That tool does not seem suitable for that task.', 'You cannot figure out', 'doesn\'t appear suitable for working',
-              'while it is inside of something',
-              'ready to be clamped', 'with clamps',
-              'Glue should now be applied', 'glue to fasten it', 'glue applied', 'You brush some glue on your', 'You apply a layer', 'ready for an application of glue',
-              'Some wood stain', 'application of stain',
-              'You fumble around but', 'Roundtime', 'You need more pieces',
-              'ASSEMBLE Ingredient1', 'You need another', 'You must assemble')
-    case result
-    when 'carved with a carving knife', 'further carving with a knife', 'continued knife carving', 'require carving with a knife', 'trimmed with a carving knife', 'carved with a knife'
-      waitrt?
-      swap_tool('carving knife')
-      command = "carve my #{@noun} with my knife"
-    when 'rubbed out with a rasp', 'A cluster of small knots'
-      waitrt?
-      swap_tool('rasp')
-      command = "scrape my #{@noun} with my rasp"
-    when 'ready to be clamped', 'with clamps', 'You brush some glue on your', 'You apply a layer'
-      waitrt?
-      swap_tool('clamps')
-      command = "push my #{@noun} with my clamp"
-    when 'Glue should now be applied', 'glue to fasten it', 'glue applied', 'ready for an application of glue'
-      waitrt?
-      swap_tool('glue')
-      command = "apply my glue to my #{@noun}"
-    when 'Some wood stain', 'application of stain'
-      waitrt?
-      swap_tool('stain')
-      command = "apply my stain to my #{@noun}"
-    when 'to be a type of finished'
-      DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
-      finish
-    when 'You need more pieces'
-      DRC.message("*** NOT ENOUGH MATERIAL TO CRAFT #{@NOUN} ***")
-      DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
-      exit
-    when 'while it is inside of something', 'You fumble around but'
-      DRC.message('*** ERROR TRYING TO CRAFT, EXITING ***')
-      DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
-      exit
-    when 'That tool does not seem suitable for that task.', 'You cannot figure out', 'doesn\'t appear suitable for working'
-      shape("analyze my #{@noun}")
-    when 'ASSEMBLE Ingredient1', 'You need another', 'You must assemble'
-      assemble_part
-    when 'Roundtime', 'a wood shaper is needed', 'with a wood shaper'
-      waitrt?
-      finish if Flags['shaping-done']
-      swap_tool('shaper')
-      command = "shape my #{@noun} with my shaper"
+  def work(command)
+    loop do
+        waitrt?
+        DRCA.crafting_magic_routine(@settings)
+        assemble_part
+        result = DRC.bput(command,
+                'a wood shaper is needed', 'with a wood shaper',
+                'carved with a carving knife', 'further carving with a knife', 'continued knife carving', 'require carving with a knife', 'trimmed with a carving knife', 'carved with a knife',
+                'rubbed out with a rasp', 'A cluster of small knots',
+                'Applying the final touches', 'lamination process', 'lightening process', 'cable-backing process', 'to be a type of finished',
+                'That tool does not seem suitable for that task.', 'You cannot figure out', 'doesn\'t appear suitable for working',
+                'while it is inside of something',
+                'ready to be clamped', 'with clamps',
+                'Glue should now be applied', 'glue to fasten it', 'glue applied', 'You brush some glue on your', 'You apply a layer', 'ready for an application of glue',
+                'Some wood stain', 'application of stain',
+                'You fumble around but', 'Roundtime', 'You need more pieces',
+                'ASSEMBLE Ingredient1', 'You need another', 'You must assemble',
+                'I could not find what you were')
+        case result
+        when 'carved with a carving knife', 'further carving with a knife', 'continued knife carving', 'require carving with a knife', 'trimmed with a carving knife', 'carved with a knife'
+            waitrt?
+            swap_tool('carving knife')
+            command = "carve my #{@noun} with my knife"
+        when 'rubbed out with a rasp', 'A cluster of small knots'
+            waitrt?
+            swap_tool('rasp')
+            command = "scrape my #{@noun} with my rasp"
+        when 'ready to be clamped', 'with clamps', 'You brush some glue on your', 'You apply a layer'
+            waitrt?
+            swap_tool('clamps')
+            command = "push my #{@noun} with my clamp"
+        when 'Glue should now be applied', 'glue to fasten it', 'glue applied', 'ready for an application of glue'
+            waitrt?
+            swap_tool('glue', true)
+            command = "apply my glue to my #{@noun}"
+        when 'Some wood stain', 'application of stain'
+            waitrt?
+            swap_tool('stain', true)
+            command = "apply my stain to my #{@noun}"
+        when 'to be a type of finished'
+            DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+            finish
+        when 'I could not find what you were'
+            DRC.bput('stow feet', 'You put', 'Stow what')
+            if command.include?('glue')
+                DRCC.check_consumables('glue', @info['tool-room'], @info['glue-number'], @bag, @bag_items, @belt)
+                swap_tool('glue')
+            elsif command.include?('stain')
+                DRCC.check_consumables('stain', @info['tool-room'], @info['stain-number'], @bag, @bag_items, @belt)
+                swap_tool('stain')
+            end
+        when 'You need more pieces'
+            DRC.message("*** NOT ENOUGH MATERIAL TO CRAFT #{@NOUN} ***")
+            DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+            exit
+        when 'while it is inside of something', 'You fumble around but'
+            DRC.message('*** ERROR TRYING TO CRAFT, EXITING ***')
+            DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+            exit
+        when 'That tool does not seem suitable for that task.', 'You cannot figure out', 'doesn\'t appear suitable for working'
+            shape("analyze my #{@noun}")
+        when 'ASSEMBLE Ingredient1', 'You need another', 'You must assemble'
+            assemble_part
+        when 'Roundtime', 'a wood shaper is needed', 'with a wood shaper'
+            waitrt?
+            finish if Flags['shaping-done']
+            swap_tool('shaper')
+            command = "shape my #{@noun} with my shaper"
+        end
     end
-    DRCA.crafting_magic_routine(@settings)
-    shape(command)
   end
 
-  def swap_tool(next_tool)
+  def swap_tool(next_tool, skip = false)
     unless next_tool == DRC.right_hand_noun
       DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
-      DRCC.get_crafting_item(next_tool, @bag, @bag_items, @belt)
+      DRCC.get_crafting_item(next_tool, @bag, @bag_items, @belt, skip)
     end
   end
 
   def magic_cleanup
-    return if @training_spells.empty?
+    return if @settings.crafting_training_spells.empty?
 
     DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
     DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
@@ -278,7 +252,7 @@ class Shape
     else
       DRC.message('Item complete')
     end
-    DRC.bput('stow feet', '')
+    DRC.bput('stow feet', 'You put', 'Stow what')
     magic_cleanup
     exit
   end

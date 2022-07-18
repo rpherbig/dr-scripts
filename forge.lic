@@ -15,18 +15,20 @@ class Forge
         { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-\']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
         { name: 'metal', regex: /\w+/i, variable: true, description: 'Type of metal ingot to use.' },
         { name: 'noun', regex: /\w+/i, variable: true, description: 'name of item being crafted' },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (oil)'},
         { name: 'debug', regex: /debug/i, optional: true, description: 'displays debug information' }
       ],
       [
-        { name: 'book_type', display: 'book type', options: %w[blacksmithing armorsmithing weaponsmithing], description: 'What smithing type is this item.' },
-        { name: 'instruction', regex: /\w+/i, variable: true, description: 'instruction noun' },
+        { name: 'instruction', regex: /instructions/i, variable: true, description: 'Instructions if using instructions' },
         { name: 'metal', regex: /\w+/i, variable: true, description: 'Type of metal ingot to use.' },
-        { name: 'noun', regex: /\w+/i, variable: true, description: 'name of item being crafted' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item being crafted' },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (oil)'},
         { name: 'debug', regex: /debug/i, optional: true, description: 'displays debug information' }
       ],
       [
         { name: 'recipe_name', display: 'Enhancement', options: %w[temper balance hone lighten reinforce], description: 'Enhancements applied to finished weapons and armor' },
         { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item to enhance.' },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (oil)'},
         { name: 'debug', regex: /debug/i, optional: true, description: 'displays debug information' }
       ],
       [
@@ -53,6 +55,7 @@ class Forge
     @resume = args.resume
     @instruction = args.instruction
     @item = args.noun
+    @info = get_data('crafting')['blacksmithing'][@hometown]
     args.recipe_name.sub!("hone", "metal weapon honing")
     args.recipe_name.sub!("balance", "metal weapon balancing")
     args.recipe_name.sub!("lighten", "metal armor lightening")
@@ -71,12 +74,8 @@ class Forge
     end
 
     find_item if args.resume
+    DRCC.check_consumables('oil', @info['finisher-room'], @info['finisher-number'], @bag, @bag_items, @forging_belt) unless args.skip
     set_defaults
-    if args.resume && DRCI.in_hands?(@item)
-      @command = "analyze my #{@item}"
-    elsif args.resume
-      @command = "analyze #{@item} #{@location}"
-    end
     work(settings) if args.resume
     prep(settings)
     work(settings)
@@ -132,11 +131,10 @@ class Forge
   def prep(settings)
     DRCA.crafting_magic_routine(settings)
     if @instruction
-      DRCC.get_crafting_item("#{@instruction} instructions", @bag, @bag_items, @forging_belt)
+      DRCC.get_crafting_item("#{@noun} instructions", @bag, @bag_items, @forging_belt)
       if /again/ =~ DRC.bput('study my instructions', 'Roundtime', 'Study them again')
         DRC.bput('study my instructions', 'Roundtime', 'Study them again')
       end
-      @command = "pound ingot on anvil with my #{@hammer}"
     else
       return if @recipe_name.include?('temper')
       if settings.master_crafting_book
@@ -179,7 +177,7 @@ class Forge
     end
   end
 
-  def swap_tool(next_tool)
+  def swap_tool(next_tool, skip = false)
     echo("What is the next tool?                       :: #{ next_tool }") if @debug
     echo("Are we holding the next tool?                :: #{ DRCI.in_hands?(next_tool) }") if @debug
     echo("Is the next tool tongs?                      :: #{ next_tool.include?('tongs') }") if @debug
@@ -197,7 +195,7 @@ class Forge
         DRCC.get_crafting_item(next_tool, @bag, @bag_items, @forging_belt)
       else
         DRCC.stow_crafting_item(DRC.right_hand, @bag, @forging_belt)
-        DRCC.get_crafting_item(next_tool, @bag, @bag_items, @forging_belt)
+        DRCC.get_crafting_item(next_tool, @bag, @bag_items, @forging_belt, skip)
       end
     end
   end
@@ -238,6 +236,7 @@ class Forge
       @home_tool = 'tongs'
       @home_command = "turn #{@item} on forge with my tongs"
       @stamp = false
+      @command = "analyze #{@item} on forge"
       @location = "on forge"
       return
     else
@@ -271,7 +270,7 @@ class Forge
                 'in need of some oil to preserve', 'protection by pouring oil on it', 'metal will quickly rust',
                 'to be cleaned of the clay', 'now needs the handle assembled and pounded into place',
                 'You need a larger volume of metal', 'I could not find what you were referring to', 'Ingredients can be added',
-                'Roundtime')
+                'Pour what', 'Roundtime')
       echo("Match result                                 :: #{ result }") if @debug
       echo("Assembly? Part string or false               :: #{ Flags['forge-assembly'] }") if @debug
       case result
@@ -341,11 +340,12 @@ class Forge
         @command = "pull my #{@item} with my pliers"
       when 'in need of some oil to preserve', 'protection by pouring oil on it',
            'metal will quickly rust', 'to be cleaned of the clay' #pour oil
-        swap_tool('oil')
         unless DRCI.in_hands?(@item) || @item == 'tongs' #when crafting tongs, you can be holding YOUR tongs and script thinks you're holding the tongs being crafted. Joyous.
           DRCC.stow_crafting_item(DRC.left_hand, @bag, @forging_belt)
           DRC.bput("get #{@item} #{@location}", 'You get')
+          check_hand(@item)
         end
+        swap_tool('oil', true)
         @command = "pour my oil on my #{@item}"
       when 'now needs the handle assembled and pounded into place'
         DRC.bput("get #{@item} from anvil", 'You get')
@@ -361,6 +361,9 @@ class Forge
         DRCC.stow_crafting_item(DRC.left_hand, @bag, @forging_belt)
         magic_cleanup
         exit
+      when 'Pour what'
+        DRCC.check_consumables('oil', @info['finisher-room'], @info['finisher-number'], @bag, @bag_items, @forging_belt)
+        swap_tool('oil')
       when 'I could not find what you were referring to' #generally missing a tool
         echo '*** ERROR TRYING TO CRAFT, EXITING ***'
         DRCC.stow_crafting_item(DRC.right_hand, @bag, @forging_belt)

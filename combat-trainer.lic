@@ -40,29 +40,32 @@ class SetupProcess
     @warhorn_cooldown = settings.warhorn_cooldown.to_i || 1200
     echo("  @warhorn_cooldown: #{@warhorn_cooldown}") if $debug_mode_ct
 
-    @last_warhorn = Time.now - @warhorn_cooldown
-    echo("  @last_warhorn: #{@last_warhorn}") if $debug_mode_ct
-
     # Egg settings, for egg only
     @egg = settings.egg
     echo("  @egg: #{@egg}") if $debug_mode_ct
 
-    @last_egg = Time.now - 900
-    echo("  @last_egg: #{@last_egg}") if $debug_mode_ct
-
-    @last_warhorn_or_egg = Time.now - 600
-    echo("  @last_warhorn_or_egg: #{@last_warhorn_or_egg}") if $debug_mode_ct
-
-    # Array representing warhorn and/or egg settings. We'll use this to rotate if both are set.
-    @warhorn_or_egg = [@warhorn, @egg].compact
-
     validate_regalia(settings)
-    set_warhorn if @warhorn
+    set_warhorn_or_egg if @warhorn || @egg
 
   end
 
-  # Handle some legacy use of warhorn: egg, as well as figure out if it's a wearable warhorn.
-  def set_warhorn
+  def set_warhorn_or_egg
+    # Helps us rotate horn/egg use
+    @warhorn_or_egg = [@warhorn, @egg].compact
+
+    # Store timestamps in UserVars
+    UserVars.warhorn = {} unless UserVars.warhorn
+    UserVars.warhorn["last_warhorn"] = (Time.now - @warhorn_cooldown) unless UserVars.warhorn["last_warhorn"]
+    UserVars.warhorn["last_egg"] = (Time.now - 900) unless UserVars.warhorn["last_egg"]
+    UserVars.warhorn["last_warhorn_or_egg"] = (Time.now - 600) unless UserVars.warhorn["last_warhorn_or_egg"]
+
+    if @warhorn_or_egg.count > 1
+      if (Time.now - UserVars.warhorn["last_egg"]) > (Time.now - UserVars.warhorn["last_warhorn"])
+        DRC.message("Rotating egg/warhorn array to put lowest cooldown first")
+        @warhorn_or_egg.rotate!
+      end
+    end
+
     if @warhorn =~ /egg/
       echo "Legacy use of warhorn: egg. Handling."
       @warhorn_activation_command = "invoke my #{@warhorn}"
@@ -104,6 +107,9 @@ class SetupProcess
     was_retreating = game_state.retreating?
     game_state.update_room_npcs
     if game_state.dancing?
+      DRC.message(" ")
+      DRC.message("Game state is dancing, will now attempt use of warhorn or egg")
+      DRC.message("Warhorn and egg array empty! All usage will be skipped.") if @warhorn_or_egg.empty?
       use_warhorn_or_egg(game_state) unless @warhorn_or_egg.empty?
       game_state.dance
     elsif game_state.retreating?
@@ -134,39 +140,34 @@ class SetupProcess
 
   # Controller method for warhorn and/or egg use
   def use_warhorn_or_egg(game_state)
-    DRC.message(" ")
     DRC.message("Warhorn/egg array is: #{@warhorn_or_egg}")
-    DRC.message("Time since last warhorn effect: #{(Time.now - @last_warhorn_or_egg)/60}")
-    DRC.message("Time since last warhorn use: #{(Time.now - @last_warhorn)/60}")
-    DRC.message("Time since last egg use: #{(Time.now - @last_egg)/60}")
-
-    # Return unless either warhorn or egg are set
-    return unless @warhorn || @egg
+    DRC.message("Time since last warhorn effect: #{(Time.now - UserVars.warhorn["last_warhorn_or_egg"])/60}")
+    DRC.message("Time since last warhorn use: #{(Time.now - UserVars.warhorn["last_warhorn"])/60}")
+    DRC.message("Time since last egg use: #{(Time.now - UserVars.warhorn["last_egg"])/60}")
 
     # Return if it hasn't been 10 minutes since last warhorn. Room effect lasts 10 minutes.
-    DRC.message("NOT 10 minutes since last worhorn effect") unless Time.now > (@last_warhorn_or_egg + 600)
-    return unless Time.now > (@last_warhorn_or_egg + 600)
+    DRC.message("NOT 10 minutes since last worhorn or egg room effect") unless Time.now > (UserVars.warhorn["last_warhorn_or_egg"] + 600)
+    return unless Time.now > (UserVars.warhorn["last_warhorn_or_egg"] + 600)
 
     game_state.sheath_whirlwind_offhand
 
-    # We created an array and we'll use the first element as the noun. If we define a warhorn or
-    # an egg, we'll later rotate the elements.
     noun = @warhorn_or_egg[0]
 
     if noun =~ /egg/i
-      return unless Time.now > @last_egg + 900
+      DRC.message("Timer not up for egg.") unless Time.now > UserVars.warhorn["last_egg"] + 900
+      return unless Time.now > UserVars.warhorn["last_egg"] + 900
       if use_egg?
         DRC.message("SUCCESSFUL egg use")
-        @last_egg = Time.now
-        @last_warhorn_or_egg = Time.now
+        UserVars.warhorn["last_egg"] = Time.now
+        UserVars.warhorn["last_warhorn_or_egg"] = Time.now
       end
     else
-      DRC.message("Not #{@warhorn_cooldown/60} minutes since last warhorn.") unless Time.now > (@last_warhorn + @warhorn_cooldown)
-      return unless Time.now > (@last_warhorn + @warhorn_cooldown)
+      DRC.message("Not #{@warhorn_cooldown/60} minutes since last warhorn.") unless Time.now > (UserVars.warhorn["last_warhorn"] + @warhorn_cooldown)
+      return unless Time.now > (UserVars.warhorn["last_warhorn"] + @warhorn_cooldown)
       if use_warhorn?
         DRC.message("SUCCESSFUL horn use")
-        @last_warhorn = Time.now
-        @last_warhorn_or_egg = Time.now
+        UserVars.warhorn["last_warhorn"] = Time.now
+        UserVars.warhorn["last_warhorn_or_egg"] = Time.now
       end
     end
 
@@ -188,16 +189,14 @@ class SetupProcess
       return false
     when /^What were you referring to/, /Invoke what?/
       DRC.message("Can't find egg, removing from hunt.")
-      @warhorn_or_egg.delete('egg')
-      return false
+      # @warhorn_or_egg.delete('egg')
+      return true
     end
 
     return true
   end
 
-  # Method to handle using the warhorn
   def use_warhorn?
-
     use_warhorn = DRC.bput("#{@warhorn_get_verb} my #{@warhorn}", /^You get.*(?:warhorn).*\.$/,
      /^You remove.*(?:warhorn).*\.$/, /^You take.*(?:warhorn).*\.$/, /^What were you referring to/,
      /^You need a free hand/, /^Remove what/)
@@ -214,8 +213,8 @@ class SetupProcess
       DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
     when /^What were you referring to/
       DRC.message "#{@warhorn} NOT FOUND! Removing from hunt."
-      @warhorn_or_egg.delete(@warhorn)
-      return false
+      # @warhorn_or_egg.delete(@warhorn)
+      return true
     end
 
     return true

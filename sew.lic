@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#sew
 =end
 
-custom_require.call(%w[common common-arcana common-crafting common-items common-money common-travel])
+custom_require.call(%w[common common-arcana common-crafting common-items common-money common-travel events])
 
 class Sew
 
@@ -11,26 +11,28 @@ class Sew
     @bag = @settings.crafting_container
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.outfitting_belt
-    @hometown = @settings.hometown
-    @hometown_data = get_data('crafting')['tailoring'][@hometown]
+    @stamp = @settings.mark_crafted_goods
 
     arg_definitions = [
       [
-        { name: 'finish', options: %w[log stow trash], description: 'What to do with the finished item.' },
-        { name: 'type', options: %w[knitting sewing leather], description: 'What tailoring type is this item.' },
+        { name: 'finish', options: %w[hold log stow trash], description: 'What to do with the finished item.' },
+        { name: 'type', options: %w[knitting sewing leather], description: 'What tailoring type is this item.' }, #no longer in use, being removed next edit. Have to change the calls from other scripts.
         { name: 'chapter', regex: /\d+/i, variable: true, description: 'Chapter containing the item.' },
         { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-\']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' },
-        { name: 'noun', regex: /\w+/i, variable: true },
-        { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material to use.' }
+        { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material to use.' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item being crafted'},
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (wax/pins/thread)'}
       ],
       [
-        { name: 'seal', regex: /seal/i }
+        { name: 'finish', options: %w[hold stow], description: 'What to do with the finished item.' },
+        { name: 'instructions', regex: /instructions/i, description: 'Instructions if using instructions'},
+        { name: 'material', regex: /\w+/i, variable: true, description: 'Type of material to use.' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item being crafted' },
+        { name: 'skip', regex: /skip/i, optional: true, description: 'Optional setting to skip restocking consumables if low (glue/stain)'}
       ],
       [
-        { name: 'reinforce', regex: /reinforce/i }
-      ],
-      [
-        { name: 'lighten', regex: /lighten/i }
+        { name: 'recipe_name', display: 'enhancement', options: %w[seal reinforce lighten], description: 'Enhancements to crafted armor/shields' },
+        { name: 'noun', regex: /\w+/i, variable: true, description: 'Noun of item being enhanced.' }
       ],
       [
         { name: 'resume', regex: /resume/i },
@@ -41,355 +43,243 @@ class Sew
     args = parse_args(arg_definitions)
 
     @finish = args.finish
-    @chapter = args.chapter
+    args.recipe_name.sub!("lighten", "tailored armor lightening")
+    args.recipe_name.sub!("seal", "tailored armor sealing")
+    args.recipe_name.sub!("reinforce", "tailored armor reinforcing")
     @recipe_name = args.recipe_name
     @noun = args.noun
     @mat_type = args.material
-    @stamp = @settings.mark_crafted_goods
-    @training_spells = @settings.crafting_training_spells
+    @chapter = args.chapter == nil ? 1 : args.chapter.to_i #chapter 5 for enhancements
+    @info = get_data('crafting')['tailoring'][@settings.hometown]
+    @cloth = ['silk', 'wool', 'burlap', 'cotton', 'felt', 'linen', 'electroweave', 'steelsilk', 'arzumodine', 'bourde', 'dergatine', 'dragonar', 'faeweave', 'farandine', 'imperial weave', 'jaspe', 'khaddar', 'ruazin', 'titanese', 'zenganne']
 
     DRC.wait_for_script_to_complete('buff', ['sew'])
 
-    Flags.add('sew-assembly', 'another finished \S+ shield (handle)', 'another finished wooden (hilt|haft)', 'another finished (long|short|small|large) leather (cord|backing)', 'another finished (small|large) cloth (padding)', 'another finished (long|short) wooden (pole)')
-    Flags.add('sew-pins', 'The pins is all used up, so you toss it away.')
+    Flags.add('sew-assembly', 'ready to be .* with some (small|large) cloth (padding)', 'another finished \S+ shield (handle)', 'another finished wooden (hilt|haft)', 'another finished (long|short|small|large) leather (cord|backing)', 'another finished (small|large) cloth (padding)', 'another finished (long|short) wooden (pole)')
+    Flags.add('sew-done', 'The .* shows improved', 'Applying the final touches', 'The .* shows a slightly reduced weight')
 
-    if args.type == 'knitting'
-      knit
-    elsif args.type == 'sewing'
-      @mat_noun = 'cloth'
-      sew
-    elsif args.type == 'leather'
-      @mat_noun = 'leather'
-      sew
-    elsif args.seal
-      seal
-    elsif args.reinforce
-      reinforce
-    elsif args.lighten
-      lighten
-    elsif args.resume
-      resume
-    else
-      echo('Sew does not yet support that form of tailoring.')
+    if args.resume
+      if DRCI.in_hands?('knitting needles')
+        @home_command = 'knit my needles'
+        command = 'analyze my knitting needles'
+      else
+        check_hand(@noun) unless DRCI.in_left_hand?(@noun)
+        command = "analyze my #{@noun}"
+      end
+      work(command)
     end
+    if @recipe_name.include?('seal')
+      DRCC.check_consumables('wax', @info['tool-room'], 10, @bag, @bag_items, @belt) unless args.skip
+    elsif @chapter != 5
+      DRCC.check_consumables('pins', @info['tool-room'], 5, @bag, @bag_items, @belt)  unless args.skip
+      DRCC.check_consumables('thread', @info['stock-room'], 6, @bag, @bag_items, @belt) unless args.skip
+    end
+    
+    work(prep)
   end
 
-  def check_thread
-    return if DRCI.exists?('cotton thread')
-    room = Room.current.id
-    DRCM.ensure_copper_on_hand(1000, @settings)
-    DRCT.order_item(@hometown_data['stock-room'], 6)
-    DRCC.stow_crafting_item('cotton thread', @bag, @belt)
-    DRCT.walk_to(room)
-  end
-
-  def check_pins
-    return unless Flags['sew-pins'] || !DRCI.exists?('pins')
-    DRCM.ensure_copper_on_hand(125, @settings)
-    item = DRC.left_hand
-    DRCC.stow_crafting_item(item, @bag, @belt)
-    room = Room.current.id
-    DRCT.order_item(@hometown_data['tool-room'], 5)
-    DRCC.stow_crafting_item('pins', @bag, @belt)
-    DRCT.walk_to(room)
-    DRCC.get_crafting_item(item, @bag, @bag_items, @belt)
-    Flags.reset('sew-pins')
-  end
-
-  def study_tailoring(chapter, recipe)
-    DRCC.get_crafting_item('tailoring book', @bag, @bag_items, @belt)
-    echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Outfitting') == 175
-    case DRC.bput("turn my book to page #{DRCC.find_recipe(chapter, recipe)}", 'You turn your', 'The book is already', 'Which page do you wish')
-    when 'Which page do you wish'
-      echo('*** Recipe not found in book, it needs to be upgraded to the next higher level ***')
+  def check_hand(x)
+    if DRCI.in_right_hand?(x)
+      DRC.bput('swap', 'You move', 'You have nothing')
+    else
+      DRC.message('***Please hold the item or material you wish to work on.***')
       magic_cleanup
       exit
     end
-    DRC.bput('study my book', 'Roundtime')
-    DRCC.stow_crafting_item('book', @bag, @belt)
   end
 
-  def sew
-    check_thread
-    check_pins
+  def prep
     DRCA.crafting_magic_routine(@settings)
-    study_tailoring(@chapter, @recipe_name)
-    DRCC.get_crafting_item("#{@mat_type} #{@mat_noun}", @bag, @bag_items, @belt)
-    do_sew("cut my #{@mat_type} #{@mat_noun} with my scissors", 'scissors')
-  end
+    if @instruction
+      DRCC.get_crafting_item("#{@noun} instructions", @bag, @bag_items, @belt)
+      if /again/ =~ DRC.bput('study my instructions', 'Roundtime', 'Study them again')
+        DRC.bput('study my instructions', 'Roundtime', 'Study them again')
+      end
+    else
+      if @settings.master_crafting_book
+        DRC.bput("turn my #{@settings.master_crafting_book} to discipline tailoring}", 'You turn the') if @settings.master_crafting_book
+        DRC.bput("turn my #{@settings.master_crafting_book} to page #{DRCC.find_recipe(@chapter, @recipe_name, @settings.master_crafting_book)}", 'You turn your', 'The .* is already')
+        DRC.bput("study my #{@settings.master_crafting_book}", 'Roundtime')
+      else
+        DRCC.get_crafting_item("tailoring book", @bag, @bag_items, @belt)
+        echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Engineering') == 175
+        DRC.bput("turn my book to page #{DRCC.find_recipe(@chapter, @recipe_name)}", 'You turn your', 'The book is already')
+        DRC.bput('study my book', 'Roundtime')
+      end
+    end
 
-  def knit
-    DRCA.crafting_magic_routine(@settings)
-    study_tailoring(@chapter, @recipe_name)
-    DRCC.get_crafting_item('knitting needle', @bag, @bag_items, @belt)
-    DRC.bput('swap', 'You move') unless DRC.right_hand =~ /needle/i
-    DRCC.get_crafting_item("#{@mat_type} yarn", @bag, @bag_items, @belt)
-    do_knit("knit my #{@mat_type} yarn with my needles")
-  end
-
-  def seal
-    Flags.add('sealing-done', 'shows improved signs of durability and wear resistance from the successful sealing process')
-    study_tailoring(1, 'tailored armor sealing')
-    do_seal(true)
-  end
-
-  def lighten
-    check_thread
-    check_pins
-    study_tailoring(1, 'tailored armor lightening')
-    DRCC.get_crafting_item('scissors', @bag, @bag_items, @belt)
-    @noun = DRC.right_hand_noun
-    do_sew("cut my #{@noun} with my scissors", 'scissors', true)
-  end
-
-  def reinforce
-    check_thread
-    check_pins
-    study_tailoring(1, 'tailored armor reinforcing')
-    DRCC.get_crafting_item('scissors', @bag, @bag_items, @belt)
-    @noun = DRC.right_hand_noun
-    do_sew("cut my #{@noun} with my scissors", 'scissors')
+    if @chapter == 5 #knitting
+        DRCC.get_crafting_item("yarn", @bag, @bag_items, @belt)
+        check_hand('yarn') unless DRCI.in_left_hand?('yarn')
+        swap_tool('knitting needles')
+        @home_tool = 'knitting needles'
+        @home_command = 'knit my needles'
+        return "knit my yarn with my knitting needles"
+    elsif @recipe_name.include?('tailored armor')  #enhancements
+      @stamp = false
+      check_hand(@noun) unless DRCI.in_left_hand?(@noun)
+      if @recipe_name.include?('seal')
+        swap_tool('sealing wax')
+        @home_tool = 'sealing wax'
+        @home_command = "apply my wax to my #{@noun}"
+        return "apply my wax to my #{@noun}"
+      else
+        swap_tool('scissors')
+        @home_tool = 'scissors'
+        @home_command = "cut my #{@noun} with my scissors"
+        return "cut my #{@noun} with my scissors"
+      end
+    elsif @cloth.include?(@mat_type) #any cloth products
+      DRCC.get_crafting_item("#{@mat_type} cloth", @bag, @bag_items, @belt)
+      check_hand('cloth') unless DRCI.in_left_hand?('cloth')
+      swap_tool('scissors')
+      @home_tool = 'sewing needles'
+      @home_command = "push my #{@noun} with my needles"
+      return "cut my #{@mat_type} cloth with my scissors"
+    else #any leather products
+      DRCC.get_crafting_item("#{@mat_type} leather", @bag, @bag_items, @belt)
+      check_hand unless DRCI.in_left_hand?('leather')
+      swap_tool('scissors')
+      @home_tool = 'sewing needles'
+      @home_command = "push my #{@noun} with my needles"
+      return "cut my #{@mat_type} leather with my scissors"
+    end
   end
 
   def assemble_part
     while Flags['sew-assembly']
-      part = Flags['sew-assembly'].to_a[1..-1].join('.')
+      tool = DRC.right_hand
+      DRCC.stow_crafting_item(tool, @bag, @belt)
+      part = Flags['sew-assembly'].to_a[1..-1].join(' ')
       Flags.reset('sew-assembly')
-      DRCC.stow_crafting_item(DRC.left_hand, @bag, @belt)
       DRCC.get_crafting_item(part, @bag, @bag_items, @belt)
       DRC.bput("assemble my #{@noun} with my #{part}", 'affix it securely in place', 'and tighten the pommel to secure it', 'carefully mark where it will attach when you continue crafting')
+      swap_tool(tool)
     end
   end
 
-  def do_seal(wax)
-    waitrt?
-    return if Flags['sealing-done']
-    if wax
-      DRCC.get_crafting_item('sealing wax', @bag, @bag_items, @belt)
-      DRC.bput("apply my wax to my #{DRC.right_hand}", 'roundtime')
-      waitrt?
-      DRCC.stow_crafting_item('wax', @bag, @belt)
-    else
-      DRCC.get_crafting_item('slickstone', @bag, @bag_items, @belt)
-      DRC.bput("scrape my #{DRC.right_hand} with my slickstone", 'roundtime')
-      DRCC.stow_crafting_item('slickstone', @bag, @belt)
-    end
 
-    do_seal !wax
-  end
-
-  def resume_knit
-    DRC.bput('analyze my knitting needles',
-         /You analyze both the needles and (?:some|an?) unfinished knitted .+ (.+) on them/,
-         'This appears to be a crafting tool',
-         'Roundtime')
-    pause 1
-    results = reget(40)
-    unless results.to_s =~ /You analyze both the needles and (?:some|an?) unfinished knitted .+ (.+) on them/
-      echo 'Nothing found on the needles.  Exiting'
-      exit
-    end
-    @noun = Regexp.last_match(1).to_s
-    echo "Found an unfinished #{@noun} on the needles."
-    do_knit('push my knitting needles') if results.to_s.include?('purl stitching')
-    do_knit('knit my knitting needles') if results.to_s.include?('more knitting')
-    do_knit('turn my knitting needles') if results.to_s.include?('need to be turned')
-    cast_and_finish if results.to_s.include?('must be cast')
-    exit
-  end
-
-  def resume
-    waitrt?
-    resume_knit if @noun.include?('needle') || DRC.right_hand.include?('knitting needles') || DRC.left_hand.include?('knitting needles')
-
-    case DRC.bput("analyze my #{@noun}",
-              'dimensions changed while working on it',
-              'is in need of pinning to help arrange the material for further sewing',
-              'pushing it with a needle and thread',
-              'Deep creases and wrinkles in the fabric',
-              'scissor cuts',
-              'cutting with some scissors',
-              'Roundtime')
-    when 'dimensions changed while working on it'
-      tool = 'yardstick'
-      next_command = "measure my #{@noun} with my yardstick"
-    when 'scissor cuts', 'cutting with some scissors'
-      tool = 'scissors'
-      next_command = "cut my #{@noun} with my scissors"
-    when 'is in need of pinning to help arrange the material for further sewing'
-      tool = 'pins'
-      next_command = "poke my #{@noun} with my pins"
-    when 'Deep creases and wrinkles in the fabric'
-      tool = 'slickstone'
-      next_command = "scrape my #{@noun} with my slickstone"
-    # when 'needs holes punched', 'requires some holes punched'
-    #   tool = 'awl'
-    #   next_command = "poke my #{@noun} with my awl"
-    when 'pushing it with a needle and thread'
-      tool = 'sewing needles'
-      next_command = "push my #{@noun} with my needles"
-    when 'Roundtime'
-      resume
-      return
-    else
-      echo '***UNKNOWN NEXT COMMAND WHEN TRYING TO RESUME***'
-      exit
-    end
-    do_sew(next_command, tool)
-  end
-
-  def do_sew(command, tool, lighten = false)
-    waitrt?
-    DRCA.crafting_magic_routine(@settings)
-    DRCC.stow_crafting_item(DRC.left_hand, @bag, @belt) unless DRC.left_hand == (tool)
-    if @last_command == "cut my #{@mat_type} #{@mat_noun} with my scissors"
-      DRCC.stow_crafting_item(DRC.left_hand, @bag, @belt)
-      DRC.bput("stow my #{@mat_type} #{@mat_noun}", '')
-    end
-    @last_command = command
-    assemble_part
-    DRCC.get_crafting_item(tool, @bag, @bag_items, @belt) unless DRC.left_hand == (tool)
-    case DRC.bput(command,
-              'dimensions appear to have shifted and could benefit from some remeasuring',
-              'With the measuring complete, now it is time to cut away more',
-              'and could use some pins to',
-              'deep crease develops along', 'wrinkles from all the handling and could use',
-              'The needles need to have thread put on them before they can be used for sewing',
-              'needs holes punched', 'requires some holes punched',
-              'You realize that cannot be repaired', 'not damaged enough to warrant repair', 'You cannot figure out how to do that',
-              'appears ready to be reinforced with some large cloth padding',
-              'New seams must now be sewn to properly fit the lightened material together',
-              'Roundtime')
-    when 'dimensions appear to have shifted and could benefit from some remeasuring'
-      tool = 'yardstick'
-      next_command = "measure my #{@noun} with my yardstick"
-    when 'With the measuring complete, now it is time to cut away more'
-      tool = 'scissors'
-      next_command = "cut my #{@noun} with my scissors"
-    when 'and could use some pins to'
-      tool = 'pins'
-      next_command = "poke my #{@noun} with my pins"
-    when 'deep crease develops along', 'wrinkles from all the handling and could use'
-      tool = 'slickstone'
-      next_command = "scrape my #{@noun} with my slickstone"
-    when 'The needles need to have thread put on them before they can be used for sewing'
-      item = DRC.right_hand
-      DRC.bput("put my #{item} in my #{@bag}", 'You put')
-      DRCC.get_crafting_item('cotton thread', @bag, @bag_items, @belt)
-      DRC.bput('put thread on my sewing needles', '')
-      DRC.bput("get #{item} from my #{@bag}", 'You get')
-      tool = 'sewing needles'
-      next_command = "push my #{@noun} with my sewing needles"
-    when 'needs holes punched', 'requires some holes punched'
-      tool = 'awl'
-      next_command = "poke my #{@noun} with my awl"
-    when 'You realize that cannot be repaired', 'not damaged enough to warrant repair', 'You cannot figure out how to do that'
-      DRCC.stow_crafting_item(DRC.left_hand, @bag, @belt)
-      finish
-    when 'New seams must now be sewn to properly fit the lightened material together'
-      tool = 'sewing needles'
-      next_command = "push my #{@noun} with my sewing needles"
-    when 'appears ready to be reinforced with some large cloth padding'
-      DRCC.stow_crafting_item(DRC.left_hand, @bag, @belt)
-      DRCC.get_crafting_item('large padding', @bag, @bag_items, @belt)
-      DRC.bput("assemble my #{@noun} with my padding", 'carefully mark where it will attach when you continue crafting')
-      case DRC.bput("analy my #{@noun}", 'needle and thread', 'pinning', 'slickstone', 'remeasuring', 'scissor')
-      when 'needle and thread'
-        tool = 'sewing needles'
-        next_command = "push my #{@noun} with my sewing needles"
-      when 'pinning'
-        tool = 'pins'
-        next_command = "poke my #{@noun} with my pins"
-      when 'slickstone'
-        tool = 'slickstone'
-        next_command = "scrape my #{@noun} with my slickstone"
-      when 'remeasuring'
-        tool = 'yardstick'
-        next_command = "measure my #{@noun} with my yardstick"
-      when 'scissor'
-        tool = 'scissors'
-        next_command = "cut my #{@noun} with my scissors"
-      end
-    when 'Roundtime'
-      if lighten
-        tool = 'scissors'
-        next_command = "cut my #{@noun} with my scissors"
-      else
-        tool = 'sewing needles'
-        next_command = "push my #{@noun} with my sewing needles"
+  def work(command)
+    loop do
+      DRCA.crafting_magic_routine(@settings)
+      assemble_part
+      result = DRC.bput(command,
+                'dimensions appear to have shifted and could benefit from some remeasuring', 'dimensions changed while working on it',
+                'With the measuring complete', 'cutting with some scissors', 'scissor cuts',
+                'and could use some pins to', 'is in need of pinning to help arrange the material for further sewing',
+                'deep crease develops along', 'wrinkles from all the handling and could use',
+                'The needles need to have thread put on them before they can be used for sewing', 'What were you referring',
+                'You carefully thread some cotton thread', 'I could not find what you were',
+                'New seams must now be sewn to properly fit the lightened material together',
+                'Nothing obstructs the fabric from continued sewing', 'pushing it with a needle and thread',
+                'A sufficient quantity of wax exists', 'Sealing wax now encases the material', 'now needs some sealing wax applied',
+                'Now the needles must be turned', 'Some ribbing should be added', 'need to be turned',
+                'Next the needles must be pushed', 'ready to be pushed', 'Some purl stitching is', 'You untie and discard',
+                'Ingredients can be added', 'You must assemble', 'You need another', 'a slip knot in your yarn',                
+                'needs holes punched', 'requires some holes punched', 'You are already knitting', 'Do you really want to discard',
+                'Roundtime', 'pushing it with a needle and thread', 'The garment is nearly complete and now must be cast off')
+      case result
+      when 'dimensions appear to have shifted and could benefit from some remeasuring', 'dimensions changed while working on it'
+        swap_tool('yardstick')
+        @home_tool = 'sewing needles'
+        @home_command = "push my #{@noun} with my sewing needles"
+        command = "measure my #{@noun} with my yardstick"
+      when 'With the measuring complete', 'cutting with some scissors', 'scissor cuts'
+        swap_tool('scissors')
+        command = "cut my #{@noun} with my scissors"
+      when 'and could use some pins to', 'is in need of pinning to help arrange the material for further sewing'
+        swap_tool('pins', true)
+        @home_tool = 'sewing needles'
+        @home_command = "push my #{@noun} with my sewing needles"
+        command = "poke my #{@noun} with my pins"
+      when 'deep crease develops along', 'wrinkles from all the handling and could use', 'Deep creases and wrinkles in the fabric',
+          'A sufficient quantity of wax exists', 'Sealing wax now encases the material'
+        swap_tool('slickstone')
+        command = "scrape my #{@noun} with my slickstone"
+      when 'The needles need to have thread put on them before they can be used for sewing'
+        swap_tool('cotton thread', true)
+        command = "put thread on my sewing needles"
+      when 'You carefully thread some cotton thread'
+        swap_tool('sewing needles')
+        command = "push my #{@noun} with my sewing needles"
+      when 'What were you referring', 'I could not find what you were'
+        DRC.bput('stow feet', 'You put', 'Stow what')
+        if command.include?('wax')
+          DRCC.check_consumables('wax', @info['tool-room'], 10, @bag, @bag_items, @belt)
+          swap_tool('wax')
+        elsif command.include?('pins')
+          DRCC.check_consumables('pins', @info['tool-room'], 5, @bag, @bag_items, @belt)
+          swap_tool('pins')
+        elsif command.include?('thread')
+          DRCC.check_consumables('thread', @info['stock-room'], 6, @bag, @bag_items, @belt)
+          swap_tool('thread')
+        end
+      when 'needs holes punched', 'requires some holes punched'
+        swap_tool('awl')
+        command = "poke my #{@noun} with my awl"
+      when 'pushing it with a needle and thread'
+        swap_tool('sewing needles')
+        command = "push my #{@noun} with my sewing needles"
+      when 'New seams must now be sewn to properly fit the lightened material together'
+        @stamp = false
+        @home_tool = 'scissors'
+        @home_command = "cut my #{@noun} with my scissors"
+        swap_tool('sewing needles')
+        command = "push my #{@noun} with my sewing needles"
+      when 'A sufficient quantity of wax exists', 'Sealing wax now encases the material', 'A buildup of wax'
+        @stamp = false
+        @home_tool = 'sealing wax'
+        @home_command = "scrape my #{@noun} with my slickstone"
+        swap_tool('slickstone')
+        command = "scrape my #{@noun} with my slickstone"
+      when 'now needs some sealing wax applied'
+        @home_tool = 'sealing wax'
+        @home_command = "scrape my #{@noun} with my slickstone"
+        swap_tool('sealing wax', true)
+        command = "apply my wax to my #{@noun}"
+      when 'Nothing obstructs the fabric from continued sewing', 'pushing it with a needle and thread'
+        @home_tool = 'sewing needles'
+        @home_command = "push my #{@noun} with my sewing needles"
+        swap_tool('sewing needles')
+        command = "push my #{@noun} with my sewing needles"
+      when 'Ingredients can be added', 'You must assemble', 'You need another'
+        assemble_part
+      when 'a slip knot in your yarn'
+        DRCC.stow_crafting_item('yarn', @bag, @belt)
+        command = 'knit my needles'
+      when 'Now the needles must be turned', 'Some ribbing should be added', 'need to be turned'
+        command = 'turn my needles'
+      when 'Next the needles must be pushed', 'ready to be pushed', 'Some purl stitching is'
+        command = 'push my needles'
+      when 'The garment is nearly complete and now must be cast off'
+        command = 'cast my needles'
+      when 'You are already knitting', 'Do you really want to discard'
+        command = 'pull my needles'
+      when 'You untie and discard'
+        command = "knit my yarn with my knitting needles"
+      when 'Roundtime'
+        finish if Flags['sew-done']
+        swap_tool(@home_tool) unless @home_tool.nil?
+        command = @home_command == nil ? command : @home_command
       end
     end
-    DRCA.crafting_magic_routine(@settings)
-    do_sew(next_command, tool, lighten)
   end
 
-  def magic_cleanup
-    return if @training_spells.empty?
-
-    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
-    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
-    DRC.bput('release symb', "But you haven't", 'You release', 'Repeat this command')
-  end
-
-  def do_knit(command)
-    waitrt?
-    DRCA.crafting_magic_routine(@settings)
-    next_command = 'knit my needles'
-    case DRC.bput(command,
-              'Now the needles must be turned', 'Some ribbing should be added',
-              'Next the needles must be pushed', 'ready to be pushed',
-              'The garment is nearly complete and now must be cast off',
-              'You are already knitting',
-              'Roundtime',
-              'That tool does not seem suitable for that task.',
-              'You need a larger amount of material',
-              'is not here!')
-    when 'Now the needles must be turned', 'Some ribbing should be added'
-      next_command = 'turn my needles'
-    when 'Next the needles must be pushed', 'ready to be pushed'
-      next_command = 'push my needles'
-    when 'The garment is nearly complete and now must be cast off'
-      cast_and_finish
-    when 'You are already knitting'
-      DRC.bput('pull my needles', 'Do you really want to discard')
-      DRC.bput('pull my needles', 'You untie and discard')
-      do_knit(command)
-      next_command = ''
-    when 'is not here!'
-      do_knit(command.sub(' my', ''))
-    when 'That tool does not seem suitable for that task.'
-      case DRC.bput('analyze my needles', 'is in need of more knitting.', 'The needles need to be turned', 'Some purl stitching is', 'needles must be cast')
-      when 'is in need of more knitting.'
-        next_command = 'knit my needles'
-      when 'The needles need to be turned'
-        next_command = 'turn my needles'
-      when 'Some purl stitching is'
-        next_command = 'push my needles'
-      when 'needles must be cast'
-        cast_and_finish
-      end
-    when 'You need a larger amount of material'
-      echo '***STATUS*** CANNOT CRAFT, NEED MORE MATERIAL'
-      exit
+  def swap_tool(next_tool, skip = false)
+    unless DRC.right_hand.include?(next_tool)
+      DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+      DRCC.get_crafting_item(next_tool, @bag, @bag_items, @belt, skip)
     end
-    waitrt?
-    DRCC.stow_crafting_item('yarn', @bag, @belt) if DRC.left_hand =~ /yarn/i
-    DRCA.crafting_magic_routine(@settings)
-    do_knit(next_command)
-  end
-
-  def cast_and_finish
-    DRC.bput('cast my needles', 'roundtime')
-    DRCC.stow_crafting_item('knitting needle', @bag, @belt)
-    finish
   end
 
   def finish
     if @stamp
-      DRCC.get_crafting_item('stamp', @bag, @bag_items, @belt)
+      swap_tool('stamp')
       DRC.bput("mark my #{@noun} with my stamp", 'Roundtime')
       DRCC.stow_crafting_item('stamp', @bag, @belt)
     end
+    
+    DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
     case @finish
     when /log/
       DRCC.logbook_item('outfitting', @noun, @bag)
@@ -397,15 +287,25 @@ class Sew
       DRCC.stow_crafting_item(@noun, @bag, @belt)
     when /trash/
       DRCI.dispose_trash(@noun)
+    when /hold/
+      DRC.message("#{@noun} Complete")
     end
+    DRC.bput('stow feet', 'You put', 'Stow what')
     magic_cleanup
     exit
   end
 end
 
+def magic_cleanup
+  return if @settings.crafting_training_spells.empty?
+
+  DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell")
+  DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
+  DRC.bput('release symb', "But you haven't", 'You release', 'Repeat this command')
+end
+
 before_dying do
   Flags.delete('sew-assembly')
-  Flags.delete('sew-pins')
   Flags.delete('sealing-done')
 end
 

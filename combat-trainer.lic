@@ -2120,17 +2120,15 @@ class AbilityProcess
     check_paladin_skills
     check_nonspell_buffs(game_state)
     check_battle_cries(game_state)
-
-    DRC.message(" ")
-    DRC.message("Will now attempt use of warhorn or egg")
-    DRC.message("Warhorn and egg array empty! All usage will be skipped.") if @warhorn_or_egg.empty?
+    DRC.message("warhorn_or_egg array is: #{@warhorn_or_egg}")  if $debug_mode_ct
     use_warhorn_or_egg(game_state) unless @warhorn_or_egg.nil? || @warhorn_or_egg.empty?
-
     false
   end
 
   private
 
+  # Sets up our warhorn and/or egg use. Sets timers. Allows legacy use of warhorn: egg. Checks to
+  # see if we're using a wearable warhorn or have it in a bag.
   def set_warhorn_or_egg
     # Helps us rotate horn/egg use
     @warhorn_or_egg = [@warhorn, @egg].compact
@@ -2141,27 +2139,30 @@ class AbilityProcess
     UserVars.warhorn["last_egg"] = (Time.now - 900) unless UserVars.warhorn["last_egg"]
     UserVars.warhorn["last_warhorn_or_egg"] = (Time.now - 600) unless UserVars.warhorn["last_warhorn_or_egg"]
 
+    # If user has defined both a warhorn and egg, we'll rotate, and since cooldowns are persistent in UserVars,
+    # do a one-time check to see which has lower time left, and put that first.
     if @warhorn_or_egg.count > 1
       if (Time.now - UserVars.warhorn["last_egg"]) > (Time.now - UserVars.warhorn["last_warhorn"])
-        DRC.message("Rotating egg/warhorn array to put lowest cooldown first")
         @warhorn_or_egg.rotate!
       end
     end
 
+    # This is how an egg was specified prior to this warhorn/egg rotation code. We'll still support.
     if @warhorn =~ /egg/
-      echo "Legacy use of warhorn: egg. Handling."
+      echo "Legacy use of warhorn: egg. Handling." if $debug_mode_ct
       @warhorn_activation_command = "invoke my #{@warhorn}"
     else
-      echo "Warhorn is actually a warhorn, not legacy use of : egg."
+      echo "Warhorn is actually a warhorn, not legacy use of : egg." if $debug_mode_ct
       @warhorn_activation_command = "exhale #{@warhorn} lure"
     end
 
+    # Set our warhorn verbs depending on whether a worn or stowed warhorn.
     if DRCI.wearing?(@warhorn)
-      echo "We're wearing the warhorn, remove/wear"
+      echo "We're wearing the warhorn, remove/wear are the verbs." if $debug_mode_ct
       @warhorn_get_verb = 'remove'
       @warhorn_store_verb = 'wear'
     else
-      echo "Not wearing warhorn, get/stow"
+      echo "Not wearing warhorn, get/stow are the verbs." if $debug_mode_ct
       @warhorn_get_verb = 'get'
       @warhorn_store_verb = 'stow'
     end
@@ -2169,29 +2170,25 @@ class AbilityProcess
 
   # Controller method for warhorn and/or egg use
   def use_warhorn_or_egg(game_state)
-    DRC.message("Warhorn/egg array is: #{@warhorn_or_egg}")
-    DRC.message("Time since last warhorn effect: #{(Time.now - UserVars.warhorn["last_warhorn_or_egg"])/60}")
-    DRC.message("Time since last warhorn use: #{(Time.now - UserVars.warhorn["last_warhorn"])/60}")
-    DRC.message("Time since last egg use: #{(Time.now - UserVars.warhorn["last_egg"])/60}")
+    DRC.message("Time since last warhorn room effect: #{(Time.now - UserVars.warhorn["last_warhorn_or_egg"])/60}") if $debug_mode_ct
+    DRC.message("Time since last warhorn use: #{(Time.now - UserVars.warhorn["last_warhorn"])/60}") if $debug_mode_ct
+    DRC.message("Time since last egg use: #{(Time.now - UserVars.warhorn["last_egg"])/60}") if $debug_mode_ct
 
     # Return if it hasn't been 10 minutes since last warhorn. Room effect lasts 10 minutes.
-    DRC.message("NOT 10 minutes since last worhorn or egg room effect") unless Time.now > (UserVars.warhorn["last_warhorn_or_egg"] + 600)
     return unless Time.now > (UserVars.warhorn["last_warhorn_or_egg"] + 600)
 
     game_state.sheath_whirlwind_offhand
 
     noun = @warhorn_or_egg[0]
 
+    # Check timers. Egg is always 15 minutes. Warhorn is 20 minutes, or configurable.
     if noun =~ /egg/i
-      DRC.message("Timer not up for egg.") unless Time.now > UserVars.warhorn["last_egg"] + 900
       return unless Time.now > UserVars.warhorn["last_egg"] + 900
       if use_egg?
-        DRC.message("SUCCESSFUL egg use")
         UserVars.warhorn["last_egg"] = Time.now
         UserVars.warhorn["last_warhorn_or_egg"] = Time.now
       end
     else
-      DRC.message("Not #{@warhorn_cooldown/60} minutes since last warhorn.") unless Time.now > (UserVars.warhorn["last_warhorn"] + @warhorn_cooldown)
       return unless Time.now > (UserVars.warhorn["last_warhorn"] + @warhorn_cooldown)
       if use_warhorn?
         DRC.message("SUCCESSFUL horn use")
@@ -2201,7 +2198,8 @@ class AbilityProcess
     end
 
     game_state.wield_whirlwind_offhand
-    DRC.message("Rotating warhorn/egg.")
+
+    # Rotate array to rotate warhorn/egg use. If we only have one, this still works fine.
     @warhorn_or_egg.rotate!
   end
 
@@ -2214,7 +2212,8 @@ class AbilityProcess
     when /The red light within the egg is dim and moves about sluggishly/
       return false
     when /Something about the area inhibits/
-      DRC.message("Egg can't be used in this area.")
+      DRC.message("Egg can't be used in this area. Removing from hunt.")
+      @warhorn_or_egg.delete('egg')
       return false
     when /^What were you referring to/, /Invoke what?/
       DRC.message("Can't find egg, removing from hunt.")
@@ -2237,12 +2236,23 @@ class AbilityProcess
       if /Your lungs are tired from having sounded a/ =~ warhorn_activation
         DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
         return false
+      elsif /Something about the area inhibits/ =~ warhorn_activation
+        DRC.message "Can't use #{@warhorn} in this area. Removing from hunt."
+        DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
+        @warhorn_or_egg.delete(@warhorn)
+        return false
+      elsif /not accomplishing much and looking rather silly/ =~ warhorn_activation
+        DRC.message "You can't use a warhorn. Removing from hunt."
+        DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
+        DRC.message("@warhorn_or_egg before delete is: #{@warhorn_or_egg}")
+        @warhorn_or_egg.delete(@warhorn)
+        DRC.message("@warhorn_or_egg after delete is: #{@warhorn_or_egg}")
+        return false
       end
       waitrt?
       DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
     when /^What were you referring to/
       DRC.message "#{@warhorn} NOT FOUND! Removing from hunt."
-      @warhorn = nil
       @warhorn_or_egg.delete(@warhorn)
       return false
     end

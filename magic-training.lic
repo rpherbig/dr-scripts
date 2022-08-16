@@ -18,58 +18,42 @@ class MagicTraining
     arg_definitions = [
       [
         { name: 'max_time', regex: /\d+/, optional: true, description: 'Max time, in minutes, spent training. (Optional)' },
-        { name: 'training_skills', regex: /^((Augmentation|Warding|Utility|Sorcery)((\s*,\s*)(Augmentation|Warding|Utility|Sorcery))*)$/i, optional: true, description: 'Override which magic skills to train, as a comma-separated list. (Optional)' }
+        { name: 'training_skills', regex: /^((Augmentation|Warding|Utility|Sorcery)((\s*,\s*)(Augmentation|Warding|Utility|Sorcery))*)$/i, optional: true, description: 'Override which magic skills to train, as a comma-separated list. (Optional)' },
+        { name: 'script_summary', optional: true, description:'Trains magic skills defined in Yaml setting training_skills' }
       ]
     ]
 
     args = parse_args(arg_definitions)
+    max_time = ((args.max_time || 60).to_i * 60) # convert to seconds
+    training_skills = args.training_skills ? args.training_skills.split(',').map { |skill| skill.strip.downcase.capitalize } : %w[Utility Warding Augmentation Sorcery]
 
-    load_settings
-    DRC.wait_for_script_to_complete('buff', ['mana'])
-
-    @max_time = ((args.max_time || 60).to_i * 60) # convert to seconds
-    @training_skills = args.training_skills.split(',').map { |skill| skill.strip.downcase.capitalize }
-    @training_skills = %w[Utility Warding Augmentation Sorcery] if @training_skills.nil? || @training_skills.empty?
-
-    echo "Max training time: #{@max_time} seconds"
-    echo "Training skills: #{@training_skills}"
+    echo "Max training time: #{max_time} seconds"
+    echo "Training skills: #{training_skills}"
 
     loop do
-      if (Time.now - @@time_in) > @max_time
+      if (Time.now - @@time_in) > max_time
         echo "Max time alloted for Magic Training reached. Now exiting..."
         exit
       end
-      unless train_magics?
+      unless train_magics?(training_skills)
         echo "Done training magics"
         exit
       end
     end
   end
 
-  def load_settings
-    @settings = get_settings
+  def train_magics?(training_skills)
+    settings = get_settings
+    DRCT.walk_to(settings.magic_training_room)
+    exp_threshold = settings.magic_exp_training_max_threshold
+    force_cambrinth = settings.waggle_force_cambrinth
+    training_spells = settings.training_spells
 
-    # Stops training a specfic skill after reaching this mindstate threshold, and quits program when all skills are above
-    @exp_threshold = @settings.magic_exp_training_max_threshold
-
-    # Hash of magic skill (e.g. Warding) to spell to train with (same config as spells in waggle sets)
-    @training_spells = @settings.magic_training # original value from `;repos download magic-training`
-    @training_spells = @settings.training_spells if @training_spells.nil? || @training_spells.empty?
-
-    @force_cambrinth = @settings.waggle_force_cambrinth
-
-    @health_threshold = @settings.health_threshold # vitaltiy percentage
-    @saferoom_health_threshold = @settings.saferoom_health_threshold # wound severity threshold
-  end
-
-  def train_magics?
-    load_settings # This is done purposely so you can adjust settings on the fly, it's great for finding mana values
-
-    magic_skills = @training_spells.keys
+    magic_skills = training_spells.keys
     skills_to_train = magic_skills
-      .select { |skill| @training_skills.include?(skill) } # filter to skills you want to train
-      .select { |skill| DRCMM.update_astral_data(@training_spells[skill]) } # filter to spells you can cast now
-      .reject { |skill| DRSkill.getxp(skill) > @exp_threshold } # filter out skills you don't need to train
+      .select { |skill| training_skills.include?(skill) } # filter to skills you want to train
+      .select { |skill| DRCMM.update_astral_data(training_spells[skill]) } # filter to spells you can cast now
+      .reject { |skill| DRSkill.getxp(skill) > exp_threshold } # filter out skills you don't need to train
       .sort_by do |skill|
         [
           DRSkill.getxp(skill),   # choose first by skills with lowest learning rate
@@ -83,21 +67,21 @@ class MagicTraining
     skills_to_train.each do |skill|
       echo "Next skill to train: #{skill}"
       before_xp = DRSkill.getxp(skill)
-      DRCA.check_discern(@training_spells[skill], @settings) if @training_spells[skill]['use_auto_mana']
-      DRCA.cast_spells({ spell_name: @training_spells[skill] }, @settings, @force_cambrinth)
+      DRCA.check_discern(training_spells[skill], settings) if training_spells[skill]['use_auto_mana']
+      DRCA.cast_spells({ spell_name: training_spells[skill] }, settings, force_cambrinth)
       echo("#{skill} gains: #{DRSkill.getxp(skill) - before_xp}")
       waitrt?
-      check_health
+      check_health(settings.health_threshold, settings.saferoom_health_threshold)
     end
 
     return true
   end
 
   # Needed when training sorcery as you may experience sorcerous backlash
-  def check_health
+  def check_health(health, saferoom)
     pause 0.5 while stunned?
     health_data = DRCH.check_health
-    if bleeding? || health_data['score'] >= @saferoom_health_threshold || DRStats.health < [50, @health_threshold].max || health_data['poisoned'] || health_data['diseased']
+    if bleeding? || health_data['score'] >= saferoom || DRStats.health < [50, health].max || health_data['poisoned'] || health_data['diseased']
       DRC.message("You're injured! Stopping training")
       DRC.wait_for_script_to_complete('safe-room', ['force'])
       exit

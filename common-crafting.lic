@@ -20,11 +20,11 @@ module DRCC
   end
 
   def clean_anvil?
-    case result = DRC.bput('look on anvil', 'surface looks clean and ready', "anvil you see an? (.*)\.", 'anvil you see')
+    case result = DRC.bput('look on anvil', 'surface looks clean and ready', "anvil you see (.*)\.")
     when /surface looks clean and ready/i
       true
-    when /anvil you see an?/
-      /anvil you see an? (.*)\./ =~ result
+    when /anvil you see/
+      /anvil you see (.*)\./ =~ result
       clutter = Regexp.last_match(1).split.last
       case DRC.bput('clean anvil', 'You drag the', 'remove them yourself')
       when /drag/
@@ -37,7 +37,7 @@ module DRCC
           fput('clean anvil')
           fput('clean anvil')
         when 'You get'
-          DRC.bput("put #{clutter} in bucket", 'You drop')
+         DRC.bput("put #{clutter} in bucket", 'You drop')
         else
           return false
         end
@@ -132,15 +132,15 @@ module DRCC
     end
   end
 
-  def find_recipe(chapter, match_string)
-    case DRC.bput("turn my book to chapter #{chapter}", 'You turn', 'You are too distracted to be doing that right now', 'The book is already turned')
+  def find_recipe(chapter, match_string, book = 'book')
+    case DRC.bput("turn my #{book} to chapter #{chapter}", 'You turn', 'You are too distracted to be doing that right now', 'The .* is already turned')
     when 'You are too distracted to be doing that right now'
       echo '***CANNOT TURN BOOK, ASSUMING I AM ENGAGED IN COMBAT***'
       fput('look')
       fput('exit')
     end
 
-    recipe = DRC.bput('read my book', "Page \\d+:\\s(?:some|a|an)?\\s*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
+    recipe = DRC.bput("read my #{book}", "Page \\d+:\\s(?:some|a|an)?\\s*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
     recipe =~ /(\d+):/
     Regexp.last_match(1)
   end
@@ -195,6 +195,84 @@ module DRCC
       end
     end
     true
+  end
+
+  def check_consumables(name, room, number, bag, bag_items, belt)
+    current = Room.current.id
+    case DRC.bput("get my #{name} from my #{bag}", 'You get', 'What were')
+    when 'You get'
+      /(\d+)/ =~ DRC.bput("count my #{name}", 'The .* has (\d+) uses remaining', 'You count out (\d+) yards of material there')
+      if Regexp.last_match(1).to_i < 3
+        DRCT.dispose(name)
+        DRCT.order_item(room, number)
+      end
+    else
+      DRCT.order_item(room, number)
+    end
+    DRCC.stow_crafting_item(name, bag, belt)
+    DRCT.walk_to(current)
+  end
+
+  def get_adjust_tongs?(usage, bag, bag_items, belt, adjustable_tongs = false)
+    
+    case usage
+    when 'shovel' #looking for a shovel
+      if @tongs_status == 'shovel' #tongs already a shovel
+        DRCC.get_crafting_item('tongs', bag, bag_items, belt) unless DRCI.in_hands?('tongs') #get unless already holding
+        return true #tongs previously set to shovel, in hands, adjusted to shovel.
+      elsif !adjustable_tongs # determines state of tongs, works either nil or tongs
+        return false #non-adjustable
+      else
+        DRCC.get_crafting_item('tongs', bag, bag_items, belt) unless DRCI.in_hands?('tongs') #get unless already holding
+
+        case DRC.bput("adjust my tongs", 'You lock the tongs', 'With a yank you fold the shovel', 'You cannot adjust', 'You have no idea how')
+        when 'You cannot adjust', 'You have no idea how' #holding tongs, not adjustable, settings are wrong.
+          DRC.message('Tongs are not adjustable. Please change yaml to reflect adjustable_tongs: false')
+          DRCC.stow_crafting_item('tongs', bag, belt) #stows to make room for shovel
+          return false
+        when 'With a yank you fold the shovel' #now tongs, adjust success but in wrong configuration
+          DRC.bput("adjust my tongs", 'You lock the tongs') #now shovel, ready to work
+          @tongs_status = 'shovel' #correcting instance variable
+          return true #tongs as shovel
+        when 'You lock the tongs' #now shovel, adjust success
+          @tongs_status = 'shovel' #setting instance variable 
+          return true #tongs as shovel
+        end
+      end
+
+      #at this point, we either have tongs-in-shovel and a return of true, or tongs stowed(if in left hand) and a return of false
+
+    when 'tongs' #looking for tongs
+      DRCC.get_crafting_item('tongs', bag, bag_items, belt) unless DRCI.in_hands?('tongs') #get unless already holding. Here we are always getting tongs, never stowing tongs.
+      if @tongs_status == 'tongs' #tongs as tongs already
+        return true #tongs previously set to tongs, in hands, adjusted to tongs. this will not catch unscripted adjustments to tongs.
+      elsif !adjustable_tongs # determines state of tongs, works either nil or shovel
+        return false #have tongs, as tongs, but not adjustable.
+      else
+
+        case DRC.bput("adjust my tongs", 'You lock the tongs', 'With a yank you fold the shovel', 'You cannot adjust', 'You have no idea how')
+        when 'You cannot adjust', 'You have no idea how' #holding tongs, not adjustable, settings are wrong.
+          DRC.message('Tongs are not adjustable. Please change yaml to reflect adjustable_tongs: false')
+          return false #here we have tongs in hand, as tongs, but they're not adjustable, so this returns false.
+        when 'You lock the tongs' #now in shovel, adjust success but in wrong configuration
+          DRC.bput("adjust my tongs", 'With a yank you fold the shovel') #now tongs, ready to work
+          @tongs_status = 'tongs'
+          return true #tongs as tongs AND adjustable
+        when 'With a yank you fold the shovel' #now tongs
+          @tongs_status = 'tongs'
+          return true #tongs as tongs AND adjustable
+        end
+      end
+    
+    when 'reset shovel', 'reset tongs' #Used at the top of a script, to determine state of tongs.
+      @tongs_status = nil
+      adjustable_tongs = true
+      if usage == 'reset shovel'
+        return DRCC.get_adjust_tongs?('shovel', bag, bag_items, belt, adjustable_tongs)
+      elsif usage == 'reset tongs'
+        return DRCC.get_adjust_tongs?('tongs', bag, bag_items, belt, adjustable_tongs)
+      end
+    end
   end
 
   def logbook_item(logbook, noun, container)

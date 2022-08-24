@@ -1,0 +1,189 @@
+=begin
+    Maneuver manager script runs passively whilst pvping. Example yaml settings:
+    maneuvers_default_weapon_skill: Small Edged # The weapon you dance with
+    maneuvers_powershot_weapon_skill: Crossbow # Powershot weapon, really only works with preloaded xbow
+    maneuvers_reload: true # Whether to reload after a powershot. First load on startup by default, false means won't reload after a shot.
+    maneuvers_doublestrike_skills:
+    - Large Edged
+    - Large Blunt
+=end
+
+custom_require.call(%w[drinfomon common equipmanager])
+
+class Maneuvers
+    def initialize
+        @settings = get_settings
+        @weapons = @settings.weapon_training
+        @equip = EquipmentManager.new(@settings)
+        @default_weapon_skill = @settings.maneuvers_default_weapon_skill
+        @powershot_weapon_skill = @settings.maneuvers_powershot_weapon_skill
+        @ele_weapons = @settings.maneuvers_use_elemental_weapons
+        @doublestrike_weapon_skills = @settings.maneuvers_doublestrike_skills
+        UserVars.maneuver_cooldowns = {}
+        @maneuver_list = ['impale', 'crash', 'cleave', 'twirl', 'powershot', 'palmstrike', 'doublestrike', 'suplex']
+        @equip.return_held_gear
+        check_powershot if @settings.maneuvers_reload
+        passive_loop
+    end
+
+    def passive_loop
+        ready = @maneuver_list
+        echo(ready)
+        loop do
+            line = get until (line && !stunned?) || UserVars.maneuver_cooldowns.any? { |man,cd| cd <= Time.now } || !standing?
+            DRC.fix_standing unless standing?
+            UserVars.maneuver_cooldowns.each { |man,cd| 
+                next unless cd <= Time.now
+                DRC.message("#{man} now off cooldown")
+                ready << man
+            }
+            UserVars.maneuver_cooldowns.reject! { |man,cd| man if cd <= Time.now }
+            case line
+            when /^im.*/
+                next if UserVars.maneuver_cooldowns['impale']
+                ready(@weapons['Polearms'])
+                maneuver('impale')
+                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+            when /^cr.*/
+                next if UserVars.maneuver_cooldowns['crash']
+                ready(@ele_weapons ? "Twohanded Blunt" : @weapons['Twohanded Blunt'])
+                maneuver('crash')
+                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+            when /^cl.*/
+                next if UserVars.maneuver_cooldowns['cleave']
+                ready(@weapons['Twohanded Edged'])
+                maneuver('cleave')
+                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+            when /^tw.*/
+                next if UserVars.maneuver_cooldowns['twirl']
+                ready(@weapons['Staves'])
+                maneuver('twirl')
+                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+            when /^po.*/
+                next if UserVars.maneuver_cooldowns['powershot']
+                ready_ranged(@weapons[@powershot_weapon_skill])
+                maneuver('powershot')
+                fput("stow feet")
+                check_powershot
+                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+            when /^pa.*/
+                next if UserVars.maneuver_cooldowns['palmstrike']
+                ready(nil)
+                maneuver('palmstrike')
+                ready(@ele_weapons ? @last_weapon : @weapons[@default_weapon_skill])
+            when /^do.*/
+                next if UserVars.maneuver_cooldowns['doublestrike']
+                ready(@weapons[@doublestrike_weapon_skills.first])
+                @equip.wield_weapon?(@weapons[@doublestrike_weapon_skills.last])
+                maneuver('doublestrike')
+                ready(@weapons[@default_weapon_skill])
+            when /^You grab hold of/
+                next if UserVars.maneuver_cooldowns['suplex']
+                ready(nil)
+                maneuver('suplex')
+                DRC.fix_standing 
+                ready(@weapons[@default_weapon_skill])
+            when /^load/
+                @noload = false
+                check_powershot
+            when /^list/
+                UserVars.maneuver_cooldowns.each { |man,cd| 
+                    ready -= [man]
+                    DRC.message("Time remaining on #{man} : #{cd - Time.now}") if man }
+                ready.each { |maneuver| DRC.message("#{maneuver} ready for use") }
+            when /^cycle/
+                unless UserVars.maneuver_cooldowns['impale']
+                    ready(@weapons['Polearms'])
+                    maneuver('impale')
+                end
+                unless UserVars.maneuver_cooldowns['crash']
+                    ready(@ele_weapons ? "Twohanded Blunt" : @weapons['Twohanded Blunt'])
+                    maneuver('crash')
+                end
+                unless UserVars.maneuver_cooldowns['cleave']
+                    ready(@weapons['Twohanded Edged'])
+                    maneuver('cleave')
+                end
+                unless UserVars.maneuver_cooldowns['twirl']
+                    ready(@weapons['Staves'])
+                    maneuver('twirl')
+                end
+                unless UserVars.maneuver_cooldowns['powershot']
+                    ready_ranged(@weapons[@powershot_weapon_skill])
+                    maneuver('powershot')
+                    fput("stow feet")
+                    check_powershot if @settings.maneuvers_reload
+                end
+                unless UserVars.maneuver_cooldowns['palmstrike'] 
+                    ready(nil)
+                    maneuver('palmstrike')
+                end
+                unless UserVars.maneuver_cooldowns['doublestrike']
+                    @doublestrike_weapon_skills.each { |skill| @equip.wield_weapon?(@weapons[skill]) }
+                    maneuver('doublestrike')
+                end
+                ready(@weapons[@default_weapon_skill])
+            end
+        end
+    end
+
+    def ready(weapon)
+        if @ele_weapons && weapon
+            unless DRC.right_hand
+                @equip.wield_weapon?(weapon)
+                return
+            else
+                DRC.bput("shape my #{DRC.right_hand_noun} to #{weapon}", /^Roundtime/)
+            end
+        elsif weapon
+            @equip.return_held_gear unless DRCI.in_hands?(weapon)
+            @equip.wield_weapon?(weapon)
+        else
+            @last_weapon = DRC.right_hand_noun
+            @equip.return_held_gear unless DRCI.in_hands?(weapon)
+        end
+    end
+
+    def ready_ranged(weapon)
+        @equip.return_held_gear unless DRCI.in_hands?(weapon)
+        @equip.wield_weapon?(weapon)
+    end
+
+    def maneuver(type)
+        result = DRC.bput("maneuver #{type}", /^Roundtime/, /^You aren't close enough/, /^You must rest a bit longer/, /^What are you trying to attack/, /^With a loud twang/, /^You draw your opponent close/, /^You prepare the shot/)
+        case result
+        when /Roundtime/, /With a loud twang/, /You draw your opponent close/
+            UserVars.maneuver_cooldowns.store(type, Time.now + 90)
+            return
+        when /You aren't close enough/
+            fput('engage')
+            return
+        when /You must rest a bit longer/
+            DRC.message("Timer not expired on #{type} maneuver")
+            return
+        when /What are you trying to attack/
+            fput('search')
+            return
+        when /You prepare the shot/
+            check_powershot
+        end
+    end
+
+    def check_powershot
+        return if @noload
+        @noload = @settings.maneuvers_reload ? false : true
+        case DRC.bput("Look on my #{@weapons[@powershot_weapon_skill]}", /^There is nothing on there/, /^On the .* you see/)
+        when /There is nothing on there/
+            ready_ranged(@weapons[@powershot_weapon_skill])
+            fput("load my #{@weapons[@powershot_weapon_skill]}")
+            pause 3
+        end
+        fput("wear my #{@weapons[@powershot_weapon_skill]}")
+    end
+
+
+
+
+end
+
+Maneuvers.new

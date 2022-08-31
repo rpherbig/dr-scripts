@@ -7,13 +7,18 @@ custom_require.call(%w[common common-items])
 class ScrollSorter
 
   def initialize
+    @ALL_SPELLS = Array.new
+    get_data('spells').spell_data.each do |k,v|
+      next if v['skill'] == 'cantrip'
+      v['guild'] = 'Analogous' if v['mana_type'] == 'ap'
+      @ALL_SPELLS.push([k,v['guild']])
+    end
     @settings = get_settings
     @default_container = @settings.default_container
     @stacker = @settings.scroll_sorter['stacker']
     @stacker_container = @settings.scroll_sorter['stacker_container']
     @custom_nouns = @settings.scroll_sorter['scroll_nouns']
     @scroll_nouns = get_data('items').scroll_nouns + @custom_nouns
-    @all_spells = get_data('spells')['spell_data']
 
     arg_definitions =
       [
@@ -22,8 +27,8 @@ class ScrollSorter
         ],
 
         [
-          { name: 'find', regex: /find/i },
-          { name: 'spell', regex: /\w+/i, variable: true, description: 'Name of spell to find' }
+          { name: 'find', regex: /find/i, description: 'Find the specified spell scroll in your stackers' },
+          { name: 'spell', regex: /\w+/i, optional: false, description: 'Name of spell to find.  Use full name, enclose in double quotes if more than one word' }
         ]
       ]
 
@@ -48,16 +53,20 @@ class ScrollSorter
       line = get
       if line.include?(@stacker)
         /labeled "(.*)"/ =~ line
-        guild = Regexp.last_match(1).to_s
-        c << guild
+        guild = Regexp.last_match(1)
+        c.push(guild)
       end
       break if line.include?('INVENTORY HELP')
     end
     return c
   end
 
-  def unknown
-    DRC.message("Spell not found.  Either a new spell was released and it hasn't been added to the script yet, or you misspelled the spell you're searching for.")
+  def unknown(guild)
+    if guild.nil?
+      DRC.message("Spell not found.  Either a new spell was released and it hasn't been added to the script yet, or you misspelled the spell you're searching for.")
+    else
+      DRC.message("Analogous Pattern spells are not stored.")
+    end
     exit
   end
 
@@ -84,22 +93,21 @@ class ScrollSorter
     return true
   end
 
+  def find_guild(spell)
+    return @ALL_SPELLS.select{ |s,g| s.casecmp(spell) == 0 }.flatten[1]
+  end
+
   def check_scroll(scroll)
     case DRC.bput("look my #{scroll}", /It is labeled "(.*)\."/, /Illustrations of complex/)
     when /Illustrations of complex/
       DRC.message('Not labeled yet!')
       /of the (.*) spell/ =~ DRC.bput("read my #{scroll}", 'The .* contains a complete description of the .* spell')
-      spell = Regexp.last_match(1).to_s
+      spell = Regexp.last_match(1)
+      return find_guild(spell)
     when /It is labeled "(.*)\."/
-      spell = Regexp.last_match(1).to_s
+      spell = Regexp.last_match(1)
+      return find_guild(spell)
     end
-
-    if @all_spells[spell]['mana_type'] == 'ap'
-      return 'Analogous'
-    else
-      return @all_spells[spell]['guild']
-    end
-
     return nil
   end
 
@@ -139,16 +147,15 @@ class ScrollSorter
     scrolls.each do |s|
       next unless get_scroll(s)
       guild = check_scroll(s)
-      unknown if guild.nil?
+      unknown(guild) if guild.nil?
       stack_scroll(s, guild)
     end
   end
 
-  def find_spell(name)
-    if @all_spells[spell]['mana_type'] == 'ap'
-      guild = 'Analogous'
-    else
-      guild = @all_spells[spell]['guild']
+  def find_spell(name, guild = nil)
+    if guild.nil?
+      guild = find_guild(name)
+      unknown(guild) if guild.nil? || guild == 'Analogous'
     end
     ord = find_case(guild)
     DRC.bput("get #{ord} #{@stacker} in my #{@stacker_container}", /You get/)
@@ -167,7 +174,10 @@ class ScrollSorter
       end
     end
     num = spells.index{ |i| i =~ /#{name}/i }
-    if num.nil?
+    if num.nil? && guild != 'Extras'
+      stow_and_refactor_cases(guild)
+      return find_spell(name, 'Extras')
+    elsif num.nil?
       DRC.message("You have no copies of #{name}!")
     else
       DRC.bput("open my #{@stacker}", /You open your/, /is already open/)

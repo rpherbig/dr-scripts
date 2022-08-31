@@ -3,12 +3,15 @@
     maneuvers_default_weapon_skill: Small Edged # The weapon you dance with
     maneuvers_powershot_weapon_skill: Crossbow # Powershot weapon, really only works with preloaded xbow
     maneuvers_reload: true # Whether to reload after a powershot. First load on startup by default, false means won't reload after a shot.
+    maneuvers_tm_spell_and_prep: lb 15 # spell abbreviation/name and mana for targeted spell
+    maneuvers_aoe_spell_and_prep: starcrash 31 # spell abbrev/name and mana for aoe (tremors, starcrash, etc)
+    maneuvers_cyclic_spell_and_prep: ee 8 # spell abbrev/name and mana for cyclic (USOL, EE, etc)
     maneuvers_doublestrike_skills:
     - Large Edged
     - Large Blunt
 =end
 
-custom_require.call(%w[drinfomon common common-items equipmanager])
+custom_require.call(%w[drinfomon common common-items common-arcana equipmanager events])
 
 class Maneuvers
     def initialize
@@ -17,8 +20,12 @@ class Maneuvers
         @equip = EquipmentManager.new(@settings)
         @default_weapon_skill = @settings.maneuvers_default_weapon_skill
         @powershot_weapon_skill = @settings.maneuvers_powershot_weapon_skill
-        @ele_weapons = @settings.maneuvers_use_elemental_weapons
         @doublestrike_weapon_skills = @settings.maneuvers_doublestrike_skills
+        @maneuvers_tm_spell_and_prep = @settings.maneuvers_tm_spell_and_prep
+        @maneuvers_aoe_spell_and_prep = @settings.maneuvers_aoe_spell_and_prep
+        @maneuvers_cyclic_spell_and_prep = @settings.maneuvers_cyclic_spell_and_prep
+        Flags.add("barbarian-cooldown", /With expert skill you end the attack and maneuver into a better position/)
+        Flags.add("SK-used", /In one frozen moment, your thoughts shift to a dreamlike tableau/)
         UserVars.maneuver_cooldowns = {}
         @maneuver_list = ['impale', 'crash', 'cleave', 'twirl', 'powershot', 'palmstrike', 'doublestrike', 'suplex']
         @equip.return_held_gear
@@ -28,58 +35,74 @@ class Maneuvers
 
     def passive_loop
         ready = @maneuver_list
-        echo(ready)
         loop do
-            line = get until (line && !stunned?) || UserVars.maneuver_cooldowns.any? { |man,cd| cd <= Time.now } || !standing?
+            if Flags["SK-used"]
+                UserVars.maneuver_cooldowns.store("Syamelyo Kuniyo", Time.now + 605)
+                Flags.reset("SK-used")
+            end
+            line = get until (line && !stunned?) || UserVars.maneuver_cooldowns.any? { |man,cd| cd <= Time.now } || !standing? || Flags["spell-prepped"]
             DRC.fix_standing unless standing?
+
             UserVars.maneuver_cooldowns.each { |man,cd| 
                 next unless cd <= Time.now
                 DRC.message("#{man.upcase} now off cooldown")
                 ready << man
             }
             UserVars.maneuver_cooldowns.reject! { |man,cd| man if cd <= Time.now }
+            if Flags["spell-prepped"] && DRCA.cast?
+                Flags.delete("spell-prepped")
+            end
             case line
             when /^im.*/
                 next if UserVars.maneuver_cooldowns['impale']
                 ready(@weapons['Polearms'])
                 maneuver('impale')
-                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^cr.*/
                 next if UserVars.maneuver_cooldowns['crash']
-                ready(@ele_weapons ? "Twohanded Blunt" : @weapons['Twohanded Blunt'])
+                ready(@weapons['Twohanded Blunt'])
                 maneuver('crash')
-                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^cl.*/
                 next if UserVars.maneuver_cooldowns['cleave']
                 ready(@weapons['Twohanded Edged'])
                 maneuver('cleave')
-                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^tw.*/
                 next if UserVars.maneuver_cooldowns['twirl']
                 ready(@weapons['Staves'])
                 maneuver('twirl')
-                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^po.*/
                 next if UserVars.maneuver_cooldowns['powershot']
                 ready_ranged(@weapons[@powershot_weapon_skill])
                 maneuver('powershot')
                 fput("stow feet")
                 check_powershot
-                ready(@ele_weapons ? @default_weapon_skill : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^pa.*/
                 next if UserVars.maneuver_cooldowns['palmstrike']
                 ready(nil)
                 maneuver('palmstrike')
-                ready(@ele_weapons ? @last_weapon : @weapons[@default_weapon_skill])
+                ready(@weapons[@default_weapon_skill])
             when /^do.*/
                 next if UserVars.maneuver_cooldowns['doublestrike']
                 ready(@weapons[@doublestrike_weapon_skills.first])
                 @equip.wield_weapon?(@weapons[@doublestrike_weapon_skills.last])
                 maneuver('doublestrike')
                 ready(@weapons[@default_weapon_skill])
-            when /^You grab hold of/
+            when /^tar.*/
+                DRC.bput("Target #{@maneuvers_tm_spell_and_prep}", //)
+                DRC.message("Loaded, fire when ready with manual 'cast'")
+            when /^tm/
+                DRC.bput("Prepare #{@maneuvers_aoe_spell_and_prep}", //)
+                Flags.add("spell-prepped", /^You feel fully prepared to cast your spell/)
+            when /^cy.*/
+                DRC.bput("Prepare #{@maneuvers_cyclic_spell_and_prep}", //)
+                Flags.add("spell-prepped", /^You feel fully prepared to cast your spell/)
+            when /^You grab hold of/, /grabs hold of you in a tight grip/
                 next if UserVars.maneuver_cooldowns['suplex']
-                ready(nil)
+                # ready(nil)
                 maneuver('suplex')
                 DRC.fix_standing 
                 ready(@weapons[@default_weapon_skill])
@@ -97,7 +120,7 @@ class Maneuvers
                     maneuver('impale')
                 end
                 unless UserVars.maneuver_cooldowns['crash']
-                    ready(@ele_weapons ? "Twohanded Blunt" : @weapons['Twohanded Blunt'])
+                    ready(@weapons['Twohanded Blunt'])
                     maneuver('crash')
                 end
                 unless UserVars.maneuver_cooldowns['cleave']
@@ -128,19 +151,11 @@ class Maneuvers
     end
 
     def ready(weapon)
-        if @ele_weapons && weapon
-            unless DRC.right_hand
-                @equip.wield_weapon?(weapon)
-                return
-            else
-                DRC.bput("shape my #{DRC.right_hand_noun} to #{weapon}", /^Roundtime/)
-            end
-        elsif weapon
+        if weapon
             @equip.return_held_gear unless DRCI.in_hands?(weapon)
             @equip.wield_weapon?(weapon)
         else
-            @last_weapon = DRC.right_hand_noun
-            @equip.return_held_gear unless DRCI.in_hands?(weapon)
+            DRCI.stow_hands unless @equip.return_held_gear
         end
     end
 
@@ -154,18 +169,18 @@ class Maneuvers
         case result
         when /Roundtime/, /With a loud twang/, /You draw your opponent close/
             UserVars.maneuver_cooldowns.store(type, Time.now + 90)
-            return
         when /You aren't close enough/
             fput('engage')
-            return
         when /You must rest a bit longer/
             DRC.message("Timer not expired on #{type} maneuver")
-            return
         when /What are you trying to attack/
             fput('search')
-            return
         when /You prepare the shot/
             check_powershot
+        end
+        if Flags["barbarian-cooldown"]
+            UserVars.maneuver_cooldowns.store(type, Time.now + 55)
+            Flags.reset("barbarian-cooldown")
         end
     end
 
@@ -180,10 +195,6 @@ class Maneuvers
         end
         fput("wear my #{@weapons[@powershot_weapon_skill]}")
     end
-
-
-
-
 end
 
 Maneuvers.new

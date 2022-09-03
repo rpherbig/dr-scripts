@@ -281,108 +281,129 @@ pull_trigger_data
 until script.gets.nil?
   @trigger_data.each do | name, values |
     if Flags[name.to_s] && values['responses']  # If no trigger responses, don't bother processing trigger
-      DRC.message("  PROCESSING TRIGGER NAMED: #{name.to_s}") if $debug_mode_tw
-      DRC.message("  TRIGGER SEEN: #{Flags[name.to_s][0]}") if $debug_mode_tw
+      scripts = values['use_with_scripts']
+      echo "USE WITH SCRIPTS: #{scripts}" if $debug_mode_tw
 
-      # Clone the array elements to avoid modifying the original array
-      responses = values['responses'].map(&:clone)
-
-      # Below we'll look for both regex capture and UserVar subsitutions in trigger responses,
-      # and substitute appropriately if so. Regex subs can be $1-$9. uvar subs can be named anything
-      # but the first character can NOT be a number.
-      num_subs = responses.join(' ').scan(/\$([0-9])\b/)
-      uvar_subs = responses.join(' ').scan(/\$([a-zA-Z]\w+)\b/)
-
-      echo "num_subs are: #{num_subs}" if $debug_mode_tw
-      echo "uvar_subs are: #{uvar_subs}" if $debug_mode_tw
-
-      # Process regex substitutions
-      unless num_subs.empty?
-        echo "Recognized regex capture subsitutions" if $debug_mode_tw
-        num_subs.each do |num|
-          regex_capture = Flags[name.to_s][num.first.to_i]
-          echo "capture group ##{num.first.to_i} is #{Flags[name.to_s][num.first.to_i]}" if $debug_mode_tw
-          responses.map { |string| string.gsub!(/\$#{num.first}\b/, regex_capture) if regex_capture }
-          if regex_capture.nil?
-            DRC.message("  Warning, you're referencing capture group $#{num.first}, which does not exist.")
+      # If user has specified that this trigger should only run when certain scripts are running
+      unless values['use_with_scripts'].nil?
+        process_trigger = false
+        scripts.each do |script|
+          echo "checking if script is running: #{script}" if $debug_mode_tw
+          if Script.running?("#{script}")
+            echo "We found #{script} running" if $debug_mode_tw
+            process_trigger = true
           end
         end
+      else
+        process_trigger = true
       end
 
-      # Process UserVar substitutions
-      unless uvar_subs.empty?
-        echo "Recognized UserVar variable subsititions" if $debug_mode_tw
-        uvar_subs.each do |uvar|
-          var_value = eval("UserVars." + "#{uvar[0].to_s}")
-          unless var_value == nil
-            responses.map { |string| string.gsub!(/\$#{uvar[0].to_s}\b/, "#{var_value.to_s}") }
+      if process_trigger
+        DRC.message("  PROCESSING TRIGGER NAMED: #{name.to_s}") if $debug_mode_tw
+        DRC.message("  TRIGGER SEEN: #{Flags[name.to_s][0]}") if $debug_mode_tw
+
+        # Clone the array elements to avoid modifying the original array
+        responses = values['responses'].map(&:clone)
+
+        # Below we'll look for both regex capture and UserVar subsitutions in trigger responses,
+        # and substitute appropriately if so. Regex subs can be $1-$9. uvar subs can be named anything
+        # but the first character can NOT be a number.
+        num_subs = responses.join(' ').scan(/\$([0-9])\b/)
+        uvar_subs = responses.join(' ').scan(/\$([a-zA-Z]\w+)\b/)
+
+        echo "num_subs are: #{num_subs}" if $debug_mode_tw
+        echo "uvar_subs are: #{uvar_subs}" if $debug_mode_tw
+
+        # Process regex substitutions
+        unless num_subs.empty?
+          echo "Recognized regex capture subsitutions" if $debug_mode_tw
+          num_subs.each do |num|
+            regex_capture = Flags[name.to_s][num.first.to_i]
+            echo "capture group ##{num.first.to_i} is #{Flags[name.to_s][num.first.to_i]}" if $debug_mode_tw
+            responses.map { |string| string.gsub!(/\$#{num.first}\b/, regex_capture) if regex_capture }
+            if regex_capture.nil?
+              DRC.message("  Warning, you're referencing capture group $#{num.first}, which does not exist.")
+            end
+          end
+        end
+
+        # Process UserVar substitutions
+        unless uvar_subs.empty?
+          echo "Recognized UserVar variable subsititions" if $debug_mode_tw
+          uvar_subs.each do |uvar|
+            var_value = eval("UserVars." + "#{uvar[0].to_s}")
+            unless var_value == nil
+              responses.map { |string| string.gsub!(/\$#{uvar[0].to_s}\b/, "#{var_value.to_s}") }
+            else
+              DRC.message("  Warning, User Variable #{uvar[0]} is not set, but your trigger is attempting to use it.")
+            end
+          end
+        end
+
+        # Send our trigger responses. Parse any trigger commands. With the exception of if/elsif/else,
+        # all trigger commands are expected only at the beginning of a trigger response line. If/elsif/else
+        # expects =if at the beginning of the line.
+        responses.each_with_index do | string, counter |
+          DRC.message("    Processing response number #{counter+1} for trigger #{name.to_s}") if $debug_mode_tw
+          DRC.message("    Response is: #{string}") if $debug_mode_tw
+
+          if string =~ /^=exec\b/i
+            echo "=exec trigger response" if $debug_mode_tw
+            exec_script = string.gsub('=exec', '').strip
+            exec_script = parse_enclosing_curly_braces(exec_script)
+            exec_script = exec_script.split
+            execute_script(exec_script[0], exec_script.drop(1))
+          elsif string =~ /^=execw\b/i
+            echo "=execw trigger response" if $debug_mode_tw
+            execw_script = string.gsub('=execw', '').strip
+            execw_script = parse_enclosing_curly_braces(execw_script)
+            execw_script = execw_script.split
+            execute_script_wait(execw_script[0], execw_script.drop(1))
+          elsif string =~ /^=uvar\b/i
+            echo "=uvar trigger response" if $debug_mode_tw
+            exec_uvar = string.gsub('=uvar', '').strip
+            exec_uvar = parse_enclosing_curly_braces(exec_uvar)
+            exec_uvar = exec_uvar.split
+            execute_uservar(exec_uvar)
+          elsif string =~ /^=logf\b/i
+            echo "=logf trigger response" if $debug_mode_tw
+            exec_logf = string.gsub('=logf', '').strip
+            exec_logf = parse_enclosing_curly_braces(exec_logf)
+            execute_logf(exec_logf)
+          elsif string =~ /^=logw\b/i
+            echo "=logw trigger response" if $debug_mode_tw
+            exec_logw = string.gsub('=logw', '').strip
+            exec_logw = parse_enclosing_curly_braces(exec_logw)
+            execute_logw(exec_logw)
+          elsif string =~ /^=pause\b/i
+            echo "=pause trigger response" if $debug_mode_tw
+            exec_pause = string.gsub('=pause', '').strip
+            exec_pause = parse_enclosing_curly_braces(exec_pause)
+            execute_pause(exec_pause)
+          elsif string =~ /^=if\b/i
+            echo "=if/elsif/else trigger response" if $debug_mode_tw
+            execute_if(string)
+          elsif string =~ /^=eval\b/i
+            echo "=eval trigger response" if $debug_mode_tw
+            exec_eval = string.gsub('=eval', '').strip
+            exec_eval = parse_enclosing_curly_braces(exec_eval)
+            execute_eval(exec_eval)
+          elsif string =~ /^=reload\b/i
+            echo "=reload trigger response" if $debug_mode_tw
+            execute_reload()
           else
-            DRC.message("  Warning, User Variable #{uvar[0]} is not set, but your trigger is attempting to use it.")
+            echo "regular trigger response (default fput)" if $debug_mode_tw
+            fput(string)
+            waitrt?
           end
         end
       end
-
-      # Send our trigger responses. Parse any trigger commands. With the exception of if/elsif/else,
-      # all trigger commands are expected only at the beginning of a trigger response line. If/elsif/else
-      # expects =if at the beginning of the line.
-      responses.each_with_index do | string, counter |
-        DRC.message("    Processing response number #{counter+1} for trigger #{name.to_s}") if $debug_mode_tw
-        DRC.message("    Response is: #{string}") if $debug_mode_tw
-
-        if string =~ /^=exec\b/i
-          echo "=exec trigger response" if $debug_mode_tw
-          exec_script = string.gsub('=exec', '').strip
-          exec_script = parse_enclosing_curly_braces(exec_script)
-          exec_script = exec_script.split
-          execute_script(exec_script[0], exec_script.drop(1))
-        elsif string =~ /^=execw\b/i
-          echo "=execw trigger response" if $debug_mode_tw
-          execw_script = string.gsub('=execw', '').strip
-          execw_script = parse_enclosing_curly_braces(execw_script)
-          execw_script = execw_script.split
-          execute_script_wait(execw_script[0], execw_script.drop(1))
-        elsif string =~ /^=uvar\b/i
-          echo "=uvar trigger response" if $debug_mode_tw
-          exec_uvar = string.gsub('=uvar', '').strip
-          exec_uvar = parse_enclosing_curly_braces(exec_uvar)
-          exec_uvar = exec_uvar.split
-          execute_uservar(exec_uvar)
-        elsif string =~ /^=logf\b/i
-          echo "=logf trigger response" if $debug_mode_tw
-          exec_logf = string.gsub('=logf', '').strip
-          exec_logf = parse_enclosing_curly_braces(exec_logf)
-          execute_logf(exec_logf)
-        elsif string =~ /^=logw\b/i
-          echo "=logw trigger response" if $debug_mode_tw
-          exec_logw = string.gsub('=logw', '').strip
-          exec_logw = parse_enclosing_curly_braces(exec_logw)
-          execute_logw(exec_logw)
-        elsif string =~ /^=pause\b/i
-          echo "=pause trigger response" if $debug_mode_tw
-          exec_pause = string.gsub('=pause', '').strip
-          exec_pause = parse_enclosing_curly_braces(exec_pause)
-          execute_pause(exec_pause)
-        elsif string =~ /^=if\b/i
-          echo "=if/elsif/else trigger response" if $debug_mode_tw
-          execute_if(string)
-        elsif string =~ /^=eval\b/i
-          echo "=eval trigger response" if $debug_mode_tw
-          exec_eval = string.gsub('=eval', '').strip
-          exec_eval = parse_enclosing_curly_braces(exec_eval)
-          execute_eval(exec_eval)
-        elsif string =~ /^=reload\b/i
-          echo "=reload trigger response" if $debug_mode_tw
-          execute_reload()
-        else
-          echo "regular trigger response (default fput)" if $debug_mode_tw
-          fput(string)
-          waitrt?
-        end
-      end
-
       # Reset flag, ready for next occurrence of trigger
       Flags.reset(name.to_s)
       echo "Flag #{name.to_s} reset." if $debug_mode_tw
+
+      process_trigger = false
+      echo "process_trigger reset to false." if $debug_mode_tw
     end
   end
 end

@@ -6,6 +6,7 @@
     maneuvers_tm_spell_and_mana: lb 15 # spell abbreviation/name and mana for targeted spell
     maneuvers_aoe_spell_and_mana: starcrash 31 # spell abbrev/name and mana for aoe (tremors, starcrash, etc)
     maneuvers_cyclic_spell_and_mana: ee 8 # spell abbrev/name and mana for cyclic (USOL, EE, etc)
+    maneuvers_debil_spell_and_mana: df 6 # spell abbrev/name and mana for debil
     maneuvers_debil_prep_time: 2 # prep time for debil cast, 0 is snap cast, default is 5 seconds
     maneuvers_doublestrike_skills:
     - Large Edged
@@ -16,12 +17,17 @@ custom_require.call(%w[drinfomon common common-items common-arcana equipmanager 
 
 class Maneuvers
     def initialize
+        arg_definitions = [
+        { name: 'script_summary', optional: true, description: "Passive PVP helper script"}
+        ]
+        args = parse_args(arg_definitions)
         @settings = get_settings
         @weapons = @settings.weapon_training
         @equip = EquipmentManager.new(@settings)
         @default_weapon_skill = @settings.maneuvers_default_weapon_skill || "Small Edged"
         @powershot_weapon_skill = @settings.maneuvers_powershot_weapon_skill || "Crossbow"
         @doublestrike_weapon_skills = @settings.maneuvers_doublestrike_skills || ["Large Edged", "Large Blunt"]
+        @maneuvers_bonded_thrown_skill = @settings.maneuvers_bonded_thrown_skill
         @maneuvers_tm_spell_and_mana = @settings.maneuvers_tm_spell_and_mana
         @maneuvers_aoe_spell_and_mana = @settings.maneuvers_aoe_spell_and_mana
         @maneuvers_cyclic_spell_and_mana = @settings.maneuvers_cyclic_spell_and_mana
@@ -99,8 +105,14 @@ class Maneuvers
             when /^do.*/
                 next if UserVars.maneuver_cooldowns['doublestrike']
                 ready(@weapons[@doublestrike_weapon_skills.first])
-                @equip.wield_weapon?(@weapons[@doublestrike_weapon_skills.last])
+                @equip.wield_weapon_offhand?(@weapons[@doublestrike_weapon_skills.last])
                 maneuver('doublestrike')
+                ready(@weapons[@default_weapon_skill])
+            when /^hu.*/
+                ready(@weapons[@maneuvers_bonded_thrown_skill])
+                if /You hurl a/i =~ DRC.bput("hurl", /^You hurl a/, /^What are you trying to attack/)
+                    DRC.bput('invoke', /^Roundtime/, /^You don't have any bonds to invoke/)
+                end
                 ready(@weapons[@default_weapon_skill])
             when /^tm.*/
                 DRC.bput("Target #{@maneuvers_tm_spell_and_mana}", //)
@@ -113,9 +125,13 @@ class Maneuvers
                 Flags.add("spell-prepped", /^You feel fully prepared to cast your spell/)
             when /^su.*/
                 next if UserVars.maneuver_cooldowns['suplex']
-                # ready(nil)
+                ready(nil)
+                unless grapple
+                    ready(@weapons[@default_weapon_skill])
+                    next
+                end
                 maneuver('suplex')
-                DRC.fix_standing 
+                DRC.fix_standing
                 ready(@weapons[@default_weapon_skill])
             when /^load/
                 @noload = false
@@ -126,6 +142,16 @@ class Maneuvers
                     DRC.message("Time remaining on #{man} : #{cd - Time.now}") if man }
                 ready.each { |maneuver| DRC.message("#{maneuver} ready for use") }
             when /^bombo/
+                unless UserVars.maneuver_cooldowns['palmstrike'] 
+                    ready(nil)
+                    maneuver('palmstrike')
+                end
+                unless UserVars.maneuver_cooldowns['suplex']
+                    if grapple
+                        maneuver('suplex')
+                        DRC.fix_standing
+                    end
+                end
                 unless UserVars.maneuver_cooldowns['impale']
                     ready(@weapons['Polearms'])
                     maneuver('impale')
@@ -148,10 +174,6 @@ class Maneuvers
                     fput("stow feet")
                     check_powershot if @settings.maneuvers_reload
                 end
-                unless UserVars.maneuver_cooldowns['palmstrike'] 
-                    ready(nil)
-                    maneuver('palmstrike')
-                end
                 unless UserVars.maneuver_cooldowns['doublestrike']
                     @doublestrike_weapon_skills.each { |skill| @equip.wield_weapon?(@weapons[skill]) }
                     maneuver('doublestrike')
@@ -173,6 +195,19 @@ class Maneuvers
     def ready_ranged(weapon)
         @equip.return_held_gear unless DRCI.in_hands?(weapon)
         @equip.wield_weapon?(weapon)
+    end
+
+    def grapple
+        case DRC.bput("grapple", /^You grab hold of/, /^You must be closer to grapple/, /^You reach out toward.* but are unable to make contact/, /^There is nothing else to face/)
+        when /You grab hold of/
+            true
+        when /You reach out toward/
+            grapple
+        when /You must be closer to grapple/
+            false
+        when /There is nothing else to face/
+            false
+        end
     end
 
     def maneuver(type)

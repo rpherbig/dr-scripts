@@ -6,6 +6,7 @@
       master_container: #bag for completed master's lockpicks
       trash_container: #bag for anything less than master/grandmaster
       initial_grand: #true/false as to whether to initial your grandmasters' lockpicks
+      full_rings: #bag for full rings, can't be either grand/master bag
 =end
 
 custom_require.call(%w[common common-items common-crafting])
@@ -20,9 +21,18 @@ class CarveLockpicks
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.engineering_belt
     @lockpick_carve_settings = @settings.lockpick_carve_settings
+    arg_definitions = [
+      [
+        { name: 'ring', regex: /ring/i, optional: true, description: 'Put completed batches of lockpicks on rings, need rings in the same bag as the lockpicks (grands rings in grands bag)' },
+        { name: 'script_summary', optional: true, description: 'Carves lockpicks with carving knife, drawing from keyblank pockets until empty.' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    @grands_ring_ready, @masters_ring_ready = [25,25]
+    @master_batch, @grand_batch = [true,true] if args.ring
 
     main_loop
-  end
+	end
 
   def main_loop
     DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
@@ -58,17 +68,19 @@ class CarveLockpicks
   end
 
   def carve_keyblank
-    case DRC.bput("carve my keyblank with my knife", 'proudly glance down at a grandmaster', 'begin to carefully carve', 'proudly glance down at a master', 'but feel your knife slip')
+    case DRC.bput("carve my keyblank with my knife", 'proudly glance down at a grandmaster', 'begin to carefully carve', 'proudly glance down at a master', 'but feel your knife slip', 'You are too injured to do any carving')
     when /proudly glance down at a grandmaster/
       DRC.bput("carve my lockpick with my knife", 'With the precision and skill') if @lockpick_carve_settings['initial_grand']
       stow_lockpick(@lockpick_carve_settings['grand_container'])
       @@grands_count += 1
+      @grands_ring_ready -= 1
       false
     when /begin to carefully carve/
       true
     when /proudly glance down at a master/
       stow_lockpick(@lockpick_carve_settings['master_container'])
       @@masters_count += 1
+      @masters_ring_ready -= 1
       false
     when /but feel your knife slip/
       false
@@ -85,9 +97,11 @@ class CarveLockpicks
     when /proudly glance down at a grandmaster/
       DRC.bput("carve my lockpick with my knife", 'With the precision and skill') if @lockpick_carve_settings['initial_grand']
       @@grands_count += 1
+      @grands_ring_ready -= 1
       stow_lockpick(@lockpick_carve_settings['grand_container'])
     when /proudly glance down at a master/
       @@masters_count += 1
+      @masters_ring_ready -= 1
       stow_lockpick(@lockpick_carve_settings['master_container'])
     when /but feel your knife slip/
       return
@@ -101,6 +115,15 @@ class CarveLockpicks
   end
 
   def stow_lockpick(container)
+    # Ring a set of 25
+    if @grands_ring_ready <= 0
+      ring_batch('grand') if @grand_batch
+      return
+    elsif @masters_ring_ready <= 0
+      ring_batch('master') if @master_batch
+      return
+    end
+    # Unless we can stow it (eg full bag), we call it quits
     unless DRCI.put_away_item?('lockpick', container)
       DRC.message("Bag's full, exiting")
       DRCC.stow_crafting_item("carving knife", @bag, @belt)
@@ -114,6 +137,45 @@ class CarveLockpicks
     return unless /referring/ =~ DRC.bput("open my keyblank pocket", 'You open', 'What were you referring')
     DRCC.stow_crafting_item("carving knife", @bag, @belt)
     exit
+  end
+
+  def ring_batch(type)
+    DRCC.stow_crafting_item("carving knife", @bag, @belt)
+    case type
+    when 'grand'
+      if /referring/ =~ DRC.bput("Get lockpick ring from my #{@lockpick_carve_settings['grand_container']}", /^You get/, /^What were you referring/)
+        DRC.message("Out of rings for Grandmaster's Picks")
+        stow_lockpick(@lockpick_carve_settings['grand_container'])
+        exit
+        DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
+        @grand_batch = false
+        return
+      else
+        container = @lockpick_carve_settings['grand_container']
+        @grands_ring_ready = 25
+      end
+    when 'master'
+      if /referring/ =~ DRC.bput("Get lockpick ring from my #{@lockpick_carve_settings['master_container']}", /^You get/, /^What were you referring/)
+        DRC.message("Out of rings for Master's Picks")
+        stow_lockpick(@lockpick_carve_settings['master_container'])
+        exit
+        DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
+        @master_batch = false
+        return
+      else
+        container = @lockpick_carve_settings['master_container']
+        @masters_ring_ready = 25
+      end
+    end
+    DRC.bput("Put my lockpick on my lockpick ring", /^You put .* lockpick on your lockpick ring/)
+    24.times do
+      DRC.bput("Get lockpick from my #{container}", /^You get a/)
+      DRC.bput("Put my lockpick on my lockpick ring", /^You put .* lockpick on your lockpick ring/)
+    end
+    unless /You put/ =~ DRC.bput("Put my lockp ring in my #{@lockpick_carve_settings['full_rings']}", /^You put/, /^That's too heavy/, /no more room/)
+      DRC.message("Out of room for rings")
+      exit
+    end
   end
 end
 

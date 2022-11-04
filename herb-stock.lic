@@ -1,4 +1,4 @@
-#   Documentation: https://elanthipedia.play.net/Lich_script_repository#restock
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#herb-stock
 
 custom_require.call(%w[common common-items common-travel common-money])
 
@@ -16,19 +16,32 @@ class HerbStock
     amount, denom = @settings.sell_loot_money_on_hand.split(' ')
     @keep_copper = DRCM.convert_to_copper(amount, denom)
     @remedy_container = @settings.remedy_container
+    herbs_override_herbstock = @settings.herbs_override_herbstock
+    user_herbs = @settings.herbs
 
     if @hometown == 'Riverhaven' && DRSkill.getrank('Athletics') > 140
       @hometown = 'Crossing'
     end
 
-    if(@hometown != 'Crossing' && @hometown != 'Shard')
+    if(@hometown != 'Crossing' && @hometown != 'Shard') && !(herbs_override_herbstock && user_herbs)
       echo 'Only Crossing, Riverhaven (with over 140 Athletics), and Shard hometowns supported. You may provide Crossing or Shard as an argument to override your hometown.'
+      echo 'Alternatively, define custom herbs in your yaml\'s herbs setting and set herbs_override_herbstock to true.'
       exit
     end
 
     @settings.storage_containers.each { |container| fput("open my #{container}") }
 
-    herbs = get_data('healingherbs').herb_stocks[@hometown]
+    herbs = []
+
+    if herbs_override_herbstock
+      herbs = parse_user_herbs(user_herbs)
+    else
+      base_herbs = get_data('healingherbs').herb_stocks[@hometown]
+
+      extra_herbs = parse_user_herbs(user_herbs)
+
+      herbs = (base_herbs + extra_herbs).uniq
+    end
 
     herbsWithLocations = herbs.select { |k| k['location'] } # find any herbs that have a specific location defined
 
@@ -39,7 +52,11 @@ class HerbStock
     herbsWithLocations.group_by { |v| v['location'] }
       .each do |location, herbsToStock|
 
-        if location == "Riverhaven" && DRSkill.getrank('Athletics') < 150
+        if location != 'Crossing' && UserVars.subscription == 'F2P'
+          next
+        end
+
+        if location == 'Riverhaven' && DRSkill.getrank('Athletics') < 150
           next
         end
 
@@ -53,7 +70,7 @@ class HerbStock
     coin_needed = 0
 
     item_list.each do |item|
-      remaining = count_combinable_item(item['name'])
+      remaining = DRCI.count_item_parts(item['name'])
       next unless remaining < item['quantity']
       num_needed = item['quantity'] - remaining
       buy_num = (num_needed / item['size'].to_f).ceil
@@ -83,25 +100,33 @@ class HerbStock
     DRCM.deposit_coins(@keep_copper, @settings, town)
   end
 
-  def count_combinable_item(item)
-    count = 0
-    $ORDINALS.each do |ordinal|
-      count_msg = DRC.bput("count my #{ordinal} #{item}", 'I could not find what you were referring to.', 'tell you much of anything.', 'There is only one part', 'There are (.+) parts left of the ', 'You count out (.+) pieces ')
-      case count_msg
-      when 'I could not find what you were referring to.'
-        break
-      when 'tell you much of anything.'
-        echo "#{item} is marked as stackable but is not!"
-        break
-      when 'There is only one part'
-        count += 1
-      else
-        count_txt = count_msg.match(/There \w+ (.+) \w+ left of the / || /You count \w+ (.+) \w+ /).captures.first.tr('-', ' ')
-        count += DRC.text2num(count_txt)
-      end
-      waitrt?
+  # The original impementation of herb-stock / HerbUser setup the herb list as a hash, but there's no need to treat it this way.
+  # Checking for hashes to maintain backwards compatibility.
+  def parse_user_herbs(herbs)
+    extra_herbs = []
+
+    return extra_herbs unless herbs.kind_of?(Array) || herbs.kind_of?(Hash)    
+
+    if herbs.kind_of?(Array)
+      herbs.each { |herb| extra_herbs.push(herb) if valid_item_data?(herb) }
+    elsif herbs.kind_of?(Hash)
+      extra_herbs = process_herb_hash(herbs)
     end
-    count
+    extra_herbs
+  end
+
+  def process_herb_hash(herbs)
+    extra_herbs = []
+
+    herbs.each { |key, value| extra_herbs.push(value) if valid_item_data?(value) }
+
+    extra_herbs
+  end
+
+  def valid_item_data?(item_data)
+    echo "Validating custom item data: #{item_data}" if @debug
+
+    %w[name size room price stackable quantity].all? { |x| item_data.key?(x) }
   end
 end
 

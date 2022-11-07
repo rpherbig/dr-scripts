@@ -16,6 +16,7 @@ class TaskMaster
             [
               { name: 'npc', options: %w[poltu bradyn zasele], variable: true, description: "Task npc's name, in full"},
               { name: 'find', regex: /^find/i, optional: true, description: 'Seeks out the taskmaster, then exits' },
+              { name: 'cycle', regex: /^cycle/i, optional: true, description: 'Cycles through each taskmaster'},
               { name: 'repeat', regex: /^repeat/i, optional: true, description: 'Repeat tasks' }
             ]
           ]
@@ -33,6 +34,10 @@ class TaskMaster
             item,count,volume_per_item,base,type = get_task
             send(@npc.to_sym, item, count, volume_per_item, base, type)
             complete_task(item, count)
+            if args.cycle
+                @npc = ['poltu', 'bradyn', 'zasele'].sample
+                next unless Flags['wrap-up']
+            end
             break unless args.repeat
             break if Flags['wrap-up']
         end
@@ -103,8 +108,11 @@ class TaskMaster
     end
 
     def zasele(item, count, volume_per_item, base, type)
-        type = @stackmap[base].first
-        buy_stackables(item, count, volume_per_item, base)
+        if base == 'yarn'
+            buy_yarn(item, count, volume_per_item, base)
+        else
+            buy_stackables(item, count, volume_per_item, base)
+        end
         tailor_item(item, count, base, type)
         trash(item, base, type) if @remainder
     end
@@ -118,7 +126,7 @@ class TaskMaster
 
     def get_task
         find_npc(@rooms, @npc)
-        case DRC.bput("ask #{@npc} for task", /if you agree to (his|her) terms/, /You may accept by typing ACCEPT TASK/, /utterly ignoring you/, /you must wait before I can give you a task/, /You are already on a task/)
+        case DRC.bput("ask #{@npc} for task", /if you agree to (his|her) terms/, /You may accept by typing ACCEPT TASK/, /utterly ignoring you/, /you must wait before I can give you a task/, /You are already on a task/, /give you a chance a little later/)
         when /if you agree to (his|her) terms/
             get_task
         when /You are already on a task/
@@ -126,7 +134,7 @@ class TaskMaster
                 DRC.bput("ask #{@npc} for task cancel", "ask me again within fifteen seconds", "no longer wish to assist me")
             end
             get_task
-        when /utterly ignoring you/
+        when /utterly ignoring you/, /give you a chance a little later/
             pause 30
             get_task
         when /you must wait before I can give you a task/
@@ -146,16 +154,12 @@ class TaskMaster
             count = Regexp.last_match(2).to_i
             DRC.message("Making #{count} #{item}s")
             case DRC.bput("read my #{item} instructions", /(cloth|bone|stone|yarn|leather|metal).* \(((\d+) .*|boulder|large rock|small rock|stone|pebble)\)/)
-            when /(cloth|bone|leather|metal).* \(((\d+) .*)\)/
+            when /(cloth|bone|yarn|leather|metal).* \(((\d+) .*)\)/
                 base = Regexp.last_match(1)
                 volume_per_item = Regexp.last_match(3).to_i
                 base.sub!('bone', 'stack')
                 base.sub!('metal', 'ingot')
                 DRC.message("Each #{item} requires #{volume_per_item} volumes")
-            when /(yarn).* \(((\d+) .*)\)/
-                base = Regexp.last_match(1)
-                volume_per_item = Regexp.last_match(3).to_i/10
-                DRC.message("Will only need one order of yarn")
             when /stone .* \((\w+)\)/
                 volume_per_item = 'boulder'
                 base = 'stone'
@@ -200,8 +204,20 @@ class TaskMaster
         @remainder = (count*vpi)%10 > 0 ? true : false
         cost = base_to_buy*@stockdata[@stackmap[base].first]['stock-value'] + 7500 # 5 gold for the next task, 2500 for repair monies
         DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
-        count.times do
+        base_to_buy.times do
             DRCT.order_item(@stackmap[base].last, @stockdata[@stackmap[base].first]['stock-number'])
+            fput("combine #{base}")
+        end
+        DRCC.stow_crafting_item(base, @settings.crafting_container, @settings.engineering_belt)
+    end
+
+    def buy_yarn(item, count, vpi, base)
+        base_to_buy = ((count*vpi)/100.to_f).ceil
+        @remainder = (count*vpi)%100 > 0 ? true : false
+        cost = base_to_buy*@stockdata[base]['stock-value'] + 7500 # 5 gold for the next task, 2500 for repair monies
+        DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
+        base_to_buy.times do
+            DRCT.order_item(@stackmap[base].last, @stockdata[base]['stock-number'])
             fput("combine #{base}")
         end
         DRCC.stow_crafting_item(base, @settings.crafting_container, @settings.engineering_belt)
@@ -228,7 +244,7 @@ class TaskMaster
     end
 
     def carve_stone(item, count)
-        DRCT.walk_to(8864)
+        DRCT.walk_to(8868)
         DRCC.get_crafting_item("chisels", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
         count.times do
             DRC.bput("get my #{item} instructions", "You get")

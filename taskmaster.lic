@@ -1,0 +1,285 @@
+custom_require.call(%w[common common-items common-money common-travel common-crafting events])
+
+class TaskMaster
+    def initialize
+        @settings = get_settings
+        @keeplist = ['sprite-bone', 'crystal bone', 'cloth', 'puffy-white', 'punka-hide', 'diamond-hide', 'shadowleaf', 'morgawr-scale', 'mammoth-hide', 'corrugated-hide', 'demonscale', 'agonite', 'animite', 'damite', 'haralun', 'icesteel', 'indurium', 'quelium', 'vardite', 'coralite', 'telothian', 'silversteel', 'niello', 'loimic', 'tomiek', 'kiralan', 'kertig', 'kadepa', 'haledroth', 'orichalcum', 'audrualm', 'diamondique', 'senci', 'felstone', 'greenheart', 'bloodwood', 'mistwood', 'silverwood', 'rockwood']
+        @rooms = [16_145, 16_146, 16_148, 16_150, 16_153, 16_154, 16_147, 16_276, 16_277, 16_278, 16_290, 16_291, 16_292, 16_293, 16_295, 16_296, 16_294, 16_159, 16_161, 16_166, 16_169]
+        @bag = @settings.crafting_container
+        @lootbag = @settings.task_loot_bag || 'backpack'
+        @gem = @settings.gem_pouch_adjective
+        @boost = @settings.task_use_boost || false
+        @stockdata = get_data('crafting')['stock']
+        @stackmap = {'leather'=>['rat', 16667],'cloth'=>['burlap', 16667],'stack'=>['deer', 8864],'ingot'=>['steel', 8775],'stone'=>['alabaster', 8864]}
+        Flags.add("wrap-up", 'Finish your tasks')
+        Flags.add("carve-done", "Applying the final touches")
+        arg_definitions = [
+            [
+              { name: 'npc', options: %w[poltu bradyn zasele], variable: true, description: "Task npc's name, in full"},
+              { name: 'find', regex: /^find/i, optional: true, description: 'Seeks out the taskmaster, then exits' },
+              { name: 'repeat', regex: /^repeat/i, optional: true, description: 'Repeat tasks' }
+            ]
+          ]
+      
+        args = parse_args(arg_definitions)
+        @npc = args.npc
+        DRCM.ensure_copper_on_hand(5000, @settings, "Crossing")
+        if args.find
+            find_npc(@rooms, @npc)
+            exit
+        end
+
+        loop do
+            @dispose,@remainder = [false,false]
+            item,count,volume_per_item,base,type = get_task
+            send(@npc.to_sym, item, count, volume_per_item, base, type)
+            complete_task(item, count)
+            break unless args.repeat
+            break if Flags['wrap-up']
+        end
+    end
+
+    def trash(item, base, type)
+        if @remainder && base == 'ingot'
+            until /What were you/ =~ DRC.bput("get my #{type} #{base}", "You get", "You are already", "You're already", "What were you")
+              DRCT.dispose("#{type} #{base}", Room.current.id)
+            end
+        elsif @remainder
+            until /What were you/ =~ DRC.bput("get my #{@stackmap[base].first} #{base}", "You get", "You are already", "You're already", "What were you")
+              DRCT.dispose("#{@stackmap[base].first} #{base}", Room.current.id)
+            end
+        end
+        DRCT.dispose("#{item} instructions", Room.current.id)
+    end
+
+    def poltu(item,count,volume_per_item, base, type)
+        type = 'steel'
+        if volume_per_item > 10 # more than a single ingot's volume, so we need to smelt
+            make_ingot(count, volume_per_item)
+        elsif volume_per_item == 10 # exactly one ingot per item, so no scrap, no smelting
+            buy_ingots(count, type)
+        elsif volume_per_item == 5 # exactly one bronze ingot per item
+            type = 'bronze'
+            buy_ingots(count, type)
+        elsif volume_per_item < 5
+            make_ingot(count, volume_per_item)
+        else # less than a single ingot's volume, so no smelting, but we'll have scrap
+            buy_ingots(count, type)
+            @dispose = true
+        end
+        base = 'ingot'
+        forge_item(item, count, type)
+        trash(item, base, type) if @remainder
+    end
+
+    def bradyn(item,count,volume_per_item, base, type)
+        type = 'steel'
+        if base == 'stone'
+            buy_rocks(count)
+            carve_stone(item, count)
+            return
+        elsif base == 'stack'
+            echo("NOT YET SUPPORTED")
+            exit
+            buy_stackables(item, count, volume_per_item, base)
+            carve_stone(item, count)
+            return
+        elsif volume_per_item > 10 # more than a single ingot's volume, so we need to smelt
+            make_ingot(count, volume_per_item)
+        elsif volume_per_item == 10 # exactly one ingot per item, so no scrap, no smelting
+            buy_ingots(count, type)
+        elsif volume_per_item == 5 # exactly one bronze ingot per item
+            type = 'bronze'
+            buy_ingots(count, type)
+        elsif volume_per_item < 5
+            make_ingot(count, volume_per_item)
+        else # less than a single ingot's volume, so no smelting, but we'll have scrap
+            type = 'steel'
+            buy_ingots(count, type)
+            @dispose = true
+        end
+        base = 'ingot'
+        forge_item(item, count, type)
+        trash(item, base, type) if @remainder
+    end
+
+    def zasele(item, count, volume_per_item, base, type)
+        type = @stackmap[base].first
+        buy_stackables(item, count, volume_per_item, base)
+        tailor_item(item, count, base, type)
+        trash(item, base, type) if @remainder
+    end
+
+    def find_npc(rooms, npc)
+        rooms.each do |room_id|
+            break if DRRoom.npcs.include?(npc.capitalize)
+            DRCT.walk_to(room_id)
+        end
+    end
+
+    def get_task
+        find_npc(@rooms, @npc)
+        case DRC.bput("ask #{@npc} for task", /if you agree to (his|her) terms/, /You may accept by typing ACCEPT TASK/, /utterly ignoring you/, /you must wait before I can give you a task/, /You are already on a task/)
+        when /if you agree to (his|her) terms/
+            get_task
+        when /You are already on a task/
+            2.times do 
+                DRC.bput("ask #{@npc} for task cancel", "ask me again within fifteen seconds", "no longer wish to assist me")
+            end
+            get_task
+        when /utterly ignoring you/
+            pause 30
+            get_task
+        when /you must wait before I can give you a task/
+            if @boost
+                DRC.bput("boost task", "You've activated")
+                pause 5
+                @boost = false
+                get_task
+            else
+                pause 30
+                get_task
+            end
+        when /You may accept by typing ACCEPT TASK/
+            DRC.bput("accept task", /You can check your progress with the TASK verb/)
+            /wanted you to craft (.*) and indicated that (\d+) would suffice/ =~ DRC.bput("task", /wanted you to craft (.*) and indicated that (\d+) would suffice/)
+            item = Regexp.last_match(1).split.last
+            count = Regexp.last_match(2).to_i
+            DRC.message("Making #{count} #{item}s")
+            case DRC.bput("read my #{item} instructions", /(cloth|bone|stone|leather|metal).* \(((\d+) .*|boulder|large rock|small rock|stone|pebble)\)/)
+            when /(cloth|bone|leather|metal).* \(((\d+) .*)\)/
+                base = Regexp.last_match(1)
+                volume_per_item = Regexp.last_match(3).to_i
+                base.sub!('bone', 'stack')
+                base.sub!('metal', 'ingot')
+                DRC.message("Each #{item} requires #{volume_per_item} volumes")
+            when /stone .* \((\w+)\)/
+                volume_per_item = 'boulder'
+                base = 'stone'
+                DRC.message("Using a boulder for each #{item}")
+            end
+            DRCI.stow_hands
+            type = @stackmap[base].first
+            return item,count,volume_per_item,base,type
+        end        
+    end
+
+    def make_ingot(count,vpi)
+        ingots_to_buy = ((count*vpi)/10.to_f).ceil
+        @remainder = (count*vpi)%10 > 0 ? true : false
+        cost = ingots_to_buy*@stockdata['steel']['stock-value'] + 7500 # 5 gold for the next task, 2500 for repair monies
+        DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
+        ingots_to_buy.times do
+            DRCT.order_item(8775, 9)
+            DRCI.stow_hands
+        end
+        return if ingots_to_buy == 1
+        DRCC.find_empty_crucible('Crossing')
+        ingots_to_buy.times do
+            DRC.bput("get my steel ingot", "You get")
+            DRC.bput("put my ingot in crucible", "You put your")
+        end
+        DRC.wait_for_script_to_complete('smelt')
+        DRCI.stow_hands
+    end
+
+    def buy_ingots(count, type)
+        cost = count*@stockdata[type]['stock-value'] + 7500 # 5 gold for the next task, 2500 for repair monies
+        DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
+        count.times do
+            DRCT.order_item(8775, @stockdata[type]['stock-number'])
+            DRCC.stow_crafting_item("ingot", @settings.crafting_container, @settings.engineering_belt)
+        end
+    end 
+
+    def buy_stackables(item, count, vpi, base)
+        base_to_buy = ((count*vpi)/10.to_f).ceil
+        @remainder = (count*vpi)%10 > 0 ? true : false
+        cost = base_to_buy*@stockdata[@stackmap[base].first]['stock-value'] + 7500 # 5 gold for the next task, 2500 for repair monies
+        DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
+        count.times do
+            DRCT.order_item(@stackmap[base].last, @stockdata[@stackmap[base].first]['stock-number'])
+            fput("combine #{base}")
+        end
+        DRCC.stow_crafting_item(base, @settings.crafting_container, @settings.engineering_belt)
+    end
+
+    def buy_rocks(count)
+        cost = count*1250 + 7500
+        DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
+        count.times do
+            DRCT.order_item(8864, 2)
+            DRCC.stow_crafting_item("deed", @settings.crafting_container, @settings.engineering_belt)
+        end
+    end
+
+    def forge_item(item, count, type)
+        DRCC.find_anvil("Crossing")
+        count.times do
+            DRC.wait_for_script_to_complete('forge', ['instructions', type, item])
+            DRC.bput("put my #{item} in my #{@bag}", "You put")
+            DRCT.dispose("#{type} ingot", Room.current.id) if @dispose
+        end
+        DRC.message("#{count} #{item}s completed")
+        DRC.wait_for_script_to_complete('workorders', ['weaponsmithing', 'repair'])
+    end
+
+    def carve_stone(item, count)
+        DRCT.walk_to(8864)
+        DRCC.get_crafting_item("chisels", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
+        count.times do
+            DRC.bput("get my #{item} instructions", "You get")
+            2.times do
+                fput("Study my instructions")
+            end
+            DRCC.stow_crafting_item("instructions", @settings.crafting_container, @settings.engineering_belt)
+            DRCC.get_crafting_item("alabaster deed", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)            
+            fput('tap my deed')
+            DRC.bput("carve boulder with my chisels", "Roundtime")
+            until Flags["carve-done"]
+                DRC.bput("carve #{item} with my chisels", "Roundtime")
+            end
+            Flags.reset("carve-done")
+            DRC.bput("stow #{item}")
+        end
+        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['chisels'], @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt) if @settings.workorders_repair_own_tools
+        DRCC.stow_crafting_item("chisels", @settings.crafting_container, @settings.engineering_belt)
+    end
+
+    def tailor_item(item, count, base, type)
+        DRCT.walk_to(6871)
+        count.times do
+            DRC.wait_for_script_to_complete('sew', ['stow', 'instructions', type, item])
+        end
+    end
+
+    def complete_task(item, count)
+        loop do
+            find_npc(@rooms, @npc)
+            DRC.bput("get #{item} from my #{@bag}", "You get")
+            break if DRC.bput("give my #{item} to #{@npc}", "more .* needed", "hands you a") =~ /hands you a/
+        end
+        sort_sack(item)
+    end
+
+    def sort_sack(item)
+        DRC.bput("fill my #{@gem} pouch with my sack", 'You open your')
+        4.times do
+            DRC.bput("get coin from my sack", "You pick up", "What were you")
+        end
+        result = DRC.bput("look in my sack", /^In the .* you see.*/)
+        if result.split(' ').any? { |word| @keeplist.include?(word) }
+            DRC.message("Found a keeper: #{result.split(' ').select { |word| @keeplist.include?(word) }}")
+        else
+            DRC.message("Nothing special: #{result}")
+        end
+        DRC.bput("put my sack in my #{@lootbag}", "You put your sack")
+    end
+end
+
+before_dying do
+    Flags.delete("wrap-up")
+    Flags.delete("carve-done")
+end
+
+TaskMaster.new

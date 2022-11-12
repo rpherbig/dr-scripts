@@ -7,6 +7,7 @@ class TaskMaster
         @rooms = [16_145, 16_146, 16_148, 16_150, 16_153, 16_154, 16_147, 16_276, 16_277, 16_278, 16_290, 16_291, 16_292, 16_293, 16_295, 16_296, 16_294, 16_159, 16_161, 16_166, 16_169]
         tools = {'poltu'=>['forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'bradyn'=>['bone saw', 'chisels', 'wood shaper', 'rasp', 'carving knife', 'drawknife', 'forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'zasele'=>['knitting needles', 'sewing needles', 'awl', 'slickstone', 'yardstick', 'scissors']}
         @bag = @settings.crafting_container
+        @bag_items = @settings.crafting_items_in_container
         @lootbag = @settings.task_loot_bag || 'backpack'
         @gem = @settings.gem_pouch_adjective
         @boost = @settings.task_use_boost || false
@@ -20,12 +21,13 @@ class TaskMaster
               { name: 'finish', regex: /^finish/, optional: true, description: 'Finishes a task you\'re already on' },
               { name: 'find', regex: /^find/i, optional: true, description: 'Seeks out the taskmaster, then exits' },
               { name: 'tools', regex: /^tools/i, optional: true, description: 'Spits out a list of the tools you need for a given npc\'s tasks' },
-              { name: 'cycle', regex: /^cycle/i, optional: true, description: 'Cycles through each taskmaster'},
-              { name: 'repeat', regex: /^repeat/i, optional: true, description: 'Repeat tasks' },
-              { name: 'script_summary', optional: true, description: 'Completes Hollows Eve tasks for the crafting taskmasters on the island' }
+              { name: 'repeat', regex: /^repeat/i, optional: true, description: 'Repeat tasks for a given taskmaster' }
             ],
             [
-              { name: 'reset_output', regex: /^reset_output/i, optional: true, description: 'Clears prize window' }
+              { name: 'reset_output', regex: /^reset_output/i, optional: true, description: 'Clears prize window' },
+              { name: 'cycle', regex: /^cycle/i, optional: true, description: 'Cycles through each taskmaster randomly and completes their task' },
+              { name: 'loot_history', regex: /^loot_history/i, optional: true, description: 'Prints out saved sack contents history, potentially scrollish' },
+              { name: 'script_summary', optional: true, description: 'Completes Hollows Eve tasks for the crafting taskmasters on the island' }
             ]
           ]
       
@@ -42,18 +44,23 @@ class TaskMaster
             exit
         elsif args.finish
             @dispose,@remainder = [false,false]
-            get_instructions
-            item,count,volume_per_item,base,type = finish
+            get_instructions # picks up a fresh set of instructions from the task master
+            item,count,volume_per_item,base,type = finish # gets the relevant information from the task verb to send to the worker methods
             send(@npc.to_sym, item, count, volume_per_item, base, type)
             complete_task(item, count)
             exit
         elsif args.reset_output
-            _respond("<clearStream id='Taskmaster'/>\r\n")
+            _respond("<clearStream id='Task Master'/>")
+            exit
+        elsif args.loot_history
+            ['poltu', 'bradyn', 'zasele'].each do |npc|
+                DRC.message("Sack history for Taskmaster #{npc.capitalize}:")
+                UserVars.taskmaster_sacks[npc].each do |sack|
+                    DRC.message(sack)
+                end
+            end
             exit
         end
-
-        _respond("<streamWindow id='Taskmaster' title='Task Master' location='center' save='true' />")
-        _respond("<exposeStream id='Taskmaster'/>")
         DRCM.ensure_copper_on_hand(5000, @settings, "Crossing")
 
         loop do
@@ -189,6 +196,7 @@ class TaskMaster
             DRC.message("You already appear to be on a task. Running this script with the task npc and finish arg will complete the task for you\nEG: ;taskmaster zasele finish")
             exit
         when /utterly ignoring you/, /give you a chance a little later/
+            DRC.message("Task on cooldown or recently canceled a task, either way, going to have to wait.")
             pause 30
             get_task
         when /you must wait before I can give you a task/
@@ -288,9 +296,11 @@ class TaskMaster
     end
 
     def forge_item(item, count, type)
+        info = get_data('crafting')['blacksmithing']["Crossing"]
+        DRCC.check_consumables('oil', info['finisher-room'], info['finisher-number'], @bag, @bag_items, nil)
         DRCC.find_anvil("Crossing")
         count.times do
-            DRC.wait_for_script_to_complete('forge', ['instructions', type, item])
+            DRC.wait_for_script_to_complete('forge', ['instructions', type, item, 'skip'])
             DRC.bput("put my #{item} in my #{@bag}", "You put")
             DRCT.dispose("#{type} ingot", Room.current.id) if @dispose
         end
@@ -299,10 +309,14 @@ class TaskMaster
     end
 
     def carve_stone(item, count)
+        Flags.add("thieving-fog", "A low fog rolls in, then just as quickly rolls out")
         DRCC.find_shaping_room("Crossing")
         DRCC.get_crafting_item("chisels", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
+        remaining = count
         count.times do
-            DRC.bput("get my #{item} instructions", "You get")
+            if /What were you/ =~ DRC.bput("get my #{item} instructions", "You get", "What were you")
+                break
+            end
             2.times do
                 fput("Study my instructions")
             end
@@ -312,13 +326,22 @@ class TaskMaster
             fput('tap my deed')
             DRC.bput("carve boulder with my chisels", "Roundtime")
             loop do
-                case DRC.bput("carve #{item} with my chisels", "Roundtime", "You cannot figure out how to do that")
-                when "You cannot figure out how to do that"
+                case DRC.bput("carve #{item} with my chisels", "Roundtime", "You cannot figure out how to do that", "It would be better to find")
+                when "You cannot figure out how to do that", "It would be better to find"
                     break
                 end
+                waitrt?
+            end
+            if Flags["thieving-fog"]
+                buy_rocks(1)
+                DRCC.find_shaping_room("Crossing")
+                count = remaining
+                Flags.reset("thieving-fog")
+                redo
             end
             DRC.bput("get #{item}", "You pick up")
-            DRC.bput("put my #{item} in my #{@bag}", "You put")
+            DRC.bput("put my #{item} in my #{@bag}", "You put")            
+            remaining -= 1
         end
         DRC.message("#{count} #{item}s completed")
         DRCC.stow_crafting_item("chisels", @settings.crafting_container, @settings.engineering_belt)
@@ -329,7 +352,9 @@ class TaskMaster
         DRCT.walk_to(8868)
         DRCC.get_crafting_item("bone saw", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
         count.times do
-            DRC.bput("get my #{item} instructions", "You get")
+            if /What were you/ =~ DRC.bput("get my #{item} instructions", "You get", "What were you")
+                break
+            end
             2.times do
                 fput("Study my instructions")
             end
@@ -390,7 +415,7 @@ class TaskMaster
             DRC.message("Nothing special: #{result}")
         end
         result.sub!('In the woven sack you see', '')
-        _respond("<pushStream id=\"Taskmaster\"/>#{result}\r\n<popStream/>\r\n")
+        DRC.log_window(result, "Task Master", true, true)
         UserVars.taskmaster_sacks[@npc] << result
         DRC.bput("put my sack in my #{@lootbag}", "You put your sack")
     end
@@ -398,6 +423,7 @@ end
 
 before_dying do
     Flags.delete("wrap-up")
+    Flags.delete("thieving-fog")
 end
 
 TaskMaster.new

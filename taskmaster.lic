@@ -5,11 +5,12 @@ class TaskMaster
         @settings = get_settings
         @keeplist = ['sprite-bone', 'crystal bone', 'cloth', 'puffy-white', 'punka-hide', 'diamond-hide', 'shadowleaf', 'morgawr-scale', 'mammoth-hide', 'corrugated-hide', 'demonscale', 'tyrium', 'agonite', 'animite', 'damite', 'haralun', 'icesteel', 'indurium', 'quelium', 'vardite', 'coralite', 'telothian', 'silversteel', 'niello', 'loimic', 'tomiek', 'kiralan', 'kertig', 'kadepa', 'haledroth', 'orichalcum', 'audrualm', 'diamondique', 'senci', 'felstone', 'diamondwood', 'greenheart', 'bloodwood', 'mistwood', 'silverwood', 'rockwood']
         @rooms = [16_145, 16_146, 16_148, 16_150, 16_153, 16_154, 16_147, 16_276, 16_277, 16_278, 16_290, 16_291, 16_292, 16_293, 16_295, 16_296, 16_294, 16_159, 16_161, 16_166, 16_169]
-        tools = {'poltu'=>['forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'bradyn'=>['bone saw', 'chisels', 'wood shaper', 'rasp', 'carving knife', 'drawknife', 'forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'zasele'=>['knitting needles', 'sewing needles', 'awl', 'slickstone', 'yardstick', 'scissors']}
+        tools = {'poltu'=>['forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'bradyn'=>['bone saw', 'chisels', 'wood shaper', 'rasp', 'carving knife', 'drawknife', 'forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'],'zasele'=>['knitting needles', 'sewing needles', 'awl', 'slickstone', 'yardstick', 'scissors'],'shaping'=>['wood shaper', 'rasp', 'carving knife', 'drawknife']}
         @bag = @settings.crafting_container
         @bag_items = @settings.crafting_items_in_container
         @lootbag = @settings.task_loot_bag || 'backpack'
         @gem = @settings.gem_pouch_adjective
+        @self_repair = @settings.task_self_repair || false
         @boost = @settings.task_use_boost || false
         @stockdata = get_data('crafting')['stock']
         @stackmap = {'leather'=>['rat', 16667],'cloth'=>['burlap', 16667],'stack'=>['deer', 8864],'ingot'=>['steel', 8775],'stone'=>['alabaster', 8864],'yarn'=>['wool', 16667],'lumber'=>['balsa', 8864]}
@@ -21,6 +22,7 @@ class TaskMaster
               { name: 'finish', regex: /^finish/, optional: true, description: 'Finishes a task you\'re already on' },
               { name: 'find', regex: /^find/i, optional: true, description: 'Seeks out the taskmaster, then exits' },
               { name: 'tools', regex: /^tools/i, optional: true, description: 'Spits out a list of the tools you need for a given npc\'s tasks' },
+              { name: 'repair', regex: /^repair/i, optional: true, description: 'repairs the tools listed under the npc indicated, run ;taskmaster <npc> tools to see what those are'},
               { name: 'repeat', regex: /^repeat/i, optional: true, description: 'Repeat tasks for a given taskmaster' }
             ],
             [
@@ -46,6 +48,7 @@ class TaskMaster
             @dispose,@remainder = [false,false]
             get_instructions # picks up a fresh set of instructions from the task master
             item,count,volume_per_item,base,type = finish # gets the relevant information from the task verb to send to the worker methods
+            tool_pickup if !@self_repair && DRCI.exists?("rangu ticket")
             send(@npc.to_sym, item, count, volume_per_item, base, type)
             complete_task(item, count)
             exit
@@ -60,31 +63,37 @@ class TaskMaster
                 end
             end
             exit
+        elsif args.repair
+            tool_drop(tools[@npc], nil)
+            tool_pickup
+            exit
         end
         DRCM.ensure_copper_on_hand(5000, @settings, "Crossing")
 
         loop do
             @dispose,@remainder = [false,false]
             item,count,volume_per_item,base,type = get_task
+            tool_pickup if !@self_repair && DRCI.exists?("rangu ticket")
             send(@npc.to_sym, item, count, volume_per_item, base, type)
             complete_task(item, count)
+            break if Flags['wrap-up']
             if args.cycle
                 @npc = ['poltu', 'bradyn', 'zasele'].sample
-                next unless Flags['wrap-up']
+                next
             end
             break unless args.repeat
-            break if Flags['wrap-up']
         end
+        # tool_pickup if DRCI.exists?("rangu ticket")
     end
 
     def trash(item, base, type)
         if @remainder && base == 'ingot'
             until /What were you/ =~ DRC.bput("get my #{type} #{base} from my #{@bag}", "You get", "You are already", "You're already", "What were you")
-              DRCT.dispose("#{type} #{base}", Room.current.id)
+              DRCT.dispose("#{type} #{base}", 793)
             end
         elsif @remainder
             until /What were you/ =~ DRC.bput("get my #{@stackmap[base].first} #{base} from my #{@bag}", "You get", "You are already", "You're already", "What were you")
-              DRCT.dispose("#{@stackmap[base].first} #{base}", Room.current.id)
+              DRCT.dispose("#{@stackmap[base].first} #{base}", 14886)
             end
         end
         DRCT.dispose("#{item} instructions", Room.current.id)
@@ -100,11 +109,12 @@ class TaskMaster
             buy_ingots(count, type)
         elsif volume_per_item < 5
             make_ingot(count, volume_per_item)
-        else # less than a single ingot's volume, so no smelting, but we'll have scrap
+        else # anything between 5 and 10
             buy_ingots(count, type)
             @dispose = true
         end
         forge_item(item, count, type)
+        tool_drop(@settings.forging_tools, @settings.forging_belt)
         trash(item, base, type)
     end
 
@@ -112,16 +122,19 @@ class TaskMaster
         if base == 'stone'
             buy_rocks(count)
             carve_stone(item, count)
+            tool_drop(["chisels"], @settings.engineering_belt)
             trash(item, base, type)
             return
         elsif base == 'stack'
             buy_stackables(item, count, volume_per_item, base)
             carve_bone(item, count)
+            tool_drop(["bone saw"], @settings.engineering_belt)
             trash(item, base, type)
             return
         elsif base == 'lumber'
             buy_stackables(item, count, volume_per_item, base)
             shape_item(item, count, base, type)
+            tool_drop(@settings.shaping_tools, @settings.engineering_belt)
             trash(item, base, type)
             return            
         elsif volume_per_item > 10 # more than a single ingot's volume, so we need to smelt
@@ -133,21 +146,25 @@ class TaskMaster
             buy_ingots(count, type)
         elsif volume_per_item < 5
             make_ingot(count, volume_per_item)
-        else # less than a single ingot's volume, so no smelting, but we'll have scrap
+        else # anything between 5 and 10
             buy_ingots(count, type)
             @dispose = true
         end
         forge_item(item, count, type)
+        tool_drop(@settings.forging_tools, @settings.forging_belt)
         trash(item, base, type)
     end
 
     def zasele(item, count, volume_per_item, base, type)
         if base == 'yarn'
             buy_yarn(item, count, volume_per_item, base)
+            toolset = ["knitting needles"]
         else
             buy_stackables(item, count, volume_per_item, base)
+            toolset = @settings.outfitting_tools
         end
         tailor_item(item, count, base, type)
+        tool_drop(toolset, @setting.outfitting_belt)
         trash(item, base, type)
     end
 
@@ -258,7 +275,7 @@ class TaskMaster
         DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
         count.times do
             DRCT.order_item(8775, @stockdata[type]['stock-number'])
-            DRCC.stow_crafting_item("ingot", @settings.crafting_container, @settings.engineering_belt)
+            DRCC.stow_crafting_item("ingot", @bag, @settings.engineering_belt)
         end
     end 
 
@@ -271,7 +288,7 @@ class TaskMaster
             DRCT.order_item(@stackmap[base].last, @stockdata[@stackmap[base].first]['stock-number'])
             fput("combine #{base}")
         end
-        DRCC.stow_crafting_item(base, @settings.crafting_container, @settings.engineering_belt)
+        DRCC.stow_crafting_item(base, @bag, @settings.engineering_belt)
     end
 
     def buy_yarn(item, count, vpi, base)
@@ -283,7 +300,7 @@ class TaskMaster
             DRCT.order_item(@stackmap[base].last, @stockdata[base]['stock-number'])
             fput("combine #{base}")
         end
-        DRCC.stow_crafting_item(base, @settings.crafting_container, @settings.engineering_belt)
+        DRCC.stow_crafting_item(base, @bag, @settings.engineering_belt)
     end
 
     def buy_rocks(count)
@@ -291,7 +308,7 @@ class TaskMaster
         DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
         count.times do
             DRCT.order_item(8864, 2)
-            DRCC.stow_crafting_item("deed", @settings.crafting_container, @settings.engineering_belt)
+            DRCC.stow_crafting_item("deed", @bag, @settings.engineering_belt)
         end
     end
 
@@ -305,13 +322,13 @@ class TaskMaster
             DRCT.dispose("#{type} ingot", Room.current.id) if @dispose
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['weaponsmithing', 'repair']) if @settings.workorders_repair
+        DRC.wait_for_script_to_complete('workorders', ['weaponsmithing', 'repair']) if @self_repair
     end
 
     def carve_stone(item, count)
         Flags.add("thieving-fog", "A low fog rolls in, then just as quickly rolls out")
         DRCC.find_shaping_room("Crossing")
-        DRCC.get_crafting_item("chisels", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
+        DRCC.get_crafting_item("chisels", @bag, @bag_items, @settings.engineering_belt)
         remaining = count
         count.times do
             if /What were you/ =~ DRC.bput("get my #{item} instructions", "You get", "What were you")
@@ -321,7 +338,7 @@ class TaskMaster
                 fput("Study my instructions")
             end
             waitrt?
-            DRCC.stow_crafting_item("instructions", @settings.crafting_container, @settings.engineering_belt)
+            DRCC.stow_crafting_item("instructions", @bag, @settings.engineering_belt)
             DRC.bput("get alabaster deed from my #{@bag}", '^You get')
             fput('tap my deed')
             DRC.bput("carve boulder with my chisels", "Roundtime")
@@ -344,13 +361,13 @@ class TaskMaster
             remaining -= 1
         end
         DRC.message("#{count} #{item}s completed")
-        DRCC.stow_crafting_item("chisels", @settings.crafting_container, @settings.engineering_belt)
-        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['chisels'], @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt) if @settings.workorders_repair_own_tools
+        DRCC.stow_crafting_item("chisels", @bag, @settings.engineering_belt)
+        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['chisels'], @bag, @bag_items, @settings.engineering_belt) if @self_repair
     end
 
     def carve_bone(item, count)
         DRCT.walk_to(8868)
-        DRCC.get_crafting_item("bone saw", @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt)
+        DRCC.get_crafting_item("bone saw", @bag, @bag_items, @settings.engineering_belt)
         count.times do
             if /What were you/ =~ DRC.bput("get my #{item} instructions", "You get", "What were you")
                 break
@@ -359,7 +376,7 @@ class TaskMaster
                 fput("Study my instructions")
             end
             waitrt?
-            DRCC.stow_crafting_item("instructions", @settings.crafting_container, @settings.engineering_belt)
+            DRCC.stow_crafting_item("instructions", @bag, @settings.engineering_belt)
             DRC.bput("get deer stack from my #{@bag}", '^You get')
             DRC.bput("cut stack with my bone saw", "Roundtime")
             loop do
@@ -371,27 +388,27 @@ class TaskMaster
             DRC.bput("put my #{item} in my #{@bag}", "You put")
         end
         DRC.message("#{count} #{item}s completed")
-        DRCC.stow_crafting_item("bone saw", @settings.crafting_container, @settings.engineering_belt)
-        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['bone saw'], @settings.crafting_container, @settings.crafting_items_in_container, @settings.engineering_belt) if @settings.workorders_repair_own_tools
+        DRCC.stow_crafting_item("bone saw", @bag, @settings.engineering_belt)
+        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['bone saw'], @bag, @bag_items, @settings.engineering_belt) if @self_repair
     end
 
 
     def tailor_item(item, count, base, type)
-        DRCT.walk_to(@settings.safe_room)
+        DRCT.walk_to(14886)
         count.times do
             DRC.wait_for_script_to_complete('sew', ['stow', 'instructions', type, item, base == 'yarn' ? 'knit' : nil])
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['tailoring', 'repair']) if @settings.workorders_repair
+        DRC.wait_for_script_to_complete('workorders', ['tailoring', 'repair']) if @self_repair
     end
 
     def shape_item(item, count, base, type)
-        DRCT.walk_to(@settings.safe_room)
+        DRCC.find_shaping_room("Crossing")
         count.times do
             DRC.wait_for_script_to_complete('shape', ['stow', 'instructions', type, item])
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['shaping', 'repair']) if @settings.workorders_repair
+        DRC.wait_for_script_to_complete('workorders', ['shaping', 'repair']) if @self_repair
     end
 
     def complete_task(item, count)
@@ -401,6 +418,31 @@ class TaskMaster
             break if DRC.bput("give my #{item} to #{@npc}", "more .* needed", "hands you a") =~ /hands you a/
         end
         sort_sack(item)
+    end
+
+    def tool_drop(toolslist, belt = nil) # accepts array of tools for repair
+        DRCT.walk_to(19209)
+        @belt = belt
+        toolslist.each do |tool_name|
+            DRCC.get_crafting_item(tool_name, @bag, @bag_items, belt, true)
+            case DRC.bput("give Rangu", "I don't repair those here", 'What is it', "There isn't a scratch on that", 'Just give it to me again', 'I will not', "I can't fix those.  They only have so many uses and then you must buy another.")
+            when /scratch/, /I will not/, /They only have so many uses/
+                DRCC.stow_crafting_item(tool_name, @bag, belt)
+            when /give/
+                DRC.bput("give Rangu", 'repair ticket')
+                DRC.bput('stow ticket', 'You put')
+            end
+        end
+    end
+    
+    def tool_pickup # picks up all your tools from repair shop
+        DRCT.walk_to(19209)      
+        while DRC.bput("get my Rangu ticket", 'You get', 'What were') == 'You get'
+        pause 30 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
+        DRC.bput("give Rangu", 'You hand')
+        pause 1
+        DRCC.stow_crafting_item([DRC.right_hand,DRC.left_hand].compact.first, @bag, @belt)
+        end
     end
 
     def sort_sack(item)

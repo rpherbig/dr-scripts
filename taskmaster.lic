@@ -1,3 +1,16 @@
+=begin
+  YAML SETTINGS(all optional but the first)
+  task_loot_bag: bagname
+  task_no_repair: true/false # skip repairing tools entirely
+  task_self_repair: true/false # use own brush and oil for repairs
+  task_get_tools_on_completion: true/false # If you want taskmaster to pickup any remaining tools in the repair shop. Useful if you're using clerk-tools after each task
+  task_use_boost: true/false # use boost to eliminate task cooldowns, useful if you have a few and you're doing a lot of tasks
+  crafting_items_in_container: ['oil', 'glue'] # list of items you might have duplicates of in other bags, but which you only want drawn from crafting bag
+  crafting_container: bagname
+   ## Important: set default stow to the same bag as your crafting bag ##
+=end
+  
+
 custom_require.call(%w[common common-items common-money common-travel common-crafting events])
 
 class TaskMaster
@@ -10,8 +23,10 @@ class TaskMaster
         @bag_items = @settings.crafting_items_in_container
         @lootbag = @settings.task_loot_bag || 'backpack'
         @gem = @settings.gem_pouch_adjective
-        @self_repair = @settings.task_self_repair || false
-        @boost = @settings.task_use_boost || false
+        @no_repair = @settings.task_no_repair
+        @self_repair = @settings.task_self_repair
+        @pickup_tools = @settings.task_get_tools_on_completion
+        @boost = @settings.task_use_boost
         @stockdata = get_data('crafting')['stock']
         @stackmap = {'leather'=>['rat', 16667],'cloth'=>['burlap', 16667],'stack'=>['deer', 8864],'ingot'=>['steel', 8775],'stone'=>['alabaster', 8864],'yarn'=>['wool', 16667],'lumber'=>['balsa', 8864]}
         Flags.add("wrap-up", 'Finish your tasks')
@@ -73,7 +88,7 @@ class TaskMaster
         loop do
             @dispose,@remainder = [false,false]
             item,count,volume_per_item,base,type = get_task
-            tool_pickup if !@self_repair && DRCI.exists?("rangu ticket")
+            tool_pickup if !@self_repair && DRCI.exists?("rangu ticket") # picks up any tools that you dropped off previous and stows them appropriately
             send(@npc.to_sym, item, count, volume_per_item, base, type)
             complete_task(item, count)
             break if Flags['wrap-up']
@@ -83,7 +98,7 @@ class TaskMaster
             end
             break unless args.repeat
         end
-        # tool_pickup if DRCI.exists?("rangu ticket")
+        tool_pickup if @pickup_tools && DRCI.exists?("rangu ticket") # if indicated, and you have tickets, picks up any tools you may have dropped off previously, all disciplines
     end
 
     def trash(item, base, type)
@@ -114,7 +129,7 @@ class TaskMaster
             @dispose = true
         end
         forge_item(item, count, type)
-        tool_drop(@settings.forging_tools, @settings.forging_belt)
+        repair(@settings.forging_tools, @settings.forging_belt)
         trash(item, base, type)
     end
 
@@ -122,19 +137,19 @@ class TaskMaster
         if base == 'stone'
             buy_rocks(count)
             carve_stone(item, count)
-            tool_drop(["chisels"], @settings.engineering_belt)
+            repair([DRC.right_hand], @settings.engineering_belt)
             trash(item, base, type)
             return
         elsif base == 'stack'
             buy_stackables(item, count, volume_per_item, base)
             carve_bone(item, count)
-            tool_drop(["bone saw"], @settings.engineering_belt)
+            repair([DRC.right_hand], @settings.engineering_belt)
             trash(item, base, type)
             return
         elsif base == 'lumber'
             buy_stackables(item, count, volume_per_item, base)
             shape_item(item, count, base, type)
-            tool_drop(@settings.shaping_tools, @settings.engineering_belt)
+            repair(@settings.shaping_tools, @settings.engineering_belt)
             trash(item, base, type)
             return            
         elsif volume_per_item > 10 # more than a single ingot's volume, so we need to smelt
@@ -151,7 +166,7 @@ class TaskMaster
             @dispose = true
         end
         forge_item(item, count, type)
-        tool_drop(@settings.forging_tools, @settings.forging_belt)
+        repair(@settings.forging_tools, @settings.forging_belt)
         trash(item, base, type)
     end
 
@@ -164,7 +179,7 @@ class TaskMaster
             toolset = @settings.outfitting_tools
         end
         tailor_item(item, count, base, type)
-        tool_drop(toolset, @setting.outfitting_belt)
+        repair(toolset, @settings.outfitting_belt)
         trash(item, base, type)
     end
 
@@ -322,7 +337,6 @@ class TaskMaster
             DRCT.dispose("#{type} ingot", Room.current.id) if @dispose
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['weaponsmithing', 'repair']) if @self_repair
     end
 
     def carve_stone(item, count)
@@ -361,8 +375,6 @@ class TaskMaster
             remaining -= 1
         end
         DRC.message("#{count} #{item}s completed")
-        DRCC.stow_crafting_item("chisels", @bag, @settings.engineering_belt)
-        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['chisels'], @bag, @bag_items, @settings.engineering_belt) if @self_repair
     end
 
     def carve_bone(item, count)
@@ -388,8 +400,6 @@ class TaskMaster
             DRC.bput("put my #{item} in my #{@bag}", "You put")
         end
         DRC.message("#{count} #{item}s completed")
-        DRCC.stow_crafting_item("bone saw", @bag, @settings.engineering_belt)
-        DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, ['bone saw'], @bag, @bag_items, @settings.engineering_belt) if @self_repair
     end
 
 
@@ -399,7 +409,6 @@ class TaskMaster
             DRC.wait_for_script_to_complete('sew', ['stow', 'instructions', type, item, base == 'yarn' ? 'knit' : nil])
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['tailoring', 'repair']) if @self_repair
     end
 
     def shape_item(item, count, base, type)
@@ -408,7 +417,6 @@ class TaskMaster
             DRC.wait_for_script_to_complete('shape', ['stow', 'instructions', type, item])
         end
         DRC.message("#{count} #{item}s completed")
-        DRC.wait_for_script_to_complete('workorders', ['shaping', 'repair']) if @self_repair
     end
 
     def complete_task(item, count)
@@ -419,6 +427,17 @@ class TaskMaster
         end
         sort_sack(item)
     end
+
+    def repair(tools, belt)
+        if @no_repair # skipping repair, stowing tool(s), moving on
+            DRCI.stow_hands
+            return
+        elsif @self_repair
+            DRCC.repair_own_tools({'finisher-room'=>8776, 'finisher-number'=>6}, tools, @bag, @bag_items, belt) # runs self repair routine
+        else
+            tool_drop(tools,belt) # drops tools off at the repair guy to be picked up later
+        end
+    end        
 
     def tool_drop(toolslist, belt = nil) # accepts array of tools for repair
         return if @self_repair
@@ -442,7 +461,10 @@ class TaskMaster
         pause 30 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
         DRC.bput("give Rangu", 'You hand')
         pause 1
-        DRCC.stow_crafting_item([DRC.right_hand,DRC.left_hand].compact.first, @bag, @belt)
+        tool = [DRC.right_hand,DRC.left_hand].compact.first
+        belts = [@settings.forging_belt, @settings.engineering_belt, @settings.outfitting_belt, @settings.alchemy_belt, @settings.enchanting_belt]
+        toolbelt = belts.select { |belt| belt["items"].find { |name| name =~ /#{tool}/i } } # searches your toolbelts for the first one containing the tool.
+        DRCC.stow_crafting_item(tool, @bag, @belt || toolbelt) # if defined, uses the belt defined during tool_drop. If not defined, uses the belt search
         end
     end
 

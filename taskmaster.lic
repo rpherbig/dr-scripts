@@ -44,6 +44,7 @@ class TaskMaster
               { name: 'reset_output', regex: /^reset_output/i, optional: true, description: 'Clears prize window' },
               { name: 'pickup', regex: /^pickup/i, optional: true, description: 'Picks up any tools left at Rangu for repair' },
               { name: 'cycle', regex: /^cycle/i, optional: true, description: 'Cycles through each taskmaster randomly and completes their task' },
+              { name: 'marathon', regex:/^marathon/i, optional: true, description: 'stocks up and runs zasele tasks, repairs during restock' },
               { name: 'loot_history', regex: /^loot_history/i, optional: true, description: 'Prints out saved sack contents history, potentially scrollish' },
               { name: 'script_summary', optional: true, description: 'Completes Hollows Eve tasks for the crafting taskmasters on the island' }
             ]
@@ -84,6 +85,25 @@ class TaskMaster
         elsif args.pickup
             tool_pickup if DRCI.exists?("rangu ticket")
             exit
+        elsif args.marathon
+            @npc = 'zasele'
+            restock
+            DRCM.ensure_copper_on_hand(80000, @settings, "Crossing")
+            loop do
+                item,count,volume_per_item,base,type = get_task
+                unless check_stock(count*volume_per_item,type, base)
+                    repair(@settings.outfitting_tools, @settings.outfitting_belt) unless @no_repair
+                    restock
+                    tool_pickup if !@self_repair && DRCI.exists?("rangu ticket")
+                    find_npc(@rooms, @npc)
+                end
+                tailor_item(item, count, base, type)
+                complete_task(item, count)
+                DRCT.dispose("#{item} instructions", 16144)
+                break if Flags['wrap-up']
+            end
+            tool_pickup if @pickup_tools && DRCI.exists?("rangu ticket")
+            exit
         end
         DRCM.ensure_copper_on_hand(5000, @settings, "Crossing")
 
@@ -101,6 +121,48 @@ class TaskMaster
             break unless args.repeat
         end
         tool_pickup if @pickup_tools && DRCI.exists?("rangu ticket") # if indicated, and you have tickets, picks up any tools you may have dropped off previously, all disciplines
+    end
+    
+    def restock
+        info = get_data('crafting')['tailoring']["Crossing"]
+        DRCC.check_consumables('pins', info['tool-room'], 5, @bag, @bag_items, nil, 40)
+        DRCC.check_consumables('thread', info['stock-room'], 6, @bag, @bag_items, nil)
+        need = {}
+        cost = 0
+        ['cloth', 'leather', 'yarn'].each do |stock|
+            if DRCI.exists?("#{@stackmap[stock].first} #{stock}")
+                /(\d+)/ =~ DRC.bput("count my #{@stackmap[stock].first} #{stock}", /^You count out (\d+) yards of material/)
+                current = Regexp.last_match(1).to_i
+                stock == 'yarn' ? need.store(stock,(400 - current)/100) : need.store(stock,(100 - current)/10)
+            else
+                stock == 'yarn' ? need.store(stock,4) : need.store(stock,10)
+            end
+            echo(need[stock])
+            cost += stock == 'yarn' ? need[stock]*@stockdata[stock]['stock-value'] : need[stock]*@stockdata[@stackmap[stock].first]['stock-value']
+        end
+        return if cost == 0
+        DRCM.ensure_copper_on_hand(cost + 100000, @settings, "Crossing")
+        ## now we have a hash with stock=># to order, and cash on hand
+        need.each do |stock,number|
+            next unless number > 0
+            DRCT.walk_to(16667)
+            DRCC.get_crafting_item("#{@stackmap[stock].first} #{stock}", @bag, @bag_items, nil) if DRCI.exists?("#{@stackmap[stock].first} #{stock}")
+            number.times do
+                DRCT.order_item(@stackmap[stock].last, stock == 'yarn' ? @stockdata[stock]['stock-number'] : @stockdata[@stackmap[stock].first]['stock-number'])
+                fput("combine #{stock}")
+            end
+            DRCC.stow_crafting_item("#{@stackmap[stock].first} #{stock}", @bag, nil)
+        end
+    end
+
+    def check_stock(needed, type, base)
+        return false unless DRCI.exists?("#{type} #{base}")
+        /(\d+)/ =~ DRC.bput("count my #{type} #{base}", /^You count out (\d+) yards of material/)
+        if Regexp.last_match(1).to_i >= needed
+            true
+        else
+            false
+        end
     end
 
     def trash(item, base, type)

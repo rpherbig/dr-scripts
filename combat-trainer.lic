@@ -852,12 +852,12 @@ class LootProcess
   end
 
   def dissected?(mob_noun, game_state)
-    if @dissect_for_thanatology 
+    if @dissect_for_thanatology
       return false if (DRSkill.getxp('Thanatology') == 34 && DRSkill.getxp('First Aid') == 34)
     else
       return false if DRSkill.getxp('First Aid') == 34
     end
-    
+
     case DRC.bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge', 'This ritual may only be performed on a corpse', /You learn something/i, 'A failed or completed ritual has rendered', 'You realize after a few seconds')
     when 'You succeed in dissecting the corpse', /You learn something/i
       return true
@@ -915,7 +915,7 @@ class LootProcess
         @equipment_manager.stow_weapon(game_state.weapon_name)
       end
 
-      if DRC.bput('get bundling rope', 'You get', 'What were you referring to', 'You need a free hand') == 'You get'
+      if DRCI.get_item_if_not_held?('bundling rope')
         DRC.bput('bundle', 'You bundle')
         DRCI.wear_item?('bundle')
         if @tie_bundle
@@ -1887,22 +1887,7 @@ class SpellProcess
     if data['moon']
       DRCMM.check_moonwatch
       moon = UserVars.moons['visible'].first
-      if !moon && data['abbrev'].downcase == 'col'
-        data['cast'] = "cast ambient"
-      elsif !moon
-        echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
-
-        @weather ||= DRC.bput('weather', 'inside', 'You glance up at the sky.', 'You glance outside')
-        if @weather =~ /inside/
-          DRC.message "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
-        end
-
-        unless moon = UserVars.moons['visible'].first
-          echo "Couldn't find any moons to cast #{data['abbrev']} with" if $debug_mode_ct
-          return
-        end
-      end
-      if data['abbrev'] == 'moonblade'
+      if data['name'].downcase == 'moonblade'
         game_state.casting_moonblade = true
         last_moon = DRCMM.moon_used_to_summon_weapon
         # Determine if we can just refresh the currently summoned weapon.
@@ -1916,6 +1901,20 @@ class SpellProcess
           # on a different moon to summon a new weapon.
           DRCMM.drop_moon_weapon?
           data['cast'] = "cast #{moon}"
+        end
+      elsif !moon && data['name'].downcase == 'cage of light'
+        data['cast'] = "cast ambient"
+      elsif !moon
+        echo "No moon available to cast #{data['abbrev']}" if $debug_mode_ct
+
+        @weather ||= DRC.bput('weather', 'inside', 'You glance up at the sky.', 'You glance outside')
+        if @weather =~ /inside/
+          DRC.message "*** You're inside and there are no available moons. You're going to have a hard time casting #{data['abbrev']}"
+        end
+
+        unless moon = UserVars.moons['visible'].first
+          echo "Couldn't find any moons to cast #{data['abbrev']} with" if $debug_mode_ct
+          return
         end
       else
         data['cast'] = "cast #{moon}"
@@ -2126,7 +2125,6 @@ class AbilityProcess
     check_paladin_skills
     check_nonspell_buffs(game_state)
     check_battle_cries(game_state)
-    DRC.message("warhorn_or_egg array is: #{@warhorn_or_egg}")  if $debug_mode_ct
     use_warhorn_or_egg(game_state) unless @warhorn_or_egg.nil? || @warhorn_or_egg.empty?
     false
   end
@@ -3162,6 +3160,8 @@ class AttackProcess
 
     charged_maneuver = check_charged_maneuver(game_state)
 
+    game_state.reset_barb_whirlwind_flags_if_needed
+
     if game_state.thrown_skill?
       game_state.loaded = false
       @firing_check = 0
@@ -3548,6 +3548,7 @@ class AttackProcess
       /You are already/,
       /You begin to target/,
       /You shift your target/,
+      /In one electrifying moment/, # Syamelyo Kuniyo spell effect
       /In one frozen moment/ # Syamelyo Kuniyo spell effect
     ]
 
@@ -4116,6 +4117,12 @@ class GameState
       Flags['ct-balance-ready'] = true
     end
 
+    if DRStats.barbarian?
+      Flags.add('ct-barbarian-whirlwind', 'Your inner fire roils with a rising desire to unleash a whirlwind attack!')
+      Flags.add('ct-barbarian-whirlwind-expired', 'The whirlwind moment passes.')
+      echo "Improved whirlwind flags reset" if $debug_mode_ct
+    end
+
     @dedicated_camb_use = settings.dedicated_camb_use
     echo(" @dedicated_camb_use: #{@dedicated_camb_use}") if $debug_mode_ct
 
@@ -4340,7 +4347,11 @@ class GameState
   end
 
   def determine_whirlwind_action
-    if lacking_inner_fire? || (@flame_for_ww_expertise && need_expertise?)
+    if Flags['ct-barbarian-whirlwind'] && !Flags['ct-barbarian-whirlwind-expired']
+      echo "Performing improved whirlwind" if $debug_mode_ct
+      Flags.reset('ct-barbarian-whirlwind')
+      'whirlwind'
+    elsif lacking_inner_fire? || (@flame_for_ww_expertise && need_expertise?)
       update_analyze_array('flame') if @analyze_combo_array.empty?
       @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     elsif Flags['ct-accuracy-ready']
@@ -4759,6 +4770,13 @@ class GameState
     Flags.reset('ct-damage-ready')
   end
 
+  def reset_barb_whirlwind_flags_if_needed
+    if Flags['ct-barbarian-whirlwind-expired']
+      Flags.reset('ct-barbarian-whirlwind')
+      Flags.reset('ct-barbarian-whirlwind-expired')
+    end
+  end
+
   def lacking_inner_fire?
     return false unless DRStats.barbarian? && @use_analyze_combos
     return false unless DRStats.mana < @flame_inner_fire_threshold
@@ -4783,7 +4801,7 @@ class GameState
       brawling? ? 'gouge' : 'jab'
     # !offhand & !brawling are there because you can't use a weapon for brawling commands
     # This issue will cause problems with the combo array system
-    elsif @use_analyze_combos && !offhand? && !brawling?
+    elsif @use_analyze_combos && !offhand? && !brawling? && DRSkill.getxp('Tactics') <= @combat_training_abilities_target
       update_analyze_array if @analyze_combo_array.empty?
       @analyze_combo_array.empty? ? 'attack' : @analyze_combo_array.shift
     else
@@ -5040,6 +5058,8 @@ before_dying do
   Flags.delete('ct-maneuver-cooldown-reduced')
   Flags.delete('ct-attack-out-of-range')
   Flags.delete('ct-battle-cry-not-facing')
+  Flags.delete('ct-barbarian-whirlwind')
+  Flags.delete('ct-barbarian-whirlwind-expired')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

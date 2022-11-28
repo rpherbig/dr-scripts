@@ -3,7 +3,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#workorders
 =end
 
-custom_require.call(%w[common common-crafting common-items common-money common-travel drinfomon])
+custom_require.call(%w[common common-crafting common-items common-money common-travel drinfomon events])
 
 class WorkOrders
 
@@ -40,6 +40,8 @@ class WorkOrders
     @retain_crafting_materials = @settings.retain_crafting_materials
     @workorders_repair = @settings.workorders_repair
     @workorders_override_store = @settings.workorders_override_store
+    @workorders_materials = @settings.workorders_materials
+    Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
 
     DRC.wait_for_script_to_complete('safe-room', ['force']) if @settings.workorders_force_heal
 
@@ -76,6 +78,7 @@ class WorkOrders
 
     case discipline
     when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
+      materials_info = crafting_data['stock'][@workorders_materials['metal_type']]
       skill = 'Forging'
       tools = @settings.forging_tools
       @belt = @settings.forging_belt
@@ -85,6 +88,7 @@ class WorkOrders
                        :forge_items
                      end
     when 'tailoring'
+      materials_info = crafting_data['stock'][@workorders_materials['fabric_type']]
       skill = 'Outfitting'
       @outfitting_room = @settings.outfitting_room
       tools = @settings.outfitting_tools
@@ -93,6 +97,7 @@ class WorkOrders
       when 4, 2, 3
         craft_method = :sew_items
       when 5
+        materials_info = crafting_data['stock'][@workorders_materials['knit_type']]
         craft_method = :knit_items
       else
         if item['chapter']
@@ -101,12 +106,18 @@ class WorkOrders
         end
       end
     when 'shaping'
+      materials_info = crafting_data['stock'][@workorders_materials['wood_type']]
       skill = 'Engineering'
       @engineering_room = @settings.engineering_room
       tools = @settings.shaping_tools
       @belt = @settings.engineering_belt
       craft_method = :shape_items
     when 'carving'
+      if @carving_type = 'bone'
+        materials_info = crafting_data['stock'][@workorders_materials['bone_type']]
+      else
+        materials_info = crafting_data['stock'][@workorders_materials['stone_type']]
+      end
       skill = 'Engineering'
       @engineering_room = @settings.engineering_room
       tools = @settings.carving_tools
@@ -136,7 +147,7 @@ class WorkOrders
       exit
     end
 
-    send(craft_method, info, item, quantity)
+    send(craft_method, info, materials_info, item, quantity)
 
     complete_work_order(info)
 
@@ -164,19 +175,15 @@ class WorkOrders
   end
 
   def repair_items(info, tools)
-    DRCT.walk_to info['repair-room']
-
-    unless tools.size >= 5
-      need_to_repair = tools.find do |tool_name|
-        get_tool(tool_name)
-        result = DRC.bput("analyze my #{tool_name}", 'Analyze what', 'practically in mint', 'pristine condition', 'Roundtime')
-        next if result == 'Analyze what'
-        waitrt?
-        stow_tool(tool_name)
-        /roundtime/i =~ result
-      end
-      return unless need_to_repair
+    if @settings.workorders_repair_own_tools
+      current = Room.current.id
+      DRCM.ensure_copper_on_hand(1500, @settings)
+      DRCT.walk_to(current)
+      DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], tools, @bag, @bag_items, @belt)
+      return
     end
+
+    DRCT.walk_to info['repair-room']
 
     tools.each do |tool_name|
       get_tool(tool_name)
@@ -198,10 +205,9 @@ class WorkOrders
     end
   end
 
-  def find_recipe(info, recipe, quantity)
-    volume_label = recipe['material'] == 'bone' ? 'stock-bone-volume' : 'stock-volume'
-    items_per_stock = info[volume_label] / recipe['volume']
-    spare_stock = (info[volume_label] % recipe['volume']).nonzero?
+  def find_recipe(materials_info, recipe, quantity)
+    items_per_stock = materials_info['stock-volume'] / recipe['volume']
+    spare_stock = (materials_info['stock-volume'] % recipe['volume']).nonzero?
 
     scrap = spare_stock || (quantity % items_per_stock).nonzero?
 
@@ -214,54 +220,46 @@ class WorkOrders
     fput('go door')
   end
 
-  def carve_items(info, item, quantity)
+  def carve_items(info, materials_info, item, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(materials_info, item, quantity)
     material_noun = %w[deed pebble stone rock rock boulder]
     material_volume = 0
     bone_carving = recipe['material'] == 'bone'
 
-    if bone_carving
-      stock_name = 'stock-bone-name'
-      stock_number = 'stock-bone-number'
-    else
-      stock_name = 'stock-name'
-      stock_number = 'stock-number'
-    end
-
-    if DRCI.search?('surface polish')
-      DRC.bput('get my surface polish', 'You get')
+    case DRC.bput('get my surface polish', 'You get', 'What were')
+    when 'You get'
       /(\d+)/ =~ DRC.bput('count my polish', 'The surface polish has \d+ uses remaining')
       if Regexp.last_match(1).to_i < 3
-        DRCI.stow_hands
+        stow_tool('polish')
         DRCT.dispose('polish')
         DRCT.order_item(info['polish-room'], info['polish-number'])
       end
     else
       DRCT.order_item(info['polish-room'], info['polish-number'])
     end
-    DRCI.stow_hands
+    stow_tool('polish')
 
     order_parts(recipe['part'], quantity) if recipe['part']
 
     quantity.times do |count|
-      DRCT.dispose("#{info['stock-name']} #{material_noun[material_volume]}") if count > 0 && spare_stock
+      DRCT.dispose("#{materials_info['stock-name']} #{material_noun[material_volume]}") if count > 0 && spare_stock
       if items_per_stock.zero? || (count % items_per_stock).zero?
         if count > 0
-          go_door
+          go_door if XMLData.room_title.include?('Workshop')
           pause 0.5 until Room.current.id
         end
         if bone_carving
-          DRC.bput("get my #{info[stock_name]} stack", 'What were', 'You get', 'You pick')
-          while DRC.bput("count my #{info[stock_name]} stack", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
-            DRCT.order_item(info['stock-room'], info[stock_number])
+          DRC.bput("get my #{materials_info['stock-name']} stack", 'What were', 'You get', 'You pick')
+          while DRC.bput("count my #{materials_info['stock-name']} stack", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
+            DRCT.order_item(info['stock-room'], materials_info['stock-number'])
             DRC.bput('combine', 'combine')
           end
         else
-          DRCT.order_item(info['stock-room'], info[stock_number])
+          DRCT.order_item(info['stock-room'], materials_info['stock-number'])
           if @engineering_room
             fput('tap my deed')
-            material_volume = info['stock-volume']
+            material_volume = materials_info['stock-volume']
           else
             material_volume = 0
           end
@@ -270,97 +268,65 @@ class WorkOrders
       end
 
       if !bone_carving
-        rock_result = DRC.bput("get #{info['stock-name']} #{material_noun[material_volume]}", 'You get', 'What were', 'You are not strong', 'You pick up', 'but can\'t quite lift it')
+        rock_result = DRC.bput("get #{materials_info['stock-name']} #{material_noun[material_volume]}", 'You get', 'What were', 'You are not strong', 'You pick up', 'but can\'t quite lift it')
         DRCC.find_shaping_room(@hometown, @engineering_room) unless rock_result =~ /You are not strong|but can\'t quite lift it/i
       else
         DRCC.find_shaping_room(@hometown, @engineering_room)
       end
       DRC.bput('swap', 'You move') if DRC.right_hand =~ /#{@noun}/i
 
-      DRC.wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], info[stock_name], bone_carving ? 'stack' : material_noun[material_volume], recipe['noun']])
+      DRC.wait_for_script_to_complete('carve', [recipe['chapter'], recipe['name'], materials_info['stock-name'], bone_carving ? 'stack' : material_noun[material_volume], recipe['noun']])
 
-      material_volume = info['stock-volume'] if material_volume == 0
+      material_volume = materials_info['stock-volume'] if material_volume == 0
       material_volume -= recipe['volume']
 
       bundle_item(recipe['noun'], info['logbook'])
     end
     if bone_carving
-      fput("get my #{info[stock_name]} stack")
+      fput("get my #{materials_info['stock-name']} stack")
       if checkleft || checkright
         DRCI.stow_hands
-        DRCT.dispose("#{info[stock_name]} stack") unless @retain_crafting_materials
+        DRCT.dispose("#{materials_info['stock-name']} stack") unless @retain_crafting_materials
       end
     elsif scrap
-      DRCT.dispose("#{info['stock-name']} #{material_noun[material_volume]}")
+      DRCT.dispose("#{materials_info['stock-name']} #{material_noun[material_volume]}")
     end
     go_door if XMLData.room_title.include?('Workshop')
   end
 
-  def shape_items(info, item, quantity)
+  def shape_items(info, materials_info, item, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 10_000, @settings)
-    recipe, items_per_stock, spare_stock, scrap = find_recipe(info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(materials_info, item, quantity)
 
     quantity.times do |count|
       if items_per_stock.zero? || (count % items_per_stock).zero?
         if count > 0 && spare_stock && !@retain_crafting_materials
-          DRCT.dispose("#{info['stock-name']} lumber")
+          DRCT.dispose("#{materials_info['stock-name']} lumber")
         elsif count > 0 && spare_stock && @retain_crafting_materials
           DRC.bput('stow feet', 'You put', 'What', 'Stow what?')
-          DRC.bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-          DRC.bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
+          DRC.bput("get my #{materials_info['stock-name']} lumber", 'What were', 'You get')
+          DRC.bput("get my other #{materials_info['stock-name']} lumber", 'What were', 'You get')
           DRC.bput('combine', 'combine')
           stow_tool(DRC.left_hand)
           stow_tool(DRC.right_hand)
         end
 
         if count > 0
-          go_door
+          go_door if XMLData.room_title.include?('Workshop')
           pause 0.5 until Room.current.id
         end
-        DRC.bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-        while DRC.bput("count my #{info['stock-name']} lumber", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
-          DRCT.order_item(info['stock-room'], info['stock-number'])
+        DRC.bput("get my #{materials_info['stock-name']} lumber", 'What were', 'You get')
+        while DRC.bput("count my #{materials_info['stock-name']} lumber", 'You count.*\d+', 'I could not').scan(/\d+/).first.to_i < recipe['volume']
+          DRCT.order_item(info['stock-room'], materials_info['stock-number'])
           DRC.bput('combine', 'combine')
         end
         stow_tool('lumber')
-
-        if DRCI.search?('glue')
-          DRC.bput('get my glue', 'You get')
-          /(\d+)/ =~ DRC.bput('count my glue', 'The wood glue has *\d+ uses remaining')
-          if Regexp.last_match(1).to_i < quantity
-            stow_tool('glue')
-            DRCT.dispose('glue')
-            DRCT.order_item(info['tool-room'], info['glue-number'])
-          end
-        else
-          DRCT.order_item(info['tool-room'], info['glue-number'])
-        end
-        stow_tool('glue')
-
-        if DRCI.search?('wood stain')
-          DRC.bput('get my wood stain', 'What were', 'You get')
-          /(\d+)/ =~ DRC.bput('count my wood stain', 'The wood stain has *\d+ uses remaining')
-          if Regexp.last_match(1).to_i < quantity
-            stow_tool('wood stain')
-            DRCT.dispose('wood stain')
-            DRCT.order_item(info['tool-room'], info['stain-number'])
-          end
-        else
-          DRCT.order_item(info['tool-room'], info['stain-number'])
-        end
-        stow_tool('wood stain')
-
-        case DRC.bput('tap my clamps', 'I could not find', 'You tap some')
-        when 'I could not find'
-          DRCT.order_item(info['tool-room'], info['clamps-number'])
-          stow_tool('clamps')
-        end
 
         buy_parts(recipe['part'], info['part-room'])
         DRCC.find_shaping_room(@hometown, @engineering_room)
       end
 
-      DRC.wait_for_script_to_complete('shape', ['log', recipe['chapter'], recipe['name'], info['stock-name'], recipe['noun']])
+      DRC.wait_for_script_to_complete('shape', ['log', recipe['chapter'], recipe['name'], materials_info['stock-name'], recipe['noun']])
       case DRC.bput('read my engineering logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
@@ -368,14 +334,14 @@ class WorkOrders
       end
     end
 
-    DRCT.dispose("#{info['stock-name']} lumber") if scrap && !@retain_crafting_materials
+    DRCT.dispose("#{materials_info['stock-name']} lumber") if scrap && !@retain_crafting_materials
     if @retain_crafting_materials
       stow_tool(DRC.left_hand)
       stow_tool(DRC.right_hand)
       if scrap
         DRC.bput('stow feet', 'You put', 'What', 'Stow what?')
-        DRC.bput("get my #{info['stock-name']} lumber", 'What were', 'You get')
-        DRC.bput("get my other #{info['stock-name']} lumber", 'What were', 'You get')
+        DRC.bput("get my #{materials_info['stock-name']} lumber", 'What were', 'You get')
+        DRC.bput("get my other #{materials_info['stock-name']} lumber", 'What were', 'You get')
         DRC.bput('combine', 'combine')
         stow_tool(DRC.left_hand)
         stow_tool(DRC.right_hand)
@@ -415,25 +381,25 @@ class WorkOrders
     stow_tool(type)
   end
 
-  def sew_items(info, recipe, quantity)
+  def sew_items(info, materials_info, recipe, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
 
-    existing = if DRC.bput("get #{info['sew-stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'What were'
+    existing = if DRC.bput("get #{materials_info['stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'What were'
                  0
                else
-                 while DRC.bput("get #{info['sew-stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'You get'
-                   DRC.bput("combine #{info['sew-stock-name']} cloth with #{info['sew-stock-name']} cloth", 'You combine')
+                 while DRC.bput("get #{materials_info['stock-name']} cloth from my #{@bag}", 'What were', 'You get') == 'You get'
+                   DRC.bput("combine #{materials_info['stock-name']} cloth with #{materials_info['stock-name']} cloth", 'You combine')
                  end
-                 DRC.bput("count my #{info['sew-stock-name']} cloth", 'You count out \d+ yards').scan(/\d+/).first.to_i
+                 DRC.bput("count my #{materials_info['stock-name']} cloth", 'You count out \d+ yards').scan(/\d+/).first.to_i
                end
     stock_needed = ((quantity * recipe['volume'] - existing) / 10.0).ceil
-    order_fabric(info['stock-room'], stock_needed, info['sew-stock-number'], "#{info['sew-stock-name']} cloth")
+    order_fabric(info['stock-room'], stock_needed, materials_info['stock-number'], "#{materials_info['stock-name']} cloth")
     order_parts(recipe['part'], quantity) if recipe['part']
 
     DRCC.find_sewing_room(@hometown, @outfitting_room)
 
     quantity.times do |count|
-      DRC.wait_for_script_to_complete('sew', ['log', 'sewing', recipe['chapter'], recipe['name'], recipe['noun'], info['sew-stock-name']])
+      DRC.wait_for_script_to_complete('sew', ['log', 'sewing', recipe['chapter'], recipe['name'], materials_info['stock-name'], recipe['noun']])
       case DRC.bput('read my outfitting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
@@ -441,29 +407,29 @@ class WorkOrders
       end
     end
     leftover = (quantity * recipe['volume']) % 10 != 0
-    DRCT.dispose("#{info['sew-stock-name']} cloth") if leftover && !@retain_crafting_materials
+    DRCT.dispose("#{materials_info['stock-name']} cloth") if leftover && !@retain_crafting_materials
     stow_tool(DRC.left_hand) if @retain_crafting_materials
     stow_tool(DRC.right_hand) if @retain_crafting_materials
   end
 
-  def knit_items(info, recipe, quantity)
+  def knit_items(info, materials_info, recipe, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
 
     existing = if DRC.bput("get yarn from my #{@bag}", 'What were', 'You get') == 'What were'
                  0
                else
                  while DRC.bput("get yarn from my #{@bag}", 'What were', 'You get') == 'You get'
-                   DRC.bput("combine #{info['sew-stock-name']} yarn with #{info['sew-stock-name']} yarn", 'You combine')
+                   DRC.bput("combine #{materials_info['stock-name']} yarn with #{materials_info['stock-name']} yarn", 'You combine')
                  end
                  DRC.bput('count my yarn', 'You count out \d+ yards').scan(/\d+/).first.to_i
                end
     stock_needed = ((quantity * recipe['volume'] - existing) / 100.0).ceil
-    order_fabric(info['stock-room'], stock_needed, info['knit-stock-number'], 'yarn')
+    order_fabric(info['stock-room'], stock_needed, materials_info['stock-number'], 'yarn')
 
     DRCC.find_sewing_room(@hometown, @outfitting_room)
 
     quantity.times do |count|
-      DRC.wait_for_script_to_complete('sew', ['log', 'knitting', recipe['chapter'], recipe['name'], recipe['noun'], info['knit-stock-name']])
+      DRC.wait_for_script_to_complete('sew', ['log', 'knitting', recipe['chapter'], recipe['name'], materials_info['stock-name'], recipe['noun']])
       case DRC.bput('read my outfitting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
       when /You must bundle and deliver \d+ more /
         log_num = Regexp.last_match(1).to_i
@@ -570,7 +536,7 @@ class WorkOrders
     stow_tool(DRC.right_hand)
   end
 
-  def remedy_items(info, recipe, quantity)
+  def remedy_items(info, materials_info, recipe, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
     herb2_needed = ''
     liquid_used = ''
@@ -626,26 +592,26 @@ class WorkOrders
     DRCT.dispose(recipe['herb2']) while recipe['herb2'] && DRCI.exists?(recipe['herb2']) unless @retain_crafting_materials
   end
 
-  def forge_items(info, item, quantity)
-    recipe, = find_recipe(info, item, quantity)
+  def forge_items(info, materials_info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(materials_info, item, quantity)
     remaining_volume = 0
 
     DRCM.ensure_copper_on_hand(@cash_on_hand || 5000, @settings)
 
     quantity.times do
       if remaining_volume < recipe['volume']
-        DRCT.dispose(info['stock-name'], info['trash-room']) if remaining_volume > 0
-        DRCT.order_item(info['stock-room'], info['stock-number'])
+        DRCT.dispose("#{materials_info['stock-name']} ingot", info['trash-room']) if remaining_volume > 0
+        DRCT.order_item(info['stock-room'], materials_info['stock-number'])
         DRCI.stow_hands
-        remaining_volume = info['stock-volume']
+        remaining_volume = materials_info['stock-volume']
       end
 
-      DRC.wait_for_script_to_complete('smith', ['bronze', item['name']])
+      DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
       bundle_item(recipe['noun'], info['logbook'])
 
       remaining_volume -= recipe['volume']
     end
-    DRCT.dispose(info['stock-name'], info['trash-room']) if remaining_volume > 0
+    DRCT.dispose("#{materials_info['stock-name']} ingot", info['trash-room']) if remaining_volume > 0
   end
 
   def ingot_volume
@@ -658,8 +624,8 @@ class WorkOrders
     res.scan(/\d+/).first.to_i
   end
 
-  def forge_items_with_own_ingot(info, item, quantity)
-    recipe, = find_recipe(info, item, quantity)
+  def forge_items_with_own_ingot(info, materials_info, item, quantity)
+    recipe, items_per_stock, spare_stock, scrap = find_recipe(materials_info, item, quantity)
 
     if DRC.bput("get my #{@use_own_ingot_type} ingot", 'You get', 'What were') == 'What were'
       if DRC.bput("get my #{@use_own_ingot_type} deed", 'You get', 'What were') == 'What were'
@@ -728,7 +694,7 @@ class WorkOrders
     fput('stow deed')
   end
 
-  def enchanting_items(info, recipe, quantity)
+  def enchanting_items(info, materials_info, recipe, quantity)
     DRCM.ensure_copper_on_hand(@cash_on_hand || 20_000, @settings)
     # Enchant Sigil #1
     DRCC.order_enchant(info['stock-room'], quantity, recipe['enchant_stock1'], @bag, @belt)
@@ -818,6 +784,10 @@ class WorkOrders
       DRCT.walk_to(room_id)
     end
   end
+end
+
+before_dying do
+  Flags.delete('proper-repair')
 end
 
 WorkOrders.new

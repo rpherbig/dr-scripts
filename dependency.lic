@@ -10,7 +10,7 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '1.4.12'
+$DEPENDENCY_VERSION = '1.5.0'
 $MIN_RUBY_VERSION = '2.5.5'
 
 no_pause_all
@@ -162,40 +162,6 @@ args = parse_args(arg_definitions)
 
 debug = args.debug || UserVars.debug_dependency
 install = args.install
-
-class OpenStruct
-  def new_ostruct_member(name)
-    name = name.to_sym
-    unless respond_to?(name)
-      define_singleton_method(name) { |*_a| @table[name] }
-      define_singleton_method("#{name}=") { |x| modifiable[name] = x }
-    end
-    name
-  end
-  protected :new_ostruct_member
-
-  def method_missing(mid, *args)
-    mname = mid.id2name
-    len = args.length
-    if mname.chomp!('=')
-      if len != 1
-        raise ArgumentError, "wrong number of arguments (#{len} for 1)", caller(1)
-      end
-      if !respond_to?(:modifiable?, true) # for backwards compatability <2.3, to be removed eventually
-        modifiable[new_ostruct_member(mname)] = args[0]
-      else                                # new >=2.3 method
-        modifiable?[new_ostruct_member(mname)] = args[0]
-      end
-    elsif len.zero?
-      @table[mid]
-    elsif len == 1
-      echo("Failed to find yaml setting #{mid}, using default:#{args[0]}")
-      args[0]
-    else
-      raise NoMethodError, "undefined method `#{mid}' for #{self}", caller(1)
-    end
-  end
-end
 
 class ScriptManager
   attr_reader :autostarts
@@ -718,6 +684,8 @@ class ScriptManager
     message_body += Dir['./scripts/data/*.*'].join(',')
     message_body += "\n"
 
+    message_body.gsub!("bastard","dastard (modified)")
+
     submit_pastebin(message_body)
   end
 end
@@ -774,7 +742,11 @@ class BankbotManager
   end
 
   def safe_load_yaml(path)
-    OpenStruct.new(YAML.load_file(path)).to_h
+    if (RUBY_VERSION =~ /^2/)
+      OpenStruct.new(YAML.load_file(path)).to_h
+    elsif (RUBY_VERSION =~ /^3/)
+      OpenStruct.new(YAML.unsafe_load_file(path)).to_h
+    end
   rescue => e
     echo('*** ERROR PARSING YAML FILE ***')
     echo(e.message)
@@ -825,7 +797,11 @@ class ReportbotManager
   end
 
   def safe_load_yaml(path)
-    YAML.load_file(path)
+    if (RUBY_VERSION =~ /^2/)
+      YAML.load_file(path)
+    elsif (RUBY_VERSION =~ /^3/)
+      YAML.unsafe_load_file(path)
+    end
   rescue => e
     echo('*** ERROR PARSING YAML FILE ***')
     echo(e.message)
@@ -921,7 +897,12 @@ class SetupFiles
   end
 
   def safe_load_yaml(filepath)
-    OpenStruct.new(YAML.load_file(filepath)).to_h
+    if (RUBY_VERSION =~ /^2/)
+      OpenStruct.new(YAML.load_file(filepath)).to_h
+    elsif (RUBY_VERSION =~ /^3/)
+      OpenStruct.new(YAML.unsafe_load_file(filepath)).to_h
+    end
+
   rescue => e
     echo('*** ERROR PARSING YAML FILE ***')
     echo(e.message)
@@ -1618,11 +1599,15 @@ def autostart(script_names, global = true)
   script_names.each { |script| $manager.run_script(script) }
 end
 
-def stop_autostart(script)
-  if UserVars.autostart_scripts.include?(script)
-    UserVars.autostart_scripts.delete(script)
-  else
-    $manager.remove_global_auto(script)
+def stop_autostart(script_names)
+  script_names = [script_names] unless script_names.is_a?(Array)
+
+  script_names.each do |script|
+    if UserVars.autostart_scripts.include?(script)
+      UserVars.autostart_scripts.delete(script)
+    else
+      $manager.remove_global_auto(script)
+    end
   end
 end
 
@@ -1807,6 +1792,21 @@ def clear_hometown
   $HOMETOWN = nil
 end
 
+def warn_custom_scripts
+  custom_scripts = Dir.entries('./scripts/custom').reject { |f| File.directory?(f) }
+  curated_scripts = Dir.entries('./scripts').reject { |f| File.directory?(f) }
+  include_list = []
+
+  custom_scripts.each do | script |
+    include_list.push(script) if curated_scripts.include?(script)
+  end
+
+  unless include_list.empty?
+    echo "NOTE: The following curated scripts are in your custom folder and will not receive updates"
+    echo "#{include_list}" unless include_list.empty?
+  end
+end
+
 full_install if install
 
 force_start_script('bootstrap', ['wipe_constants'])
@@ -1833,6 +1833,9 @@ before_dying do
 end
 
 $setupfiles.reload
+
+# Remind user of curated scripts with a copy in custom folder
+warn_custom_scripts
 
 loop do
   if $turn_on_moon_watch && $moon_watch.nil?

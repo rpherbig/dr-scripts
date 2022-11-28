@@ -101,6 +101,7 @@ custom_require.call(%w[spellmonitor drinfomon])
 
 module DRC
   $pause_all_lock ||= Mutex.new
+  $safe_pause_lock ||= Mutex.new
 
   module_function
 
@@ -145,7 +146,7 @@ module DRC
       case response
       when /(?:\.\.\.wait |Wait |\.\.\. wait )([0-9]+)/
         unless ignore_rt
-          pause(Regexp.last_match(1).to_i - 0.9)
+          pause(Regexp.last_match(1).to_i - 0.5)
           waitrt?
           put message
           timer = Time.now
@@ -275,13 +276,13 @@ module DRC
   end
 
   def rummage(parameter, container)
-    result = DRC.bput("rummage /#{parameter} my #{container}", 'but there is nothing in there like that\.', 'looking for .* and see .*', 'While it\'s closed', 'I don\'t know what you are referring to', 'You feel about')
+    result = DRC.bput("rummage /#{parameter} my #{container}", 'but there is nothing in there like that\.', 'looking for .* and see .*', 'While it\'s closed', 'I don\'t know what you are referring to', 'You feel about', 'That would accomplish nothing')
 
     case result
     when 'You feel about'
       release_invisibility
       return rummage(parameter, container)
-    when 'but there is nothing in there like that.', 'While it\'s closed', 'I don\'t know what you are referring to'
+    when 'but there is nothing in there like that.', 'While it\'s closed', 'I don\'t know what you are referring to', 'That would accomplish nothing'
       return []
     end
 
@@ -289,6 +290,8 @@ module DRC
     case parameter
     when 'B'
       box_list_to_adj_and_noun(text)
+    when 'SC'
+      scroll_list_to_adj_and_noun(text)
     else
       list_to_nouns(text)
     end
@@ -317,6 +320,28 @@ module DRC
   # And return an array ["wooden strongbox", "ironwood crate"]
   def box_list_to_adj_and_noun(list)
     list.strip.split($box_regex).reject(&:empty?).select{ |item| item =~ $box_regex}
+  end
+
+  def scroll_list_to_adj_and_noun(list)
+    list_to_array(list).map { |entry| entry
+                                      .sub(/(an|some|a(?: piece of)?)\s/, '')
+                                      .sub(/\slabeled with.*/, '')
+                                      .sub(/icy blue vellum scroll/, 'icy scroll')
+                                      .sub(/papyrus roll/, 'papyrus.roll')
+                                      .sub(/\s(bark|leaf|ostracon|papyrus|parchment|roll|scroll|tablet|vellum|manuscript)\s.*/, ' \1')
+                                      .sub(/crumpled paper/, 'crumpled')
+                                      .sub(/pale ricepaper/, 'pale')
+                                      .sub(/stormy grey/, 'stormy')
+                                      .sub(/mossy green/, 'mossy')
+                                      .sub(/dark purple/, 'dark')
+                                      .sub(/vibrant red/, 'vibrant')
+                                      .sub(/bright green/, 'bright')
+                                      .sub(/icy blue/, 'blue')
+                                      .sub(/pearl-white silk/, 'silk')
+                                      .sub(/ghostly white/, 'white')
+                                      .sub(/crinkled violet/, 'crinkled')
+                                      .sub(/stormy grey/, 'stormy')
+                                      .strip }
   end
 
   # Take a game formatted list "an arrow, silver coins and a deobar strongbox"
@@ -657,40 +682,54 @@ module DRC
   def clean_instrument(settings, worn = true)
     cloth = settings.cleaning_cloth
     instrument = worn ? settings.worn_instrument : settings.instrument
-    case bput("get my #{cloth}", 'You get', 'You are already holding', 'What were you')
-    when 'What were you'
-      echo('You have no chamois cloth -- this could cause problems with playing an instrument!')
-      beep
+
+    unless DRCI.get_item?(cloth)
+      DRC.message('You have no chamois cloth -- this could cause problems with playing an instrument!')
+      DRC.beep
       return false
     end
-    stop_playing
+    DRC.stop_playing
 
-    worn ? bput("remove my #{instrument}", 'You slide', 'You remove') : bput("get #{instrument}", 'You get', 'What were you', 'You are already')
+    if worn
+      unless DRCI.remove_item?(instrument)
+        DRC.message("Could not remove #{instrument} putting away cloth, and not trying to clean.")
+        DRCI.stow_item?(cloth)
+        DRC.beep
+        return false
+      end
+    else
+      unless DRCI.get_item?(instrument)
+        DRC.message("Could not get #{instrument} putting away cloth, and not trying to clean.")
+        DRCI.stow_item?(cloth)
+        DRC.beep
+        return false
+      end
+    end
 
     loop do
-      case bput("wipe my #{instrument} with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
+      case DRC.bput("wipe my #{instrument} with my #{cloth}", 'Roundtime', 'not in need of drying', 'You should be sitting up')
       when 'not in need of drying'
         break
       when 'You should be sitting up'
-        fix_standing
+        DRC.fix_standing
         next
       end
       pause 1
       waitrt?
 
-      until /you wring a dry/i =~ bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
+      until /you wring a dry/i =~ DRC.bput("wring my #{cloth}", 'You wring a dry', 'You wring out')
         pause 1
         waitrt?
       end
     end
 
-    until /not in need of cleaning/i =~ bput("clean my #{instrument} with my #{cloth}", 'Roundtime', 'not in need of cleaning')
+    until /not in need of cleaning/i =~ DRC.bput("clean my #{instrument} with my #{cloth}", 'Roundtime', 'not in need of cleaning')
       pause 1
       waitrt?
     end
 
-    bput("wear my #{instrument}", 'You slide', 'You attach') if worn
-    bput("stow my #{cloth}", 'You put')
+    DRCI.wear_item?(instrument) if worn
+    DRCI.stow_item?(cloth)
     true
   end
 
@@ -734,11 +773,33 @@ module DRC
       s.pause
       paused_script_list << s.name
     end
+    echo("Pausing #{paused_script_list} to run #{Script.self.name}")
     return paused_script_list
   end
 
   def unpause_all_list(scripts_to_unpause)
+    echo("Unpausing #{scripts_to_unpause}, #{Script.self.name} has finished.")
     Script.running.find_all { |s| s.paused? && !s.no_pause_all && scripts_to_unpause.include?(s.name) }.each(&:unpause)
+  end
+
+  def safe_pause_list
+    return false unless $safe_pause_lock.try_lock
+
+    paused_script_list = []
+    Script.running.find_all { |s| !s.paused? && !s.no_pause_all && s.name != Script.self.name}.each do  |s|
+      s.pause
+      paused_script_list << s.name
+    end
+    echo("Pausing #{paused_script_list} to run #{Script.self.name}")
+    return paused_script_list
+  end
+
+  def safe_unpause_list(scripts_to_unpause)
+    return false unless $safe_pause_lock.owned?
+
+    echo("Unpausing #{scripts_to_unpause}, #{Script.self.name} has finished.")
+    Script.running.find_all { |s| s.paused? && !s.no_pause_all && scripts_to_unpause.include?(s.name) }.each(&:unpause)
+    $safe_pause_lock.unlock
   end
 
   def set_stance(skill)
@@ -768,10 +829,27 @@ module DRC
 
   # Sends a message to the atmospherics window.
   # By default the message is bold.
+  # DEPRECATED in favor of log_window
   def atmo(text, make_bold = true)
+    log_window(text, "atmospherics", make_bold)
+  end
+
+  # Sends a message to the specified window. Replaces the deprecated atmo method.
+  # By default the message is bold. Creates window upon request. Pre-clears window upon request.
+  def log_window(text, window_name, make_bold = true, create_window = false, pre_clear_window = false)
+
+    if create_window
+      _respond("<streamWindow id=\"#{window_name}\" title=\"#{window_name}\" location=\"center\" save=\"true\" />")
+      _respond("<exposeStream id=\"#{window_name}\"/>")
+    end
+
+    if pre_clear_window
+      _respond("<clearStream id=\"#{window_name}\"/>\r\n")
+    end
+
     _respond(
-      "<pushStream id=\"atmospherics\"/>" + (make_bold ? bold(text) : text),
-      "<popStream id=\"atmospherics\" /><prompt time=\"#{Time.now.to_i}\">&gt;</prompt>"
+      "<pushStream id=\"#{window_name}\"/>" + (make_bold ? bold(text) : text),
+      "<popStream id=\"#{window_name}\" /><prompt time=\"#{Time.now.to_i}\">&gt;</prompt>"
     )
   end
 

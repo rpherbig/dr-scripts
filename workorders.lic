@@ -12,7 +12,7 @@ class WorkOrders
             { name: 'discipline', options: %w[blacksmithing weaponsmithing tailoring shaping carving remedies artificing], description: 'What type of workorder to do?' },
             { name: 'repair', regex: /repair/i, optional: true, description: 'repair tools instead of crafting' }
         ]
-    ]
+        ]
 
         args = parse_args(arg_definitions)
         work_order(args.discipline, args.repair)
@@ -20,13 +20,12 @@ class WorkOrders
 
     def work_order(discipline, repair)
         @settings = get_settings
+        @ordinals = $ORDINALS
         crafting_data = get_data('crafting')
         @recipe_parts = crafting_data['recipe_parts']
         @bag = @settings.crafting_container
         @bag_items = @settings.crafting_items_in_container
         @hometown = @settings.crafting_hometown || @settings.hometown
-        @use_own_ingot_type = @settings.use_own_ingot_type
-        @deed_own_ingot = @settings.deed_own_ingot
         deeds_data = get_data('crafting').deeds[@hometown]
         @deeds_room = deeds_data['room']
         @deeds_number = deeds_data['medium_number']
@@ -39,6 +38,7 @@ class WorkOrders
         @retain_crafting_materials = @settings.retain_crafting_materials
         @workorders_repair = @settings.workorders_repair
         @workorders_override_store = @settings.workorders_override_store
+        @workorders_repair_own_tools = @settings.workorders_repair_own_tools
         @workorders_materials = @settings.workorders_materials
         @workorders_deed_storage = @settings.workorders_deed_storage || @bag
         @workorders_collect_herbs = @settings.workorders_collect_herbs
@@ -75,6 +75,7 @@ class WorkOrders
         when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
             materials_info = crafting_data['stock'][@workorders_materials['metal_type']]
             skill,tools,@belt = ['Forging',@settings.forging_tools,@settings.forging_belt]
+            base = 'ingot'
             craft_method = :forge_prep
         when 'tailoring'
             book,script = ['outfitting','sew']
@@ -128,17 +129,18 @@ class WorkOrders
             exit
         end
 
-        total_cost = DRCC.crafting_cost(item, @hometown, skill = 'Alchemy' ? item['part']+['alcohol','water','coal'] : item['part'], quantity, (skill =~ /alchemy|enchanting/i) || (skill == 'Forging' && @use_own_ingot_type) ? false : materials_info)
+        total_cost = DRCC.crafting_cost(item, @hometown, skill = 'Alchemy' ? item['part']+['alcohol','water','coal'] : item['part'], quantity, (skill =~ /alchemy|enchanting/i) || (skill == 'Forging' && @workorders_materials['custom'][base]) ? false : materials_info)
         total_cost += 5000 if @workorders_repair
         DRCM.ensure_copper_on_hand(total_cost, @settings, @hometown)
 
+
         send(craft_method, info, materials_info, item, quantity, book, script, base)
 
-        tool_drop(info, tools) if @workorders_repair
+        tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair
 
         complete_work_order(info)
 
-        tool_pickup(info)
+        tool_pickup(get_data('crafting')['shaping'][@hometown])
 
         repair_own_tools(info, tools) if @workorders_repair_own_tools
     end
@@ -182,22 +184,35 @@ class WorkOrders
 ################           WORK SECTION            ######################
 
     def craft_prep(info, materials_info, item, quantity, book, script, base)
-        base_to_buy,scrap = calc_stock(materials_info, item, quantity, base)
-        buy_material_stackables(info, materials_info, quantity, base_to_buy, base) if base_to_buy
+        unless @workorders_materials['custom'][base] && check_own_materials(item, quantity, @workorders_materials['custom'][base], base)
+            type = materials_info['stock-name']
+            base_to_buy,scrap = calc_stock(materials_info, item, quantity, base)
+            buy_material_stackables(info, materials_info, quantity, base_to_buy, base) if base_to_buy
+        else
+            type = @workorders_materials['custom'][base]
+        end
+
         order_parts(item['part'], quantity) if item['part']
         DRCC.find_shaping_room(@hometown, @work_room)
-        while check_logbook_count(book, quantity)
-            DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], materials_info['stock-name'], item['noun']])
+        quantity.times do
+            break unless check_logbook_count(book, quantity)
+            DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
             DRCC.logbook_item(book, item['noun'], @bag)
         end
-        trash_crafting_items("#{materials_info['stock-name']} #{base}", info) if scrap && !@retain_crafting_materials
+
+        if @workorders_materials['custom'][base] && DRCI.exists?("#{type} #{base}")
+            deed_item("#{type} #{base}")
+        else
+            trash_crafting_item("#{materials_info['stock-name']} #{base}", info) if scrap && !@retain_crafting_materials
+        end
     end
 
     def stone_prep(info, materials_info, item, quantity, book, script, base)
         buy_material_singles(info, materials_info, quantity)
         order_parts(item['part'], quantity) if item['part']
         DRCC.find_shaping_room(@hometown)
-        while check_logbook_count("engineering", quantity)
+        quantity.times do
+            break unless check_logbook_count("engineering", quantity)
             DRC.wait_for_script_to_complete('carve', [item['chapter'], item['name'], materials_info['stock-name'], item['noun']])
             DRCC.logbook_item('engineering', item['noun'], @bag)
         end
@@ -205,15 +220,16 @@ class WorkOrders
 
     def remedy_prep(info, materials_info, item, quantity, book, script, base)
         leftovers = buy_remedies(info, materials_info, item, quantity)
-        echo leftovers
         @bag_items << leftovers
         DRCT.walk_to(@work_room)
-        while check_logbook_count("alchemy", quantity)
+        quantity.times do
             DRC.wait_for_script_to_complete('slim-remedy', [item['name']])
-            DRCC.logbook_item('alchemy', item['noun'], @bag)
+            name = DRC.right_hand
+            break if finished_remedies(name, quantity) >= quantity*5
+            DRCC.stow_crafting_item(name, @bag, nil)
         end
-        echo leftovers
-        leftovers.each { |part| trash_crafting_items(part, info) }
+        log_remedy(item['noun'], quantity)
+        leftovers.each { |part| trash_crafting_item(part, info) }
     end
 
     def enchant_prep(info, materials_info, item, quantity, book, script, base)
@@ -224,31 +240,30 @@ class WorkOrders
         DRCI.stow_hands
         # Start crafting #
         DRCC.find_enchanting_room(@hometown, @work_room)
-        while check_logbook_count("enchanting", quantity)
+        quantity.times do
             DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
             DRCC.logbook_item('enchanting', item['noun'], @bag)
         end
     end
 
     def forge_prep(info, materials_info, item, quantity, book, script, base)
-        unless @use_own_ingot_type && check_own_ingot(item, quantity)
+        unless @workorders_materials['custom'][base] && check_own_ingot(item, quantity, @workorders_materials['custom'][base])
             buy_material_singles(info, materials_info, quantity)
-            base,scrap = calc_stock(materials_info, item, quantity, 'ingot')
+            base,scrap = calc_stock(materials_info, item, quantity, base)
         end
-        while check_logbook_count("forging", quantity)
+        quantity.times do
+            break unless check_logbook_count("forging", quantity)
             DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
             DRCC.logbook_item('forging', item['noun'], @bag)
             DRCT.dispose("#{materials_info['stock-name']} ingot") if scrap
         end
-        smelt if @smelt
-        deed_item("#{@use_own_ingot_type} ingot") if @deed_own_ingot
+        smelt(@workorders_materials['custom'][base]) if @smelt
+        deed_item("#{@workorders_materials['custom'][base]} #{base}") if @workorders_materials['custom'][base]
     end
 
     def check_logbook_count(craft, quantity)
-        count ||= quantity + 1
-        return false if count <= 0
         if /(\d)/ =~ DRC.bput("read my #{craft} logbook", /This work order appears to be complete/, /You must bundle and deliver (\d+) more/, /^This logbook is not currently tracking any work orders/)
-            return true
+            true
         else
             false
         end
@@ -290,6 +305,14 @@ class WorkOrders
         item['part'].each { |part| buy_material_singles(info, materials_info[part], 1, part) } # purchase one of each of these bits
         buy_material_singles(get_data('crafting')['blacksmithing'][@hometown], materials_info['coal'], 1, 'nugget') && item['part'] += ['coal nugget'] # Buy a single coal nugget, plenty, and add it to our parts list
         return item['part'] # Return a list of parts for disposal at the end.
+    end
+
+    def finished_remedies(name, quantity)
+        type,base = name.split(' ')
+        until /referring/ =~ DRC.bput("get #{type} #{base} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+            fput("combine")
+        end
+        return material_volume(type, base)
     end
 
     def calc_stock(materials_info, recipe, quantity, base = '')
@@ -334,7 +357,7 @@ class WorkOrders
         end
     end
     
-    def trash_crafting_items(trash, info)
+    def trash_crafting_item(trash, info)
         DRCT.walk_to(info['trash-room'])
         DRCC.get_crafting_item(trash, @bag, @bag_items, @belt)
         DRCI.dispose_trash(trash)
@@ -381,86 +404,109 @@ class WorkOrders
         end
     end
 
-    def redeem_deed(deed_type, base)
-        unless /referring/ =~ DRC.bput("get #{$ORDINALS.first} #{deed_type} deed from my #{@workorders_deed_storage}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) || [DRC.right_hand,DRC.left_hand].compact.include?("deed")
+    def redeem_deed(deed_type, base = '')
+        unless /referring/ =~ DRC.bput("get #{@ordinals.first} #{deed_type} deed from my #{@workorders_deed_storage}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
             if /explains/ =~ DRC.bput("tap my deed", /^An attendant arrives/, /^The worker explains/)
-                DRCC.stow_crafting_item('deed', @bag, nil)
-                $ORDINALS.shift
-                redeem_deed(deed_type)
+                DRCC.stow_crafting_item('deed', @workorders_deed_storage, nil)
+                @ordinals.shift
+                return redeem_deed(deed_type, base)
             end
             pause 0.5
-            DRC.bput("get #{deed_type} #{base}", /^You pick up/) unless checkleft || checkright
-            DRCC.stow_crafting_item([DRC.right_hand,DRC.left_hand].compact, @bag, nil)
+            DRC.bput("get #{deed_type} #{base}", /^You pick up/) unless checkleft
+            true
         else
             DRC.message("Missing the required deeds for #{deed_type}")
-            exit
+            false
         end
     end
 
     def deed_item(item)
-        unless DRC.bput('look my deed packet', /You count \d+ deed claim forms remaining/, /I could not find what you were referring to/) =~ /You count \d+ deed claim forms remaining/
+        if /I could not find/ =~ DRC.bput('look my deed packet', /You count \d+ deed claim forms remaining/, /I could not find what you were referring to/)
             DRCM.ensure_copper_on_hand(@cash_on_hand || 10_000, @settings)
             DRCT.order_item(@deeds_room, @deeds_number)
         end
         DRC.bput("get my packet", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
         DRC.bput("get my #{item}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
         DRC.bput("push my #{item} with packet", /^You push/)
-        [DRC.right_hand,DRC.left_hand].compact.each do |item|
-            DRCC.stow_crafting_item(item, @bag, nil)
-        end
+        DRCC.stow_crafting_item("packet", @bag, nil)
+        DRCC.stow_crafting_item("deed", @workorders_deed_storage, nil)
     end
 
     def ingot_volume(material)
         DRC.bput("analyze my #{material} ingot", /About \d+ volume/).scan(/\d+/).first.to_i
     end
 
+    def material_volume(type, base)
+        DRC.bput("count my #{type} #{base}", /^You count out (\d+) (pieces|uses|yards).*(lumber|remaining|material)/).scan(/\d+/).first.to_i
+    end
+
     def deed_volume(material)
         DRC.bput("read my #{material} deed", /Volume:\s*\d+/, /Amount:\s*\d+/, /Pieces:\s*\d+/).scan(/\d+/).first.to_i
     end
 
-    def check_own_ingot(item, quantity)
-        if /referring/ =~ DRC.bput("get my #{@use_own_ingot_type} ingot", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) 
-            if /referring/ =~ DRC.bput("get my #{@use_own_ingot_type} deed", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+    def check_own_materials(item, quantity, type, base)
+        volume = 0
+        while volume < (item['volume'] * quantity)
+            unless /referring/ =~ DRC.bput("get #{type} #{base} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /^What were you referring to/)
+                volume = material_volume(type, base)
+                next
+            end
+            if volume < (item['volume'] * quantity)
+                if redeem_deed(type, base)
+                    volume += material_volume(type, base)
+                    if [DRC.right_hand,DRC.left_hand].compact.size > 1
+                        fput("combine")
+                    end
+                else
+                    DRC.message("Out of #{base} and deeds")
+                    DRCI.stow_hands
+                    return false
+                end
+            end
+        end
+        true
+    end
+
+    def check_own_ingot(item, quantity, type)
+        if /referring/ =~ DRC.bput("get my #{type} ingot", /^You get/, /^You are already/, /^You're already/, /^What were you referring to/) 
+            if volume = deed_volume(type)                
+                redeem_deed(type, 'ingot')
+            else
                 echo('out of material/deeds')
                 return false
-            else
-                volume = deed_volume(@use_own_ingot_type)
-                redeem_deed(@use_own_ingot_type)
             end
         end
 
-        volume ||= ingot_volume(@use_own_ingot_type)
+        volume ||= ingot_volume(type)
 
         DRCI.stow_hands
         @smelt = false
 
         if volume < quantity * item['volume']
             @smelt = true
-            if /referring/ =~ DRC.bput("get my #{@use_own_ingot_type} deed", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+            if volume = deed_volume(type)
+                redeem_deed(type, 'ingot')
+            else
                 echo('out of material/deeds')
                 return false
-            else
-                volume = deed_volume(@use_own_ingot_type)
-                redeem_deed(@use_own_ingot_type)
             end
-            volume = ingot_volume(@use_own_ingot_type)
         end
 
         DRCI.stow_hands
 
         if volume < quantity * item['volume']
             echo('out of material/deeds')
-            smelt
-            return check_own_ingot(item, quantity)
+            smelt(type)
+            return check_own_ingot(item, quantity, type)
         end
 
         true
     end
 
-    def smelt
+    def smelt(type)
         DRCC.find_empty_crucible(@hometown)
         2.times do
-            DRC.bput("get my #{@use_own_ingot_type} ingot", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+            DRC.bput("get my #{type} ingot", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
             fput('put my ingot in cruc')
         end
         DRC.wait_for_script_to_complete('smelt')
@@ -506,6 +552,26 @@ class WorkOrders
         end
         DRCC.stow_crafting_item('logbook', @bag, nil)
         exit
+    end    
+
+    def log_remedy(name, quantity)
+        return unless name
+        quantity.times do
+            DRC.bput("mark my #{name} at 5", /^You measure out/, /^There is not enough/, /^You must be holding/)
+            DRC.bput("break my #{name}", /^You carefully break off/)
+            DRCC.stow_crafting_item(name, @bag, nil)
+        end
+        mod = ''
+        if checkleft
+            mod = 'second'
+            DRCC.stow_crafting_item(name, @bag, nil)
+        end
+        DRC.bput("get my alchemy logbook", 'You get')
+        quantity.times do
+            DRC.bput("get #{mod} #{name} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+            DRC.bput("bundle my #{name} with my logbook", /^You notate the/)
+        end
+        DRC.bput("put my alchemy logbook in my #{@bag}", 'You put', 'What were you referring to')
     end
 
     def complete_work_order(info)

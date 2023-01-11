@@ -136,11 +136,11 @@ class WorkOrders
 
         send(craft_method, info, materials_info, item, quantity, book, script, base)
 
-        tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair
+        tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair && !@workorders_repair_own_tools
 
         complete_work_order(info)
 
-        tool_pickup(get_data('crafting')['shaping'][@hometown])
+        tool_pickup(get_data('crafting')['shaping'][@hometown]) && !@workorders_repair_own_tools
 
         repair_own_tools(info, tools) if @workorders_repair_own_tools
     end
@@ -242,9 +242,12 @@ class WorkOrders
         DRCC.find_enchanting_room(@hometown, @work_room)
         quantity.times do
             DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
-            DRCC.logbook_item('enchanting', item['noun'], @bag)
+            DRCC.logbook_item('enchanting', item['noun'].split(' ').last, @bag)
         end
     end
+    ## TODO:
+    # 1. ingot calcs, minimizing waste on purchases
+    # 2. bingots with above
 
     def forge_prep(info, materials_info, item, quantity, book, script, base)
         unless @workorders_materials['custom'][base] && check_own_ingot(item, quantity, @workorders_materials['custom'][base])
@@ -297,7 +300,8 @@ class WorkOrders
     def buy_remedies(info, materials_info, item, quantity)
         herb_list = ['crushed flowers', 'muljin','belradi','dioica','hulnik','aloe','eghmok','lujeakave','yelith','cebi','blocil','hulij','nuloe','hisan']
         if herb_list.include?(item['part'].first)
-            collect_and_process(item, item['part'].first, quantity)
+            needed = item['part'].first.split(' ').last
+            collect_and_process(item, needed, quantity)
         else
             quantity.times { buy_material_singles(info, materials_info[item['part'].first], 1, item['part'].first) } # Buy one  main herb stack for each remedy to craft
         end
@@ -369,21 +373,31 @@ class WorkOrders
     ## 1. use_own_lumber
     ## 2. consolidate, maybe even move entirely to calc
 
-    def collect_and_process(recipe, herb_needed, quantity) # requires significant outdoorsmanship skill and somewhat careful selection of an outdoors room. Alternative is just foraging and processing your own.
+    def collect_and_process(recipe, herb_needed, quantity) # can require significant outdoorsmanship skill and somewhat careful selection of an outdoors room. Alternative is just foraging and processing your own.
         unless @workorders_collect_herbs
-            quantity.times { redeem_deed(herb_needed) }
+            quantity.times { DRCC.stow_crafting_item(DRC.left_hand, @bag, nil) if redeem_deed(herb_needed) }
             return
         end
         forage_name = ['muljin sap','belradi moss','dioica sap','hulnik grass','aloe leaves','eghmok moss','lujeakave root','yelith root','cebi root','blocil berries','hulij leaves','nuloe stem','hisan flower']
-        herb = forage_name.find { |h| h.include?(herb_needed) } || 'blue flowers' # crushed flowers is the special case here, so unless we find a match, it becomes crushed flowers.
+        herb = forage_name.find { |h| h.include?(herb_needed) } || 'blue flower' # crushed flowers is the special case here, so unless we find a match, it defaults to blue flowers.
         DRCT.walk_to(@settings.outdoors_room)
         flowers,needed = [0,quantity] # number of individual flower stacks, representing 1 does, and 25 count stacks, representing 5 doses
         until flowers >= 5*quantity
-            unless /manage/ =~ DRC.bput("collect #{herb}", /^You manage to collect/, /^You.*(forage|wander) around/, /^You find something dead/)
+            case DRC.bput("collect #{herb}", /^You manage to collect/, /^You.*(forage|wander) around/, /^You find something dead/, /too cluttered/)
+            when /You.*(forage|wander) around/, /You find something dead/
                 DRC.message("Failed to collect #{herb}. Either it cannot be found here or you don't have the skill to collect it.\nYou will have to collect your own herbs for this recipe going forwards.\nChange yaml setting: workorders_collect_herbs to false.")
                 exit
+            when /too cluttered/
+                fput("dump junk")
+                pause 60
+                redo
             end
-            until /Stow what/ =~ DRC.bput("stow #{herb}", /^You put your/, /^Stow what/)
+            until /(There doesn't seem to be anything left in the pile|You pick up)/ =~ DRC.bput("get #{herb}", /^You get.*a pile on the ground/, /^You pick up/, /^There doesn't seem to be anything left in the pile/) 
+                DRC.bput("put my #{herb} in my #{@bag}", /^You put your/)
+                flowers += 1
+            end
+            if checkright
+                DRC.bput("put my #{herb} in my #{@bag}", /^You put your/)
                 flowers += 1
             end
         end
@@ -391,7 +405,7 @@ class WorkOrders
         process = recipe['container'] == 'bowl' ? "put my #{herb} in grinder" : "put my #{herb} in press"
         quantity.times do
             5.times do
-                DRC.bput("get #{herb} from my carryall", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+                DRC.bput("get #{herb} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
                 DRC.bput(process, /^You place some/)
                 DRC.bput("combine", /^You must be holding/, /^You combine/)
                 flowers -= 1
@@ -412,7 +426,7 @@ class WorkOrders
                 return redeem_deed(deed_type, base)
             end
             pause 0.5
-            DRC.bput("get #{deed_type} #{base}", /^You pick up/) unless checkleft
+            DRC.bput("get #{deed_type} #{base}", /^You pick up/, /^You are already/, /^You're already/)
             true
         else
             DRC.message("Missing the required deeds for #{deed_type}")
@@ -453,10 +467,10 @@ class WorkOrders
             end
             if volume < (item['volume'] * quantity)
                 if redeem_deed(type, base)
-                    volume += material_volume(type, base)
                     if [DRC.right_hand,DRC.left_hand].compact.size > 1
                         fput("combine")
                     end
+                    volume += material_volume(type, base)
                 else
                     DRC.message("Out of #{base} and deeds")
                     DRCI.stow_hands
@@ -557,8 +571,8 @@ class WorkOrders
     def log_remedy(name, quantity)
         return unless name
         quantity.times do
-            DRC.bput("mark my #{name} at 5", /^You measure out/, /^There is not enough/, /^You must be holding/)
-            DRC.bput("break my #{name}", /^You carefully break off/)
+            DRC.bput("mark my #{name} at 5", /^You measure out/, /^There is not enough/, /^You must be holding/) # if we have exactly the number required, the last remedy won't mark
+            DRC.bput("break my #{name}", /^You carefully break off/, /^You can't break that/) # and won't break. Bundles fine.
             DRCC.stow_crafting_item(name, @bag, nil)
         end
         mod = ''
@@ -569,7 +583,9 @@ class WorkOrders
         DRC.bput("get my alchemy logbook", 'You get')
         quantity.times do
             DRC.bput("get #{mod} #{name} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
-            DRC.bput("bundle my #{name} with my logbook", /^You notate the/)
+            unless /You notate the/ =~ DRC.bput("bundle my #{name} with my logbook", /^You notate the/, /^The workorder requires/)
+                DRCT.dispose(name)
+            end
         end
         DRC.bput("put my alchemy logbook in my #{@bag}", 'You put', 'What were you referring to')
     end

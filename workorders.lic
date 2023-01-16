@@ -10,19 +10,16 @@ class WorkOrders
         arg_definitions = [
         [
             { name: 'discipline', options: %w[blacksmithing weaponsmithing tailoring shaping carving remedies artificing], description: 'What type of workorder to do?' },
+            { name: 'train', regex: /train/i, optional: true, description: 'train a particular craft to mindlock instead of doing a workorder' },
             { name: 'repair', regex: /repair/i, optional: true, description: 'repair tools instead of crafting' }
         ]
         ]
 
         args = parse_args(arg_definitions)
-        work_order(args.discipline, args.repair)
-    end
-
-    def work_order(discipline, repair)
         @settings = get_settings
         @ordinals = $ORDINALS
-        crafting_data = get_data('crafting')
-        @recipe_parts = crafting_data['recipe_parts']
+        @crafting_data = get_data('crafting')
+        @recipe_parts = @crafting_data['recipe_parts']
         @bag = @settings.crafting_container
         @bag_items = @settings.crafting_items_in_container
         @hometown = @settings.crafting_hometown || @settings.hometown
@@ -42,21 +39,65 @@ class WorkOrders
         @workorders_materials = @settings.workorders_materials
         @workorders_deed_storage = @settings.workorders_deed_storage || @bag
         @workorders_collect_herbs = @settings.workorders_collect_herbs
-
         Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
-
         DRC.wait_for_script_to_complete('safe-room', ['force']) if @settings.workorders_force_heal
 
-        info =      if discipline =~ /weaponsmithing|armorsmithing/i
-                        info = crafting_data['blacksmithing'][@hometown]
-                    else
-                        crafting_data[discipline][@hometown]
-                    end
+        if args.train
+            train_craft(args.discipline.downcase)
+        else
+            work_order(args.discipline, args.repair)
+        end
+    end
 
+    def train_craft(discipline)
+        @skip_logging = true
+
+        train_map = {
+            'tailoring' => {25=>'some knitted socks',50=>'some knitted mittens',100=>'a knitted hat',200=>'some knitted gloves',300=>'some knitted hose',425=>'a knitted cloak',500=>'a cloth haversack',600=>'a deeply-hooded cloak',850=>"some flowing cloth robes",1000=>'a cloth mining belt',1400=>"a cloth survival belt",1750=>"a cloth artisan's belt"},
+            'shaping'=> {25=>'a wood band',50=>'a wood bracelet',100=>'a wood cloak pin',200=>'a wood amulet',300=>'a wood brooch',425=>'a wood armband',500=>'a wood choker',600=>'an articulated wood necklace',850=>'a wood crown',1000=>'a wood comb',1400=>'a wood haircomb',1750=>'a detailed wood statue'},
+            'blacksmithing'    => {25=>'a shallow metal cup',50=>'a short metal mug',100=>'a back scratcher',200=>'a small metal flask',300=>'a metal lockpick ring',425=>'a metal armband',500=>'some metal clippers',600=>'a triangular wire sieve',850=>'a serrated hide scraper',1000=>'a metal mask',1400=>'some thin sewing needles',1750=>'a trapezoidal wire sieve'},
+            'remedies'    => {25=>'some blister cream',50=>'some moisturizing ointment',100=>'some chest salve',200=>'a neck potion',300=>'some limb salve',425=>'some chest ungent',500=>'some neck tonic',600=>'some eye tonic',850=>'a body elixir',1000=>'a general elixir',1400=>'some refreshment elixir',1750=>'some vigor poultices'},
+            'artificing' => {25=>'a radiant trinket',50=>'a mana trinket',100=>'a wind trinket',200=>'an earth trinket',300=>'a fire trinket',425=>'a water trinket',500=>'simple gwethsmasher',600=>'a destructive focus',850=>'a fire focus',1000=>'a frost focus',1400=>'an electric focus',1750=>'an electric focus'}
+          }
+        @rank_map = {'tailoring'=>'Outfitting','shaping'=>'Engineering','blacksmithing'=>'Forging','remedies'=>'Alchemy','artificing'=>'Enchanting'}
+        
+        unless train_map[discipline]
+            DRC.message("#{discipline} is not currently supported for training option. Options include: tailoring, shaping, blacksmithing, remedies, and artificing.")
+            exit
+        end
+        quantity = (34 - DRSkill.getxp(@rank_map[discipline]))/10 # sets quantity based on current mindstate, max of 3 items.
+        
+        unless quantity > 0 # mindstate of 25 or greater ends the training prematurely
+            DRC.message("Current mindstate in #{discipline} is above training threshold of 25, exiting")
+            exit
+        end
+
+        recipe_name = train_map[discipline].find { |rank,item| DRSkill.getrank(@rank_map[discipline]) <= rank }.last
+        info = @crafting_data[discipline][@hometown]
+        item = get_data('recipes')[discipline].find { |recipe| recipe_name == recipe['name'] }
+        craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info = set_discipline_info(discipline, item)
+
+        
+        send(craft_method, info, materials_info, item, quantity, book, script, base)
+
+        tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair && !@workorders_repair_own_tools
+
+        tool_pickup(get_data('crafting')['shaping'][@hometown]) && !@workorders_repair_own_tools
+
+        repair_own_tools(info, tools) if @workorders_repair_own_tools
+    end
+
+    def work_order(discipline, repair)
         recipes =   if @recipe_overrides[discipline]
                         get_data('recipes')[discipline].select { |recipe| @recipe_overrides[discipline].find { |name| recipe['name'] =~ /#{name}/i } }
                     else
                         get_data('recipes')[discipline].select { |recipe| recipe['work_order'] }
+                    end
+
+        info =      if discipline =~ /weaponsmithing|armorsmithing/i
+                        @crafting_data['blacksmithing'][@hometown]
+                    else
+                        @crafting_data[discipline][@hometown]
                     end
 
         recipes = discipline == 'carving' ? recipes.select { |x| x['material'] == @carving_type } : recipes
@@ -69,51 +110,8 @@ class WorkOrders
             end
             item = recipes.find { |r| r['name'] == item_name }
         end
-        craft_method,book,script,base = [:craft_prep,'','','']
-
-        case discipline
-        when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
-            materials_info = crafting_data['stock'][@workorders_materials['metal_type']]
-            skill,tools,@belt = ['Forging',@settings.forging_tools,@settings.forging_belt]
-            base = 'ingot'
-            craft_method = :forge_prep
-        when 'tailoring'
-            book,script = ['outfitting','sew']
-            skill,tools,@belt,@work_room = ['Outfitting',@settings.outfitting_tools,@settings.outfitting_belt,@settings.outfitting_room]
-            if item['chapter'] == 5
-                base = 'yarn'
-                materials_info = crafting_data['stock'][@workorders_materials['knit_type']]
-            elsif [2,3,4].include?(item['chapter'])
-                base = 'cloth'
-                materials_info = crafting_data['stock'][@workorders_materials['fabric_type']]
-            else
-                base = 'leather'
-                materials_info = crafting_data['stock'][@workorders_materials['leather_type']]
-            end
-        when 'shaping'
-            book,script,base = ['engineering','shape','lumber']
-            materials_info = crafting_data['stock'][@workorders_materials['wood_type']]
-            skill,tools,@belt,@work_room = ['Engineering',@settings.shaping_tools,@settings.engineering_belt,@settings.engineering_room]
-        when 'carving'
-            book,script = ['engineering','carve']
-            if @carving_type == 'bone'
-                base = 'stack'
-                materials_info = crafting_data['stock'][@workorders_materials['bone_type']]
-            else
-                materials_info = crafting_data['stock'][@workorders_materials['stone_type']]
-                craft_method = :stone_prep
-            end
-            skill,tools,@belt,@work_room = ['Engineering',@settings.carving_tools,@settings.engineering_belt,@settings.engineering_room]
-        when 'remedies'
-            book,script,materials_info,craft_method = ['alchemy', 'slim-remedy',crafting_data['stock'],:remedy_prep]
-            skill,tools,@belt,@work_room = ['Alchemy',@settings.alchemy_tools,@settings.alchemy_belt,@settings.alchemy_room]
-        when 'artificing'
-            book,script,materials_info,craft_method = ['enchanting','enchant',crafting_data['stock'],:enchant_prep]
-            skill,tools,@belt,@work_room = ['Enchanting',@settings.enchanting_tools,@settings.enchanting_belt,@settings.enchanting_room]
-        else
-            echo 'No discipline found?'
-            return
-        end
+        
+        craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info = set_discipline_info(discipline, item)
 
         if repair && @workorders_repair_own_tools
             repair_own_tools(info, tools)
@@ -121,11 +119,6 @@ class WorkOrders
         elsif repair
             tool_drop(info, tools)
             tool_pickup(info)
-            exit
-        end
-
-        if DRSkill.getxp(skill) > @craft_max_mindstate
-            echo("Exiting because your current mindstate for #{skill} over the set maximum craft_max_mindstate:#{@craft_max_mindstate}")
             exit
         end
 
@@ -140,9 +133,57 @@ class WorkOrders
 
         complete_work_order(info)
 
-        tool_pickup(get_data('crafting')['shaping'][@hometown]) && !@workorders_repair_own_tools
+        tool_pickup(get_data('crafting')['shaping'][@hometown]) if @workorders_repair && !@workorders_repair_own_tools
 
         repair_own_tools(info, tools) if @workorders_repair_own_tools
+    end
+    
+    def set_discipline_info(discipline, item)
+
+
+        craft_method,book,script,base = [:craft_prep,'','','']
+        case discipline
+        when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
+            materials_info = @crafting_data['stock'][@workorders_materials['metal_type']]
+            skill,tools,@belt = ['Forging',@settings.forging_tools,@settings.forging_belt]
+            base = 'ingot'
+            craft_method = :forge_prep
+        when 'tailoring'
+            book,script = ['outfitting','sew']
+            skill,tools,@belt,@work_room = ['Outfitting',@settings.outfitting_tools,@settings.outfitting_belt,@settings.outfitting_room]
+            if item['chapter'] == 5
+                base = 'yarn'
+                materials_info = @crafting_data['stock'][@workorders_materials['knit_type']]
+            elsif [2,3,4].include?(item['chapter'])
+                base = 'cloth'
+                materials_info = @crafting_data['stock'][@workorders_materials['fabric_type']]
+            else
+                base = 'leather'
+                materials_info = @crafting_data['stock'][@workorders_materials['leather_type']]
+            end
+        when 'shaping'
+            book,script,base = ['engineering','shape','lumber']
+            materials_info = @crafting_data['stock'][@workorders_materials['wood_type']]
+            skill,tools,@belt,@work_room = ['Engineering',@settings.shaping_tools,@settings.engineering_belt,@settings.engineering_room]
+        when 'carving'
+            book,script = ['engineering','carve']
+            if @carving_type == 'bone'
+                base = 'stack'
+                materials_info = @crafting_data['stock'][@workorders_materials['bone_type']]
+            else
+                materials_info = @crafting_data['stock'][@workorders_materials['stone_type']]
+                craft_method = :stone_prep
+            end
+            skill,tools,@belt,@work_room = ['Engineering',@settings.carving_tools,@settings.engineering_belt,@settings.engineering_room]
+        when 'remedies'
+            book,script,materials_info,craft_method = ['alchemy', 'slim-remedy',@crafting_data['stock'],:remedy_prep]
+            skill,tools,@belt,@work_room = ['Alchemy',@settings.alchemy_tools,@settings.alchemy_belt,@settings.alchemy_room]
+        when 'artificing'
+            book,script,materials_info,craft_method = ['enchanting','enchant',@crafting_data['stock'],:enchant_prep]
+            skill,tools,@belt,@work_room = ['Enchanting',@settings.enchanting_tools,@settings.enchanting_belt,@settings.enchanting_room]
+        end
+
+        return [craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info]
     end
 
 ################             REPAIR                ######################
@@ -195,9 +236,15 @@ class WorkOrders
         order_parts(item['part'], quantity) if item['part']
         DRCC.find_shaping_room(@hometown, @work_room)
         quantity.times do
-            break unless check_logbook_count(book, quantity)
-            DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
-            DRCC.logbook_item(book, item['noun'], @bag)
+            if @skip_logging
+                DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
+                DRCI.dispose_trash(item['noun'])
+                break if DRSkill.getxp(book.capitalize) > 28
+            else
+                break unless check_logbook_count(book, quantity)
+                DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
+                DRCC.logbook_item(book, item['noun'], @bag)
+            end
         end
 
         if @workorders_materials['custom'][base] && DRCI.exists?("#{type} #{base}")
@@ -225,8 +272,13 @@ class WorkOrders
         quantity.times do
             DRC.wait_for_script_to_complete('slim-remedy', [item['name']])
             name = DRC.right_hand
-            break if finished_remedies(name, quantity) >= quantity*5
-            DRCC.stow_crafting_item(name, @bag, nil)
+            if @skip_logging
+                DRCI.dispose_trash(name)
+                break if DRSkill.getxp('Alchemy') > 28
+            else
+                break if finished_remedies(name, quantity) >= quantity*5
+                DRCC.stow_crafting_item(name, @bag, nil)
+            end
         end
         log_remedy(item['noun'], quantity)
         leftovers.each { |part| trash_crafting_item(part, info) }
@@ -242,7 +294,12 @@ class WorkOrders
         DRCC.find_enchanting_room(@hometown, @work_room)
         quantity.times do
             DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
-            DRCC.logbook_item('enchanting', item['noun'].split(' ').last, @bag)
+            if @skip_logging                
+                DRCI.dispose_trash(item['noun'].split(' ').last)
+                break if DRSkill.getxp('Enchanting') > 28
+            else
+                DRCC.logbook_item('enchanting', item['noun'].split(' ').last, @bag)
+            end
         end
     end
     ## TODO:
@@ -255,9 +312,15 @@ class WorkOrders
             base,scrap = calc_stock(materials_info, item, quantity, base)
         end
         quantity.times do
-            break unless check_logbook_count("forging", quantity)
-            DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
-            DRCC.logbook_item('forging', item['noun'], @bag)
+            if @skip_logging
+                DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
+                DRCI.dispose_trash(item['noun'])
+                break if DRSkill.getxp('Forging') > 28
+            else
+                break unless check_logbook_count("forging", quantity)
+                DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
+                DRCC.logbook_item('forging', item['noun'], @bag)
+            end            
             DRCT.dispose("#{materials_info['stock-name']} ingot") if scrap
         end
         smelt(@workorders_materials['custom'][base]) if @smelt
@@ -298,14 +361,17 @@ class WorkOrders
     end
 
     def buy_remedies(info, materials_info, item, quantity)
-        herb_list = ['crushed flowers', 'muljin','belradi','dioica','hulnik','aloe','eghmok','lujeakave','yelith','cebi','blocil','hulij','nuloe','hisan']
-        if herb_list.include?(item['part'].first)
-            needed = item['part'].first.split(' ').last
-            collect_and_process(item, needed, quantity)
-        else
-            quantity.times { buy_material_singles(info, materials_info[item['part'].first], 1, item['part'].first) } # Buy one  main herb stack for each remedy to craft
+        herb_list = ['crushed flowers','muljin','belradi','dioica','hulnik','aloe','eghmok','lujeakave','yelith','cebi','blocil','hulij','nuloe','hisan']
+        item['part'].each do |part|
+            if herb_list.include?(part)
+                needed = part.split(' ').last
+                collect_and_process(item, needed, quantity)
+                item['part'].shift
+            else
+                quantity.times { buy_material_singles(info, materials_info[part.first], 1, part.first) } # Buy one  main herb stack for each remedy to craft
+            end
         end
-        item['part'].shift && item['part'] += ['water', 'alcohol'] # Update our parts list to remove the herb we've already purchased, and add the bits we might need
+        item['part'] += ['water', 'alcohol'] # Update our parts list to remove the herb we've already purchased, and add the bits we might need
         item['part'].each { |part| buy_material_singles(info, materials_info[part], 1, part) } # purchase one of each of these bits
         buy_material_singles(get_data('crafting')['blacksmithing'][@hometown], materials_info['coal'], 1, 'nugget') && item['part'] += ['coal nugget'] # Buy a single coal nugget, plenty, and add it to our parts list
         return item['part'] # Return a list of parts for disposal at the end.

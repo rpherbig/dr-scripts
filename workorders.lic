@@ -695,21 +695,84 @@ class WorkOrders
   end
 
   def enchanting_items(info, materials_info, recipe, quantity)
+    tally = 0
+
+    sigil_quantity = quantity
+
     DRCM.ensure_copper_on_hand(@cash_on_hand || 20_000, @settings)
     # Enchant Sigil #1
-    DRCC.order_enchant(info['stock-room'], quantity, recipe['enchant_stock1'], @bag, @belt)
+    # Need to check if nil so we can check for all sigils. Some recipes only use ones
+    # Tally is used to exit if 1 exists but will allow user to see which sigils they need to hunt.
+    tally += 1 if !DRCC.check_for_existing_sigil?(recipe['enchant_stock1_name'], recipe['enchant_stock1'], sigil_quantity, @bag, @belt, info)
 
     # Enchant Sigil #2
-    DRCC.order_enchant(info['stock-room'], quantity, recipe['enchant_stock2'], @bag, @belt) unless recipe['enchant_stock2'].nil?
+    # Check if the sigils are on the person or purchasable.
+    if !recipe['enchant_stock2_name'].nil?
+      sigil_quantity *= 2 if recipe['enchant_stock2_name'] == recipe['enchant_stock1_name']
+      tally += 1 if !DRCC.check_for_existing_sigil?(recipe['enchant_stock2_name'], recipe['enchant_stock2'], sigil_quantity, @bag, @belt, info)
+    end
 
-    # Sigil 3
-    DRCC.order_enchant(info['stock-room'], quantity, recipe['enchant_stock3'], @bag, @belt) unless recipe['enchant_stock3'].nil?
+    # Enchant Sigil #3
+    # Check if the sigils are on the person or purchasable.
+    # Reset sigil_quantity to quantity to avoid possible over buying
+    sigil_quantity = quantity
+    if !recipe['enchant_stock3_name'].nil?
+      if recipe['enchant_stock3_name'] == recipe['enchant_stock1_name'] && recipe['enchant_stock3_name'] == !recipe['enchant_stock2_name']
+        sigil_quantity *= 2
+      elsif recipe['enchant_stock3_name'] == recipe['enchant_stock1_name'] && recipe['enchant_stock3_name'] == recipe['enchant_stock2_name']
+        sigil_quantity *= 3
+      end
+      tally += 1 if !DRCC.check_for_existing_sigil?(recipe['enchant_stock3_name'], recipe['enchant_stock3'], sigil_quantity, @bag, @belt, info)
+    end
+
+    # Enchant Sigil #4
+    # Check if the sigils are on the person or purchasable.
+    # Reset sigil_quantity to quantity to avoid possible over buying
+    sigil_quantity = quantity
+    if !recipe['enchant_stock4_name'].nil?
+      if recipe['enchant_stock4_name'] == recipe['enchant_stock1_name'] && recipe['enchant_stock4_name'] == !recipe['enchant_stock2_name'] && recipe['enchant_stock4_name'] == !recipe['enchant_stock3_name']
+        sigil_quantity *= 2
+      elsif recipe['enchant_stock4_name'] == recipe['enchant_stock1_name'] && recipe['enchant_stock4_name'] == recipe['enchant_stock2_name'] && recipe['enchant_stock4_name'] == !recipe['enchant_stock3_name']
+        sigil_quantity *= 3
+      elsif recipe['enchant_stock4_name'] == recipe['enchant_stock1_name'] && recipe['enchant_stock4_name'] == recipe['enchant_stock2_name'] && recipe['enchant_stock4_name'] == recipe['enchant_stock3_name']
+        sigil_quantity *= 4
+      end
+      tally += 1 if !DRCC.check_for_existing_sigil?(recipe['enchant_stock4_name'], recipe['enchant_stock4'], sigil_quantity, @bag, @belt, info)
+    end
+
+    # Exit script if one of the four sigil checks is false.
+    exit if tally >= 1
 
     # Enchant component #1
-    DRCC.order_enchant(info['stock-room'], quantity, recipe['item'], @bag, @belt) unless recipe['item'].nil?
+    tmp_comp_count = 0
+    need_comp = 0
+    if recipe['item']
+      tmp_comp_count = DRCI.count_items_in_container(recipe['noun'].split.last, @bag)
+      if tmp_comp_count < quantity
+        need_comp = quantity - tmp_comp_count
+        # Found a weird challenge that made the temp_part_count equal 1 even though no "component" was in container
+        need_comp += 1 if reget(3, "but there is nothing in there like that") && (need_comp + tmp_comp_count) != quantity
+        DRC.message("need_comp with potiental plus 1 is #{need_comp}.")
+        DRCC.order_enchant(info['stock-room'], need_comp, recipe['item'], @bag, @belt)
+      end
+    end
 
     # Parts #
-    order_parts(recipe['part'], quantity) if recipe['part']
+    tmp_part_count = 0
+    need_part = 0
+    if recipe['part']
+      for p in recipe['part']
+        p.to_s
+        tmp_part_count = DRCI.count_items_in_container(p.split.last, @bag)
+        if tmp_part_count < quantity
+          need_part = quantity - tmp_part_count
+          # Found a weird challenge that made the temp_part_count equal 1 even though no "part" was in container
+          need_part += 1 if reget(3, "but there is nothing in there like that") && (need_part + tmp_part_count) != quantity
+          DRC.message("need_part with potiental plus 1 is #{need_part}.")
+          order_parts(recipe['part'], need_part)
+        end
+      end
+    end
 
     # Check for fount #
     DRCC.fount(info['tool-room'], 1, info['fount'], quantity, @bag, @bag_items, @belt)
@@ -719,11 +782,17 @@ class WorkOrders
     # Start crafting #
     DRCC.find_enchanting_room(@hometown, @enchanting_room)
 
-    quantity.times do
+    quantity.times do |count|
       DRC.wait_for_script_to_complete('enchant', [recipe['chapter'], recipe['name'], recipe['noun']])
-      bundle_item(recipe['noun'], info['logbook'])
-      case DRC.bput('read my enchanting logbook', 'This work order appears to be complete.', 'You must bundle and deliver \d+ more')
-      when /You must bundle and deliver \d+ more /
+      if recipe['name'].include?('fount')
+        product = "fount"
+      else
+        product = recipe['noun'].split.last
+      end
+      bundle_item(product, info['logbook'])
+      case DRC.bput('read my enchanting logbook', 'This work order appears to be complete.',\
+                    'You must bundle and deliver \d+ more')
+      when /You must bundle and deliver (\d+) more/
         log_num = Regexp.last_match(1).to_i
         break if count + 1 + log_num != quantity
       end
@@ -733,7 +802,7 @@ class WorkOrders
   def bundle_item(noun, logbook)
     noun = 'fount' if noun == 'small sphere'
     DRC.bput("get my #{logbook} logbook", 'You get')
-    if /requires items of/ =~ DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That\'s not going to work')
+    if /requires items of|Only undamaged enchanted/ =~ DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'Only undamaged enchanted items may be used with workorders.', 'That\'s not going to work')
       DRCT.dispose(noun)
     end
     DRCI.stow_hands

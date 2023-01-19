@@ -23,9 +23,8 @@ class WorkOrders
         @bag = @settings.crafting_container
         @bag_items = @settings.crafting_items_in_container
         @hometown = @settings.crafting_hometown || @settings.hometown
-        deeds_data = get_data('crafting').deeds[@hometown]
-        @deeds_room = deeds_data['room']
-        @deeds_number = deeds_data['medium_number']
+        @deeds_room = get_data('crafting').deeds[@hometown]['room']
+        @deeds_number = get_data('crafting').deeds[@hometown]['medium_number']
         @carving_type = @settings.carving_workorder_material_type
         @min_items = @settings.workorder_min_items
         @max_items = @settings.workorder_max_items
@@ -43,7 +42,7 @@ class WorkOrders
         DRC.wait_for_script_to_complete('safe-room', ['force']) if @settings.workorders_force_heal
 
         if args.train
-            train_craft(args.discipline.downcase)
+            train_craft(args.discipline)
         else
             work_order(args.discipline, args.repair)
         end
@@ -52,7 +51,7 @@ class WorkOrders
     def train_craft(discipline)
         @skip_logging = true
 
-        # This can be a little confusing, the train_map should be read as "if skill in this craft is less than <rank>, craft this item".
+        # This can be a little confusing, the train_map should be read as "if skill in this craft is less than <rank>, craft this item". 
         # So once you hit 26 ranks in Outfitting(tailoring) you'll start crafting 'some knitted mittens' instead of 'some knitted socks'.
         train_map = {
             'tailoring'     => {25=>'some knitted socks',50=>'some knitted mittens',100=>'a knitted hat',200=>'some knitted gloves',300=>'some knitted hose',425=>'a knitted cloak',500=>'a cloth haversack',600=>'a deeply-hooded cloak',850=>"some flowing cloth robes",1000=>'a cloth mining belt',1400=>"a cloth survival belt",1750=>"a cloth artisan's belt"},
@@ -68,18 +67,20 @@ class WorkOrders
             DRC.message("#{discipline} is not currently supported for training option. Options include: tailoring, shaping, blacksmithing, remedies, and artificing.")
             exit
         end
-        
+
         quantity = (34 - DRSkill.getxp(rank_map[discipline]))/10 # sets quantity based on current mindstate, max of 3 items.
-        
+        @items_remaining = quantity # for disposal of stock/parts if we hit our mindstate early
+
         unless quantity > 0 # mindstate of 25 or greater ends the training prematurely
-            DRC.message("Current mindstate in #{discipline} is #{DRSkill.getxp(rank_map[discipline])}, which is above training threshold of 25. Exiting")
+            DRC.message("Current mindstate in #{discipline} is #{DRSkill.getxp(rank_map[discipline])}, which is above training threshold of 24. Exiting")
             exit
         end
-
+        
         recipe_name = train_map[discipline].find { |rank,item| DRSkill.getrank(rank_map[discipline]) <= rank }.last # Selects first recipe with rank threshold higher than your current skill.
         info = @crafting_data[discipline][@hometown]
         item = get_data('recipes')[discipline].find { |recipe| recipe_name == recipe['name'] } # populates recipe data from base-recipes for a given item selected above
         craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info = set_discipline_info(discipline, item)
+        withdraw_funds(item, book, quantity, base, materials_info)
 
         DRC.message("Crafting #{item['name']} #{quantity} times to train #{rank_map[discipline]} from #{DRSkill.getxp(rank_map[discipline])}/34")
         
@@ -117,6 +118,7 @@ class WorkOrders
         end
         
         craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info = set_discipline_info(discipline, item)
+        withdraw_funds(item, book, quantity, base, materials_info)
 
         if repair && @workorders_repair_own_tools
             repair_own_tools(info, tools)
@@ -126,11 +128,6 @@ class WorkOrders
             tool_pickup(info)
             exit
         end
-
-        total_cost = DRCC.crafting_cost(item, @hometown, skill = 'Alchemy' ? item['part']+['alcohol','water','coal'] : item['part'], quantity, (skill =~ /alchemy|enchanting/i) || (skill == 'Forging' && @workorders_materials['custom'][base]) ? false : materials_info)
-        total_cost += 5000 if @workorders_repair
-        DRCM.ensure_copper_on_hand(total_cost, @settings, @hometown)
-
 
         send(craft_method, info, materials_info, item, quantity, book, script, base)
 
@@ -147,9 +144,9 @@ class WorkOrders
         craft_method,book,script,base = [:craft_prep,'','','']
         case discipline
         when 'blacksmithing', 'weaponsmithing', 'armorsmithing'
+            book,script,base = ['forging', 'smith', 'ingot']
             materials_info = @crafting_data['stock'][@workorders_materials['metal_type']]
             skill,tools,@belt = ['Forging',@settings.forging_tools,@settings.forging_belt]
-            base = 'ingot'
             craft_method = :forge_prep
         when 'tailoring'
             book,script = ['outfitting','sew']
@@ -189,7 +186,13 @@ class WorkOrders
         return [craft_method,book,script,base,skill,tools,@belt,@work_room,materials_info]
     end
 
-################             REPAIR                ######################
+    def withdraw_funds(item, book, quantity, base, materials_info)
+        total_cost = DRCC.crafting_cost(item, @hometown, book = 'alchemy' ? item['part']+['alcohol','water','coal'] : item['part'], quantity, (book =~ /alchemy|enchanting/i) || (book == 'forging' && @workorders_materials['custom'][base]) ? false : materials_info)
+        total_cost += 5000 if @workorders_repair
+        DRCM.ensure_copper_on_hand(total_cost, @settings, @hometown)
+    end
+
+################             REPAIR               ######################
 
     def repair_own_tools(info, tools)
         current = Room.current.id
@@ -240,9 +243,8 @@ class WorkOrders
         DRCC.find_shaping_room(@hometown, @work_room)
         quantity.times do
             if @skip_logging
-                DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
-                DRCI.dispose_trash(item['noun'])
-                break if DRSkill.getxp(book.capitalize) > 28
+                training_monitor(script, [item['chapter'], item['name'], type, item['noun']], book, item['noun'])
+                break if training_done?(book, info, item['part'], base, type)
             else
                 break unless check_logbook_count(book, quantity)
                 DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], type, item['noun']])
@@ -253,7 +255,11 @@ class WorkOrders
         if @workorders_materials['custom'][base] && DRCI.exists?("#{type} #{base}")
             deed_item("#{type} #{base}")
         else
-            trash_crafting_item("#{materials_info['stock-name']} #{base}", info) if scrap && !@retain_crafting_materials
+            if scrap && !@retain_crafting_materials
+                trash_crafting_item("#{materials_info['stock-name']} #{base}", info) 
+            elsif scrap
+                deed_item("#{type} #{base}")
+            end
         end
     end
 
@@ -277,7 +283,7 @@ class WorkOrders
             name = DRC.right_hand
             if @skip_logging
                 DRCI.dispose_trash(name)
-                break if DRSkill.getxp('Alchemy') > 28
+                break if training_done?(book, info, leftovers, base)
             else
                 break if finished_remedies(name, quantity) >= quantity*5
                 DRCC.stow_crafting_item(name, @bag, nil)
@@ -296,11 +302,12 @@ class WorkOrders
         # Start crafting #
         DRCC.find_enchanting_room(@hometown, @work_room)
         quantity.times do
-            DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
-            if @skip_logging                
-                DRCI.dispose_trash(item['noun'].split(' ').last)
-                break if DRSkill.getxp('Enchanting') > 28
+            if @skip_logging
+                DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
+                DRCT.dispose(item['noun'].split(' ').last)
+                break if training_done?(book, info, item['part'], base)
             else
+                DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
                 DRCC.logbook_item('enchanting', item['noun'].split(' ').last, @bag)
             end
         end
@@ -313,18 +320,20 @@ class WorkOrders
         unless @workorders_materials['custom'][base] && check_own_ingot(item, quantity, @workorders_materials['custom'][base])
             buy_material_singles(info, materials_info, quantity)
             base,scrap = calc_stock(materials_info, item, quantity, base)
+            type = materials_info['stock-name']
+        else
+            type = @workorders_materials['custom'][base]
         end
         quantity.times do
             if @skip_logging
-                DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
-                DRCI.dispose_trash(item['noun'])
-                break if DRSkill.getxp('Forging') > 28
+                training_monitor(script, [materials_info['stock-name'], item['name']], book, item['noun'])
+                break if training_done?(book, info, item['part'], base, type)
             else
                 break unless check_logbook_count("forging", quantity)
                 DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
                 DRCC.logbook_item('forging', item['noun'], @bag)
-            end            
-            DRCT.dispose("#{materials_info['stock-name']} ingot") if scrap
+            end
+            DRCT.dispose("#{materials_info['stock-name']} #{base}") if scrap
         end
         smelt(@workorders_materials['custom'][base]) if @smelt
         deed_item("#{@workorders_materials['custom'][base]} #{base}") if @workorders_materials['custom'][base]
@@ -332,6 +341,68 @@ class WorkOrders
 
     def check_logbook_count(craft, quantity)
         /(\d)/ =~ DRC.bput("read my #{craft} logbook", /This work order appears to be complete/, /You must bundle and deliver (\d+) more/, /^This logbook is not currently tracking any work orders/)
+    end
+
+    def training_monitor(script, args, book, name)
+        verify_script(script)
+        start_script(script, args.map { |arg| arg =~ /\s/ ? "\"#{arg}\"" : arg })
+        pause 30
+
+        @counter ||= 0
+        @counter += 30
+        loop do
+            if Script.running?(script) && DRSkill.getxp(book.capitalize) == 34
+                DRC.message("Stopping #{script} after #{@counter/60} minutes because #{book.capitalize} is mindlocked")
+                stop_script(script)
+                stop_script("forge") if Script.running?("forge")
+                pause 1 while Script.running?(script)
+                break
+            elsif Script.running?(script)
+                @counter += 1
+                pause 1
+                next
+            end
+            DRCI.dispose_trash(name)
+            return
+        end
+
+        case book
+        when /forging/
+            [DRC.left_hand,DRC.right_hand].each do |tool|
+                DRCC.stow_crafting_item(tool, @bag, @belt) if @settings.forging_tools.include?(tool)
+            end
+            return if DRCC.clean_anvil?
+            return DRCI.dispose_trash(name)
+        when /enchanting/
+            DRCC.clean_brazier?
+            [DRC.left_hand,DRC.right_hand].each do |tool|
+                DRCC.stow_crafting_item(tool, @bag, @belt) if @settings.enchanting_tools.include?(tool)
+            end
+            2.times do fput("empty feet") end
+        else
+            DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+            DRCT.dispose(DRC.left_hand)
+        end
+    end
+
+    def training_done?(book, info, parts, base, type = '')
+        @items_remaining -= 1 # reduce remaining by 1 each time we come here, reflecting a completed use of materials.
+        return false unless DRSkill.getxp(book.capitalize) > 28 # not yet at our mindstate goal
+        return false if @items_remaining <= 0 # met our mindstate goal, but also finished using our materials
+        DRC.message("Stopping #{book.capitalize} training after #{@counter/60} minutes because #{book.capitalize} is above training threshold of 28")
+        DRCT.walk_to(@crafting_data['blacksmithing'][@hometown]['trash-room'])
+
+        parts.each do |part| # dumping all excess parts, this covers all of enchanting/remedies
+            until /What were you referring to/ =~ DRC.bput("get my #{part} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+                DRCI.dispose_trash(part)
+            end
+        end
+        # don't trash stock materials if doing remedies|artificing(no stock materials to trash), if we're using custom materials(we'll be deeding remainder), or if we've specifically elected to retain them.
+        return true if book =~ /enchanting|alchemy/i || @workorders_materials['custom'][base] == type || @retain_crafting_materials
+        until /What were you referring to/ =~ DRC.bput("get my #{type} #{base}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) # dumping excess stock
+            DRCI.dispose_trash("#{type} #{base}")
+        end
+        true
     end
 
 ################        MATERIALS HANDLING         ######################
@@ -365,12 +436,12 @@ class WorkOrders
             if herb_list.include?(part)
                 needed = part.split(' ').last
                 collect_and_process(item, needed, quantity)
-                item['part'].shift # Update our parts list to remove the herb we've already purchased
+                item['part'].shift
             else
                 quantity.times { buy_material_singles(info, materials_info[part.first], 1, part.first) } # Buy one  main herb stack for each remedy to craft
             end
         end
-        item['part'] += ['water', 'alcohol'] # add the bits we might need to parts array for purchase and disposal
+        item['part'] += ['water', 'alcohol'] # Update our parts list to remove the herb we've already purchased, and add the bits we might need
         item['part'].each { |part| buy_material_singles(info, materials_info[part], 1, part) } # purchase one of each of these bits
         buy_material_singles(get_data('crafting')['blacksmithing'][@hometown], materials_info['coal'], 1, 'nugget') && item['part'] += ['coal nugget'] # Buy a single coal nugget, plenty, and add it to our parts list
         return item['part'] # Return a list of parts for disposal at the end.
@@ -388,8 +459,11 @@ class WorkOrders
         total_needed = quantity*recipe['volume']
         if base == 'ingot'
             scrap = (recipe['volume'])%materials_info['stock-volume'] > 0 ? true : false # if any left after division (%) we'll have to toss the extra bits between crafts
-            return [nil, scrap] # These are not stackable, so we just need to determine if there will be leftovers out of each ingot
-        elsif DRCI.exists?("#{materials_info['stock-name']} #{base}")
+            return [base, scrap] # These are not stackable, so we just need to determine if there will be leftovers out of each ingot
+        elsif on_hand_stock = check_own_materials(recipe, quantity, materials_info['stock-name'], base) # If we have enough materials, returns a value for on_hand_stock. otherwise returns false.
+            scrap = total_needed == on_hand_stock ? false : true
+            return [false,scrap] # have what we need, no need to buy
+        else
             /(\d+)/ =~ DRC.bput("count my #{materials_info['stock-name']} #{base}", /^You count out (\d+) (pieces|yards) of (lumber|material)/)
             on_hand_stock = Regexp.last_match(1).to_i
             return [false,false] if on_hand_stock >= (total_needed) # We have what we need, so no need to buy more.
@@ -427,16 +501,12 @@ class WorkOrders
     end
     
     def trash_crafting_item(trash, info)
-        DRCT.walk_to(info['trash-room'])
+        DRCT.walk_to(@crafting_data['blacksmithing'][@hometown]['trash-room'])
         DRCC.get_crafting_item(trash, @bag, @bag_items, @belt)
         DRCI.dispose_trash(trash)
     end
 
 ################    PERSONAL MATERIALS HANDLING    ######################
-
-    ## TODO 
-    ## 1. use_own_lumber
-    ## 2. consolidate, maybe even move entirely to calc
 
     def collect_and_process(recipe, herb_needed, quantity) # can require significant outdoorsmanship skill and somewhat careful selection of an outdoors room. Alternative is just foraging and processing your own.
         unless @workorders_collect_herbs
@@ -540,7 +610,7 @@ class WorkOrders
                     if [DRC.right_hand,DRC.left_hand].compact.size > 1
                         fput("combine")
                     end
-                    volume += material_volume(type, base)
+                    volume = material_volume(type, base)
                 else
                     DRC.message("Out of #{base} and deeds")
                     DRCI.stow_hands
@@ -548,7 +618,7 @@ class WorkOrders
                 end
             end
         end
-        true
+        return volume
     end
 
     def check_own_ingot(item, quantity, type)
@@ -648,12 +718,12 @@ class WorkOrders
         end
         mod = ''
         if checkleft
-            mod = 'second'
+            mod = 'second '
             DRCC.stow_crafting_item(name, @bag, nil)
         end
         DRC.bput("get my alchemy logbook", 'You get')
         quantity.times do
-            DRC.bput("get #{mod} #{name} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
+            DRC.bput("get #{mod}#{name} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
             unless /You notate the/ =~ DRC.bput("bundle my #{name} with my logbook", /^You notate the/, /^The workorder requires/)
                 DRCT.dispose(name)
             end
@@ -682,10 +752,10 @@ class WorkOrders
             DRCT.walk_to(room_id)
         end
     end
-end
 
-before_dying do
-  Flags.delete('proper-repair')
+    before_dying do
+      Flags.delete('proper-repair')
+    end
 end
 
 WorkOrders.new

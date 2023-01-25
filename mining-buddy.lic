@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#mining-buddy
 =end
 
-custom_require.call(%w[common common-items common-crafting common-money common-travel drinfomon events])
+custom_require.call(%w[common common-items common-crafting common-money common-travel drinfomon])
 
 class MiningBuddy
 
@@ -16,29 +16,31 @@ class MiningBuddy
     @skip_populated = settings.mining_skip_populated
     @mine_every_room = settings.mining_buddy_mine_every_room
     @vein_list = settings.mining_buddy_vein_list
-    @mining_implement = settings.mining_implement || 'shovel'
+    @mining_implement = settings.mining_implement
     @use_packet = settings.mine_use_packet
-    @pickaxe = settings.pickaxe || @mining_implement
+    @pickaxe = settings.pickaxe
     @hometown = settings.hometown
     deeds_data = get_data('crafting').deeds[@hometown]
     @deeds_room = deeds_data['room']
     @deeds_number = deeds_data['medium_number']
     @mine_repair_own_tools = settings.mine_repair_own_tools
-
-    unless @mining_implement || DRCI.exists?("shovel")
-      DRC.message("No mining implement defined or found")
-      exit
-    end
-    
     DRC.message("#{@areas}:#{@vein_list}") if UserVars.mining_debug
+    # Need this flag for self repair
     Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
     
-    #checks yaml settings against tools
-    #corrects settings when tongs are wrongly set as adjustable, and/or when implement is tongs.
+    #corrects settings when tongs are wrongly set as adjustable, or adjusts tongs to shovel when implement is tongs.
     unless settings.adjustable_tongs && @mining_implement.include?('tongs') && DRCC.get_adjust_tongs?('reset shovel', @bag, @bag_items, @forging_belt)
       @mining_implement.sub!(/.* tongs/, "shovel") 
     end
     DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt) if DRCI.in_hands?(@mining_implement)
+    
+    # if we've elected to mine out every room, and defined a pickaxe, but we don't have a pickaxe, we'll set that tool to our normal mining implement
+    if @mine_every_room && @pickaxe && !DRCI.exists?(@pickaxe)
+      DRC.message("#{@pickaxe} not found, setting clearing tool to #{@mining_implement}")
+      @pickaxe = @mining_implement
+    end
+    #creating a tools list based on our yaml settings, removing duplicates, placing them in an array
+    tools = [@pickaxe,@mining_implement].compact.uniq
     
     DRCM.ensure_copper_on_hand(10_000, settings)
 
@@ -54,7 +56,7 @@ class MiningBuddy
         DRCC.stow_crafting_item('packet', @bag, @forging_belt)
       end
     end
-    check_repair
+    check_repair(tools)
     DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
     DRC.bput('speculate luck', '^You focus your mind on the world around you', '^You are already focusing on the world around you.', '^Your pattern-matching skills are still exhausted') if DRStats.trader? && DRStats.circle >= 65
     @areas.each { |area_name| mine_rooms(@area_list[area_name]) }
@@ -70,34 +72,54 @@ class MiningBuddy
     fput('stow my packet')
   end
 
-  def check_repair
+  def check_repair(tools_array)
     # Self repair begins here
     if @mine_repair_own_tools # Yaml setting of same name
-      DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], @mining_implement, @bag, @bag_items, @forging_belt)
+      tools_array.each { |tool| DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], tool, @bag, @bag_items, @forging_belt) }
       return
     end
-    # Store repair begins here
-    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt) unless DRCI.in_hands?(@mining_implement)
-    result = DRC.bput("analyze my #{@mining_implement}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
-    waitrt?
 
-    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
-    return unless /roundtime/i =~ result
+    # Store repair begins here
+    tools_to_be_repaired = []
+    tools_array.each do |tool|
+      # grab each tool unless we're already holding it
+      DRCC.get_crafting_item(tool, @bag, @bag_items, @forging_belt) unless DRCI.in_hands?(tool)
+      # checking damage, and adding tool to list of tools to repair if it requires repair
+      tools_to_be_repaired << tool if /Roundtime/ =~ DRC.bput("analyze my #{tool}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
+      DRCC.stow_crafting_item(tool, @bag, @forging_belt)
+    end
+    # if no tools require repair, skipping shop repair
+    return DRC.message("Tools appear to be in adequate repair") if tools_to_be_repaired.empty?
+    
+    # with our list of tools requiring repair, we'll drop each off at the repair shop
     repair = get_data('town')[@hometown]['metal_repair']
     DRCT.walk_to(repair['id'])
-    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt)
-    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
-    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
-    pause 10 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
-    DRC.bput("give #{repair['name']}", 'You hand', 'takes your ticket')
-    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
+    tools_to_be_repaired.each do |tool|
+      DRCC.get_crafting_item(tool, @bag, @bag_items, @forging_belt, true)
+      case DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
+      when /give/
+          DRC.bput("give #{repair['name']}", 'repair ticket')
+          DRC.bput("stow #{repair['name']} ticket", 'You put')
+      else
+          DRCC.stow_crafting_item(tool, @bag, belt)
+      end    
+    end
+
+    # Now we wait until they are all ready to be picked up, and pick them up until we run out of tickets
+    while DRC.bput("get my #{repair['name']} ticket", 'You get', 'What were') == 'You get'
+      pause 30 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
+      DRC.bput("give #{repair['name']}", 'You hand', 'takes your ticket', "Please don't lose this ticket!")
+      pause 0.01 until tool = [DRC.right_hand,DRC.left_hand].compact.first # waits for tool to hit your hand
+      DRCC.stow_crafting_item(tool, @bag, @forging_belt) # hopefully stows the tool appropriately. 
+    end
   end
 
   def mine_rooms(rooms)
     rooms.each do |room|
       DRC.wait_for_script_to_complete('safe-room') if bleeding?
       next unless mine?(room)
-      check_repair
+      # making this variable an array for repair handling
+      check_repair(@implement.to_a)
     end
   end
 
@@ -118,30 +140,24 @@ class MiningBuddy
     echo(results) if UserVars.mining_debug
 
     return false if results.nil?
-
+    # here we're taking the lines from our reget above and checking if any of them match our keep list, then adding those matched materials to our keep variable (making it truthy)
     keep = results
                   .each_with_object([]) { |line, array| array << line.match(/You are certain that (.*) can be mined here/i)[1] }
                   .reject(&:nil?)
                   .map(&:downcase)
                   .any? { |vein| @vein_list.map(&:downcase).include?(vein) }
-    if @mine_every_room
-      implement = keep ? @mining_implement : @pickaxe
-    elsif keep
-      implement = @mining_implement
-    else
+    if @mine_every_room # Always mining, so we'll choose implement based on whether we've found a metal we want to keep
+      @implement = keep ? @mining_implement : @pickaxe
+    elsif keep # Only mining the metal/stone we want, so if we're mining, we're using our more thorough tool
+      @implement = @mining_implement
+    else # No metal/stone we want to keep, so on to the next room
       return false
-    end    
+    end
 
-    waitrt?
-
-    DRC.wait_for_script_to_complete('mine', implement)
+    DRC.wait_for_script_to_complete('mine', [@implement])
     DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
     true
   end
-end
-
-before_dying do
-  Flags.delete('proper-repair')
 end
 
 MiningBuddy.new

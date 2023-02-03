@@ -124,18 +124,21 @@ class WorkOrders
             repair_own_tools(info, tools)
             exit
         elsif repair
-            tool_drop(info, tools)
-            tool_pickup(info)
+            DRCC.repair_tools(tools, @bag, @belt, @hometown, @settings)
             exit
         end
 
         send(craft_method, info, materials_info, item, quantity, book, script, base)
 
-        tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair && !@workorders_repair_own_tools
+        DRCC.repair_tools(tools, @bag, @belt, @hometown, @settings, false) if @workorders_repair && !@workorders_repair_own_tools
+
+        # tool_drop(get_data('crafting')['shaping'][@hometown], tools) if @workorders_repair && !@workorders_repair_own_tools
 
         complete_work_order(info)
 
-        tool_pickup(get_data('crafting')['shaping'][@hometown]) if @workorders_repair && !@workorders_repair_own_tools
+        DRCC.pickup_tools(@bag, @belt, @hometown, @settings) if @workorders_repair && !@workorders_repair_own_tools
+
+        # tool_pickup(get_data('crafting')['shaping'][@hometown]) if @workorders_repair && !@workorders_repair_own_tools
 
         repair_own_tools(info, tools) if @workorders_repair_own_tools
     end
@@ -282,7 +285,7 @@ class WorkOrders
             DRC.wait_for_script_to_complete('slim-remedy', [item['name']])
             name = DRC.right_hand
             if @skip_logging
-                DRCI.dispose_trash(name)
+                DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
                 break if training_done?(book, info, leftovers, base)
             else
                 break if finished_remedies(name, quantity) >= quantity*5
@@ -304,7 +307,7 @@ class WorkOrders
         quantity.times do
             if @skip_logging
                 DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
-                DRCI.dispose_trash(item['noun'])
+                DRCI.dispose_trash(item['noun'], @settings.worn_trashcan, @settings.worn_trashcan_verb)
                 break if training_done?(book, info, item['part'], base)
             else
                 DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
@@ -333,7 +336,10 @@ class WorkOrders
                 DRC.wait_for_script_to_complete('smith', [materials_info['stock-name'], item['name']])
                 DRCC.logbook_item('forging', item['noun'], @bag)
             end
-            DRCT.dispose("#{materials_info['stock-name']} #{base}") if scrap
+            if scrap
+                DRCC.get_crafting_item("#{materials_info['stock-name']} #{base}", @bag, ["#{materials_info['stock-name']} #{base}"], nil)
+                DRCI.dispose_trash("#{materials_info['stock-name']} #{base}", @settings.worn_trashcan, @settings.worn_trashcan_verb) 
+            end
         end
         smelt(@workorders_materials['custom'][base]) if @smelt
         deed_item("#{@workorders_materials['custom'][base]} #{base}") if @workorders_materials['custom'][base]
@@ -345,7 +351,7 @@ class WorkOrders
 
     def training_monitor(script, args, book, name)
         verify_script(script)
-        start_script(script, args.map { |arg| arg =~ /\s/ ? "\"#{arg}\"" : arg })
+        start_script(script, args.map { |arg| arg.to_s =~ /\s/ ? "\"#{arg}\"" : arg })
         pause 30
 
         @counter ||= 0
@@ -362,7 +368,7 @@ class WorkOrders
                 pause 1
                 next
             end
-            DRCI.dispose_trash(name)
+            DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
             return
         end
 
@@ -372,7 +378,7 @@ class WorkOrders
                 DRCC.stow_crafting_item(tool, @bag, @belt) if @settings.forging_tools.include?(tool)
             end
             return if DRCC.clean_anvil?
-            return DRCI.dispose_trash(name)
+            return DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
         when /enchanting/
             DRCC.clean_brazier?
             [DRC.left_hand,DRC.right_hand].each do |tool|
@@ -381,7 +387,7 @@ class WorkOrders
             2.times do fput("empty feet") end
         else
             DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
-            DRCT.dispose(DRC.left_hand) if checkleft
+            DRCI.dispose_trash(DRC.left_hand, @settings.worn_trashcan, @settings.worn_trashcan_verb) if checkleft
         end
     end
 
@@ -393,13 +399,13 @@ class WorkOrders
 
         parts.each do |part| # dumping all excess parts, this covers all of enchanting/remedies
             until /What were you referring to/ =~ DRC.bput("get my #{part} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
-                DRCI.dispose_trash(part)
+                DRCI.dispose_trash(part, @settings.worn_trashcan, @settings.worn_trashcan_verb)
             end
         end
         # don't trash stock materials if doing remedies|artificing(no stock materials to trash), if we're using custom materials(we'll be deeding remainder), or if we've specifically elected to retain them.
         return true if book =~ /enchanting|alchemy/i || @workorders_materials['custom'][base] == type || @retain_crafting_materials
         until /What were you referring to/ =~ DRC.bput("get my #{type} #{base}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) # dumping excess stock
-            DRCI.dispose_trash("#{type} #{base}")
+            DRCI.dispose_trash("#{type} #{base}", @settings.worn_trashcan, @settings.worn_trashcan_verb)
         end
         true
     end
@@ -463,11 +469,16 @@ class WorkOrders
             scrap = total_needed == on_hand_stock ? false : true
             return [false,scrap] # have what we need, no need to buy
         elsif DRCI.exists?("#{materials_info['stock-name']} #{base}")
+            DRC.bput("get my #{materials_info['stock-name']} #{base}", /^You get/, /^You are already/, /^You're already/, /^What were you referring to/)
             /(\d+)/ =~ DRC.bput("count my #{materials_info['stock-name']} #{base}", /^You count out (\d+) (pieces|yards) of (lumber|material)/)
             on_hand_stock = Regexp.last_match(1).to_i
-            return [false,false] if on_hand_stock >= (total_needed) # We have what we need, so no need to buy more.
+            if on_hand_stock >= (total_needed) # We have what we need, so no need to buy more.
+                DRC.bput("put my #{materials_info['stock-name']} #{base} in my #{@bag}", /^You put/)
+                scrap = (total_needed)%materials_info['stock-volume'] > 0 ? true : false
+                return [base,scrap]
+            end
             total_needed -= on_hand_stock # How many do we need to buy to add to what we already have.
-            DRC.bput("get my #{materials_info['stock-name']} #{base} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) # have in hand to combine
+            # DRC.bput("get my #{materials_info['stock-name']} #{base} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/) # have in hand to combine
         end
         
         base_to_buy = (total_needed/materials_info['stock-volume'].to_f).ceil
@@ -501,7 +512,7 @@ class WorkOrders
     
     def trash_crafting_item(trash, info)
         DRCC.get_crafting_item(trash, @bag, @bag_items, @belt)
-        DRCI.dispose_trash(trash)
+        DRCI.dispose_trash(trash, @settings.worn_trashcan, @settings.worn_trashcan_verb)
     end
 
 ################    PERSONAL MATERIALS HANDLING    ######################
@@ -547,7 +558,7 @@ class WorkOrders
             needed -= 1
         end
         until /referring/ =~ DRC.bput("get my #{herb}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
-            DRCI.dispose_trash(herb)
+            DRCI.dispose_trash(herb, @settings.worn_trashcan, @settings.worn_trashcan_verb)
         end
     end
 
@@ -600,6 +611,7 @@ class WorkOrders
         volume = 0
         while volume < (item['volume'] * quantity)
             unless /referring/ =~ DRC.bput("get #{type} #{base} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /^What were you referring to/)
+                fput('combine')
                 volume = material_volume(type, base)
                 next
             end
@@ -611,7 +623,7 @@ class WorkOrders
                     volume = material_volume(type, base)
                 else
                     DRC.message("Out of #{base} and deeds")
-                    DRCI.stow_hands
+                    [DRC.right_hand,DRC.left_hand].each { |item| item =~ /deed/i ? DRCC.stow_crafting_item("deed", @workorders_deed_storage, nil) : DRCC.stow_crafting_item(item, @bag, @belt)}
                     return false
                 end
             end
@@ -726,7 +738,7 @@ class WorkOrders
         quantity.times do
             DRC.bput("get #{mod}#{name} from my #{@bag}", /^You get/, /^You are already/, /^You're already/, /What were you referring to/)
             unless /You notate the/ =~ DRC.bput("bundle my #{name} with my logbook", /^You notate the/, /^The workorder requires/)
-                DRCT.dispose(name)
+                DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
             end
         end
         DRC.bput("put my alchemy logbook in my #{@bag}", 'You put', 'What were you referring to')

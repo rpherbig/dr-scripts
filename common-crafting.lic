@@ -6,6 +6,16 @@
 $PRIMARY_SIGILS_PATTERN = /\b(?:abolition|congruence|induction|permutation|rarefaction) sigil\b/
 $SECONDARY_SIGILS_PATTERN = /\b(?:antipode|ascension|clarification|decay|evolution|integration|metamorphosis|nurture|paradox|unity) sigil\b/
 
+$VOL_MAP = {
+  'enormous' => 20,
+  'massive' => 10,
+  'huge' => 5,
+  'large' => 4,
+  'medium' => 3,
+  'small' => 2,
+  'tiny' => 1
+}
+
 custom_require.call(%w[common common-items common-travel drinfomon])
 
 module DRCC
@@ -180,12 +190,32 @@ module DRCC
     Regexp.last_match(1)
   end
 
-  def get_crafting_item(name, bag, bag_items, belt, skip_exit = false)
+  def find_recipe2(chapter, match_string, book = 'book', discipline = nil)
+    DRC.bput("turn my #{book} to discipline #{discipline}", /^You turn the #{book} to the section on/) unless discipline.nil?
+    case DRC.bput("turn my #{book} to chapter #{chapter}", /^You turn your #{book} to chapter/, /^The #{book} is already turned to chapter/, /^You are too distracted to be doing that right now./)
+    when /^You are too distracted to be doing that right now./
+      echo '***CANNOT TURN BOOK, ASSUMING I AM ENGAGED IN COMBAT***'
+      fput('look')
+      fput('exit')
+    end
+
+    recipe = DRC.bput("read my #{book}", "Page \\d+:\\s(?:some|a|an)?\\s*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
+    recipe =~ /(\d+):/
+    page = Regexp.last_match(1)
+    DRC.bput("turn my #{book} to page #{page}", /^You turn your #{book} to page/, /^You are already on page/)
+    DRC.bput("study my #{book}", /^Roundtime/)
+  end  
+
+  def get_crafting_item(*args)
+    get_crafting_item?(*args); nil
+  end
+
+  def get_crafting_item?(name, bag, bag_items, belt, skip_exit = false)
     waitrt?
     if belt && belt['items'].find { |item| /\b#{name}/i =~ item || /\b#{item}/i =~ name }
       case DRC.bput("untie my #{name} from my #{belt['name']}", /^You (remove|untie)/, /^You are already/, /^Untie what/, /^Your wounds hinder your ability to do that/)
       when /You (remove|untie)/, /You are already/
-        return
+        return true
       when /Your wounds hinder your ability to do that/
         craft_room = Room.current.id
         DRC.wait_for_script_to_complete('safe-room', ['force'])
@@ -196,18 +226,19 @@ module DRCC
     command = "get my #{name}"
     command += " from my #{bag}" if bag_items && bag_items.include?(name)
     case DRC.bput(command, /^You get/, /^You are already/, /^What do you/, /^What were you/, /^You pick up/, /can't quite lift it/, /^You should untie/)
-    when 'What do you', 'What were you'
+    when 'What do you', 'What were you', 'You are already', 'You get', 'You pick up'
+      return true if DRCI.in_hands?(name)
       pause 2
-      return if DRCI.in_hands?(name)
       DRC.beep
       echo("You seem to be missing: #{name}")
       exit unless skip_exit
+      return false
     when "can't quite lift it"
-      get_crafting_item(name, bag, bag_items, belt)
+      return get_crafting_item(name, bag, bag_items, belt)
     when 'You should untie'
       case DRC.bput("untie my #{name}", /^You (remove|untie)/, /^Untie what/, /^Your wounds hinder your ability to do that/)
       when /You (remove|untie)/
-        return
+        return true
       when /Your wounds hinder your ability to do that/
         craft_room = Room.current.id
         DRC.wait_for_script_to_complete('safe-room', ['force'])
@@ -215,32 +246,31 @@ module DRCC
         return get_crafting_item(name, bag, bag_items, belt)
       end
     end
+    false
   end
 
-  def stow_crafting_item(name, bag, belt)
-    return unless name
+  def stow_crafting_item(*args)
+    stow_crafting_item?(*args); nil
+  end
 
+  def stow_crafting_item?(name, bag, belt)
+    return false unless name # false here because it may still be in our hands
+    return true unless DRCI.in_hands?(name) # true here because wherever it is, it isn't in our hands
     waitrt?
     if belt && belt['items'].find { |item| /\b#{name}/i =~ item || /\b#{item}/i =~ name }
-      case DRC.bput("tie my #{name} to my #{belt['name']}", 'you attach', 'Your wounds hinder')
+      case DRC.bput("tie my #{name} to my #{belt['name']}", 'you attach', 'Your wounds hinder', 'doesn\'t seem to fit', 'There\'s no more free ties')
       when 'Your wounds hinder'
         craft_room = Room.current.id
         DRC.wait_for_script_to_complete('safe-room', ['force'])
         DRCT.walk_to(craft_room)
         return stow_crafting_item(name, bag, belt)
+      when 'doesn\'t seem to fit', 'There\'s no more free ties'
+        return stow_crafting_item(name, bag, nil)
       end
+      true
     else
-      case DRC.bput("put my #{name} in my #{bag}", 'You put your', 'What were you referring to', 'is too \w+ to fit', 'Weirdly, you can\'t manage', 'There\'s no room', 'You can\'t put that there', 'You combine')
-      when /is too \w+ to fit/, 'Weirdly, you can\'t manage', 'There\'s no room'
-        fput("stow my #{name}")
-      when 'Weirdly, you can\'t manage'
-        fput("stow my #{name}")
-      when 'You can\'t put that there'
-        fput("put my #{name} in my other #{bag}")
-        return false
-      end
+      return DRCI.put_away_item?(name, bag)
     end
-    true
   end
 
   def crafting_cost(recipe, hometown, parts, quantity, material)
@@ -409,6 +439,34 @@ module DRCC
     end
   end
 
+  def repair_tools(tools, bag, belt, town, settings, pickup = true)
+    tools = tools.to_a
+    repair_info = get_data('crafting')['shaping'][town]
+    DRCT.walk_to(repair_info['repair-room'])
+    tools.each do |tool_name|
+      next unless get_crafting_item(tool_name, bag, nil, belt, true)
+      if DRCI.give_item?(repair_info['repair-npc'], tool_name)
+        DRCI.stow_item?("#{repair_info['repair-npc']} ticket")
+      else
+        stow_crafting_item(tool_name, bag, belt) if DRCI.in_hands?(tool_name)
+      end
+    end
+    pickup_tools(bag, belt, town, settings) if pickup
+  end
+  
+  def pickup_tools(bag, belt, town, settings)
+    repair_info = get_data('crafting')['shaping'][town]
+    DRCT.walk_to(repair_info['repair-room'])
+    while DRCI.get_item?("#{repair_info['repair-npc']} ticket")
+      pause 30 until DRC.bput('look at my ticket', /should be ready by now/, /^Looking at the/) == 'should be ready by now'
+      DRCI.give_item?(repair_info['repair-npc'], "#{repair_info['repair-npc']} ticket")
+      pause 0.01 until tool = [DRC.right_hand,DRC.left_hand].compact.first # waits for tool to hit your hand
+      belts = [settings.forging_belt, settings.engineering_belt, settings.outfitting_belt, settings.alchemy_belt, settings.enchanting_belt]
+      toolbelt = belts.select { |belt| belt["items"].find { |name| name =~ /#{tool}/i } }.first # searches your toolbelts for the first one containing the tool.
+      stow_crafting_item(tool, bag, toolbelt) # hopefully stows the tool appropriately.      
+    end
+  end
+
   def logbook_item(logbook, noun, container)
     DRC.bput("get my #{logbook} logbook", 'You get')
     case DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.')
@@ -502,6 +560,43 @@ module DRCC
         return false
       end
     end
+  end
+
+  def count_raw_metal(container, type = nil)
+    case DRC.bput("rummage /M #{container}", /crafting materials but there is nothing in there like that\.$/, /While it\'s closed/, /I don\'t know what you are referring to/, /You feel about/, /That would accomplish nothing/, /looking for crafting materials and see (.*)\.$/)
+    when /crafting materials but there is nothing in there like that\.$/
+      DRC.message("No materials found")
+      return
+    when /While it\'s closed/
+      return unless DRCI.open_container?(container)
+      count_raw_metal(container, type)
+    when /I don\'t know what you are referring to/
+      DRC.message("Container not found.")
+      return
+    when /You feel about/
+      DRC.message("Try again when you're not invisible.")
+      return
+    when /looking for crafting materials and see (.*)\.$/
+      h = Hash.new
+      list = Regexp.last_match(1).sub(' and ', ', ').split(', ')
+      list.each do |e|
+        metal = e.split[2]
+        volume = $VOL_MAP[e.split[1]]
+        if h.key?(metal)
+          h[metal][0] += volume
+          h[metal][1] += 1
+        else
+          h[metal] = [volume, 1]
+        end
+      end
+      h.each do |k,v|
+        DRC.message("#{k} - #{v[0]} volume - #{v[1]} pieces")
+      end
+    else
+      DRC.message("Please report this error to the dev team on discord.  Include a log snippet if possible.")
+      return
+    end
+    type.nil? ? (return h) : (return h[type])
   end
 
 end

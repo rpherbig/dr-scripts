@@ -2,40 +2,13 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#magic-training
 =end
 
-custom_require.call(%w[common common-arcana common-healing common-moonmage drinfomon common-travel])
-
-# Track how long we've been training and how many mindstates we increase at the end.
-# These are defined with @@ so that they can be referenced in before_dying block.
+custom_require.call(%w[common common-arcana common-healing common-travel common-moonmage drinfomon])
 
 class MagicTraining
 
-  @@time_in = Time.now
-  @@aug_in = DRSkill.getxp('Augmentation')
-  @@ward_in = DRSkill.getxp('Warding')
-  @@util_in = DRSkill.getxp('Utility')
-  @@sorc_in = DRSkill.getxp('Sorcery')
-
-  def self.time_in
-    @@time_in
-  end
-
-  def self.aug_in
-    @@aug_in
-  end
-
-  def self.ward_in
-    @@ward_in
-  end
-
-  def self.util_in
-    @@util_in
-  end
-
-  def self.sorc_in
-    @@sorc_in
-  end
-
   def initialize
+    @@time_in = Time.now
+    @@mindstate_gains = {}
     arg_definitions = [
       [
         { name: 'max_time', regex: /\d+/, optional: true, description: 'Max time, in minutes, spent training. (Optional)' },
@@ -43,10 +16,11 @@ class MagicTraining
         { name: 'script_summary', optional: true, description:'Trains magic skills defined in Yaml setting training_skills' }
       ]
     ]
-
     args = parse_args(arg_definitions)
     max_time = ((args.max_time || 60).to_i * 60) # convert to seconds
     training_skills = args.training_skills ? args.training_skills.split(',').map { |skill| skill.strip.downcase.capitalize } : %w[Utility Warding Augmentation Sorcery]
+    training_skills += ["Attunement", "Arcana"]
+    training_skills.each { |skill| @@mindstate_gains.store(skill,0) }
 
     echo "Max training time: #{max_time} seconds"
     echo "Training skills: #{training_skills}"
@@ -66,6 +40,7 @@ class MagicTraining
   def train_magics?(training_skills)
     settings = get_settings
     DRCT.walk_to(settings.magic_training_room)
+    DRC.wait_for_script_to_complete('buff', ['mana'])
     exp_threshold = settings.magic_exp_training_max_threshold
     force_cambrinth = settings.waggle_force_cambrinth
     training_spells = settings.training_spells.empty? ? settings.magic_training : settings.training_spells
@@ -87,12 +62,21 @@ class MagicTraining
 
     skills_to_train.each do |skill|
       echo "Next skill to train: #{skill}"
-      before_xp = DRSkill.getxp(skill)
-      DRCA.check_discern(training_spells[skill], settings) if training_spells[skill]['use_auto_mana']
-      DRCA.cast_spells({ spell_name: training_spells[skill] }, settings, force_cambrinth)
-      echo("#{skill} gains: #{DRSkill.getxp(skill) - before_xp}")
+      spelldata = training_spells[skill]
+      before_xp = {}
+      gain = {}
+      DRCA.check_discern(spelldata, settings) if spelldata['use_auto_mana']
+      DRCA.prepare?(spelldata['abbrev'],spelldata['mana'],spelldata['symbiosis'],spelldata['prep'])
+      DRCA.find_charge_invoke_stow(settings.cambrinth, settings.stored_cambrinth, settings.cambrinth_cap, settings.dedicated_camb_use, spelldata['cambrinth'], settings.cambrinth_invoke_exact_amount)
+      DRC.collect('rock')
+      DRC.kick_pile?
+      waitcastrt?
+      training_skills.each { |s| before_xp.store(s,DRSkill.getxp(s)) } #snapshot of mindstates before casting
+      DRCA.cast?(spelldata['cast'], spelldata['symbiosis']) # casting our spell
+      training_skills.each { |s| gain.store(s,DRSkill.getxp(s) - before_xp[s]) && @@mindstate_gains[s] += gain[s] } # record the change in mindstates for all skills, to capture spell casts that train more than one
+      gain.each { |k,v| echo("Gained #{v} mindstates in #{k}") if v > 0 } # display mindstates gained in each skill that got mindstates
       waitrt?
-      check_health(settings.health_threshold, settings.saferoom_health_threshold)
+      check_health(settings.health_threshold, settings.saferoom_health_threshold) unless settings.safe_sorcery
     end
 
     return true
@@ -105,23 +89,23 @@ class MagicTraining
     if bleeding? || health_data['score'] >= saferoom || DRStats.health < [50, health].max || health_data['poisoned'] || health_data['diseased']
       DRC.message("You're injured! Stopping training")
       DRC.wait_for_script_to_complete('safe-room', ['force'])
-      exit
+      finish
     end
   end
 
-end
+  before_dying do
+    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared', 'Please don\'t do that here')
+    DRC.bput('release symbiosis', 'You release', 'But you haven\'t prepared')
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
 
-before_dying do
-  fput('release spell')
-  fput('release mana')
-  fput('release symbiosis')
-
-  total_time = (Time.now - MagicTraining.time_in) / 60
-  echo "Total time in Magic-Training: #{total_time.to_i} minutes"
-  echo "Total xp gained in Augmentation: #{DRSkill.getxp('Augmentation') - MagicTraining.aug_in}"
-  echo "Total xp gained in Warding: #{DRSkill.getxp('Warding') - MagicTraining.ward_in}"
-  echo "Total xp gained in Utility: #{DRSkill.getxp('Utility') - MagicTraining.util_in}"
-  echo "Total xp gained in Sorcery: #{DRSkill.getxp('Sorcery') - MagicTraining.sorc_in}"
+    total_time = (Time.now - @@time_in) / 60
+    echo "Total time in Magic-Training: #{total_time.to_i} minutes"
+    @@mindstate_gains.each do |k,v|
+      echo("Total xp gained in #{k}: #{v}") if v > 0
+    end
+    exit
+  end
 end
 
 MagicTraining.new

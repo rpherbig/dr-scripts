@@ -1,0 +1,107 @@
+custom_require.call(%w[common common-crafting common-items common-money common-travel equipmanager])
+
+class SlimRepair
+
+    def initialize
+        arg_definitions = [
+          [
+            { name: 'drop', regex: /drop/i, optional: true, description: 'Drop off gear only, do not pick up' },
+            { name: 'pickup', regex: /pickup/i, optional: true, description: 'Pick up items only' },
+            { name: 'town', regex: $HOMETOWN_REGEX, optional: true, description: 'Town to repair in' },
+            { name: 'reset_town', regex: /reset_town/i, optional: true, description: 'Clears last town variable' },
+            { name: 'script_summary', regex: /script_summary/i, optional: true, description: 'Repair script with option to split drop and pickup routines' }
+          ]
+        ]
+    
+        args = parse_args(arg_definitions)
+        reset_town(true) if args.reset_town
+        settings = get_settings
+        @repair_timer = settings.repair_timer
+        @sort_head = settings.sort_auto_head
+        UserVars.repair_timer_snap ||= Time.now
+        @equipmanager = EquipmentManager.new
+        @equipmanager.empty_hands
+        town = UserVars.last_repair_town || args.town.capitalize || settings.hometown
+
+        unless repair_info = get_data('town')[town]['metal_repair']
+            DRC.message("No repair info found for #{town}, exiting")
+            reset_town
+            exit
+        end
+
+        if args.drop && should_repair?
+            DRCM.ensure_copper_on_hand(settings.repair_withdrawal_amount, settings, town)
+            repair_gear(town, settings, repair_info)
+        elsif args.pickup
+            pickup_repaired_items(town, settings, repair_info)
+            fput('sort auto head') if @sort_head
+        elsif should_repair?
+            DRCM.ensure_copper_on_hand(settings.repair_withdrawal_amount, settings, town)
+            repair_gear(town, settings, repair_info)
+            pickup_repaired_items(town, settings, repair_info)
+            fput('sort auto head') if @sort_head
+        end
+    end
+
+    def reset_town(leave = false)
+        if UserVars.last_repair_town
+            DRC.message("Last repair town was: #{UserVars.last_repair_town}. Resetting.") if leave
+            UserVars.last_repair_town = nil
+        else
+            DRC.message("Last repair town not defined.")
+        end
+        exit if leave
+    end
+
+    def should_repair?
+        return true if @repair_timer.nil?
+    
+        last_repair_time = UserVars.repair_timer_snap
+        current_repair_time = Time.now
+        elapsed_time = (current_repair_time - last_repair_time).to_i
+        should_repair = elapsed_time >= @repair_timer
+    
+        return should_repair
+    end
+
+    def repair_gear(town, settings, repair_info)
+        UserVars.last_repair_town = town # stores our last repair location, so next pickup goes there, instead of trying to pick up gear from a different repair shop
+        DRCT.walk_to(repair_info['id'])
+        DRC.release_invisibility
+        @equipmanager.items.each do |item|
+            next if item.skip_repair
+            next unless @equipmanager.get_item?(item)
+            if DRCI.give_item?(repair_info['name'], item.name)
+                DRCI.stow_item?("#{repair_info['name']} ticket")
+            else
+                smart_stow_gear([DRC.right_hand,DRC.left_hand].compact.first, settings)
+            end
+        end
+    end
+
+    def pickup_repaired_items(town, settings, repair_info)
+        reset_town # resets our last repair location for next run        
+        exit unless DRCI.exists?("#{repair_info['name']} ticket") # no ticket, nothing to collect
+        DRCT.walk_to(repair_info['id'])
+        DRC.release_invisibility
+        while DRCI.get_item?("#{repair_info['name']} ticket")
+            pause 30 until DRC.bput('look at my ticket', /should be ready by now/, /^Looking at the/) == 'should be ready by now'
+            DRC.bput("give #{repair_info['name']}", /^You hand/, /takes your ticket/)
+            pause 0.01 until item = [DRC.right_hand,DRC.left_hand].compact.first # waits for repaired item to hit your hand
+            smart_stow_gear(item, settings)
+        end
+    end
+
+    def smart_stow_gear(item, settings)
+        return unless item
+        if toolbelt = [settings.forging_belt, settings.engineering_belt, settings.outfitting_belt, settings.alchemy_belt, settings.enchanting_belt].select { |belt| belt["items"].find { |name| name =~ /\b#{item}\b/i } }.first      
+            DRCC.stow_crafting_item(item, settings.crafting_container, toolbelt) # hopefully stows the tool appropriately.
+        elsif [settings.forging_tools, settings.tinkering_tools, settings.carving_tools, settings.shaping_tools, settings.outfitting_tools, settings.alchemy_tools, settings.enchanting_tools].any? { |tools| tools.any? { |name| name =~ /\b#{item}\b/i } }
+            DRCC.stow_crafting_item(item, settings.crafting_container, nil)
+        else
+            @equipmanager.return_held_gear
+        end
+    end
+end
+
+SlimRepair.new

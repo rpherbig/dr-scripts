@@ -3,19 +3,6 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#common-crafting
 =end
 
-$PRIMARY_SIGILS_PATTERN = /\b(?:abolition|congruence|induction|permutation|rarefaction) sigil\b/
-$SECONDARY_SIGILS_PATTERN = /\b(?:antipode|ascension|clarification|decay|evolution|integration|metamorphosis|nurture|paradox|unity) sigil\b/
-
-$VOL_MAP = {
-  'enormous' => 20,
-  'massive' => 10,
-  'huge' => 5,
-  'large' => 4,
-  'medium' => 3,
-  'small' => 2,
-  'tiny' => 1
-}
-
 custom_require.call(%w[common common-items common-travel drinfomon])
 
 module DRCC
@@ -36,10 +23,10 @@ module DRCC
         .match(/In the .* you see (?:some|an|a) (?<items>.*)\./)[:items]
         .split(/(?:,|and) (?:some|an|a)/)
         .map(&:strip)
-      clutter.each { |junk|
+      clutter.each { |junk| 
         junk = DRC.get_noun(junk)
         DRCI.get_item_unsafe(junk, 'crucible')
-        DRCI.dispose_trash(junk) }
+        DRCI.dispose_trash(junk)}
         return DRCC.empty_crucible?
     else
         false
@@ -74,7 +61,7 @@ module DRCC
           fput('clean anvil')
           fput('clean anvil')
         when 'You get'
-          DRC.bput("put #{clutter} in bucket", 'You drop')
+          DRCI.dispose_trash(clutter)
         else
           return false
         end
@@ -167,8 +154,6 @@ module DRCC
       if exact_matches.length == 1
         return recipes.find { |x| x['name'] == item_name }
       end
-
-      DRC.message("Using the full name of the item you wish to craft will avoid this in the future (e.g. 'a metal pike' vs 'metal pike')")
       echo('Please select desired recipe ;send #')
       match_names.each_with_index { |x, i| respond "    #{i + 1}: #{x}" }
       line = get until line.strip =~ /^([0-9]+)$/
@@ -190,23 +175,11 @@ module DRCC
     Regexp.last_match(1)
   end
 
-  def find_recipe2(chapter, match_string, book = 'book', discipline = nil)
-    DRC.bput("turn my #{book} to discipline #{discipline}", /^You turn the #{book} to the section on/) unless discipline.nil?
-    case DRC.bput("turn my #{book} to chapter #{chapter}", /^You turn your #{book} to chapter/, /^The #{book} is already turned to chapter/, /^You are too distracted to be doing that right now./)
-    when /^You are too distracted to be doing that right now./
-      echo '***CANNOT TURN BOOK, ASSUMING I AM ENGAGED IN COMBAT***'
-      fput('look')
-      fput('exit')
-    end
-
-    recipe = DRC.bput("read my #{book}", "Page \\d+:\\s(?:some|a|an)?\\s*#{match_string}").split('Page').find { |x| x =~ /#{match_string}/i }
-    recipe =~ /(\d+):/
-    page = Regexp.last_match(1)
-    DRC.bput("turn my #{book} to page #{page}", /^You turn your #{book} to page/, /^You are already on page/)
-    DRC.bput("study my #{book}", /^Roundtime/)
+  def get_crafting_item(*args)
+    get_crafting_item?(*args); nil
   end
 
-  def get_crafting_item(name, bag, bag_items, belt, skip_exit = false)
+  def get_crafting_item?(name, bag, bag_items, belt, skip_exit = false)
     return true if DRCI.in_hands?(name)
     waitrt?
     if belt && belt['items'].find { |item| /\b#{name}/i =~ item || /\b#{item}/i =~ name } && ( DRCI.untie_item?(name, belt['name']) || DRCI.untie_item?(name) )
@@ -225,8 +198,12 @@ module DRCC
       false
     end
   end
+  
+  def stow_crafting_item(*args)
+    stow_crafting_item?(*args); nil
+  end
 
-  def stow_crafting_item(name, bag, belt)
+  def stow_crafting_item?(name, bag, belt)
     return false unless name
     return true unless DRCI.in_hands?(name)
     waitrt?
@@ -238,30 +215,22 @@ module DRCC
   end
 
   def crafting_cost(recipe, hometown, parts, quantity, material)
-  # To use this method, you'll need to pass:
-  # recipe => This is a hash drawn directly from base-recipes eg {name: 'a metal ring cap', noun: 'cap', volume: 8, type: 'armorsmithing',etc}
-  #     This is fetched via get_data('recipes').crafting_recipes('name')[<name of recipe>]
-  # hometown => Just a string eg "Crossing"
-  # parts => This is an array containing(if any) a list of parts required. Where base-recipes doesn't do this, you will need to format this.
-  # quantity => an integer representing how many of each finished craft you intend to make. You can call this once per item, or once for all items.
-  # material => This needs to be a hash drawn directly from base-crafting eg {stock-volume: 5, stock-number: 11, stock-name: 'bronze', stock-value: 562}
-  #     This is fetched via get_data('crafting')['stock'][<name of material>]
-  #     nil or false if not using stock materials
-
     currency = DRCM.town_currency(hometown)
     data = get_data('crafting')['stock'] #fetch parts data
 
     if material && ["alabaster", "granite", "marble"].any? { |x| material['stock-name'] == x } #stone isn't stackable, so just calculate stock*quantity
       total += material['stock-value']*quantity
-    elsif material #neither alchemy nor artificing have ONE stock material, they take various materials and combine them, so those are handled by parts below
+    elsif material && material['stock-volume'] # alchemy and remedies doesn't have materials_info, those are handled by parts below
       stock_to_order = ((recipe['volume']/material['stock-volume'].to_f)*quantity).ceil
       total += (stock_to_order*material['stock-value'])
     end
 
-    if parts
-      parts_cannot_purchase = ['sufil', 'blue flower', 'muljin', 'belradi', 'dioica', 'hulnik', 'aloe', 'eghmok', 'lujeakave', 'yelith', 'cebi', 'blocil', 'hulij', 'nuloe', 'hisan', 'gem', 'pebble', 'ring', 'gwethdesuan', 'brazier', 'burin', 'any', 'ingot', 'mechanism']
+    unless parts.nil? || parts.empty?
+      parts_cannot_purchase = ['sufil','crushed flowers','muljin','belradi','dioica','hulnik','aloe','eghmok','lujeakave','yelith',
+        'cebi','blocil','hulij','nuloe','hisan','gem','pebble','ring','gwethdesuan','brazier','simple burin','ingot', 'mechanism']
+
       parts.reject! { |part| parts_cannot_purchase.include?(part) } #excludes things you cannot purchase, so won't error if you've got these.
-      parts.each { |part| total += data[part]['stock-value']*quantity } #adds the cost of each purchasable part to the total
+      parts.each { |part| total += data[part]['stock-value']*quantity }#adds the cost of each purchasable part to the total
     end
 
     total += 1000 #added to account for consumables, water, coal, etc
@@ -312,8 +281,6 @@ module DRCC
           return
         when 'cannot figure out how'
           DRC.message("Something has gone wrong, exiting repair")
-          DRCC.stow_crafting_item(tool_name, bag, belt)
-          DRCC.stow_crafting_item(x, bag, belt)
           return
         end
       end
@@ -341,8 +308,7 @@ module DRCC
     DRCT.walk_to(current)
   end
 
-  def get_adjust_tongs?(usage, bag, bag_items, belt, adjustable_tongs = false)
-
+  def get_adjust_tongs?(usage, bag, bag_items, belt, adjustable_tongs = false)    
     case usage
     when 'shovel' #looking for a shovel
       if @tongs_status == 'shovel' #tongs already a shovel
@@ -403,10 +369,38 @@ module DRCC
     end
   end
 
+  def repair_tools(tools, bag, belt, town, settings, pickup = true)
+    tools = tools.to_a
+    repair_info = get_data('crafting')['shaping'][town]
+    DRCT.walk_to(repair_info['repair-room'])
+    tools.each do |tool_name|
+      next unless get_crafting_item?(tool_name, bag, nil, belt, true)
+      if DRCI.give_item?(repair_info['repair-npc'], tool_name)
+        DRCI.stow_item?("#{repair_info['repair-npc']} ticket")
+      else
+        stow_crafting_item?(tool_name, bag, belt)
+      end
+    end
+    pickup_tools(bag, belt, town, settings) if pickup
+  end
+  
+  def pickup_tools(bag, belt, town, settings)
+    repair_info = get_data('crafting')['shaping'][town]
+    DRCT.walk_to(repair_info['repair-room'])
+    while DRCI.get_item?("#{repair_info['repair-npc']} ticket")
+      pause 30 until DRC.bput('look at my ticket', /should be ready by now/, /^Looking at the/) == 'should be ready by now'
+      DRCI.give_item?(repair_info['repair-npc'], "#{repair_info['repair-npc']} ticket")
+      pause 0.01 until tool = [DRC.right_hand,DRC.left_hand].compact.first # waits for tool to hit your hand
+      belts = [settings.forging_belt, settings.engineering_belt, settings.outfitting_belt, settings.alchemy_belt, settings.enchanting_belt]
+      toolbelt = belts.select { |belt| belt["items"].find { |name| name =~ /#{tool}/i } }.first # searches your toolbelts for the first one containing the tool.
+      break unless stow_crafting_item?(tool, bag, toolbelt) # hopefully stows the tool appropriately.      
+    end
+  end
+
   def logbook_item(logbook, noun, container)
     DRC.bput("get my #{logbook} logbook", 'You get')
-    case DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.')
-    when 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.'
+    case DRC.bput("bundle my #{noun} with my logbook", 'You notate the', 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.', 'You notice the workorder calls for')
+    when 'This work order has expired', 'The work order requires items of a higher quality', 'That isn\'t the correct type of item for this work order.', 'You notice the workorder calls for'
       DRCI.dispose_trash(noun)
     end
     case DRC.bput("put my #{logbook} logbook in my #{container}", 'You put', 'What were you referring to')
@@ -475,29 +469,6 @@ module DRCC
     end
   end
 
-  def check_for_existing_sigil?(sigil, stock_number, quantity, bag, belt, info)
-    merged = Regexp.union($PRIMARY_SIGILS_PATTERN, $SECONDARY_SIGILS_PATTERN)
-
-    tmp_count = 0
-    more = 0
-    tmp_count = DRCI.count_items_in_container("#{sigil} sigil-scroll", bag)
-
-    if tmp_count >= quantity
-      return true
-    else
-      if merged.match?("#{sigil} sigil")
-        more = quantity - tmp_count
-        # Found a weird challenge that made the temp_part_count equal 1 even though no "sigil" was in container
-        more += 1 if reget(3, "but there is nothing in there like that")
-        DRCC.order_enchant(info['stock-room'], more, stock_number, bag, belt)
-        return true
-      else
-        DRC.message("Not enough #{sigil} sigil-scroll(s). You can purchase or harvest #{more} more. We recommend using our sigilhunter script. Run ;sigilhunter help for more information.")
-        return false
-      end
-    end
-  end
-
   def count_raw_metal(container, type = nil)
     case DRC.bput("rummage /M #{container}", /crafting materials but there is nothing in there like that\.$/, /While it\'s closed/, /I don\'t know what you are referring to/, /You feel about/, /That would accomplish nothing/, /looking for crafting materials and see (.*)\.$/)
     when /crafting materials but there is nothing in there like that\.$/
@@ -533,6 +504,5 @@ module DRCC
       return
     end
     type.nil? ? (return h) : (return h[type])
-  end
-
+  end    
 end

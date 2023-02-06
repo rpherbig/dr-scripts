@@ -27,17 +27,13 @@ class BuffWatcher
 
     args = parse_args(arg_definitions)
     @settings = get_settings
-
-    @no_use_scripts = @settings.buff_watcher_no_use_scripts
-    @no_use_rooms = @settings.buff_watcher_no_use_rooms
+    @buff_watcher_no_use_scripts = @settings.buff_watcher_no_use_scripts
     @startup_delay = args.delay || @settings.buff_watcher_startup_delay
-    @passive_delay = @settings.buff_watcher_passive_delay
     @buff_set_name = args.buff_set_name || @settings.buff_watcher_name || 'default'
-    @barb_buffs_inner_fire_threshold = @settings.barb_buffs_inner_fire_threshold
 
     # Don't allow users to make foolish mistakes, always prevent use during go2/burgle
-    @no_use_scripts << 'go2'
-    @no_use_scripts << 'burgle'
+    @buff_watcher_no_use_scripts << 'go2'
+    @buff_watcher_no_use_scripts << 'burgle'
 
     # Pause for the startup delay so you can control spammyness of autostart scripts
     pause @startup_delay
@@ -55,21 +51,21 @@ class BuffWatcher
   def passive_run
     loop do
       activate_buffs if should_activate_buffs?
-      pause @passive_delay
+      pause @settings.buff_watcher_passive_delay
     end
   end
 
   def should_activate_buffs?
-    !(hidden? || invisible? || running_no_use_scripts? || inside_no_use_room? || need_inner_fire? || buffs_active? || DRStats.guild.nil?)
+    !(hidden? || invisible? || running_no_use_scripts? || inside_no_use_room? || need_inner_fire? || buffs_active? || DRStats.guild.nil? || DRStats.mana < @settings.waggle_spells_mana_threshold || DRStats.concentration < @settings.waggle_spells_concentration_threshold)
   end
 
   def activate_buffs
-    # Pause scripts to prevent interference
-    until scripts_to_unpause = DRC.safe_pause_list
-      echo("Cannot pause, trying again in 30 seconds.")
-      pause 30
+    # Pause other scripts so they don't interfere with our casting
+    scripts_to_unpause = DRC.safe_pause_list
+    unless scripts_to_unpause
+      echo("Cannot pause, trying again shortly.")
+      return
     end
-
     temp_left_item = nil
     waitrt?
 
@@ -91,7 +87,7 @@ class BuffWatcher
     DRCA.do_buffs(@settings, @buff_set_name)
 
     # Pick item back up if you lowered something
-    DRCI.get_item?(temp_left_item) if temp_left_item
+    DRCI.lift_specific?(temp_left_item) if temp_left_item
 
     # Resume scripts
     DRC.safe_unpause_list(scripts_to_unpause)
@@ -99,34 +95,34 @@ class BuffWatcher
 
   def buffs_active?
     #Reloads your waggle settings each time it checks for active spells so you can change on the fly them without killing buff-watcher
-    @settings = get_settings
+    settings = get_settings
     if DRStats.thief?
       # Cleaning up the various different styles of thief waggles
-      spell_list = @settings.waggle_sets[@buff_set_name].join(' ').split(' ').map(&:capitalize)
+      spell_list = settings.waggle_sets[@buff_set_name].join(' ').split(' ').map(&:capitalize)
       # Removing elements that are not spells we want to check
       spell_list.reject! { |spell| spell =~ /delay|khri|puncture|slice|impact|fire|cold|electric/i }
       # Checking that each spell on our list is currently active
       return spell_list.all? { |name| DRSpells.active_spells["Khri #{name}"] }
     elsif DRStats.barbarian?
       # Elements in the waggle set are ability names (strings)
-      return @settings.waggle_sets[@buff_set_name].all? { |name| DRSpells.active_spells[name] }
+      return settings.waggle_sets[@buff_set_name].all? { |name| DRSpells.active_spells[name] }
     else
       # Elements in the waggle set are maps of spell name to spell data
-      return @settings.waggle_sets[@buff_set_name].all? { |name, data| DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast']) }
+      return settings.waggle_sets[@buff_set_name].all? { |name, data| DRSpells.active_spells[name] && (data['recast'].nil? || DRSpells.active_spells[name].to_i > data['recast']) }
     end
   end
 
   def running_no_use_scripts?
-    @no_use_scripts.any? { |name| Script.running?(name) }
+    @buff_watcher_no_use_scripts.any? { |name| Script.running?(name) }
   end
 
   def inside_no_use_room?
-    @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
+    @settings.buff_watcher_no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
   end
 
   def need_inner_fire?
     return false unless DRStats.barbarian?
-    DRStats.mana < @barb_buffs_inner_fire_threshold
+    DRStats.mana < @settings.barb_buffs_inner_fire_threshold
   end
 
   def use_stored_cambrinth?

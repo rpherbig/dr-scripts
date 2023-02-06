@@ -11,50 +11,57 @@ class MakeSteel
       [
         { name: 'count', regex: /^(0?[1-9]|1[0-9]|2[0-1])$/, description: 'Number of iron ingots to smelt. (e.g. 1-21)' },
         { name: 'type', options: %w[l m h], optional: true, description: 'Carbon content, defaults to high' },
-        { name: 'refine', regex: /refine/i, optional: true, description: 'If provided, refine the resulting ingot' }
+        { name: 'refine', regex: /refine/i, optional: true, description: 'If provided, refine the resulting ingot' },
+        { name: 'hold', regex: /^hold/, optional: true, description: 'Holds final ingot for further use, rather than stowing'}
       ]
     ]
 
     args = parse_args(arg_definitions)
+    @hold = args.hold
+    @refine = args.refine
     total_count = args.count.to_i
     type = args.type || 'h'
     @settings = get_settings
     @stock_room = get_data('crafting')['blacksmithing'][@settings.hometown]['stock-room']
+    name,multiplier = if type == 'h'
+                        ['highsteel', 3]
+                      elsif type == 'm'
+                        ['midsteel', 2]
+                      elsif type == 'l'
+                        ['lowsteel', 1]
+                      end
+    tools = settings.adjustable_tongs ? %w[rod bellows tongs] : %w[rod bellows shovel]
+    unless tools.all? { |tool| DRCI.exists?(tool) }
+      echo 'A TOOL WAS MISSING. FIND IT AND RESTART'
+      exit
+    end
+    recipe,stock = [get_data('recipes').blacksmithing.select { |x| x['name'] == name }, get_data('crafting')['stock']['iron']]
+    cost = DRCC.crafting_cost(recipe, @settings.hometown, recipe['part'], total_count, stock)
+    cost += 312 if @refine
+    DRCM.ensure_copper_on_hand(cost, @settings)
 
-    DRCM.ensure_copper_on_hand(2000 * total_count, @settings)
+    smelt_ingot(total_count, type, multiplier)
 
-    smelt_ingot(total_count, type)
-
-    refine if args.refine
+    refine if @refine
   end
 
   def refine
     DRCT.order_item(get_data('crafting')['blacksmithing'][@settings.hometown]['finisher-room'], 9) unless DRCI.exists?('flux')
     DRCC.find_empty_crucible(@settings.hometown)
-    DRCI.get_item('steel ingot')
     DRC.bput('put my steel ingot in crucible', /You put your.*in the.*crucible\./)
     DRC.wait_for_script_to_complete('smelt', ['refine'])
-    DRCI.stow_item?('ingot')
+    DRCI.stow_item?('ingot') unless @hold
   end
 
-  def smelt_ingot(count, type)
+  def smelt_ingot(count, type, multiplier)
     count.times do
       order_stow(7)
-      order_stow(2)
-      order_stow(2) if %w[m h].include?(type)
-      order_stow(2) if type == 'h'
+      multiplier.times do
+        order_stow(2)
+      end
     end
 
     DRCC.find_empty_crucible(@settings.hometown)
-
-    multiplier = case type
-                 when 'l'
-                   1
-                 when 'm'
-                   2
-                 when 'h'
-                   3
-                 end
 
     (count * multiplier).times do
       DRCI.get_item('coal nugget')
@@ -75,7 +82,7 @@ class MakeSteel
     end
 
     DRC.wait_for_script_to_complete('smelt')
-    DRCI.stow_item?('ingot')
+    DRCI.stow_item?('ingot') unless @hold || @refine
   end
 
   def order_stow(num)

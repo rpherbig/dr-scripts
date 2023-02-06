@@ -6,9 +6,15 @@
       master_container: #bag for completed master's lockpicks
       trash_container: #bag for anything less than master/grandmaster
       initial_grand: #true/false as to whether to initial your grandmasters' lockpicks
+      full_rings_container: #bag for full rings, can't be either grand/master bag
+      ring_picks: #true/false as a default to put carved picks on rings
+      carve_past_ring_capacity: #true/false to continue carving after you've run out of lockpick rings
 =end
 
 custom_require.call(%w[common common-items common-crafting])
+@@grands_count = 0
+@@masters_count = 0
+UserVars.grands_ratio ||= {}
 
 class CarveLockpicks
 
@@ -17,93 +23,300 @@ class CarveLockpicks
     @bag = @settings.crafting_container
     @bag_items = @settings.crafting_items_in_container
     @belt = @settings.engineering_belt
+    @stool_out = false
     @lockpick_carve_settings = @settings.lockpick_carve_settings
-	  @grandbag = @lockpick_carve_settings['grand_container']
-	  @masterbag = @lockpick_carve_settings['master_container']
-	  @trashbag = @lockpick_carve_settings['trash_container']
-	  @initial = @lockpick_carve_settings['initial_grand']
+    arg_definitions = [
+      [
+        { name: 'ring', regex: /ring/i, optional: true, description: 'Put completed batches of lockpicks on rings, need rings in the same bag as the lockpicks (grands rings in grands bag)' },
+        { name: 'ratio_last', regex: /ratio_last/i, optional: true, description: 'Displays most recent percentage of grandmaster to master picks carved from last run.' },
+        { name: 'ratio_all', regex: /ratio_all/i, optional: true, description: 'Displays overall percentage of grandmaster to master picks carved from all runs.' },
+        { name: 'ratio_reset', regex: /ratio_reset/i, optional: true, description: 'Delete all past recorded carving projects data'},
+        { name: 'script_summary', optional: true, description: 'Carves lockpicks with carving knife, drawing from keyblank pockets until empty.' }
+      ],
+      [
+        { name: 'buy_rings', regex: /buy_rings/i, description: 'Buy rings from a shop, first number is masters, second number is grands'},
+        { name: 'pockets', regex: /\d+/, description: 'How many pockets you\'re carving' },
+        { name: 'masters_ordinal', regex: /\w+/, description: 'Ordinal (first/second/third) of master\'s rings to order' },
+        { name: 'grands_ordinal', regex: /\w+/, description: 'Ordinal (first/second/third) of grandmaster\'s rings to order' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    @grands_ring_ready, @masters_ring_ready = [15,10]
+    @master_batch, @grand_batch = [true,true] if args.ring || @lockpick_carve_settings['ring_picks']
 
-    DRC.wait_for_script_to_complete('buff', ['carve'])
-    DRC.bput('sit', 'You sit', 'You are already sitting', 'You rise', 'While swimming?') unless sitting?
+    purchase_rings(args.pockets.to_i, args.masters_ordinal, args.grands_ordinal) if args.buy_rings
+
+    if args.ratio_last
+      return DRC.message("No history to display") if UserVars.grands_ratio.empty?
+      DRC.message("Most recent percentage of Grandmaster's to Master's picks: #{UserVars.grands_ratio.to_a.last.last}")
+      exit
+    elsif args.ratio_all
+      return DRC.message("No history to display") if UserVars.grands_ratio.empty?
+      DRC.message("Average of all recorded carving projects to date, Grandmaster's percentages: #{calc_ratio}")
+      exit
+    elsif args.ratio_reset
+      UserVars.grands_ratio = {}
+      DRC.message("Resetting past carving projects data. Historical data: #{UserVars.grands_ratio}")
+      exit
+    end
+
+    main_loop
+	end
+
+  def calc_ratio
+    total = 0
+    UserVars.grands_ratio.each { |k,v| total += v }
+    total = total/UserVars.grands_ratio.size
+    return total.round
+  end
+
+  def purchase_rings(pockets, mord, gord)
+    # getting ring count for each based on past performance    
+    if UserVars.grands_ratio.empty?
+      DRC.message('Cannot calculate exact figure, doing an even split')
+      @mrings,@grings = [pockets + 1,pockets + 1]
+    else
+      total_rings = (pockets*50)/25
+      @grings = (calc_ratio/100.to_f * total_rings).round
+      @mrings = total_rings - @grings
+      @grings += [@grings/5,1].max
+      @mrings += [@mrings/5,1].max
+    end
+    DRC.message("Buying:\nMaster's rings: #{@mrings}\nGrandmaster's rings: #{@grings}")
+    sleep 1
+    verify_funds("lockpick ring", mord, gord)
+    
+    grings.times do
+      DRCT.buy_item(Room.current.id, "#{gord} lockpick ring")
+      DRCI.put_away_item?("lockpick ring", @lockpick_carve_settings['grand_container'])
+    end
+
+    mrings.times do
+      DRCT.buy_item(Room.current.id, "#{mord} lockpick ring")
+      DRCI.put_away_item?("lockpick ring", @lockpick_carve_settings['master_container'])
+    end
+    exit
+  end
+
+  def verify_funds(item, *ords)
+    total_needed,currency = [0,'']
+    counts = [@mrings,@grings]
+    ords.each do |ord|
+      case DRC.bput("shop #{ord} #{item}", /^I could not find/, /Cost: (\d+) (\w+)/)
+      when /(\d+) (\w+)/
+        cost = Regexp.last_match(1).to_i
+        currency = Regexp.last_match(2)
+        total_needed += cost*counts.shift
+      else
+        DRC.message("Cannot find #{ord} #{item} to purchase here.")
+        exit
+      end
+    end
+    DRC.message("Total purchase price is: #{DRCM.minimize_coins(total_needed)}")
+    sleep 1
+    current_coin = DRCM.check_wealth(currency)
+    if (current_coin < total_needed)
+      DRC.message("Need coin in the amount of: #{DRCM.minimize_coins(total_needed - current_coin)}")
+      sleep 1
+      exit
+    else
+      DRC.message("Sufficient coin on hand, purchasing.")
+      sleep 1
+    end
+  end
+
+  def check_status
+    spell_list = @settings.waggle_sets['carve'].join(' ').split(' ').map(&:capitalize)
+    spell_list.reject! { |spell| spell =~ /delay|khri|puncture|slice|impact|fire|cold|electric/i }
+    DRC.wait_for_script_to_complete('buff', ['carve']) unless spell_list.all? { |name| DRSpells.active_spells["Khri #{name}"] }
+    if @settings.camp_stool
+      if standing? && !@stool_out && /You get|You pick up/ =~ DRC.bput("get my camp stool", /^You get/, /^You pick up/, /^What were you referring to/)
+        DRC.bput("open my camp stool", /^You open the camp stool/, /^You notice that the camp stool is already open/)
+        DRCI.lower_item?('camp stool')
+        DRC.bput('sit stool', 'You sit', 'You are already sitting', 'You rise', 'While swimming?')
+        @stool_out = true
+      elsif standing?
+        DRC.bput('sit stool', 'You sit', 'You are already sitting', 'You rise', 'While swimming?')
+      end
+    else
+      DRC.bput("sit", 'You sit', 'You are already sitting', 'You rise', 'While swimming?') unless sitting?
+    end
+  end
+
+  def main_loop
     DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
     if DRCI.exists?("keyblank pocket")
-      get_keyblank
+      loop do
+        check_status
+        get_keyblank
+        carve_lockpick if carve_keyblank
+      end
     else
       DRCC.stow_crafting_item("carving knife", @bag, @belt)
       exit
-	end
+    end
   end
 
-
   def get_keyblank
-    case DRC.bput "get keyblank from my keyblank pocket", 'You get', 'What were you referring to?'
-    when /What were you referring to?/
-      case DRC.bput "count my keyblank pocket", /There's nothing inside the keyblank pocket/, /It looks like there/, /I could not find what you were referring to./
-      when /There's nothing inside the keyblank pocket/
+    case DRC.bput("get keyblank from my keyblank pocket", 'You get', 'What were you referring to', 'You need a free hand')
+    when /What were you referring to/
+      case DRC.bput("count my keyblank pocket", 'nothing inside the keyblank pocket', 'It looks like there', 'I could not find what you were referring to')
+      when /nothing inside the keyblank pocket/
         empty_pocket
       when /It looks like there/
-        DRC.bput "open my keyblank pocket", 'You open a'
-      when /I could not find what you were referring to./
-        DRCC.stow_crafting_item("carving knife", @belt, @bag)
+        DRC.bput("open my keyblank pocket", 'You open a')
+      when /I could not find what you were referring to/
+        DRCC.stow_crafting_item("carving knife", @bag, @belt)
         exit
       end
-	    get_keyblank
-    when /You get/
-      carve_keyblank
+      get_keyblank
+    when /You need a free hand/
+      if /referring/ =~ DRC.bput("Put my keyblank in my keyblank pocket", 'You put a', 'What were you referring to')
+        fput('stow left')
+      end
+      get_keyblank
     end
   end
 
   def carve_keyblank
-    case DRC.bput('carve my keyblank with my knife', /proudly glance down at a grandmaster/, /begin to carefully carve/, /proudly glance down at a master/, /but feel your knife slip/)
+    case DRC.bput("carve my keyblank with my knife", 'proudly glance down at a grandmaster', 'begin to carefully carve', 'proudly glance down at a master', 'but feel your knife slip', 'You are too injured to do any carving')
     when /proudly glance down at a grandmaster/
-	    stow_item("grand")
+      DRC.bput("carve my lockpick with my knife", 'With the precision and skill') if @lockpick_carve_settings['initial_grand']
+      @@grands_count += 1
+      @grands_ring_ready -= 1
+      stow_lockpick(@lockpick_carve_settings['grand_container'])
+      false
     when /begin to carefully carve/
-      carve_lockpick
+      true
     when /proudly glance down at a master/
-      stow_item("master")
-    when /but feel your knife slip and the iron keyblank snaps like a twig/
-      get_keyblank
+      @@masters_count += 1
+      @masters_ring_ready -= 1
+      stow_lockpick(@lockpick_carve_settings['master_container'])
+      false
+    when /but feel your knife slip/
+      false
+    when /You are too injured to do any carving/
+      DRC.message("Need to be completely wound-free, go get healed")
+      DRC.bput("Put my keyblank in my keyblank pocket", 'You put a')
+      DRCC.stow_crafting_item("carving knife", @bag, @belt)
+      exit
     end
   end
 
   def carve_lockpick
-    case DRC.bput('carve my lockpick with my knife', /proudly glance down at a grandmaster/, /proudly glance down at a master/, /into the side of a/, /find a creature to carve/, /It would be better/, /Working with extreme caution/, /but feel your knife slip/)
+    case DRC.bput("carve my lockpick with my knife", 'proudly glance down at a grandmaster', 'proudly glance down at a master', 'into the side of a', 'find a creature to carve', 'It would be better', 'Working with extreme caution', 'but feel your knife slip')
     when /proudly glance down at a grandmaster/
-	    stow_item("grand")
+      DRC.bput("carve my lockpick with my knife", 'With the precision and skill') if @lockpick_carve_settings['initial_grand']
+      @@grands_count += 1
+      @grands_ring_ready -= 1
+      stow_lockpick(@lockpick_carve_settings['grand_container'])
     when /proudly glance down at a master/
-      stow_item("master")
+      @@masters_count += 1
+      @masters_ring_ready -= 1
+      stow_lockpick(@lockpick_carve_settings['master_container'])
     when /but feel your knife slip/
-      get_keyblank
-	  return
+      return
     when /find a creature to carve/, /It would be better/
-      stow_item("trash")
+      stow_lockpick(@lockpick_carve_settings['trash_container'])
     when /Working with extreme caution/
       carve_lockpick
     when /iron lockpick in your hands/
-      stow_item("trash")
+      stow_lockpick(@lockpick_carve_settings['trash_container'])
     end
   end
 
-  def stow_item(name)
-    case name
-	  when /grand/
-      DRC.bput("carve my lockpick with my knife", 'With the precision and skill') if @initial
-      DRCI.put_away_item?('lockpick', @grandbag)
-	  when /master/
-      DRCI.put_away_item?('lockpick', @masterbag)
-	  when /trash/
-      DRCI.put_away_item?('lockpick', @trashbag)
+  def stow_lockpick(container)
+    # Ring a set of 25
+    if @grands_ring_ready <= 0 && @grand_batch
+      ring_batch('grand')
+      return
+    elsif @masters_ring_ready <= 0 && @master_batch
+      ring_batch('master')
+      return
     end
-    get_keyblank
+    # Unless we can stow it (eg full bag), we call it quits
+    unless DRCI.put_away_item?('lockpick', container)
+      DRC.message("Bag's full, exiting")
+      DRCC.stow_crafting_item("carving knife", @bag, @belt)
+      exit
+    end
   end
 
   def empty_pocket
     DRC.bput("get my keyblank pocket", 'You get')
-    DRC.bput("drop my pocket", 'You drop')
-    return unless /referring/ =~ DRC.bput("open my keyblank pocket", 'You open', 'What were you referring')
-    DRCC.stow_crafting_item("carving knife", @bag, @belt)
-    exit
+    DRCI.dispose_trash("keyblank pocket", @settings.worn_trashcan, @settings.worn_trashcan_verb)
+    return unless /referring/ =~ DRC.bput("open my keyblank pocket", 'You open', 'What were you referring', 'That is already open')
+    if DRCI.get_item_from_eddy_portal?("keyblank pocket", "portal")
+      DRCI.put_away_item?("keyblank pocket", @lockpick_carve_settings['full_rings_container'])
+      DRC.bput("open my keyblank pocket", 'You open', 'What were you referring', 'That is already open')
+    else
+      DRCC.stow_crafting_item("carving knife", @bag, @belt)
+      exit
+    end
   end
+
+  def ring_batch(type)
+    DRCC.stow_crafting_item("carving knife", @bag, @belt)
+    case type
+    when 'grand'
+      if /referring/ =~ DRC.bput("Get lockpick ring from my #{@lockpick_carve_settings['grand_container']}", /^You get/, /^What were you referring/)
+        DRC.message("Out of rings for Grandmaster's Picks")
+        @grand_batch = false
+        stow_lockpick(@lockpick_carve_settings['grand_container'])
+        exit unless @lockpick_carve_settings['carve_past_ring_capacity']
+        DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
+        return
+      else
+        container = @lockpick_carve_settings['grand_container']
+        @grands_ring_ready = 25
+      end
+    when 'master'
+      if /referring/ =~ DRC.bput("Get lockpick ring from my #{@lockpick_carve_settings['master_container']}", /^You get/, /^What were you referring/)
+        DRC.message("Out of rings for Master's Picks")
+        @master_batch = false
+        stow_lockpick(@lockpick_carve_settings['master_container'])
+        exit unless @lockpick_carve_settings['carve_past_ring_capacity']
+        DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
+        return
+      else
+        container = @lockpick_carve_settings['master_container']
+        @masters_ring_ready = 25
+      end
+    end
+    DRC.bput("Put my lockpick on my lockpick ring", /^You put .* lockpick on your lockpick ring/)
+    24.times do
+      DRC.bput("Get lockpick from my #{container}", /^You get a/)
+      DRC.bput("Put my lockpick on my lockpick ring", /^You put .* lockpick on your lockpick ring/)
+    end
+    unless /You put/ =~ DRC.bput("Put my lockp ring in my #{@lockpick_carve_settings['full_rings_container']}", /^You put/, /^That's too heavy/, /no more room/)
+      DRC.message("Out of room for rings")
+      exit
+    end
+    
+    DRCC.get_crafting_item("carving knife", @bag, @bag_items, @belt)
+  end
+end
+
+before_dying do
+  DRCI.clean_feet
+  percentage = (@@grands_count.to_f / (@@grands_count + @@masters_count).to_f)*100
+  exit if percentage.nan?
+  DRC.message("Total grandmaster's picks: #{@@grands_count}")
+  DRC.message("Total master's picks: #{@@masters_count}")
+  DRC.message("Grandmaster's percentage:  #{percentage.round(2)}%")
+  unless UserVars.grands_ratio.empty?
+    total = 0
+    UserVars.grands_ratio.each { |k,v| total += v }
+    total = total/UserVars.grands_ratio.size
+    if total > percentage
+      DRC.message("This was a bad run, past carving projects yielded #{(total - percentage).round(2)}% more Grandmaster's than Master's picks")
+    elsif total < percentage
+      DRC.message("Nice job, this run beat your past projects by carving #{(percentage - total).round(2)}% more Grandmaster's than Master's picks")
+    else
+      DRC.message("Consistent with past performance, no gain or loss in ratio of Grandmaster's to Master's picks")
+    end
+  end
+  UserVars.grands_ratio.store(Time.now, percentage.round)
 end
 
 CarveLockpicks.new

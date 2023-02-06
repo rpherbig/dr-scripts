@@ -1,0 +1,148 @@
+custom_require.call(%w[common common-arcana common-crafting common-items common-travel common-money events])
+
+class SlimRemedy
+
+    def initialize
+        @settings = get_settings
+        @bag = @settings.crafting_container
+        @bag_items = @settings.crafting_items_in_container
+        @belt = @settings.alchemy_belt
+        @cube = @settings.cube_armor_piece
+        hometown = @settings.crafting_hometown['outfitting'] || @settings.crafting_hometown || @settings.hometown
+        @info = get_data('crafting')['remedies'][hometown]
+
+        arg_definitions = [[
+              { name: 'recipe_name', display: 'recipe name', regex: /^[A-z\s\-']+$/i, variable: true, description: 'Name of the recipe, wrap in double quotes if this is multiple words.' }
+            ]]
+
+        args = parse_args(arg_definitions)
+
+        @recipes = get_data('recipes')['remedies']
+        recipe = DRCC.recipe_lookup(@recipes, args.recipe_name)
+        @noun,@recipe_name,@parts,@chapter = [recipe['noun'],recipe['name'],recipe['part'],recipe['chapter']]
+        @container,@main_tool = if recipe['container'] == 'bowl'
+                                    [@settings.alchemy_tools.find { |tool| tool =~ /cauldron|bowl/ },@settings.alchemy_tools.find { |tool| tool =~ /stick/ }]
+                                else
+                                    [@settings.alchemy_tools.find { |tool| tool =~ /mortar/ },@settings.alchemy_tools.find { |tool| tool =~ /pestle/ }]
+                                end
+        @home_command = recipe['container'] == 'bowl' ? "stir #{@container} with my #{@main_tool}" : "crush #{@noun} in #{@container} with my #{@main_tool}"
+        
+        DRC.wait_for_script_to_complete('buff', ['remedy'])
+        Flags.add('remedy-assembly', /^You need another splash of (water|alcohol)/, /^You need another (catalyst) material/, /^You need another prepared (herb)/)
+        Flags.add('remedy-finished', /^Applying the final touches/)
+
+        work(prep)
+    end
+
+    def check_hand(x)
+        if DRCI.in_right_hand?(x)
+            DRC.bput('swap', 'You move', 'You have nothing')
+        else
+            DRC.message('***Please hold the item or material you wish to work on.***')
+            magic_cleanup
+            exit
+        end
+    end
+    
+    def swap_tool(next_tool, skip = false)
+        unless DRC.right_hand.include?(next_tool)
+            DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+            tool = @settings.alchemy_tools.find { |t| t =~ /#{next_tool}/i } || next_tool
+            DRCC.get_crafting_item(tool, @bag, @bag_items, @belt, skip)
+        end
+    end
+    
+    def prep
+        DRCA.crafting_magic_routine(@settings)
+        if @settings.master_crafting_book
+            DRC.bput("turn my #{@settings.master_crafting_book} to discipline remedies", 'You turn the')
+            DRC.bput("turn my #{@settings.master_crafting_book} to page #{DRCC.find_recipe(@chapter, @recipe_name, @settings.master_crafting_book)}", 'You turn your', 'The .* is already')
+            DRC.bput("study my #{@settings.master_crafting_book}", 'Roundtime')
+        else
+            DRCC.get_crafting_item("remedy book", @bag, @bag_items, @belt)
+            echo('*** You will need to upgrade to a journeyman or master book before 176 ranks! ***') if DRSkill.getrank('Alchemy') == 175
+            DRC.bput("turn my book to page #{DRCC.find_recipe(@chapter, @recipe_name)}", 'You turn your', 'The book is already')
+            DRC.bput('study my book', 'Roundtime')
+            DRCC.stow_crafting_item("remedy book", @bag, @belt)
+        end
+
+        swap_tool(@container)
+        check_hand(@container)
+        swap_tool(@parts.first)
+        DRC.bput("put my #{@parts.first} in my #{@container}", /^You put your/)
+        swap_tool(@main_tool)
+        return command = @container.include?('mortar') ? "crush #{@parts.first} in #{@container} with my #{@main_tool}" : @home_command
+    end
+
+    def add_ingredient
+        return unless Flags['remedy-assembly']
+
+        tool = DRC.right_hand
+        DRCC.stow_crafting_item(tool, @bag, @belt)
+        case Flags['remedy-assembly'][1]
+        when /water/
+            swap_tool('water')
+        when /alcohol/
+            swap_tool('alcohol')
+        when /catalyst/
+            swap_tool('coal nugget')
+        else
+            swap_tool(@parts.last)
+        end
+
+        DRC.bput("put my #{DRC.right_hand} in my #{@container}", /^You toss the/, /^You vigorously rub/)
+        swap_tool(tool)
+        Flags.reset('remedy-assembly')
+    end
+
+    def work(command)
+        tool = @main_tool
+        DRC.bput("touch my #{@cube}", /Warm vapor swirls around your head in a misty halo/, /A thin cloud of vapor manifests with no particular effect./, /Touch what/) if @cube
+        loop do
+            waitrt?
+            DRCA.crafting_magic_routine(@settings)
+            case DRC.bput(command,
+                /Clumps of material stick to the sides/, /Once finished you notice clumps of material/, # turn
+                /begins to transition colors/, /smell the mixture/, # smell
+                /^Upon completion you see some particulate clouding up the mixture/, /with a sieve/, # sieve
+                /Roundtime/) # everything else
+            when /clumps/
+                command = "turn my #{@container}"
+            when /begins to transition colors/, /smell the mixture/
+                command = "smell my #{@noun}"
+            when /clouding up the mixture/, /with a sieve/
+                tool = 'sieve'
+                command = "push my #{@noun} with my sieve"
+            else
+                finish if Flags['remedy-finished']
+                command = @home_command
+            end
+            add_ingredient
+            swap_tool(tool)
+            tool = @main_tool
+        end
+    end
+
+    def magic_cleanup
+        return if @settings.crafting_training_spells.empty?
+        DRC.bput('prepare symbiosis', /^You recall the exact details of the/, /^But you've already prepared/, /^Please don't do that here/)
+        DRC.bput('release symbiosis', /^You release/, /^But you haven't prepared/)
+        DRC.bput('release spell', /^You let your concentration lapse/, /^You aren't preparing a spell/)
+        DRC.bput('release mana', /^You release all/, /^You aren't harnessing any mana/)
+    end
+
+    def finish
+        DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+        DRC.bput("get #{@noun} from my #{@container}", /^You get/)
+        DRCC.stow_crafting_item(@container, @bag, @belt)
+        magic_cleanup
+        exit
+    end
+end
+
+before_dying do
+    Flags.delete('remedy-assembly')
+    Flags.delete('remedy-finished')
+end
+
+SlimRemedy.new

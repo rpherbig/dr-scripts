@@ -77,6 +77,7 @@ module DRCI
     /^You stop as you realize the .* is not yours/,
     /^You can't reach that from here/, # on a mount like a flying carpet
     /^You don't seem to be able to move/,
+    /^You should untie/,
     /^Get what/,
     /^I could not/,
     /^What were you/,
@@ -127,19 +128,19 @@ module DRCI
 
   @@tie_item_success_patterns = [
     /^You .* tie/,
-    /^You attach/,
-    /^You untie/
+    /^You attach/
   ]
 
   @@tie_item_failure_patterns = [
     /^You don't seem to be able to move/,
     /^There's no more free ties/,
     /^You must be holding/,
+    /^Your wounds hinder your ability to do that/,
+    /doesn't seem to fit/,
     /^Tie what/
   ]
 
   @@untie_item_success_patterns = [
-    /you untie/,
     /^You untie/
   ]
 
@@ -273,7 +274,7 @@ module DRCI
     /^You (thump|drum) your finger/, # You tapped an item with fancy verbiage, ohh la la!
     /^The orb is delicate/, # You tapped a favor orb
     /^You .* on the shoulder/, # You tapped someone
-    /^You suddenly forget what you were doing/ # "tap my tessera" messaging when hands are full
+    /^You suddenly forget what you were doing/
   ]
 
   @@tap_failure_patterns = [
@@ -351,21 +352,6 @@ module DRCI
   def dispose_trash(item, worn_trashcan = nil, worn_trashcan_verb = nil)
     return if item.nil?
 
-    if worn_trashcan
-      case DRC.bput("put my #{item} in my #{worn_trashcan}", @@drop_trash_retry_patterns, @@drop_trash_success_patterns, @@drop_trash_failure_patterns, /^Perhaps you should be holding that first/)
-      when /^Perhaps you should be holding that first/
-        return false unless DRCI.get_item?(item) && DRCI.dispose_trash(item)
-      when *@@drop_trash_retry_patterns
-        return true if dispose_trash(item, worn_trashcan, worn_trashcan_verb)
-      when *@@drop_trash_success_patterns
-        if worn_trashcan_verb
-          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
-          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
-        end
-        return true
-      end
-    end
-
     trashcans = DRRoom.room_objs
                       .reject { |obj| obj =~ /azure \w+ tree/ }
                       .map { |long_name| DRC.get_noun(long_name) }
@@ -406,6 +392,22 @@ module DRCI
         # then don't return yet, will try to drop it later.
         return true if dispose_trash(item)
       when *@@drop_trash_success_patterns
+        return true
+      end
+    end
+    
+    # no bins in the room, use personal trash bin    
+    if worn_trashcan
+      case DRC.bput("put my #{item} in my #{worn_trashcan}", @@drop_trash_retry_patterns, @@drop_trash_success_patterns, @@drop_trash_failure_patterns, /^Perhaps you should be holding that first/)
+      when /^Perhaps you should be holding that first/
+        return false unless DRCI.get_item?(item) && DRCI.dispose_trash(item)
+      when *@@drop_trash_retry_patterns
+        return true if dispose_trash(item, worn_trashcan, worn_trashcan_verb)
+      when *@@drop_trash_success_patterns
+        if worn_trashcan_verb
+          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
+          DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
+        end
         return true
       end
     end
@@ -531,12 +533,7 @@ module DRCI
         count = count_items(item)
         break
       when *match_messages
-        countval = Regexp.last_match(1).tr('-', ' ')
-        if countval.match? /\A\d+\z/
-          count += Integer(countval)
-        else
-          count += DRC.text2num(countval)
-        end
+        count += DRC.text2num(Regexp.last_match(1).tr('-', ' '))
       end
       waitrt?
     end
@@ -709,18 +706,19 @@ module DRCI
   def tie_item?(item, container)
     case DRC.bput("tie my #{item} to my #{container}", @@tie_item_success_patterns, @@tie_item_failure_patterns)
     when *@@tie_item_success_patterns
-      return true
+      true
     else
-      return false
+      false
     end
   end
 
-  def untie_item?(item, container)
-    case DRC.bput("untie my #{item} from my #{container}", @@untie_item_success_patterns, @@untie_item_failure_patterns)
+  def untie_item?(item, container = nil)
+    place = container ? "from my #{container}" : nil
+    case DRC.bput("untie my #{item} #{place}", @@untie_item_success_patterns, @@untie_item_failure_patterns)
     when *@@untie_item_success_patterns
-      return true
+      true
     else
-      return false
+      false
     end
   end
 
@@ -783,6 +781,7 @@ module DRCI
   # Stows an item into its default container. See STORE HELP for details.
   # Same as 'stow_item_safe?'.
   def stow_item?(item)
+    return false unless item
     stow_item_safe?(item)
   end
 
@@ -809,7 +808,7 @@ module DRCI
   end
 
   #########################################
-  # LOWER ITEM
+  # LOWER/LIFT ITEM
   #########################################
 
   # Lowers the item to the ground.
@@ -824,6 +823,49 @@ module DRCI
     else
       false
     end
+  end
+
+  def lift_and_stow(item = nil, bag = nil)
+    if bag && item
+      put_away_item?(item, bag) if lift_specific?(item)
+    elsif bag
+      put_away_item?(lift?, bag)
+    elsif item
+      stow_item?(item) if lift_specific?(item)
+    else
+      stow_item?(lift?)
+    end
+  end
+
+  def clean_feet(bag = nil)
+    while item = lift?
+      if bag
+        put_away_item?(item, bag)
+      else
+        stow_item?(item)
+      end
+    end
+  end
+
+  def check_feet?
+    /All of your items lying at your feet/ =~ DRC.bput("lift list", /^All of your items lying at your feet/, /^There are no items lying at your feet/)
+  end
+
+  def lift_specific?(item)
+    return false unless check_feet?
+    return false unless item_id = UserVars.items_at_feet.find { |id,desc| desc =~ /#{item}/ }.first
+    /You pick up/ =~ DRC.bput("get ##{item_id}", /^You pick up/, /^What did you want to try and lift/, /^There are no items lying at your feet/, /can\'t quite lift it/, /^You are not strong enough to pick that up/)
+  end
+
+  def lift?
+    current = [DRC.right_hand,DRC.left_hand].compact # current contents of our hands
+    if current.size > 1 # Can't lift anything if our hands are already full.
+        DRC.message("Hands are FULL, cannot lift anything without a free hand!")
+        return false
+    elsif /You pick up/ =~ DRC.bput("lift", /^You pick up/, /^What did you want to try and lift/, /^There are no items lying at your feet/, /can\'t quite lift it/, /^You are not strong enough to pick that up/)
+        return ([DRC.right_hand,DRC.left_hand].compact - current).first # returns whatever item we lifted, less whatever was already in our hands.
+    end
+    false
   end
 
   #########################################
@@ -1005,9 +1047,20 @@ module DRCI
   def give_item?(target, item)
     # An offer expires after 30 seconds.
     # The timeout is set to 35 to give some buffer for clock skew.
-    case DRC.bput("give my #{item} to #{target}", { 'timeout' => 35 }, "has accepted your offer", "has declined the offer", "Your offer to .* has expired", "You may only have one outstanding offer at a time", "What is it you're trying to give", "There's nothing in your right hand to give away")
-    when "has accepted your offer"
+    # Expanded to include repair tickets
+    case DRC.bput("give my #{item} to #{target}", { 'timeout' => 35 }, 
+            "has accepted your offer", "has declined the offer",
+            "Your offer to .* has expired", "You may only have one outstanding offer at a time", "What is it you're trying to give",
+            "There's nothing in your right hand to give away", 'Just give it to me again', "If you agree, give it to me again",
+            "You don't need to specify the object", "^You hand.*gives you back a repair ticket", "Please don't lose this ticket!", 
+            "I don't repair those here", "What is it", "There isn't a scratch on that", "I will not", "I can't fix those",
+            "^You hand.*your ticket and are handed back")
+    when /has accepted your offer/, /your ticket and are handed back/, /Please don't lose this ticket!/, /gives you back a repair ticket/
       true
+    when /I don't repair those here/, /What is it/, /There isn't a scratch on that/, /I will not/, /I can't fix those/
+      false
+    when /give it to me again/
+      return give_item?(target, item)
     else
       false
     end

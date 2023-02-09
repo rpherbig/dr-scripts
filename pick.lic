@@ -10,6 +10,7 @@ class Pick
     arg_definitions = [
       [
         { name: 'debug', regex: /debug/, optional: true, description: ''},
+        { name: 'player', options: DRRoom.pcs, optional: true, description: 'Name of player to pick for' },
         { name: 'refill', regex: /refill/, optional: true, description: 'Refills your lockpick ring.' },
         { name: 'source', regex: /(source=(\w+))/, optional: true, description: 'Container with boxes to pick.'},
         { name: 'all', regex: /all/, optional: true, description: 'Overwrite for @stop_pick_on_mindlock to keep picking'},
@@ -22,6 +23,7 @@ class Pick
 
     @settings = get_settings()
     @debug = args.debug || @settings.pick['debug'] || false
+    @player = args.player
 
     if args.source
       @sources = [ args.source.split('=')[1] ]
@@ -31,7 +33,7 @@ class Pick
       @sources = [ @settings.picking_box_source ]
     end
 
-    if @sources.nil?
+    if @sources.nil? && !args.player
       DRC.message('No valid configuration was found for box source. Exiting.')
       exit
     end
@@ -136,6 +138,13 @@ class Pick
 
     if args.refill
       refill_ring
+    elsif @player
+      @equipment_manager = EquipmentManager.new
+      setup_flags
+      remove_hindering_gear
+      pickfor_loop
+      stop_buffs
+      wear_normal_gear
     elsif stop_picking?
       echo 'Exiting due to mindstate...'
     else
@@ -226,6 +235,35 @@ class Pick
     Flags.add('more-locks', 'You discover another lock protecting')
     Flags.add('glance-no-traps', 'It looks like there are no traps left on')
     Flags.add('glance-no-locks', 'It looks like there are no locks left on')
+    Flags.add('tip-offered', '.* offers you a tip')
+    Flags.add('box-offered', /.* offers you .* ((?:brass|copper|deobar|driftwood|iron|ironwood|mahogany|oaken|pine|steel|wooden) (?:box|caddy|casket|chest|coffer|crate|skippet|strongbox|trunk))/)
+  end
+
+  def pickfor_loop
+    until Flags['tip-offered']
+      while current = accept_box
+        attempt_open(current)
+        DRCI.give_item?(@player, current)
+        current = false
+      end
+    end
+  end
+
+  def accept_box
+    echo "Waiting for proffer"
+    pause 0.1 until offer = ( Flags['box-offered'] || Flags['tip-offered'] )
+    command = Flags['box-offered'] ? "accept" : "accept tip"
+    case DRC.bput(command, "You accept .* offer and are now holding.*", "You accept #{@player.capitalize}'s tip and slip it away", "You have no offers", "Both of your hands are full", "would push you over your item limit")
+    when /are now holding/
+      Flags.reset('box-offered')
+      [DRC.right_hand,DRC.left_hand].compact.first
+    when /tip and slip it away/
+      DRC.message("Looks like we're done, closing shop")
+      false
+    when /You have no offers/
+      DRC.message("Something went wrong")
+      false
+    end
   end
 
   def crack_boxes
@@ -353,13 +391,13 @@ class Pick
         if current_box['trap'] && @trap_blacklist.include?(current_box['trap'])
           echo 'identified blacklisted trap on box' if @debug
           handle_trap_too_hard_or_blacklisted(current_box, @blacklist_container)
-          return
+          return unless @player
         end
 
         if current_box['trap_difficulty'] >= @disarm_too_hard_threshold
           echo 'identified box trap as too hard' if @debug
           handle_trap_too_hard_or_blacklisted(current_box, @too_hard_container)
-          return
+          return unless @player
         end
 
         while holding_box?(current_box) && current_box['trapped'] && !current_box['trap_difficulty'].nil?
@@ -393,6 +431,8 @@ class Pick
         end
       end
     end
+
+    return if @player
 
     if holding_box?(current_box)
       stow_hands_except(current_box['noun'])
@@ -581,6 +621,12 @@ class Pick
   end
 
   def handle_trap_too_hard_or_blacklisted(box, container)
+    if @player
+      DRC.message("Very difficult and/or blacklisted trap according to your current settings. Unpause me to continue with an attempt to open")
+      pause_script
+      return
+    end
+    
     if container
       return if DRCI.put_away_item?(box['noun'], container)
       DRC.message("Throwing away box cause it was not disarmed and stowing in #{container} failed")
@@ -845,6 +891,8 @@ before_dying do
   Flags.delete('more-locks')
   Flags.delete('glance-no-traps')
   Flags.delete('glance-no-locks')
+  Flags.delete('box-offered')
+  Flags.delete('tip-offered')
 end
 
 Pick.new

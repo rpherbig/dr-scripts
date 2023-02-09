@@ -11,6 +11,7 @@ class Pick
       [
         { name: 'debug', regex: /debug/, optional: true, description: ''},
         { name: 'player', options: DRRoom.pcs, optional: true, description: 'Name of player to pick for' },
+        { name: 'pickforme', regex: /pickforme/i, optional: true, description: 'Have player pick all of your boxes' },
         { name: 'refill', regex: /refill/, optional: true, description: 'Refills your lockpick ring.' },
         { name: 'source', regex: /(source=(\w+))/, optional: true, description: 'Container with boxes to pick.'},
         { name: 'all', regex: /all/, optional: true, description: 'Overwrite for @stop_pick_on_mindlock to keep picking'},
@@ -138,6 +139,11 @@ class Pick
 
     if args.refill
       refill_ring
+    elsif args.pickforme
+      setup_flags
+      open_containers
+      check_for_boxes
+      pickforme_loop
     elsif @player
       @equipment_manager = EquipmentManager.new
       setup_flags
@@ -236,7 +242,7 @@ class Pick
     Flags.add('glance-no-traps', 'It looks like there are no traps left on')
     Flags.add('glance-no-locks', 'It looks like there are no locks left on')
     Flags.add('tip-offered', '.* offers you a tip')
-    Flags.add('box-offered', /.* offers you .* ((?:brass|copper|deobar|driftwood|iron|ironwood|mahogany|oaken|pine|steel|wooden) (?:box|caddy|casket|chest|coffer|crate|skippet|strongbox|trunk))/)
+    Flags.add('box-offered', /#{@player.capitalize} offers you .* ((?:brass|copper|deobar|driftwood|iron|ironwood|mahogany|oaken|pine|steel|wooden) (?:box|caddy|casket|chest|coffer|crate|skippet|strongbox|trunk))/)
   end
 
   def pickfor_loop
@@ -248,15 +254,39 @@ class Pick
       end
     end
   end
+  
+  def pickforme_loop
+    first_box = true
+    @boxes_by_bag.each do |source, boxes|
+      boxes.each do |box_noun|
+        DRCI.get_item?(box_noun, source)
+        if first_box
+          DRCI.give_item?(@player, box_noun)
+          first_box = false
+          next
+        else
+          current = accept_box
+          DRCI.give_item?(@player, box_noun)
+          Flags.reset('box-offered')
+          loot(current)
+          dispose_empty_box(current)
+        end
+      end
+    end
+    current = accept_box
+    loot(current)
+    dispose_empty_box(current)
+  end
 
   def accept_box
+    held = [DRC.left_hand,DRC.right_hand].compact
     echo "Waiting for proffer"
     pause 0.1 until offer = ( Flags['box-offered'] || Flags['tip-offered'] )
     command = Flags['box-offered'] ? "accept" : "accept tip"
+    Flags.reset('box-offered')
     case DRC.bput(command, "You accept .* offer and are now holding.*", "You accept #{@player.capitalize}'s tip and slip it away", "You have no offers", "Both of your hands are full", "would push you over your item limit")
     when /are now holding/
-      Flags.reset('box-offered')
-      [DRC.right_hand,DRC.left_hand].compact.first
+      ([DRC.right_hand,DRC.left_hand].compact - held).first
     when /tip and slip it away/
       DRC.message("Looks like we're done, closing shop")
       false
@@ -437,7 +467,7 @@ class Pick
     if holding_box?(current_box)
       stow_hands_except(current_box['noun'])
       loot(current_box['noun'])
-      dispose_empty_box(current_box)
+      dispose_empty_box(current_box['noun'])
     else
       echo "You lost your box somehow." if @debug
     end
@@ -737,7 +767,7 @@ class Pick
 
   def dispose_empty_box(box)
     if @trash_empty_boxes
-      DRCI.dispose_trash(box['noun'], @worn_trashcan, @worn_trashcan_verb)
+      DRCI.dispose_trash(box, @worn_trashcan, @worn_trashcan_verb)
     else
       dismantle(box)
     end
@@ -745,15 +775,15 @@ class Pick
 
   def dismantle(box)
     DRC.release_invisibility
-    command = "dismantle my #{box['noun']} #{@dismantle_type}"
+    command = "dismantle my #{box} #{@dismantle_type}"
     case DRC.bput(command, 'repeat this request in the next 15 seconds', 'Roundtime', 'You must be holding the object you wish to dismantle', 'Your hands are too full for that', 'You can not dismantle that')
     when 'repeat this request in the next 15 seconds'
       dismantle(box)
     when 'Your hands are too full for that'
-      stow_hands_except(box['noun'])
+      stow_hands_except(box)
       dismantle(box)
     when 'You can not dismantle that'
-      DRCI.dispose_trash(box['noun'], @worn_trashcan, @worn_trashcan_verb)
+      DRCI.dispose_trash(box, @worn_trashcan, @worn_trashcan_verb)
     end
   end
 

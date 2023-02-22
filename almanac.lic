@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#almanac
 =end
 
-custom_require.call(%w[common common-items drinfomon])
+custom_require.call(%w[common common-items])
 
 class Almanac
 
@@ -13,6 +13,7 @@ class Almanac
     @no_use_rooms = settings.almanac_no_use_rooms
     @almanac_skills = settings.almanac_skills
     @almanac = settings.almanac_noun
+    @priority_skills = settings.almanac_priority_skills
 
     startup_delay = settings.almanac_startup_delay
 
@@ -22,16 +23,24 @@ class Almanac
 
   def passive_loop
     loop do
-      use_almanac if should_use_almanac?
-      pause 20
+      use_almanac unless should_not_use_almanac?
+      pause
     end
+  end
+
+  def almanac_sort_by_rate_then_rank(skills)
+    skills
+          .select { |skill| DRSkill.getxp(skill) < 18 }
+          .sort_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }.first
   end
 
   def use_almanac
     unless @almanac_skills.empty?
-      training_skill = @almanac_skills
-                       .select { |skill| DRSkill.getxp(skill) < 18 }
-                       .sort_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }.first
+      unless almanac_sort_by_rate_then_rank(@priority_skills)
+        training_skill = almanac_sort_by_rate_then_rank(@almanac_skills)
+      else
+        training_skill = almanac_sort_by_rate_then_rank(@priority_skills)
+      end
       return unless training_skill
     end
 
@@ -69,7 +78,19 @@ class Almanac
       DRC.bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn')
     end
 
-    case DRC.bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what', 'interrupt your research', 'The pages of the .* seem worn', /is only usable by a character with a Premium subscription/, /STUDY its contents\./)
+    study_almanac
+
+    DRCI.put_away_item?(@almanac)
+
+    DRC.safe_unpause_list(scripts_to_unpause)
+  end
+
+  def study_almanac
+    case DRC.bput("study my #{@almanac}", /You believe you've learned something significant/, /^You've gleaned all the insight you can/, /^Study what/, 'interrupt your research', /^The pages of the .* seem worn/, /is only usable by a character with a Premium subscription/, /STUDY its contents\./)
+    when /^You've gleaned all the insight you can/, /^The pages of the .* seem worn/
+      UserVars.almanac_last_use = Time.now - 540
+    when /You believe you've learned something significant/
+      UserVars.almanac_last_use = Time.now
     when /is only usable by a character with a Premium subscription/
       DRC.message("Premium almanac detected in a non-premium account.")
       DRC.message("Exiting")
@@ -77,19 +98,13 @@ class Almanac
       exit
     when /STUDY its contents\./
       DRC.bput("open my #{@almanac}", /^You open/)
-      DRC.bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what', 'interrupt your research', 'The pages of the .* seem worn')
+      study_almanac
     end
       waitrt?
-
-    DRCI.put_away_item?(@almanac)
-
-    UserVars.almanac_last_use = Time.now
-
-    DRC.safe_unpause_list(scripts_to_unpause)
   end
 
-  def should_use_almanac?
-    !(hidden? || invisible? || almanac_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
+  def should_not_use_almanac?
+    (hidden? || invisible? || almanac_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
   end
 
   def running_no_use_scripts?
@@ -101,7 +116,7 @@ class Almanac
   end
 
   def almanac_on_cooldown?
-    (Time.now - UserVars.almanac_last_use) < 600
+    (Time.now - UserVars.almanac_last_use.to_i).to_i < 600
   end
 
   def hands_full?

@@ -342,6 +342,9 @@ class LootProcess
     @dissect_for_thanatology = skinning['dissect_for_thanatology'] || false
     echo("  @dissect_for_thanatology: #{@dissect_for_thanatology}") if $debug_mode_ct
 
+    @dissect_retry_once = skinning['dissect_retry_once'] || false
+    echo("  @dissect_retry_once: #{@dissect_retry_once}") if $debug_mode_ct
+
     @dissect_cycle_skills = []
     @dissect_cycle_skills.append("Thanatology") if @dissect_for_thanatology
     @dissect_cycle_skills.append("First Aid") if @dissect
@@ -858,9 +861,29 @@ class LootProcess
       return false if DRSkill.getxp('First Aid') == 34
     end
 
-    case DRC.bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge', 'This ritual may only be performed on a corpse', /You learn something/i, 'A failed or completed ritual has rendered', 'You realize after a few seconds')
-    when 'You succeed in dissecting the corpse', /You learn something/i
+    case DRC.bput("dissect #{mob_noun}",
+          /You'll gain no insights from this attempt/,
+          /You succeed in dissecting the corpse/,
+          'What exactly are you trying to dissect',
+          "You'll learn nothing",
+          'While likely a fascinating study',
+          'You cannot dissect',
+          'would probably object',
+          "should be left alone.",
+          "That'd be a waste of time.",
+          'A skinned creature is worthless',
+          'You do not yet possess the knowledge',
+          'This ritual may only be performed on a corpse',
+          /You learn something/i,
+          'A failed or completed ritual has rendered',
+          'You realize after a few seconds'
+        )
+    when /You succeed in dissecting the corpse/, /You learn something/i
       return true
+    when /You'll gain no insights from this attempt/
+      waitrt?
+      fput("dissect")
+      return false
     when 'This ritual may only be performed on a corpse', 'A failed or completed ritual has rendered', 'You realize after a few seconds'
       return false
     when 'While likely a fascinating study',"That'd be a waste of time.",'You do not yet possess the knowledge'
@@ -1131,6 +1154,12 @@ class SpellProcess
     @osrel_no_harness = settings.osrel_no_harness
     echo("  @osrel_no_harness: #{@osrel_no_harness}") if $debug_mode_ct
 
+    @osrel_mana_threshold = settings.osrel_mana_threshold
+    echo("  @osrel_mana_threshold: #{@osrel_mana_threshold}") if $debug_mode_ct
+
+    @osrel_need_mana = false
+    echo("  @osrel_need_mana: #{@osrel_need_mana}") if $debug_mode_ct
+
     @cast_only_to_train = settings.cast_only_to_train
     echo("  @cast_only_to_train: #{@cast_only_to_train}") if $debug_mode_ct
 
@@ -1139,6 +1168,9 @@ class SpellProcess
 
     @training_spell_mana_threshold = settings.training_spell_mana_threshold
     echo("  @training_spell_mana_threshold: #{@training_spell_mana_threshold}") if $debug_mode_ct
+
+    @training_spells_combat_sorcery = settings.training_spells_combat_sorcery
+    echo("  @training_spells_combat_sorcery: #{@training_spells_combat_sorcery}") if $debug_mode_ct
 
     @release_cyclic_on_low_mana = settings.release_cyclic_on_low_mana
     echo("  @release_cyclic_on_low_mana: #{@release_cyclic_on_low_mana}") if $debug_mode_ct
@@ -1271,7 +1303,11 @@ class SpellProcess
       game_state.casting = false
       Flags.reset('ct-spelllost')
     end
+
     check_osrel(game_state)
+    DRC.message("Skipping other spell processes until @osrel_need_mana is false") if @osrel_need_mana
+    return false if @osrel_need_mana
+
     if game_state.mob_died
       @offensive_spells
         .select { |spell| spell['expire'] }
@@ -1305,11 +1341,14 @@ class SpellProcess
 
   def check_slivers(game_state)
     return unless DRStats.moon_mage?
-    return if game_state.casting
-    return if @tk_ammo
     return unless @tk_spell
+    return if game_state.casting
     return if DRSpells.slivers
-    return if UserVars.moons['visible'].empty?
+    unless UserVars.moons['visible'].any?
+      DRC.message "There are NO moons available and you have NO TK_AMMO set! You need to fix this!" if !@tk_ammo && $debug_mode_ct
+      return
+    end
+
     # With low skill you may fail to create the slivers
     # when breaking your moonblade. If so, keep retrying.
     retry_count = 0
@@ -1347,8 +1386,18 @@ class SpellProcess
     return if game_state.casting
     return unless @osrel_amount && DRSpells.active_spells['Osrel Meraud']
     return unless Time.now - @osrel_timer > 300
+    return unless DRSpells.active_spells['Osrel Meraud'] && DRSpells.active_spells['Osrel Meraud'] < 90
+
+    if DRStats.mana <= @osrel_mana_threshold
+      DRC.message("Setting @osrel_need_mana to true until mana over #{@osrel_mana_threshold}. Current mana: #{DRStats.mana}")
+      @osrel_need_mana = true
+      return
+    end
+
     @osrel_timer = Time.now
     infuse_om(!@osrel_no_harness, @osrel_amount)
+    DRC.message("Setting @osrel_need_mana to false") if @osrel_need_mana
+    @osrel_need_mana = false
   end
 
   def check_timer(game_state)
@@ -1572,10 +1621,12 @@ class SpellProcess
     needs_training = ['Warding', 'Utility', 'Augmentation', 'Sorcery', 'Debilitation', 'Targeted Magic']
                      .select { |skill| @training_spells[skill] }
                      .select { |skill| game_state.is_offense_allowed? || @training_spells[skill]['harmless'] }
+                     .select { |skill| ['Warding', 'Utility', 'Augmentation'].include?(skill) || !@training_spells_combat_sorcery && skill == 'Sorcery' || !game_state.npcs.empty? }
                      .select { |skill| DRSkill.getxp(skill) < @magic_exp_training_max_threshold }
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
                      .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
                      .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
+    DRC.message "all eligible training spells: #{needs_training}" if $debug_mode_ct
     needs_training = game_state.sort_by_rate_then_rank(needs_training).first
     return unless needs_training
     DRC.message "needs_training: #{needs_training}" if $debug_mode_ct
@@ -1597,6 +1648,7 @@ class SpellProcess
       game_state.casting_sorcery = true
     end
     prepare_spell(data, game_state)
+    Flags.reset('ct-spelllost')
   end
 
   def spell_is_sorcery?(spell_data)
@@ -1623,6 +1675,8 @@ class SpellProcess
                        .select { |_name, data| data['recast'] || data['recast_every'] || data['expire'] }
                        .select { |_name, data| data['expire'] ? Flags["ct-#{data['abbrev']}"] : true }
                        .select { |name, _data| check_buff_conditions?(name, game_state) }
+                       .select { |_name, data| data['night'] ? UserVars.sun['night'] : true }
+                       .select { |_name, data| data['day'] ?  UserVars.sun['day'] : true }
                        .select { |_name, data| data['starlight_threshold'] ? enough_starlight?(game_state, data) : true }
                        .reject { |name, data | data['cyclic'] && DRSpells.active_spells.include?(data['name']) && !data['recast_every'] }
 
@@ -1792,11 +1846,11 @@ class SpellProcess
                    .select { |spell| game_state.is_offense_allowed? || spell['harmless'] }
                    .select { |spell| game_state.dancing? ? spell['harmless'] : true }
                    .select { |spell| spell['recast_every'] ? check_spell_timer?(spell) : true }
-                   .select { |spell| @cast_only_to_train || spell['cast_only_to_train'] ? DRSkill.getxp(spell['skill']) <= @magic_exp_training_max_threshold : true }
+                   .select { |spell| (@cast_only_to_train || spell['cast_only_to_train']) ? DRSkill.getxp(spell['skill']) <= @magic_exp_training_max_threshold : true }
                    .select { |spell| spell['cyclic'] ? !DRSpells.active_spells[spell['name']] : true }
                    .select { |spell| spell['night'] ? UserVars.sun['night'] : true }
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
-                   .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
+                   .select { |spell| spell['slivers'] ? (DRSpells.slivers || @tk_ammo) : true }
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
     echo "Ready Spells: #{ready_spells.to_yaml}" if $debug_mode_ct
 
@@ -2520,7 +2574,7 @@ class TrainerProcess
       'Tessera' => 'Trading'
     }
 
-    @skill_map['Hunt'] = %w[Perception Scouting] if DRStats.ranger?
+    @skill_map['Hunt'] = %w[Perception Instinct] if DRStats.ranger?
     @favor_god = settings.favor_god
     if settings.favor_goal && @favor_god && /delicate/ =~ bput("tap #{@favor_god} orb", 'The orb is delicate', 'I could not find')
       @training_abilities['Favor Orb'] = settings.favor_orb_rub_frequency
@@ -3711,7 +3765,7 @@ class AttackProcess
     # The majority of the time, if not always, the words to reference the item are the first and last (e.g. matte sphere).
     ammo_parts = ammo.strip.split(' ')
     ammo = [ammo_parts.first, ammo_parts.last].compact.uniq.join(' ')
-    case bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what', 'needs to be tended to be removed')
+    case bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what', 'needs to be tended to be removed', 'As you reach for a glowing')
     when 'You pick up', 'You put your'
       stow_ammo(ammo, quantity - 1)
     when 'Stow what'

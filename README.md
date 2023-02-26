@@ -5,7 +5,7 @@ A series of [Lich](https://github.com/elanthia-online/lich-5) scripts for use wi
 
 [To get started, see the setup guide on the wiki](https://github.com/rpherbig/dr-scripts/wiki/First-Time-Setup)
 
-[Script-specific documentationmain](https://elanthipedia.play.net/Lich_script_repository)
+[Script-specific documentation](https://elanthipedia.play.net/Lich_script_repository)
 
 [For YAML documentation](https://github.com/rpherbig/dr-scripts/wiki/Introduction-to-Character-Settings)
 

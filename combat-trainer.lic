@@ -342,6 +342,9 @@ class LootProcess
     @dissect_for_thanatology = skinning['dissect_for_thanatology'] || false
     echo("  @dissect_for_thanatology: #{@dissect_for_thanatology}") if $debug_mode_ct
 
+    @dissect_retry_once = skinning['dissect_retry_once'] || false
+    echo("  @dissect_retry_once: #{@dissect_retry_once}") if $debug_mode_ct
+
     @dissect_cycle_skills = []
     @dissect_cycle_skills.append("Thanatology") if @dissect_for_thanatology
     @dissect_cycle_skills.append("First Aid") if @dissect
@@ -858,9 +861,29 @@ class LootProcess
       return false if DRSkill.getxp('First Aid') == 34
     end
 
-    case DRC.bput("dissect #{mob_noun}","You'll gain no insights from this attempt", 'You succeed in dissecting the corpse','What exactly are you trying to dissect',"You'll learn nothing",'While likely a fascinating study','You cannot dissect','would probably object',"should be left alone.","That'd be a waste of time.",'A skinned creature is worthless','You do not yet possess the knowledge', 'This ritual may only be performed on a corpse', /You learn something/i, 'A failed or completed ritual has rendered', 'You realize after a few seconds')
-    when 'You succeed in dissecting the corpse', /You learn something/i
+    case DRC.bput("dissect #{mob_noun}",
+          /You'll gain no insights from this attempt/,
+          /You succeed in dissecting the corpse/,
+          'What exactly are you trying to dissect',
+          "You'll learn nothing",
+          'While likely a fascinating study',
+          'You cannot dissect',
+          'would probably object',
+          "should be left alone.",
+          "That'd be a waste of time.",
+          'A skinned creature is worthless',
+          'You do not yet possess the knowledge',
+          'This ritual may only be performed on a corpse',
+          /You learn something/i,
+          'A failed or completed ritual has rendered',
+          'You realize after a few seconds'
+        )
+    when /You succeed in dissecting the corpse/, /You learn something/i
       return true
+    when /You'll gain no insights from this attempt/
+      waitrt?
+      fput("dissect")
+      return false
     when 'This ritual may only be performed on a corpse', 'A failed or completed ritual has rendered', 'You realize after a few seconds'
       return false
     when 'While likely a fascinating study',"That'd be a waste of time.",'You do not yet possess the knowledge'
@@ -1146,6 +1169,9 @@ class SpellProcess
     @training_spell_mana_threshold = settings.training_spell_mana_threshold
     echo("  @training_spell_mana_threshold: #{@training_spell_mana_threshold}") if $debug_mode_ct
 
+    @training_spells_combat_sorcery = settings.training_spells_combat_sorcery
+    echo("  @training_spells_combat_sorcery: #{@training_spells_combat_sorcery}") if $debug_mode_ct
+
     @release_cyclic_on_low_mana = settings.release_cyclic_on_low_mana
     echo("  @release_cyclic_on_low_mana: #{@release_cyclic_on_low_mana}") if $debug_mode_ct
 
@@ -1315,11 +1341,14 @@ class SpellProcess
 
   def check_slivers(game_state)
     return unless DRStats.moon_mage?
-    return if game_state.casting
-    return if @tk_ammo
     return unless @tk_spell
+    return if game_state.casting
     return if DRSpells.slivers
-    return if UserVars.moons['visible'].empty?
+    unless UserVars.moons['visible'].any?
+      DRC.message "There are NO moons available and you have NO TK_AMMO set! You need to fix this!" if !@tk_ammo && $debug_mode_ct
+      return
+    end
+
     # With low skill you may fail to create the slivers
     # when breaking your moonblade. If so, keep retrying.
     retry_count = 0
@@ -1515,10 +1544,12 @@ class SpellProcess
     if game_state.is_offense_allowed? || @prepared_spell['harmless']
       snapshot = DRSkill.getxp(@skill)
       success = cast?(@custom_cast, @symbiosis, @before, @after)
-      if @symbiosis && @use_auto_mana
+      if (@symbiosis || spell_is_sorcery?(@prepared_spell)) && @use_auto_mana
         if !success
           UserVars.discerns[@abbrev]['more'] = [UserVars.discerns[@abbrev]['more'] - 1, 0].max
-        elsif DRSkill.getxp(@skill) - snapshot < @symbiosis_learning_threshold
+          @prepared_spell['failed'] = true
+          DRC.message("Casting spell #{@abbrev} failed - will no longer automatically increase")
+        elsif DRSkill.getxp(@skill) - snapshot < @symbiosis_learning_threshold && !@prepared_spell['failed']
           UserVars.discerns[@abbrev]['more'] = UserVars.discerns[@abbrev]['more'] + 1
         end
       end
@@ -1592,10 +1623,12 @@ class SpellProcess
     needs_training = ['Warding', 'Utility', 'Augmentation', 'Sorcery', 'Debilitation', 'Targeted Magic']
                      .select { |skill| @training_spells[skill] }
                      .select { |skill| game_state.is_offense_allowed? || @training_spells[skill]['harmless'] }
+                     .select { |skill| ['Warding', 'Utility', 'Augmentation'].include?(skill) || !@training_spells_combat_sorcery && skill == 'Sorcery' || !game_state.npcs.empty? }
                      .select { |skill| DRSkill.getxp(skill) < @magic_exp_training_max_threshold }
                      .select { |skill| Time.now > (@training_spells[skill]['cyclic'] ? @training_cyclic_timer : @training_cast_timer) }
                      .select { |skill| @training_spells[skill]['night'] ? UserVars.sun['night'] : true }
                      .select { |skill| @training_spells[skill]['day'] ? UserVars.sun['day'] : true }
+    DRC.message "all eligible training spells: #{needs_training}" if $debug_mode_ct
     needs_training = game_state.sort_by_rate_then_rank(needs_training).first
     return unless needs_training
     DRC.message "needs_training: #{needs_training}" if $debug_mode_ct
@@ -1617,6 +1650,7 @@ class SpellProcess
       game_state.casting_sorcery = true
     end
     prepare_spell(data, game_state)
+    Flags.reset('ct-spelllost')
   end
 
   def spell_is_sorcery?(spell_data)
@@ -1818,7 +1852,7 @@ class SpellProcess
                    .select { |spell| spell['cyclic'] ? !DRSpells.active_spells[spell['name']] : true }
                    .select { |spell| spell['night'] ? UserVars.sun['night'] : true }
                    .select { |spell| spell['day'] ? UserVars.sun['day'] : true }
-                   .select { |spell| spell['slivers'] ? DRSpells.slivers : true }
+                   .select { |spell| spell['slivers'] ? (DRSpells.slivers || @tk_ammo) : true }
                    .select { |spell| spell['starlight_threshold'] ? enough_starlight?(game_state, spell) : true }
     echo "Ready Spells: #{ready_spells.to_yaml}" if $debug_mode_ct
 
@@ -1875,7 +1909,7 @@ class SpellProcess
   def prepare_spell(data, game_state, force_cambrinth = false)
     return unless data
 
-    data = check_discern(data, @settings) if data['use_auto_mana']
+    data = check_discern(data, @settings, spell_is_sorcery?(data)) if data['use_auto_mana']
     game_state.cast_timer = Time.now
     @prep_time = data['prep_time']
     echo("prepare spell: #{data}") if $debug_mode_ct
@@ -2203,8 +2237,6 @@ class AbilityProcess
     # Return if it hasn't been 10 minutes since last warhorn. Room effect lasts 10 minutes.
     return unless Time.now > (UserVars.warhorn["last_warhorn_or_egg"] + 600)
 
-    game_state.sheath_whirlwind_offhand
-
     noun = @warhorn_or_egg[0]
 
     # Check timers. Egg is always 15 minutes. Warhorn is 20 minutes, or configurable.
@@ -2217,14 +2249,12 @@ class AbilityProcess
       end
     else
       return unless Time.now > (UserVars.warhorn["last_warhorn"] + @warhorn_cooldown)
-      if use_warhorn?
+      if use_warhorn?(game_state)
         DRC.message("SUCCESSFUL horn use") if $debug_mode_ct
         UserVars.warhorn["last_warhorn"] = Time.now
         UserVars.warhorn["last_warhorn_or_egg"] = Time.now
       end
     end
-
-    game_state.wield_whirlwind_offhand
 
     # Rotate array to rotate warhorn/egg use. If we only have one, this still works fine.
     @warhorn_or_egg.rotate!
@@ -2251,7 +2281,8 @@ class AbilityProcess
     return true
   end
 
-  def use_warhorn?
+  def use_warhorn?(game_state)
+    game_state.sheath_whirlwind_offhand
     use_warhorn = DRC.bput("#{@warhorn_get_verb} my #{@warhorn}", /^You get.*(?:warhorn).*\.$/,
      /^You remove.*(?:warhorn).*\.$/, /^You take.*(?:warhorn).*\.$/, /^What were you referring to/,
      /^You need a free hand/, /^Remove what/)
@@ -2261,21 +2292,21 @@ class AbilityProcess
       warhorn_activation = DRC.bput(@warhorn_activation_command, 'Something about the area inhibits',
         'You sound a series of bursts from the', 'Your lungs are tired from having sounded a', 'not accomplishing much and looking rather silly')
       if /Your lungs are tired from having sounded a/ =~ warhorn_activation
-        stow_warhorn
-        return false
+        stow_warhorn(game_state)
+        return true
       elsif /Something about the area inhibits/ =~ warhorn_activation
         DRC.message "Can't use #{@warhorn} in this area. Removing from hunt."
-        stow_warhorn
+        stow_warhorn(game_state)
         @warhorn_or_egg.delete(@warhorn)
         return false
       elsif /not accomplishing much and looking rather silly/ =~ warhorn_activation
         DRC.message "You can't use a warhorn. Removing from hunt."
-        stow_warhorn
+        stow_warhorn(game_state)
         @warhorn_or_egg.delete(@warhorn)
         return false
       end
       waitrt?
-      stow_warhorn
+      stow_warhorn(game_state)
     when /^What were you referring to/
       DRC.message "#{@warhorn} NOT FOUND! Removing from hunt."
       @warhorn_or_egg.delete(@warhorn)
@@ -2285,8 +2316,9 @@ class AbilityProcess
     return true
   end
 
-  def stow_warhorn
+  def stow_warhorn(game_state)
     DRC.bput("#{@warhorn_store_verb} my #{@warhorn}", 'You put', 'You attach')
+    game_state.wield_whirlwind_offhand
   end
 
   def check_paladin_skills

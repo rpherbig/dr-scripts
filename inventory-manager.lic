@@ -2,12 +2,13 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#inventory-manager
 =end
 
-custom_require.call(%w[common])
+custom_require.call(%w[common common-arcana common-items])
 
 class InventoryManager
   def initialize
     @active_character = Char.name.to_sym
     @item_db_path = "data/inventory.yaml"
+    @pg_prep_time = get_settings.pg_prep_time
 
     arg_definitions = [
       [
@@ -15,7 +16,6 @@ class InventoryManager
         { name: 'desc', regex: /\w+/i, optional: true, description: "Optional specific count by description. Use quotes for multiple word strings, i.e., \"purple pouch\"." }
       ],
       [
-
         { name: 'save', regex: /save/i, description: "Save new or update current character's items to the database." },
         { name: 'vault_book', regex: /vault_book/i, optional: true, description: "Retrieves, reads, and save from vault book." },
         { name: 'vault_regular', regex: /vault_regular/i, optional: true, description: "Rummages your vault to save items NOTE: must be standing by your open vault." },
@@ -45,15 +45,17 @@ class InventoryManager
     if args.vault_book
       add_vault_book_inv
     elsif args.vault_regular
-      add_vault_regular_inv
+      add_container_inventory('Personal Vault', 'vault')
     elsif args.family_vault
-      add_family_vault
+      add_container_inventory('Family Vault', 'vault')
     elsif args.register
       add_register_inv
     elsif args.eddy
-      add_eddy_inv
+      add_container_inventory('Eddy Portal', 'watery portal', 'my ')
     elsif args.storage_box
-      add_storage_box_inv
+      add_container_inventory('Caravan Box', 'storage box')
+    elsif args.servant
+      add_servant_inv
     elsif args.save
       add_current_inv
     elsif args.count
@@ -85,6 +87,44 @@ class InventoryManager
 
     @item_data = OpenStruct.new(YAML.load_file(@item_db_path)).to_h
   end
+  
+  def remove_previous_entries(location_tag)
+    if @item_data[@active_character]
+      @item_data[@active_character].reject! { |line| line.include? location_tag }
+    else
+      @item_data[@active_character] = []
+    end
+  end
+
+  def get_contents_of(container, preposition = nil)
+    rummage_success_patterns = DRCI.class_variable_get(:@@rummage_success_patterns) << /^You rummage around on .* and see (.*)\./
+    rummage_failure_patterns = DRCI.class_variable_get(:@@rummage_failure_patterns)
+    container_is_closed_patterns = DRCI.class_variable_get(:@@container_is_closed_patterns)
+
+    # so this is a special problem as a result of how common-items handles rummaging.
+    contents = DRC.bput("rummage #{preposition}#{container}", container_is_closed_patterns, rummage_success_patterns, rummage_failure_patterns)
+    case contents
+    when *rummage_failure_patterns
+      return nil
+    when *container_is_closed_patterns
+      return nil unless DRCI.open_container?(container)
+      get_contents_of(container, preposition)
+    else
+      # Get string of just the comma separated item list
+      contents = contents.match(/You rummage (around on|through) .* and see (?:a|an|some) (?<items>.*)\./)[:items]
+
+      # Split at a, an, or some, but only when it follows a comma
+      # The last two items in the rummage list are never comma delimited, handle shortly
+      contents = contents.split(/, (?:a|an|some) /)
+
+      # Grab the last array element which is the final two items that are never comma
+      # delimited in game output, split them into their item descriptions
+      sub_contents = contents.pop.split(/ and (?:a|an|some) /)
+
+      # Tack those last two items back onto our item list array
+      contents = contents.concat(sub_contents)
+    end
+  end
 
   def get_inv_count(desc)
     count, closed = 0, 0
@@ -111,23 +151,15 @@ class InventoryManager
   end
 
   def add_vault_book_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? 'vault' }
-    else
-      @item_data[@active_character] = []
-    end
+    return unless DRCI.get_item?('vault book')
 
-    case DRC.bput('get my vault book', 'You get', 'What were')
-    when 'What were'
-      DRC.message "Unable to find your vault book, exiting!"
-      exit
-    end
+    remove_previous_entries('Personal Vault')
 
     DRC.bput('read my vault book', 'Vault Inventory:')
     while (line = get)
       break if line =~ /The last note/i
 
-      item = line.lstrip.concat(' (vault)')
+      item = line.lstrip.concat(' (Personal Vault)')
       @item_data[@active_character] << item
     end
 
@@ -138,11 +170,9 @@ class InventoryManager
   end
 
   def add_current_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| (line.include?('vault') || line.include?('eddy')) }
-    else
-      @item_data[@active_character] = []
-    end
+    remove_previous_entries('worn')
+    remove_previous_entries('in container')
+    remove_previous_entries('Eddy Portal')
 
     DRC.bput('inv list', 'You have:')
     while (line = get)
@@ -163,17 +193,9 @@ class InventoryManager
   end
 
   def add_register_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? 'register' }
-    else
-      @item_data[@active_character] = []
-    end
+    return unless DRCI.get_item?('register')
 
-    case DRC.bput("get my register", 'You get', 'What were', 'You are already holding that')
-    when 'What were'
-      DRC.message "Unable to find your register, exiting!"
-      exit
-    end
+    remove_previous_entries('register')
 
     DRC.bput("turn my register to contents", 'You flip your deed register', 'already at the table of contents')
 
@@ -189,52 +211,54 @@ class InventoryManager
       end
     end
 
-    DRC.bput('stow my register', 'You put')
+    DRCI.stow_item?('register')
 
     DRC.message "Saving register data for #{@active_character}!"
     File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
   end
 
-  def add_eddy_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? 'eddy' }
-    else
-      @item_data[@active_character] = []
+  def add_servant_inv
+    unless DRStats.moon_mage?
+      DRC.message "You're not a Moon Mage! Try again."
+      exit
     end
 
-    using_sorter = false
-    if Script.running?('sorter')
-      stop_script('sorter')
-      using_sorter = true
+    remove_previous_entries('servant')
+
+    # Default behavior is a full prep, which can be modified with yaml setting pg_prep_time.
+    # This can be an integer representing prep time in seconds, nil for default, or anything else for snapcast
+    # DRCA.safe_release # This would be an appropriate place for setting a release block
+    DRCA.prepare?('pg', 5)
+    if @pg_prep_time.is_a? Integer
+      echo "Pausing #{@pg_prep_time} seconds"
+      sleep @pg_prep_time
+    elsif @pg_prep_time.nil?
+      waitcastrt?
     end
 
-    item_list = DRC.bput('look in my watery portal', /In the swirling eddy .*/i, 'What were')
-                   .slice!("In the swirling eddy you see")
-                   .split(",")
-    item_list.each_with_index do |item, itr|
-      if itr < item_list.length - 1
-        @item_data[@active_character] << item.lstrip.concat(' (eddy)')
-      else
-        item.split("and")
-            .each do |item2|
-          @item_data[@active_character] << item2.strip.concat(" (eddy)").tr('.', '')
-        end
+    case DRC.bput('cast servant', 'Within the belly', 'The center of your vision', 'backfires')
+    when 'The center of your vision'
+      DRC.message "Your servant is not present. Summon it and retry."
+    when 'backfires'
+      DRC.message "Your prep time is too low, set pg_prep_time a little higher or remove the setting for default long cast behavior"
+      @pg_prep_time = nil
+      add_servant_inv
+    when 'Within the belly'
+      while (line = get)
+        break if line =~ /Your servant/i
+
+        item = line.lstrip.concat(' (servant)')
+        @item_data[@active_character] << item
       end
-    end
 
-    DRC.message "Saving eddy data for #{@active_character}!"
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
-    if using_sorter
-      start_script('sorter') unless Script.running?('sorter')
+      DRC.message "Saving shadow servant data for #{@active_character}!"
+      UserVars.servant_last_updated = Time.now
+      File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
     end
   end
 
-  def add_storage_box_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? 'caravan_box' }
-    else
-      @item_data[@active_character] = []
-    end
+  def add_container_inventory(proper_name, interact_name, preposition = nil)
+    remove_previous_entries(proper_name)
 
     using_sorter = false
     if Script.running?('sorter')
@@ -242,89 +266,13 @@ class InventoryManager
       using_sorter = true
     end
 
-    item_list = DRC.bput('rummage storage box', /through a storage box and see .*/i, 'What were')
-                   .slice!("You rummage through a storage box and see")
-                   .split(",")
-    item_list.each_with_index do |item, itr|
-      if itr < item_list.length - 1
-        @item_data[@active_character] << item.lstrip.concat(' (caravan_box)')
-      else
-        item.split("and")
-            .each do |item2|
-          @item_data[@active_character] << item2.strip.concat(" (caravan_box)").tr('.', '')
-        end
-      end
+    contents = get_contents_of(interact_name, preposition)
+
+    contents.each do |item|
+      @item_data[@active_character] << item.strip.concat(" (#{proper_name})").tr('.', '')
     end
 
-    DRC.message("Saving caravan box data for #{@active_character}!")
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
-    if using_sorter
-      start_script('sorter') unless Script.running?('sorter')
-    end
-  end
-
-  def add_family_vault
-    if @item_data['Family']
-      @item_data['Family'] = @item_data['Family'].select { |line| !line.include? 'Family' }
-    else
-      @item_data['Family'] = []
-    end
-
-    using_sorter = false
-    if Script.running?('sorter')
-      stop_script('sorter')
-      using_sorter = true
-    end
-
-    item_list = DRC.bput('rummage vault', /through a vault and see .*/i, 'What were')
-                   .slice!("You rummage through a vault and see")
-                   .split(",")
-    item_list.each_with_index do |item, itr|
-      if itr < item_list.length - 1
-        @item_data['Family'] << item.lstrip.concat(' (Family)')
-      else
-        item.split("and")
-            .each do |item2|
-          @item_data['Family'] << item2.strip.concat(" (Family)").tr('.', '')
-        end
-      end
-    end
-
-    DRC.message("Saving family vault data!")
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
-    if using_sorter
-      start_script('sorter') unless Script.running?('sorter')
-    end
-  end
-
-  def add_vault_regular_inv
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? 'vault' }
-    else
-      @item_data[@active_character] = []
-    end
-
-    using_sorter = false
-    if Script.running?('sorter')
-      stop_script('sorter')
-      using_sorter = true
-    end
-
-    item_list = DRC.bput('rummage vault', /through a secure vault and see .*/i, 'What were')
-                   .slice!("You rummage through a secure vault and see")
-                   .split(",")
-    item_list.each_with_index do |item, itr|
-      if itr < item_list.length - 1
-        @item_data[@active_character] << item.lstrip.concat(' (vault)')
-      else
-        item.split("and")
-            .each do |item2|
-          @item_data[@active_character] << item2.strip.concat(" (vault)").tr('.', '')
-        end
-      end
-    end
-
-    DRC.message("Saving vault data for #{@active_character}!")
+    DRC.message "Saving #{proper_name} data for #{@active_character}!"
     File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
     if using_sorter
       start_script('sorter') unless Script.running?('sorter')

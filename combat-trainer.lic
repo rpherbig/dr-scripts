@@ -2217,7 +2217,8 @@ class AbilityProcess
     check_nonspell_buffs(game_state)
     check_battle_cries(game_state)
     use_warhorn_or_egg(game_state) unless @warhorn_or_egg.nil? || @warhorn_or_egg.empty?
-    game_state.engage if @stomp_on_cooldown && game_state.npcs && Flags['war-stomp-ready']
+    game_state.stomp if @stomp_on_cooldown && game_state.npcs
+    game_state.pounce if DRStats.ranger? && UserVars.subscription =~ /premium|platinum/i && game_state.npcs && DRSkill.getxp('Instinct') < 28
     false
   end
 
@@ -4218,9 +4219,6 @@ class GameState
     @stomp_to_engage = settings.war_stomp_to_engage
     echo(" @stomp_to_engage: #{@stomp_to_engage}") if $debug_mode_ct
 
-    @pounce_to_engage = settings.pounce_to_engage
-    echo(" @pounce_to_engage: #{@pounce_to_engage}") if $debug_mode_ct
-
     @stomp_on_cooldown = settings.war_stomp_on_cooldown
     echo("  @stomp_on_cooldown: #{@stomp_on_cooldown}") if $debug_mode_ct
 
@@ -4362,49 +4360,64 @@ class GameState
   end
 
   def engage
-    if (@stomp_on_cooldown || @stomp_to_engage) && Flags['war-stomp-ready'] # if we're using stomp and stomp is ready
-      Flags.reset('war-stomp-ready')
-      case DRC.bput("stomp",
-                    /^As you feel your inner fire/,
-                    /^With a heaving flex of masterfully controlled muscles/,
-                    /You leap forward, kicking in a somersault/,
-                    /You begin sprinting forward, feeling as the wind/,
-                    /You spring lightly into the air. For one frozen moment/,
-                    /Like a dust devil sent by Gizzbolf, you hop spinning wildly into the air/,
-                    /Bringing your prodigious Togpower to bear on/,
-                    /Swift and agile, you handspring into an easy/,
-                    /You crouch for but a heartbeat, and then leap with the acrobatic ease/,
-                    /Like an indefatigable avatar of Coshivi, you lope across the distance/,
-                    /You set yourself, poised for the opportunity that will see you vanquish your adversary/,
-                    /^You are not ready to perform another War Stomp/, /^What are you trying to attack/,
-                    /^You have not yet been taught the proper techniques to perform a War Stomp/,
-                    /^Stomp where/,
-                    /^You are too fatigued to perform a War Stomp/)
-      when /You have not yet been taught the proper techniques to perform a War Stomp/, /Stomp where/
-        DRC.message("You have elected to War Stomp, but you do not know the ability. Learn it or remove war_stomp_on_cooldown from your yaml")
-        @stomp_to_engage, @stomp_on_cooldown = [false, false]
-        Flags['war-stomp-ready'] = false
-      when /You are not ready to perform another War Stomp/, /You are too fatigued to perform a War Stomp/
-        engage
-      end
-    elsif @pounce_to_engage && Flags['pounce-ready'] # if we're using pounce and pounce is ready
-      Flags.reset('pounce-ready')
-      case DRC.bput("pounce",
-                    /You angle yourself to knock .* to the ground/,
-                    /^What are you trying to attack/,
-                    /Doing your best impression of a house cat, you pounce on absolutely nothing at all./,
-                    /You're too tired from the last time you pounced on some prey./)
-      when /Doing your best impression/
-        DRC.message('You have elected to use Pounce, but you do not know the ability. Please remove this setting from your yaml: pounce_to_engage')
-        @pounce_to_engage = false
-      when /You're too tired/
-        engage
-      end
-    else # standard engage
-      case DRC.bput("engage", /^You (are already|begin to) (stealthily )?(advanc(e|ing)|at melee)/, /^There is nothing else/, /is already quite dead/, /^What do you want to advance towards/)
-      when /You are already advancing/, /You begin to advance/, /You begin to stealthily advance/
-        pause 2
-      end
+    return if stomp
+    return if pounce
+    case DRC.bput("engage", /^You (are already|begin to) (stealthily )?(advanc(e|ing)|at melee)/, /^There is nothing else/, /is already quite dead/, /^What do you want to advance towards/)
+    when /You are already advancing/, /You begin to advance/, /You begin to stealthily advance/
+      pause 2
+    end
+  end
+
+  def stomp
+    return false unless DRStats.barbarian? && DRStats.circle >= 100 # basic qualifications for use
+    return false unless (@stomp_to_engage || @stomp_on_cooldown) && Flags['war-stomp-ready'] # ability is off cooldown and we've elected to use it
+
+    Flags.reset('war-stomp-ready')
+    case DRC.bput("stomp",
+                  /^As you feel your inner fire/,
+                  /^With a heaving flex of masterfully controlled muscles/,
+                  /You leap forward, kicking in a somersault/,
+                  /You begin sprinting forward, feeling as the wind/,
+                  /You spring lightly into the air. For one frozen moment/,
+                  /Like a dust devil sent by Gizzbolf, you hop spinning wildly into the air/,
+                  /Bringing your prodigious Togpower to bear on/,
+                  /Swift and agile, you handspring into an easy/,
+                  /You crouch for but a heartbeat, and then leap with the acrobatic ease/,
+                  /Like an indefatigable avatar of Coshivi, you lope across the distance/,
+                  /You set yourself, poised for the opportunity that will see you vanquish your adversary/,
+                  /^You are not ready to perform another War Stomp/, /^What are you trying to attack/,
+                  /^You have not yet been taught the proper techniques to perform a War Stomp/,
+                  /^Stomp where/,
+                  /^You are too fatigued to perform a War Stomp/)
+    when /You have not yet been taught the proper techniques to perform a War Stomp/, /Stomp where/
+      DRC.message("You have elected to War Stomp, but you do not know the ability. Learn it or remove war_stomp_on_cooldown from your yaml")
+      @stomp_to_engage, @stomp_on_cooldown = [false, false]
+      Flags.delete('war-stomp-ready')
+      false
+    when /You are not ready to perform another War Stomp/, /You are too fatigued to perform a War Stomp/
+      false
+    else
+      true
+    end
+  end
+
+  def pounce
+    return false unless DRStats.ranger? && UserVars.subscription =~ /premium|platinum/i # Current basic qualifications for use
+    return false unless Flags['pounce-ready'] # ability is off cooldown
+
+    Flags.reset('pounce-ready')
+    case DRC.bput("pounce",
+                  /You angle yourself to knock .* to the ground/,
+                  /^What are you trying to attack/,
+                  /Doing your best impression of a house cat, you pounce on absolutely nothing at all./,
+                  /You're too tired from the last time you pounced on some prey./)
+    when /Doing your best impression/
+      Flags.delete('pounce-ready')
+      false
+    when /You're too tired/
+      false
+    else
+      true
     end
   end
 

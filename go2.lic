@@ -9,10 +9,12 @@
    original author: Shaelun
               game: any
               tags: core, movement
-           version: 1.34
+           version: 1.35
           required: Lich >= 4.6.14
 
    changelog:
+      1.35 (2023-02-04)
+        Add support for custom named targets with an array of roomnumbers. Finds nearest.
       1.34 (2022-11-26)
         Add support to "goback" to the room go2 last started in.
       1.33 (2022-04-20):
@@ -161,7 +163,9 @@ show_help = proc {
    output.concat "   other commands:\n"
    output.concat "\n"
    output.concat "      #{$clean_lich_char}#{script.name} save <new name>=<target>      Saves a custom target.  <target> can be the same\n"
-   output.concat "      #{''.rjust($clean_lich_char.length + script.name.length)}                                as before, or \"current\" for your current room\n"
+   output.concat "      #{$clean_lich_char}#{script.name} save <name>=[123, 456, 789]   as before, or \"current\" for your current room.\n"
+   output.concat "      #{''.rjust($clean_lich_char.length + script.name.length)}                                Can also be an array of rooms, separated by commas.\n"
+   output.concat "      #{''.rjust($clean_lich_char.length + script.name.length)}                                If the target exists, will append the room to array.\n"
    output.concat "      #{$clean_lich_char}#{script.name} delete <custom target>        Deletes a saved custom target.\n"
    output.concat "      #{$clean_lich_char}#{script.name} list                          Shows your settings and custom targets.\n"
    output.concat "      #{$clean_lich_char}#{script.name} targets                       Shows the built-in targets.\n"
@@ -169,13 +173,9 @@ show_help = proc {
    respond output
 }
 
-# For Dragonrealms only
-# A change in behavior from Lich4 to Lich5 caused certain ;go2 map wayto movements to fail.
-# This is because of the way the map stringprocs are structured, and the method used to evaluate
-# certain map moves, which involved an arguably dubious overloading of FalseClass on Lich4.
-# The transition to Lich5 makes it necessary to fix some stringprocs as an interim solution, at
-# least until the map can be divested from current owner control and handled appropriately. This code
-# also allows the flexibility to pull custom map wayto overrides from the standard yaml hierarchy.
+# For Dragonrealms
+# Allows map wayto and timeto overrides in base.yaml and a user's yaml
+# Allows custom map targets defined via yaml
 if XMLData.game =~ /^DR/
   # Get yaml settings
   settings = get_settings
@@ -210,6 +210,15 @@ if XMLData.game =~ /^DR/
 
     start_room.wayto["#{end_room_id}"] = new_wayto
     start_room.timeto["#{end_room_id}"] = new_timeto
+  end
+
+  # Pull personal map custom targets, if any
+  personal_map_targets = settings.personal_map_targets
+
+  if personal_map_targets
+    custom_targets = (GameSettings['custom targets'] || Hash.new)
+    custom_targets.merge!(personal_map_targets)
+    GameSettings['custom targets'] = custom_targets
   end
 end
 
@@ -300,14 +309,14 @@ elsif script.vars[0] =~ /^list$/i
    end
    output.concat "\n"
    output.concat "                delay: #{CharSettings['delay']}\n"
-   output.concat "          get silvers: #{CharSettings['get silvers'] ? 'on' : 'off'}\n"
-   output.concat "   get return silvers: #{CharSettings['get return trip silvers'] ? 'on' : 'off'}\n"
-   output.concat "             ice mode: #{UserVars.mapdb_ice_mode.nil? ? 'auto' : UserVars.mapdb_ice_mode}\n"
-   output.concat "          use seeking: #{CharSettings['use seeking'] ? 'on' : 'off'}\n"
-   output.concat "         use day pass: #{UserVars.mapdb_use_day_pass == 'yes' ? 'on' : 'off'}\n"
-   output.concat "         buy day pass: #{UserVars.mapdb_buy_day_pass.nil? ? 'off' : UserVars.mapdb_buy_day_pass}\n"
-   output.concat "   day pass container: #{UserVars.day_pass_sack.nil? ? '(not set)' : UserVars.day_pass_sack}\n"
    if XMLData.game =~ /^GS/
+      output.concat "          get silvers: #{CharSettings['get silvers'] ? 'on' : 'off'}\n"
+      output.concat "   get return silvers: #{CharSettings['get return trip silvers'] ? 'on' : 'off'}\n"
+      output.concat "             ice mode: #{UserVars.mapdb_ice_mode.nil? ? 'auto' : UserVars.mapdb_ice_mode}\n"
+      output.concat "          use seeking: #{CharSettings['use seeking'] ? 'on' : 'off'}\n"
+      output.concat "         use day pass: #{UserVars.mapdb_use_day_pass == 'yes' ? 'on' : 'off'}\n"
+      output.concat "         buy day pass: #{UserVars.mapdb_buy_day_pass.nil? ? 'off' : UserVars.mapdb_buy_day_pass}\n"
+      output.concat "   day pass container: #{UserVars.day_pass_sack.nil? ? '(not set)' : UserVars.day_pass_sack}\n"
       output.concat "        stop for dead: #{CharSettings['stop for dead'] ? 'on' : 'off'}\n"
       output.concat "      vaalor shortcut: #{CharSettings['vaalor shortcut'] ? 'on' : 'off'}\n"
       output.concat "          FWI trinket: #{UserVars.mapdb_fwi_trinket ? UserVars.mapdb_fwi_trinket : '(not set)'}\n"
@@ -324,40 +333,73 @@ elsif script.vars[0] =~ /^list$/i
    output.concat "\n"
    output.concat "custom targets:\n"
    output.concat "\n"
-   for target_name,target_num in GameSettings['custom targets'].sort
-      output.concat "   #{target_name.ljust(20)} = #{target_num.to_s.rjust(5)}   #{Map[target_num].title.first}\n"
+   GameSettings['custom targets'].sort_by {|key| key}.to_h.each do |target_name, target_nums|
+      if target_nums.is_a?(Array)
+        target_nums.uniq!
+        if target_nums.length == 1
+          output.concat "   #{target_name.ljust(15)} = #{target_nums.to_s} - #{Map[target_nums[0]].title.first}"
+        else
+          output.concat "   #{target_name.ljust(15)} = #{target_nums.sort.to_s}"
+        end
+      else
+        output.concat "   #{target_name.ljust(15)} = [#{target_nums.to_s}] - #{Map[target_nums].title.first}"
+      end
+      output.concat "\n"
    end
    output.concat "\n"
    respond output
    exit
 elsif script.vars[1] =~ /^save/i
-   unless script.vars[0] =~ /^save (.+?)=(.+)$/
-      echo "error: You're doing it wrong."
+   unless script.vars[0] =~ /^save ([a-zA-Z0-9!@#$%_-]+)\s?=\s?(current|\d+)$/ || script.vars[0] =~ /^save ([a-zA-Z0-9!@#$%_-]+)\s?=\s?\[?([current\d,\s]+)\]?$/
+      echo "error: format"
+      echo "error: proper format examples - ;go2 save test=1234 OR ;go2 save test=[1234, 1432] etc."
       exit
    end
-   target_name = $1.strip
-   target = $2.strip
+   target_name = $1
+   target = $2.split(',')
+              .collect(&:strip)
+
    if target_name =~ /^\d+$/
       echo "error: target name can't be just a number."
       exit
    end
-   if target =~ /^current$/i
-      unless target_room = Map.current
-         echo 'error: your current room was not found in the map database.'
-         exit
+
+   # User included current room as a custom target. Verify exists.
+   if target.include?(/current/i)
+      unless Map.current.id
+        echo 'error: your current room was not found in the map database.'
+        exit
       end
-   else
-      unless target =~ /^\d+$/ and (target_room = Map[target.to_i])
-         unless target_room = Map[target]
-            echo "error: could not identify the target room"
-            exit
-         end
+    end
+
+   target.map! {|element| element == "current" ? Map.current.id : element}
+         .map!(&:to_i)
+
+   target_holder = []
+   target.each do |element|
+      unless target_room = Map[element]
+         target_holder.append(element)
       end
+    end
+
+   unless target_holder.empty?
+      echo "error: the following rooms were not found in the map - #{target_holder}"
+      exit
    end
+
    custom_targets = (GameSettings['custom targets'] || Hash.new)
-   custom_targets[target_name] = target_room.id
+
+   if (custom_targets[target_name] && custom_targets[target_name].kind_of?(Array))
+      echo "Custom target #{target_name} exists. Appending this roomnumber(s)."
+      custom_targets[target_name] = (custom_targets[target_name] + target).uniq
+   elsif (custom_targets[target_name] && custom_targets[target_name].kind_of?(Integer))
+      echo "Custom target #{target_name} exists. Replacing with this room number."
+      custom_targets[target_name] = target
+   else
+      custom_targets[target_name] = target
+   end
    GameSettings['custom targets'] = custom_targets
-   echo "custom target saved (#{target_name}->#{target_room.id})"
+   echo "custom target saved (#{target_name} => #{custom_targets[target_name]})"
    exit
 elsif script.vars[1] =~ /^delete$/i
    delkey = script.vars[0].sub(/\s*delete\s*/i, '')
@@ -912,12 +954,19 @@ if (target_search_string =~ /^[0-9]+$/) or (XMLData.game =~ /^GS/ and target_sea
          exit
       end
    end
-elsif (custom_targets = GameSettings['custom targets']) and (target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}$/i }) or (target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}/i })
-   destination_id = custom_targets[target]
+elsif (custom_targets = GameSettings['custom targets']) and ((target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}$/i }) or (target = custom_targets.keys.find { |key| key =~ /^#{target_search_string}/i }))
+   unless custom_targets[target].kind_of?(Array)
+      echo("Custom targets is an integer: #{custom_targets[target].kind_of?(Integer)}")
+      destination_id = custom_targets[target]
+   else
+      echo("Custom targets is an array: #{custom_targets[target].kind_of?(Array)}")
+      destination_id = Room.current.find_nearest(custom_targets[target].uniq)
+   end
    unless destination = Map[destination_id]
       echo "error: custom target (#{destination_id}) was not found in the map database"
       exit
    end
+   echo "nearest room for custom target: #{target} is #{destination_id} #{Map[destination_id].title.first}"
    confirm = false
 elsif Map.list.any? { |r| r.tags.include?(target_search_string) }
    target_list = Map.list.find_all { |room| room.tags.include?(target_search_string) }.collect { |room| room.id }

@@ -11,7 +11,7 @@ module DRCI
   module_function
 
   ## How to add new trash receptacles https://github.com/rpherbig/dr-scripts/wiki/Adding-new-trash-receptacles
-  @@trash_storage = %w[arms barrel basin basket bin birdbath bucket chamberpot gloop hole log puddle statue stump tangle tree turtle urn]
+  @@trash_storage = %w[arms barrel basin basket bin birdbath bucket chamberpot gloop hole log puddle statue stump tangle tree turtle urn gelapod]
 
   @@drop_trash_success_patterns = [
     /^You drop/,
@@ -19,7 +19,9 @@ module DRCI
     /^You spread .* on the ground/,
     /smashing it to bits/,
     # The next message is when item crumbles when leaves your hand, like a moonblade.
-    /^As you open your hand to release the/
+    /^As you open your hand to release the/,
+    /^You toss .* at the domesticated gelapod/,
+    /^You feed .* a bit warily to the domesticated gelapod/
   ]
 
   @@drop_trash_failure_patterns = [
@@ -36,7 +38,9 @@ module DRCI
     # Find a Cleric to uncurse you.
     /^Oddly, when you attempt to stash it away safely/,
     /^You need something in your right hand/,
-    /^You can't put that there/
+    /^You can't put that there/,
+    /^The domesticated gelapod glances warily at/, # deeds
+    /^You should empty it out, first./ # container with items
   ]
 
   # Messages that when trying to drop an item you're warned.
@@ -185,7 +189,7 @@ module DRCI
     /^You hold out/,
     /^You tuck/,
     /^You open your pouch and put/,
-    /^You nudge your/i, #monkey storage
+    /^You nudge your/i, # monkey storage
     # The next message is when item crumbles when stowed, like a moonblade.
     /^As you open your hand to release the/,
     # You're a thief and you binned a stolen item.
@@ -370,14 +374,15 @@ module DRCI
   #########################################
 
   def dispose_trash(item, worn_trashcan = nil, worn_trashcan_verb = nil)
-    return if item.nil?
+    return unless item
+    return unless DRCI.get_item_if_not_held?(item)
 
     if worn_trashcan
       case DRC.bput("put my #{item} in my #{worn_trashcan}", @@drop_trash_retry_patterns, @@drop_trash_success_patterns, @@drop_trash_failure_patterns, /^Perhaps you should be holding that first/)
       when /^Perhaps you should be holding that first/
-        return false unless DRCI.get_item?(item) && DRCI.dispose_trash(item)
+        return (DRCI.get_item?(item) && DRCI.dispose_trash(item, worn_trashcan, worn_trashcan_verb))
       when *@@drop_trash_retry_patterns
-        return true if dispose_trash(item, worn_trashcan, worn_trashcan_verb)
+        return DRCI.dispose_trash(item, worn_trashcan, worn_trashcan_verb)
       when *@@drop_trash_success_patterns
         if worn_trashcan_verb
           DRC.bput("#{worn_trashcan_verb} my #{worn_trashcan}", *@@worn_trashcan_verb_patterns)
@@ -417,11 +422,15 @@ module DRCI
         trashcan = 'dark gap' if DRRoom.room_objs.include?('tangle of thick roots forming a dark gap')
       elsif XMLData.room_title == '[[A Junk Yard]]'
         trashcan = 'bin'
+      elsif trashcan == 'gelapod'
+        trash_command = "feed my #{item} to gelapod"
       end
 
-      case DRC.bput("put my #{item} in #{trashcan}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns, /^Perhaps you should be holding that first/)
+      trash_command = "put my #{item} in #{trashcan}" unless trashcan == 'gelapod'
+
+      case DRC.bput(trash_command, @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns, /^Perhaps you should be holding that first/)
       when /^Perhaps you should be holding that first/
-        return false unless DRCI.get_item?(item) && DRCI.dispose_trash(item)
+        return (DRCI.get_item?(item) && DRCI.dispose_trash(item))
       when *@@drop_trash_retry_patterns
         # If still didn't dispose of trash after retry
         # then don't return yet, will try to drop it later.
@@ -432,9 +441,9 @@ module DRCI
     end
 
     # No trash bins or not able to put item in a bin, just drop it.
-    case DRC.bput("drop my #{item}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns, /^Perhaps you should be holding that first/)
-    when /^Perhaps you should be holding that first/
-      return false unless DRCI.get_item?(item) && DRCI.dispose_trash(item)
+    case DRC.bput("drop my #{item}", @@drop_trash_success_patterns, @@drop_trash_failure_patterns, @@drop_trash_retry_patterns, /^Perhaps you should be holding that first/, /^But you aren't holding that/)
+    when /^Perhaps you should be holding that first/, /^But you aren't holding that/
+      return (DRCI.get_item?(item) && DRCI.dispose_trash(item))
     when *@@drop_trash_retry_patterns
       return dispose_trash(item)
     when *@@drop_trash_success_patterns
@@ -476,6 +485,7 @@ module DRCI
   # If no container specified then generically taps whatever's in your immediate inventory.
   def tap(item, container = nil)
     return nil unless item
+
     from = container
     from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
     DRC.bput("tap my #{item} #{from}", *@@tap_success_patterns, *@@tap_failure_patterns)
@@ -497,6 +507,7 @@ module DRCI
   # Hand options are: left, right, either, both.
   def in_hand?(item, which_hand = 'either')
     return false unless item
+
     item = DRC::Item.from_text(item) if item.is_a?(String)
     case which_hand.downcase
     when 'left'
@@ -553,7 +564,7 @@ module DRCI
         break
       when *match_messages
         countval = Regexp.last_match(1).tr('-', ' ')
-        if countval.match? /\A\d+\z/
+        if countval.match?(/\A\d+\z/)
           count += Integer(countval)
         else
           count += DRC.text2num(countval)
@@ -570,6 +581,7 @@ module DRCI
     /inside your (.*)/ =~ tap(item)
     container = Regexp.last_match(1)
     return 0 if container.nil?
+
     count_items_in_container(item, container)
   end
 
@@ -607,7 +619,7 @@ module DRCI
   def count_all_boxes(settings)
     current_box_count = 0
 
-    containers = [
+    [
       settings.picking_box_source,
       settings.pick['picking_box_sources'],
       settings.pick['blacklist_container'],
@@ -626,8 +638,8 @@ module DRCI
   #########################################
 
   def stow_hands
-    (!DRC.left_hand  || stow_hand('left')) &&
-    (!DRC.right_hand || stow_hand('right'))
+    (!DRC.left_hand || stow_hand('left')) &&
+      (!DRC.right_hand || stow_hand('right'))
   end
 
   def stow_hand(hand)
@@ -657,6 +669,7 @@ module DRCI
   def get_item_if_not_held?(item, container = nil)
     return false unless item
     return true if in_hands?(item)
+
     return get_item(item, container)
   end
 
@@ -713,6 +726,7 @@ module DRCI
   def get_item_from_eddy_portal?(item, container)
     # Ensure the eddy is open then look in it to force the contents to be loaded.
     return false unless DRCI.open_container?('my eddy') && DRCI.look_in_container(container)
+
     from = container
     from = "from #{container}" if container && !(container =~ /^(in|on|under|behind|from) /i)
     case DRC.bput("get #{item} #{from}", @@get_item_success_patterns, @@get_item_failure_patterns)
@@ -837,6 +851,7 @@ module DRCI
   # Determines which hand is holding the item then lowers it to your feet slot.
   def lower_item?(item)
     return false unless in_hands?(item)
+
     item_regex = /\b#{item}\b/
     hand = (DRC.left_hand =~ item_regex) ? 'left' : 'right'
     case DRC.bput("lower ground #{hand}", *@@lower_success_patterns, *@@lower_failure_patterns)
@@ -876,14 +891,14 @@ module DRCI
     # If the snapshot found all the inventory then begin processing.
     if snapshot.grep(/^All of your (#{type}|items)|^You aren't wearing anything like that|Both of your hands are empty/).any? && snapshot.grep(/Use INVENTORY HELP/).any?
       snapshot
-      .map(&:strip)
-      .reverse
-      .take_while { |line| [/^All of your (#{type}|items)/, /^You aren't wearing anything like that/, /Both of your hands are empty/].none? { |phrase| phrase =~ line } }
-      .drop_while { |line| !line.start_with?('[Use INVENTORY HELP for more options.]') }
-      .drop(1)
-      .reverse
-      .take_while { |line| !items_at_feet || !line.start_with?('Lying at your feet') }
-      .map { |item| item.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '') }
+        .map(&:strip)
+        .reverse
+        .take_while { |line| [/^All of your (#{type}|items)/, /^You aren't wearing anything like that/, /Both of your hands are empty/].none? { |phrase| phrase =~ line } }
+        .drop_while { |line| !line.start_with?('[Use INVENTORY HELP for more options.]') }
+        .drop(1)
+        .reverse
+        .take_while { |line| !items_at_feet || !line.start_with?('Lying at your feet') }
+        .map { |item| item.gsub(/^(a|an|some)\s+/, '').gsub(/\s+\(closed\)/, '') }
     else
       # Otherwise, retry the command. Other actions may have flooded the game window.
       get_inventory_by_type(type, line_count + 40)
@@ -913,21 +928,13 @@ module DRCI
       return nil
     when *@@container_is_closed_patterns
       return nil unless open_container?(container)
+
       rummage_container(container)
     else
-      # Get string of just the comma separated item list
-      contents = contents.match(/You rummage through .* and see (?:a|an|some) (?<items>.*)\./)[:items]
-
-      # Split at a, an, or some, but only when it follows a comma
-      # The last two items in the rummage list are never comma delimited, handle shortly
-      contents = contents.split(/, (?:a|an|some) /)
-
-      # Grab the last array element which is the final two items that are never comma
-      # delimited in game output, split them into their item descriptions
-      sub_contents = contents.pop.split(/ and (?:a|an|some) /)
-
-      # Tack those last two items back onto our item list array
-      contents = contents.concat(sub_contents)
+      contents
+        .match(/You rummage through .* and see (?:a|an|some) (?<items>.*)\./)[:items] # Get string of just the comma separated item list
+        .sub(/ and (?=a|an|some)/, ", ") # replace " and " for the last item into " , "
+        .split(/, (?:a|an|some) /) # Split at a, an, or some, but only when it follows a comma
     end
   end
 
@@ -942,6 +949,7 @@ module DRCI
       return nil
     when *@@container_is_closed_patterns
       return nil unless open_container?(container)
+
       look_in_container(container)
     else
       contents
@@ -987,6 +995,7 @@ module DRCI
     case result
     when *@@container_is_closed_patterns
       return false unless container && open_container?(container)
+
       return put_away_item_unsafe?(item, container)
     when *@@put_away_item_retry_patterns
       return put_away_item_unsafe?(item, container)
@@ -1057,7 +1066,6 @@ module DRCI
   # GEM POUCH HANDLING ROUTINES
   #########################################
   def swap_out_full_gempouch?(gem_pouch_adjective, gem_pouch_noun, full_pouch_container = nil, spare_gem_pouch_container = nil, should_tie_gem_pouches = false)
-
     if DRC.left_hand
       lowered_item = DRC.left_hand
       if lowered_item
@@ -1116,14 +1124,13 @@ module DRCI
 
   def fill_gem_pouch_with_container(gem_pouch_adjective, gem_pouch_noun, source_container, full_pouch_container = nil, spare_gem_pouch_container = nil, should_tie_gem_pouches = false)
     case DRC.bput("fill my #{gem_pouch_adjective} #{gem_pouch_noun} with my #{source_container}",
-        /^You open/,
-        /is too full to fit/,
-        /^You'd better tie it up before putting/,
-        /You'll need to tie it up before/,
-        'What were you referring to',
-        "There aren't any gems",
-        'You fill your'
-        )
+                  /^You open/,
+                  /is too full to fit/,
+                  /^You'd better tie it up before putting/,
+                  /You'll need to tie it up before/,
+                  'What were you referring to',
+                  "There aren't any gems",
+                  'You fill your')
     when /is too full to fit/
       unless swap_out_full_gempouch?(gem_pouch_adjective, gem_pouch_noun, full_pouch_container, spare_gem_pouch_container, should_tie_gem_pouches)
         DRC.message("Could not swap gem pouches.")
@@ -1144,6 +1151,4 @@ module DRCI
       fill_gem_pouch_with_container(gem_pouch_adjective, gem_pouch_noun, source_container, full_pouch_container, spare_gem_pouch_container, should_tie_gem_pouches)
     end
   end
-
-
 end

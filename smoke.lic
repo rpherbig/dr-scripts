@@ -1,19 +1,28 @@
-custom_require.call(%w[common events])
-
 =begin
-  Documentation: https://elanthipedia.play.net/Lich_script_repository#smoke
+  * If smoke_image is not included with YAML setting, it will just smoke/inhale/exhale.
+  * Can use flint or a lighter with YAML.
+  * Can random an image, supports array or single.
+  * Supports warrior mage cantrip Burning Touch.
+  Use YAML settings:
+    smoke:
+      cigar_container:
+      smoke_image:
+      lighter:
+        type:
+        container:
+        blade:
 =end
 
-class Smoker
-  include DRC
+custom_require.call(%w[common common-items events])
 
+class Smoker
   def initialize
     arg_definitions = [
       [
         { name: 'cigar', regex: /\w+/i, variable: true, description: 'Cigar noun. (Only thing required if using YAML settings.)' }
       ],
       [
-        { name: 'image', regex: /\w+/i, variable: true, description: 'Smoke image to learn.' },
+        { name: 'image', regex: /\w+/i, variable: true, description: 'Smoke image to learn, can be an ARRAY, will random one.' },
         { name: 'cigar', regex: /\w+/i, variable: true, description: 'Cigar noun.' },
         { name: 'container', regex: /\w+/i, variable: true, description: "Cigar's container." },
         { name: 'lighter', regex: /\w+/i, variable: true, description: "Lighter's noun." }
@@ -31,25 +40,30 @@ class Smoker
       smoke_settings = get_settings.smoke
 
       @cigar = args.cigar
-      @image = smoke_settings['smoke_image'] if smoke_settings['smoke_image']
+      if smoke_settings['smoke_image']
+        @image = if smoke_settings['smoke_image'].is_a? Array
+                   smoke_settings['smoke_image'].sample
+                 else
+                   smoke_settings['smoke_image']
+                 end
+      end
+
       @lighter_info = smoke_settings['lighter']
       @cigar_container = smoke_settings['cigar_container']
     end
 
     Flags.add('new-cig', 'That was the last of your')
 
-    smoke_cig if get_cig? && light_cig?
+    smoke_cig if cig? && light_cig?
 
     Flags.delete('new-cig')
   end
 
-  def get_cig?
-    case bput("get #{@cigar} in my #{@cigar_container}", 'You get', 'What were', 'You need')
-    when 'What were'
-      echo 'Out of cigars, exiting.'
+  def cig?
+    unless DRCI.get_item?(@cigar, @cigar_container)
+      DRC.message 'Out of cigars, exiting.'
       return false
     end
-
     true
   end
 
@@ -57,23 +71,35 @@ class Smoker
     pause 3
     output = 'exhale'
     output = "exhale line #{@image}" if @image
-    bput(output.to_s, 'Roundtime')
+    DRC.bput(output.to_s, 'You (blow|breathe|exhale|loft|cast|need)')
   end
 
   def light_cig?
     output = "get my #{@lighter}"
     output = "get #{@lighter_info['type']} in my #{@lighter_info['container']}" unless @lighter_info.empty?
+    output = 'prep c b t' if @lighter_info['type'].eql? 'cantrip'
 
-    case bput(output.to_s, 'You get', 'What were', 'You are already')
+    case DRC.bput(output.to_s, 'You get', 'What were', 'You are already', 'You are now prepared', 'You have no idea')
+    when 'You have no idea'
+      DRC.message "You don't know the cantrip you are trying to you! EXITING!"
+      exit
+    when 'You are now prepared'
+      case DRC.bput("gesture my #{@cigar}", 'You touch')
+      when 'You touch'
+        Flags.reset('new-cig')
+        return true
+      when 'What were'
+        DRC.message 'Cigar missing! Exiting!'
+        exit
+      end
     when 'What were'
-      echo 'No lighter found! Exiting.'
+      DRC.message 'No lighter found! Exiting.'
       return false
     end
 
     if @lighter_info['type'].include?('flint')
-      bput("drop my #{@cigar}", 'You drop')
-      bput("guard #{@cigar}", 'You are a bit', 'You move into position')
-      bput("wield my #{@lighter_info['blade']}", 'You get', 'What were', 'You are already', 'You draw')
+      DRCI.lower_item?(@cigar)
+      DRC.bput("wield my #{@lighter_info['blade']}", 'You get', 'What were', 'You are already', 'You draw')
     end
 
     if @lighter
@@ -82,11 +108,11 @@ class Smoker
     else
       fput("light #{@cigar} with my #{@lighter_info['type']}")
       waitrt?
-      bput("sheath my #{@lighter_info['blade']}", 'You Sheath', 'You put')
-      bput("get #{@cigar}", 'You pick up')
+      DRC.bput("sheath my #{@lighter_info['blade']}", /You (sheath|put)/)
+      DRC.bput('lift', 'You pick up')
     end
 
-    bput("put my #{@lighter_info['type']} in my #{@lighter_info['container']}", 'You put')
+    DRC.bput("put my #{@lighter_info['type']} in my #{@lighter_info['container']}", 'You put')
 
     Flags.reset('new-cig')
     true
@@ -94,19 +120,16 @@ class Smoker
 
   def smoke_cig
     inhale_counter = 0
-    loop do
-      exit if Flags['new-cig']
-
+    until Flags['new-cig']
       if @image
-        bput("inhale my #{@cigar}", 'You take', 'What were')
+        DRC.bput("inhale my #{@cigar}", 'You take', 'What were', 'out of your lungs first')
         exhale_smoke
         waitrt?
-        fput('smoke list')
       else
-        output = "smoke #{@cigar}"
-        output = "inhale #{@cigar}" if inhale_counter == 0
-        bput(output.to_s, 'You puff', 'You take', 'What were')
-        exhale_smoke if inhale_counter == 0
+        output = "smoke my #{@cigar}"
+        output = "inhale my #{@cigar}" if inhale_counter.zero?
+        DRC.bput(output.to_s, 'You puff', 'You take', 'What were')
+        exhale_smoke if inhale_counter.zero?
         pause 15
         inhale_counter += 1
         inhale_counter = 0 if inhale_counter > 2

@@ -5,12 +5,6 @@
 custom_require.call(%w[common common-crafting common-items common-money common-travel])
 
 class ShopRestock
-  include DRC
-  include DRCC
-  include DRCI
-  include DRCM
-  include DRCT
-
   def initialize
     @settings = get_settings
 
@@ -22,6 +16,8 @@ class ShopRestock
     @part_data = get_data('crafting')[:recipe_parts]
     @bag = @settings.crafting_container
     @belt = @settings.forging_belt || @settings.engineering_belt
+    @worn_trashcan = @settings.worn_trashcan
+    @worn_trashcan_verb = @settings.worn_trashcan_verb
 
     go_to_shop
     check_surfaces
@@ -32,11 +28,11 @@ class ShopRestock
   def check_surfaces
     missing_items = []
     @item_list.map { |data| data['surface'] }.uniq.each do |surface|
-      raw_list = bput("look #{surface}", "There's nothing", 'you see [^\.]*')
+      raw_list = DRC.bput("look #{surface}", "There's nothing", 'you see [^\.]*')
       raw_list = if raw_list == "There's nothing"
                    []
                  else
-                   list_to_array(raw_list)
+                   DRC.list_to_array(raw_list)
                  end
       missing_items += @item_list.select { |item| surface == item['surface'] }
                                  .reject { |item| raw_list.find { |raw_item| raw_item.match(item['full_name']) } }
@@ -52,7 +48,7 @@ class ShopRestock
     missing_recipes_re = Regexp.union(missing_items.map { |item| item['recipe'] })
     @recipes = all_recipes.select { |recipe| missing_recipes_re.match(recipe['name']) }
 
-    ensure_copper_on_hand(40_000, @settings)
+    DRCM.ensure_copper_on_hand(40_000, @settings)
     go_to_shop
     restock_surfaces(missing_items)
   end
@@ -71,18 +67,18 @@ class ShopRestock
     volume = ((total_volume_of(missing_items) * 1.25) / 10.0).ceil
     return if volume.zero?
 
-    wait_for_script_to_complete('makesteel', [volume, 'refine'])
+    DRC.wait_for_script_to_complete('makesteel', [volume, 'refine'])
 
     missing_items.each do |item|
-      wait_for_script_to_complete('smith', ['steel', item['recipe'], 'stamp', 'temper'])
+      DRC.wait_for_script_to_complete('smith', ['steel', item['recipe'], 'stamp', 'temper'])
       go_to_shop
       sell(item)
     end
 
-    wait_for_script_to_complete('workorders', %w[blacksmithing repair])
-    walk_to(get_data('crafting')[:blacksmithing][@town]['trash-room'])
-    get_item('steel ingot')
-    dispose_trash('steel ingot')
+    DRC.wait_for_script_to_complete('workorders', %w[blacksmithing repair])
+    DRCT.walk_to(get_data('crafting')[:blacksmithing][@town]['trash-room'])
+    DRCC.get_crafting_item('steel ingot', @bag, @belt, @belt)
+    DRCI.dispose_trash('steel ingot', @worn_trashcan, @worn_trashcan_verb)
   end
 
   def restock_burlap(missing_items)
@@ -92,77 +88,78 @@ class ShopRestock
     return if volume.zero?
 
     have = 0
-    if bput('get burlap cloth', 'You get', 'What were') == 'You get'
-      res = bput('count my cloth', 'You count out .*')
+    if DRC.bput('get burlap cloth', 'You get', 'What were') == 'You get'
+      res = DRC.bput('count my cloth', 'You count out .*')
       have = res.scan(/\d+/).first.to_i
-      stow_hands
+      DRCI.stow_hands
     end
 
     if have < volume
       multiples = ((volume - have) / 16.0).ceil
       multiples.times do
-        wait_for_script_to_complete('spin', ['burlap'])
-        wait_for_script_to_complete('spin', ['burlap'])
-        wait_for_script_to_complete('weave-cloth')
+        DRC.wait_for_script_to_complete('spin', ['burlap'])
+        DRC.wait_for_script_to_complete('spin', ['burlap'])
+        DRC.wait_for_script_to_complete('weave-cloth')
       end
     end
 
-    while bput("get burlap cloth from #{@bag}", 'You get', 'What were') == 'You get'
+    while DRC.bput("get burlap cloth from #{@bag}", 'You get', 'What were') == 'You get'
       fput('combine cloth')
     end
-    stow_hands
+    DRCI.stow_hands
 
     missing_items.each do |item|
       move('out') if Room.current.id == @inner_id
-      recipe_data = recipe_lookup(@recipes, item['recipe'])
+      recipe_data = DRCC.recipe_lookup(@recipes, item['recipe'])
       recipe_data['part'] << 'large padding' # HACK: Reinforcing should be user specified
       recipe_data['part'].uniq.each do |part_name|
         recipe_data['part'].map { |part| part == part_name ? 1 : 0 }.reduce(0, :+).times { buy_part(part_name) }
       end
 
-      wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'burlap'])
+      DRC.wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'burlap'])
       stamp(item)
-      wait_for_script_to_complete('sew', ['reinforce'])
+      DRC.wait_for_script_to_complete('sew', ['reinforce'])
       fput("stow #{item['noun']}")
       go_to_shop
       fput("get my #{item['noun']} from my #{@bag}")
       sell(item)
     end
-    wait_for_script_to_complete('workorders', %w[tailoring repair])
+    DRC.wait_for_script_to_complete('workorders', %w[tailoring repair])
   end
 
   def restock_linen(missing_items)
     return if missing_items.empty?
+
     echo missing_items
 
     volume = total_volume_of(missing_items)
     return if volume.zero?
 
     have = 0
-    if bput('get linen cloth', 'You get', 'What were') == 'You get'
-      res = bput('count my cloth', 'You count out .*')
+    if DRC.bput('get linen cloth', 'You get', 'What were') == 'You get'
+      res = DRC.bput('count my cloth', 'You count out .*')
       have = res.scan(/\d+/).first.to_i
-      stow_hands
+      DRCI.stow_hands
     end
 
     if have < volume
       multiples = ((volume - have) / 16.0).ceil
       multiples.times do
-        wait_for_script_to_complete('spin', ['linen'])
-        wait_for_script_to_complete('spin', ['linen'])
-        wait_for_script_to_complete('weave-cloth')
+        DRC.wait_for_script_to_complete('spin', ['linen'])
+        DRC.wait_for_script_to_complete('spin', ['linen'])
+        DRC.wait_for_script_to_complete('weave-cloth')
       end
     end
 
-    while bput("get linen cloth from #{@bag}", 'You get', 'What were') == 'You get'
+    while DRC.bput("get linen cloth from #{@bag}", 'You get', 'What were') == 'You get'
       fput('combine cloth')
     end
-    stow_hands
+    DRCI.stow_hands
 
     missing_items.each do |item|
       move('out') if Room.current.id == @inner_id
-      recipe_data = recipe_lookup(@recipes, item['recipe'])
-      wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'linen'])
+      recipe_data = DRCC.recipe_lookup(@recipes, item['recipe'])
+      DRC.wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'linen'])
       go_to_shop
       stamp(item)
       sell(item)
@@ -176,30 +173,30 @@ class ShopRestock
     return if volume.zero?
 
     have = 0
-    if bput("get silk cloth from my #{@bag}", 'You get', 'What were') == 'You get'
-      res = bput('count my cloth', 'You count out .*')
+    if DRC.bput("get silk cloth from my #{@bag}", 'You get', 'What were') == 'You get'
+      res = DRC.bput('count my cloth', 'You count out .*')
       have = res.scan(/\d+/).first.to_i
-      stow_hands
+      DRCI.stow_hands
     end
 
     if have < volume
       multiples = ((volume - have) / 16.0).ceil
       multiples.times do
-        wait_for_script_to_complete('spin', ['silk'])
-        wait_for_script_to_complete('spin', ['silk'])
-        wait_for_script_to_complete('weave-cloth')
+        DRC.wait_for_script_to_complete('spin', ['silk'])
+        DRC.wait_for_script_to_complete('spin', ['silk'])
+        DRC.wait_for_script_to_complete('weave-cloth')
       end
     end
 
-    while bput("get silk cloth from my #{@bag}", 'You get', 'What were') == 'You get'
+    while DRC.bput("get silk cloth from my #{@bag}", 'You get', 'What were') == 'You get'
       fput('combine cloth')
     end
-    stow_hands
+    DRCI.stow_hands
 
     missing_items.each do |item|
-      recipe_data = recipe_lookup(@recipes, item['recipe'])
+      recipe_data = DRCC.recipe_lookup(@recipes, item['recipe'])
       move('out') if Room.current.id == @inner_id
-      wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'silk'])
+      DRC.wait_for_script_to_complete('sew', ['stow', 'sewing', recipe_data['chapter'], item['recipe'], item['noun'], 'silk'])
       go_to_shop
       stamp(item)
       sell(item)
@@ -213,19 +210,19 @@ class ShopRestock
     else
       DRCT.buy_item(part_data['part-room'], name)
     end
-    stow_hands
+    DRCI.stow_hands
   end
 
   def restock_gryphon(missing_items)
     return if missing_items.empty?
 
     missing_items.each do |item|
-      recipe_data = recipe_lookup(@recipes, item['recipe'])
+      recipe_data = DRCC.recipe_lookup(@recipes, item['recipe'])
       recipe_data['part'].each { |part| buy_part(part) }
-      wait_for_script_to_complete('sew', ['stow', 'leather', recipe_data['chapter'], item['recipe'], item['noun'], item['material']])
+      DRC.wait_for_script_to_complete('sew', ['stow', 'leather', recipe_data['chapter'], item['recipe'], item['noun'], item['material']])
       fput('stow leather')
-      get_item('shield')
-      wait_for_script_to_complete('sew', ['seal'])
+      DRCC.get_crafting_item('shield', @bag, @belt, @belt)
+      DRC.wait_for_script_to_complete('sew', ['seal'])
       go_to_shop
       stamp(item)
       sell(item)
@@ -235,11 +232,11 @@ class ShopRestock
   def go_to_shop
     return if Room.current.id == @inner_id
 
-    walk_to(@shop_id)
-    if bput("open #{@entrance}",
-            'You will need to contact the owner about that',
-            'But your shop is already set up and ready for you to enter',
-            'Your shop is ready') == 'You will need to contact the owner about that'
+    DRCT.walk_to(@shop_id)
+    if DRC.bput("open #{@entrance}",
+                'You will need to contact the owner about that',
+                'But your shop is already set up and ready for you to enter',
+                'Your shop is ready') == 'You will need to contact the owner about that'
       echo '*****************'
       echo 'Your shop settings appear to be incorrect. Please check the script documentation and update your settings'
       echo '*****************'
@@ -253,27 +250,17 @@ class ShopRestock
     fput("sell my #{item['noun']} #{item['surface']} for #{item['price']}")
   end
 
-  def get_item(name)
-    get_crafting_item(name, @bag, @belt, @belt)
-  end
-
-  def stow_item(name)
-    stow_crafting_item(name, @bag, @belt)
-  end
-
   def stamp(item)
     fput("get my #{item['noun']} from my #{@bag}")
-    get_item('stamp')
-    fput("mark my #{item['noun']} with my stamp")
-    waitrt?
-    pause
-    stow_item('stamp')
+    DRCC.get_crafting_item('stamp', @bag, @bag_items, @belt)
+    DRC.bput("mark my #{noun} with my stamp", 'carefully hammer the stamp', 'You cannot figure out how to do that', 'too badly damaged')
+    DRCC.stow_crafting_item('stamp', @bag, @belt)
   end
 
   def total_volume_of(items)
     return 0 if items.empty?
 
-    items.map { |item| recipe_lookup(@recipes.select { |recipe| recipe['noun'] == item['noun'] }, item['recipe'])['volume'] }
+    items.map { |item| DRCC.recipe_lookup(@recipes.select { |recipe| recipe['noun'] == item['noun'] }, item['recipe'])['volume'] }
          .inject(&:+)
   end
 end

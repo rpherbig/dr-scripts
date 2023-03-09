@@ -1,0 +1,277 @@
+=begin
+  All in one repair script. Can be run with the listed options or any combination of tools, gear, etc.
+    Only restricted in pickup, the pickup routine will go to the last repair location, or the location you designate,
+    if you have any tickets from that repair person.
+  EXAMPLES:
+  ;repair forging                    # runs to your hometown repair shop, drops off and picks up your forging tools
+  ;repair forging self_repair        # Uses wire brush and oil to repair your own forging tools as defined in yaml
+  ;repair forging crossing           # runs to crossing repair shop, drops off and picks up your forging tools
+  ;repair forging drop_off shard     # runs to shard, drops your forging tools at the repair shop for pickup at a later time.
+  ;repair shield "iron bracer" pilum forging shard drop_off
+                                     # runs to shard, drops off your shield, bracer, pilum, and forging tools for pickup at a later time.
+  (probably works)
+=end
+
+custom_require.call(%w[common common-crafting common-items common-money common-travel equipmanager events])
+
+class Repair
+  def initialize
+    UserVars.repair_timer_snap ||= Time.now
+    arg_definitions = [
+      [
+        { name: 'drop_off', regex: /drop_off/i, optional: true, description: 'Drop off gear only, do not pick up' },
+        { name: 'pick_up', regex: /pick_up/i, optional: true, description: 'Pick up items only' },
+        { name: 'self_repair', regex: /self_repair/i, optional: true, description: 'Use wire brush and oil to repair items yourself. WARNING: LOTS OF RT, even with techs.' },
+        { name: 'town', regex: $HOMETOWN_REGEX, optional: true, description: 'Town to repair in' },
+        { name: 'reset_town', regex: /reset_town/i, optional: true, description: 'Clears last town variable' },
+        { name: 'force_repair', regex: /force_repair/i, optional: true, description: 'Ignore repair_timer' },
+        { name: 'script_summary', regex: /script_summary/i, optional: true, description: 'Repair script with option to split drop and pickup routines' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions, true)
+    reset_town(true) if args.reset_town
+    Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
+
+    @settings       = get_settings
+    @bag            = @settings.crafting_container
+    @bag_items      = @settings.crafting_items_in_container
+    @cash_on_hand   = @settings.repair_withdrawal_amount
+    low_town        = args.town || UserVars.last_repair_town || @settings.repair_town || @settings.hometown
+    @town           = low_town.split.map(&:capitalize).join(' ')
+    @force_repair   = args.force_repair
+    @repair_timer   = @settings.repair_timer
+    @sort_head      = @settings.sort_auto_head
+    @disciplines    = ['forging', 'tinkering', 'carving', 'shaping', 'outfitting', 'alchemy', 'enchanting', 'engineering']
+    @toolbelts_list = []
+    @toolset_list   = []
+    @craft_data     = get_data('crafting')['blacksmithing'][@town.capitalize]
+    @equipmanager   = EquipmentManager.new
+
+    @disciplines.each do |name|
+      @toolbelts_list << @settings.send(name + '_belt')
+      @toolset_list   << @settings.send(name + '_tools')
+    end
+
+    if @town == 'Fang Cove' && fang_closed?
+      DRC.message('Fang Cove repair personnel are sleeping off their latest hangover, and are not available for repairs at this hour. Try back between mid-morning and sunset')
+      exit
+    end
+
+    unless (repair_info = get_data('town')[@town]['metal_repair']) || args.self_repair
+      DRC.message("No repair info found for #{@town}, exiting")
+      reset_town
+      exit
+    end
+
+    @equipmanager.empty_hands
+
+    if args.drop_off # dropping off based on remaining args
+      gear_list = args.flex.empty? ? prep_full_repair : build_list(args.flex)
+      UserVars.last_repair_town = @town
+      repair_gear(gear_list, repair_info)
+    elsif args.pick_up # by default picks up everything at the last place you dropped off, or your hometown.
+      pickup_repaired_items(repair_info)
+      fput('sort auto head') if @sort_head
+    elsif args.flex.empty? # This represents no flex args, so full repair routine.
+      gear_list = prep_full_repair
+      UserVars.last_repair_town = @town unless args.self_repair
+      repair_gear(gear_list, repair_info, args.self_repair)
+      pickup_repaired_items(repair_info) unless args.self_repair
+      fput('sort auto head') if @sort_head
+    else # Here we have flex args, and no drop/pickup specified, so doing a full routine on the specific items from our flex args.
+      gear_list = build_list(args.flex)
+      UserVars.last_repair_town = @town unless args.self_repair
+      repair_gear(gear_list, repair_info, args.self_repair)
+      pickup_repaired_items(repair_info) unless args.self_repair
+    end
+  end
+
+  def prep_full_repair
+    unless should_repair?
+      DRC.message("Last repair was #{(Time.now - UserVars.repair_timer_snap).to_i / 60} minutes ago, which is less than your repair_timer settings\nCurrently set to repair only once every #{@repair_timer / 60} minutes. Run with arg force_repair to repair anyways.")
+      exit
+    end
+
+    UserVars.repair_timer_snap = Time.now
+    gear = []
+    @equipmanager.items.each do |item|
+      next if item.skip_repair
+
+      gear << [item.adjective, item.name].join(' ').strip
+    end
+    gear
+  end
+
+  def build_list(selections)
+    gear_list = []
+    @disciplines.each do |toolset|
+      if selections.include?(toolset)
+        gear_list << @settings.send(toolset + '_tools')
+        selections -= [toolset]
+      end
+    end
+    (gear_list + selections).flatten
+  end
+
+  def reset_town(leave = false)
+    if UserVars.last_repair_town
+      DRC.message("Last repair town was: #{UserVars.last_repair_town}. Resetting.") if leave
+      UserVars.last_repair_town = nil
+    else
+      DRC.message("Last repair town not defined.")
+    end
+    exit if leave
+  end
+
+  def should_repair?
+    return true if @repair_timer.nil? || @force
+
+    @repair_timer <= (Time.now - UserVars.repair_timer_snap).to_i
+  end
+
+  def verify_funds(gear, repair_own)
+    current = Room.current.id
+    DRCM.ensure_copper_on_hand(@cash_on_hand, @settings, @town)
+    if repair_own
+      DRCT.walk_to(current)
+      DRCC.check_consumables('oil', @craft_data['finisher-room'], @craft_data['finisher-number'], @bag, @bag_items, nil, gear.size)
+      DRCC.check_consumables('wire brush', @craft_data['finisher-room'], 10, @bag, @bag_items, nil, gear.size)
+    end
+  end
+
+  def repair_gear(gear, info, repair_own = false)
+    gear.reject! { |item| is_immune?(item) }
+    if gear.empty?
+      DRC.message("All items queued for repair remain immune to damage, exiting")
+      return
+    end
+
+    missing = []
+    verify_funds(gear, repair_own)
+    DRCT.walk_to(info['id']) unless repair_own
+
+    gear.each do |gear_item|
+      unless smart_get_gear(gear_item)
+        DRC.message("Missing #{gear_item}, skipping")
+        missing << gear_item
+        next
+      end
+      repair_own ? self_repair(gear_item) : shop_repair(gear_item, info)
+    end
+    unless missing.empty?
+      DRC.beep
+      missing.each do |item|
+        DRC.message("Missing listed gear item: #{item}")
+      end
+    end
+  end
+
+  def shop_repair(gear_item, repair_info)
+    DRC.release_invisibility
+    if DRCI.give_item?(repair_info['name'], gear_item)
+      DRCI.stow_item?("#{repair_info['name']} ticket")
+    else
+      smart_stow_gear(gear_item)
+    end
+  end
+
+  def self_repair(gear_item)
+    repeat = false
+    ['wire brush', 'oil'].each do |tool|
+      DRCI.get_item(tool, @bag)
+      command = tool == 'wire brush' ? "rub my #{gear_item} with my wire brush" : "pour my oil on my #{gear_item}"
+      case DRC.bput(command, 'Roundtime', 'not damaged enough',
+                    'You cannot do that while engaged!',
+                    'cannot figure out how', 'Pour what')
+      when 'Roundtime'
+        DRCI.put_away_item?(tool, @bag)
+        repeat = true
+      when 'not damaged enough'
+        DRCI.put_away_item?(tool, @bag)
+        break
+      when 'Pour what'
+        DRCC.check_consumables('oil', info['finisher-room'], info['finisher-number'], @bag, @bag_items, nil)
+        DRCI.get_item(tool, @bag)
+        DRC.bput("pour my oil on my #{gear_item}", 'Roundtime')
+        DRCI.put_away_item?(tool, @bag)
+      when 'You cannot do that while engaged!'
+        DRC.message("Cannot repair in combat")
+        smart_stow_gear(gear_item)
+        DRCI.put_away_item?(tool, @bag)
+        exit
+      when 'cannot figure out how'
+        DRC.message("Something has gone wrong, moving to next item")
+        DRCI.put_away_item?(tool, @bag)
+        break
+      end
+    end
+    if repeat
+      set_immune(gear_item)
+      self_repair(gear_item)
+    end
+    smart_stow_gear(gear_item)
+  end
+
+  def is_immune?(gear_item)
+    UserVars.immune_list[gear_item] >= Time.now
+  end
+
+  def set_immune(gear_item)
+    return unless Flags['proper-repair']
+
+    Flags.reset('proper-repair')
+    UserVars.immune_list.store(gear_item, Time.now + 7000)
+  end
+
+  def fang_closed?
+    tod = DRC.bput('time', /^It is currently .* and it is .*./)
+    ['evening', 'night', 'sunrise', 'dawn', 'early morning'].any? { |closed| tod.include?(closed) }
+  end
+
+  def pickup_repaired_items(repair_info)
+    reset_town # resets our last repair location for next run
+    exit unless DRCI.exists?("#{repair_info['name']} ticket") # no ticket, nothing to collect
+
+    DRCT.walk_to(repair_info['id'])
+    DRC.release_invisibility
+    while DRCI.get_item?("#{repair_info['name']} ticket")
+      pause 30 until DRC.bput('look at my ticket', /should be ready by now/, /^Looking at the/) == 'should be ready by now'
+      DRC.bput("give #{repair_info['name']}", /^You hand/, /takes your ticket/)
+      pause 0.01 until (item = [DRC.right_hand, DRC.left_hand].compact.first) # waits for repaired item to hit your hand
+      smart_stow_gear(item)
+    end
+  end
+
+  def smart_get_gear(gear_item)
+    return false unless gear_item
+
+    if (toolbelt = @toolbelts_list.select { |belt| belt["items"].find { |name| name =~ /\b#{gear_item}\b/i } }.first)
+      DRCC.get_crafting_item(gear_item, @bag, @bag_items, toolbelt)
+    elsif (tool_name = @toolset_list.find { |tools| tools.any? { |name| name =~ /\b#{gear_item}\b/i } }.select { |tool| tool =~ /\b#{gear_item}\b/i }.first)
+      DRCI.get_item?(tool_name, @bag)
+    elsif (item_info = @equipmanager.items.find { |gear| gear.short_regex =~ gear_item || gear.name =~ /\b#{gear_item}\b/i })
+      @equipmanager.get_item?(item_info)
+    else
+      DRCI.get_item?(gear_item)
+    end
+  end
+
+  def smart_stow_gear(gear_item)
+    return true unless gear_item
+
+    if (toolbelt = @toolbelts_list.select { |belt| belt["items"].find { |name| name =~ /\b#{gear_item}\b/i } }.first)
+      DRCC.stow_crafting_item(gear_item, @bag, toolbelt)
+    elsif @toolset_list.any? { |tools| tools.find { |name| name =~ /\b#{gear_item}\b/i } }
+      DRCI.put_away_item?(gear_item, @bag)
+    else
+      @equipmanager.return_held_gear
+    end
+  end
+end
+
+before_dying do
+  Flags.delete('proper-repair')
+end
+
+Repair.new

@@ -17,20 +17,34 @@ class MiningBuddy
     @vein_list = settings.mining_buddy_vein_list
     @mining_implement = settings.mining_implement
     @use_packet = settings.mine_use_packet
+    @pickaxe = settings.pickaxe || @mining_implement
     @hometown = settings.hometown
     deeds_data = get_data('crafting').deeds[@hometown]
     @deeds_room = deeds_data['room']
     @deeds_number = deeds_data['medium_number']
     @mine_repair_own_tools = settings.mine_repair_own_tools
     DRC.message("#{@areas}:#{@vein_list}") if UserVars.mining_debug
-    Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
 
-    # checks yaml settings against tools
-    # corrects settings when tongs are wrongly set as adjustable, and/or when implement is tongs.
+    Flags.add('proper-repair', 'Your excellent training in the ways of tool repair') # Need this flag for self repair
+    Flags.add('resource-level', # Adding here to skip the second prospect in mine
+              'certain a scattering of resources', 'enormous quantity remains to be found', 'substantial quantity remains to be found',
+              'good quantity remains to be found', 'decent quantity remains to be found', 'small quantity remains to be found',
+              'enormous quantity \(5/5\) remains to be found', 'substantial quantity \(4/5\) remains to be found', 'good quantity \(3/5\) remains to be found',
+              'decent quantity \(2/5\) remains to be found', 'small quantity \(1/5\) remains to be found', 'scattering of resources \(0/5\) remains to be found')
+
+    # corrects settings when tongs are wrongly set as adjustable, or adjusts tongs to shovel when implement is tongs.
     unless settings.adjustable_tongs && @mining_implement.include?('tongs') && DRCC.get_adjust_tongs?('reset shovel', @bag, @bag_items, @forging_belt)
       @mining_implement.sub!(/.* tongs/, "shovel")
     end
     DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt) if DRCI.in_hands?(@mining_implement)
+
+    # if we've elected to mine out every room, and defined a pickaxe, but we don't have a pickaxe, we'll set that tool to our normal mining implement
+    if @mine_every_room && @pickaxe && !DRCI.exists?(@pickaxe)
+      DRC.message("#{@pickaxe} not found, setting clearing tool to #{@mining_implement}")
+      @pickaxe = @mining_implement
+    end
+    # creating a tools array based on our yaml settings, removing duplicates and empty entries
+    tools = [@pickaxe, @mining_implement].compact.uniq
 
     DRCM.ensure_copper_on_hand(10_000, settings)
 
@@ -46,7 +60,8 @@ class MiningBuddy
         DRCC.stow_crafting_item('packet', @bag, @forging_belt)
       end
     end
-    check_repair
+
+    check_repair(tools)
     DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
     DRC.bput('speculate luck', '^You focus your mind on the world around you', '^You are already focusing on the world around you.', '^Your pattern-matching skills are still exhausted') if DRStats.trader? && DRStats.circle >= 65
     @areas.each { |area_name| mine_rooms(@area_list[area_name]) }
@@ -59,76 +74,79 @@ class MiningBuddy
       echo 'Your hometown is missing data for purchasing deeds!'
       exit
     end
-    fput('stow my packet')
+    DRCI.stow_item?('deed packet')
   end
 
-  def check_repair
+  def check_repair(tools_array)
     # Self repair begins here
     if @mine_repair_own_tools # Yaml setting of same name
-      DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], @mining_implement, @bag, @bag_items, @forging_belt)
+      tools_array.each { |tool| DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], tool, @bag, @bag_items, @forging_belt) }
       return
     end
+
     # Store repair begins here
-    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt) unless DRCI.in_hands?(@mining_implement)
-    result = DRC.bput("analyze my #{@mining_implement}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
-    waitrt?
+    tools_to_be_repaired = []
+    tools_array.each do |tool|
+      # checking damage, and adding tool to list of tools to repair if it requires repair
+      tools_to_be_repaired << tool if /Roundtime/ =~ DRC.bput("analyze my #{tool}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
+      DRCC.stow_crafting_item(tool, @bag, @forging_belt) if DRCI.in_hands?(tool)
+    end
+    # if no tools require repair, skipping shop repair
+    return DRC.message("#{tools_array.join(" and ")} appear#{tools_array.size > 1 ? "" : "s"} to be in adequate repair") if tools_to_be_repaired.empty?
 
-    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
-    return unless /roundtime/i =~ result
+    DRC.message("Repairing #{tools_to_be_repaired.join(" and ")}")
 
-    repair = get_data('town')[@hometown]['metal_repair']
-    DRCT.walk_to(repair['id'])
-    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt)
-    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
-    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
-    pause 10 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
-    DRC.bput("give #{repair['name']}", 'You hand', 'takes your ticket')
-    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
+    # with our list of tools requiring repair, we'll drop each off at the repair shop
+    DRCC.repair_tools(tools_array, @bag, @forging_belt, @hometown, get_settings)
   end
 
   def mine_rooms(rooms)
     rooms.each do |room|
       DRC.wait_for_script_to_complete('safe-room') if bleeding?
-      next unless mine?(room)
-
-      check_repair
+      Flags.reset('resource-level')
+      mine(room)
     end
   end
 
-  def mine?(room)
+  def mine(room)
     waitrt?
     DRCT.walk_to(room)
+
     unless DRRoom.pcs.empty?
-      return false if @skip_populated
+      return if @skip_populated
 
       fput('wave')
     end
 
-    unless @mine_every_room
-      DRC.bput('prospect', 'Roundtime')
-      results = reget(20, 'can be mined here')
+    DRC.bput('prospect', 'Roundtime')
+    results = reget(20, 'can be mined here')
+    waitrt?
+    echo(results) if UserVars.mining_debug
+    return if results.nil?
 
-      waitrt?
+    # here we're taking the lines from our reget above and checking if any of them match our keep list. If any are found, setting keep to true.
+    keep = results
+           .each_with_object([]) { |line, array| array << line.match(/You are certain that (.*) can be mined here/i)[1] }
+           .reject(&:nil?)
+           .map(&:downcase)
+           .any? { |vein| @vein_list.map(&:downcase).include?(vein) }
 
-      echo(results) if UserVars.mining_debug
-
-      return false if results.nil?
-      return false unless results
-                          .each_with_object([]) { |line, array| array << line.match(/You are certain that (.*) can be mined here/i)[1] }
-                          .reject(&:nil?)
-                          .map(&:downcase)
-                          .any? { |vein| @vein_list.map(&:downcase).include?(vein) }
+    if keep # Found something we want to keep, running full routine with careful implement
+      DRC.wait_for_script_to_complete('mine', [@mining_implement])
+      check_repair(@mining_implement.to_a)
+    elsif @mine_every_room # Found nothing we want, but we're going to clear out the room
+      DRC.wait_for_script_to_complete('mine', [@pickaxe, "clear"])
+      check_repair(@pickaxe.to_a)
+    else # Found nothing we want, and we aren't clearing rooms, on to the next room
+      return
     end
 
-    waitrt?
-
-    DRC.wait_for_script_to_complete('mine')
     DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
-    true
   end
 end
 
 before_dying do
+  Flags.delete('resource-level')
   Flags.delete('proper-repair')
 end
 

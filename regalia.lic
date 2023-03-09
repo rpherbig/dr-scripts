@@ -1,0 +1,161 @@
+=begin
+  Yaml settings
+
+  regalia_settings:
+    collector-room: *safe_room # Room to drop stellar collector (optional)
+    regalia-mana: 20 # optional override for min cast
+    enrichment: true # whether to use enrichment to put the armor up
+    armor_type_and_location: # use cap for head slot, head will create head,neck,eyes
+    - plate eyes # creates a mask
+    - chain head # since mask already in place, will create cap and aventail in chain
+    - brigandine hands # just gloves
+    - light # will cast light armor for all remaining unexposed body parts
+    alternate: # Secondary set, won't pass gearset checks so not used with CT
+    - light
+
+  Ordering for the armor_type_and_location is important if you're using bespoke. Smaller pieces before larger pieces. If you wanted
+  to wear, say, plate mask, brig gloves, chain cap, and the rest light, you'd do:
+  - brigandine hands
+  - chain cap
+  - plate eyes
+  - light
+
+  The last cast would do a head-to-toe cast filling in any pieces not already covered, either by existing regalia or normal armor.
+  However, if the 'light' cast is above any of the smaller pieces, the other pieces will fail because you'll already have armor on all eligible
+  body parts
+
+  Additionally, you need to change your standard gearset to match the regalia armor, or CT will just pull it all off.
+=end
+
+custom_require.call(%w[common common-arcana common-travel])
+
+class Regalia
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'collector', regex: /collector/i, optional: true, description: 'Travel to your collector room and drop a stellar collector' },
+        { name: 'recharge', regex: /recharge/i, optional: true, description: 'Travel to your collector room and invoke to receive stored aura' },
+        { name: 'alternate', regex: /alternate/i, optional: true, description: 'Cast an alternate (eg pvp) set defined in your regalia_settings' },
+        { name: 'drop', regex: /drop/i, optional: true, description: 'Drop currently worn regalia armor' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    @regalia = @settings.regalia_settings
+
+    if args.collector
+      create_stellar_collector
+      exit
+    elsif args.drop
+      clear_existant
+      exit
+    elsif args.recharge && use_stellar_collector?
+      DRC.message("Recharge successful")
+      exit
+    elsif args.recharge
+      DRC.message("Something is wrong with your collector")
+      exit
+    elsif args.alternate
+      @regalia['armor_type_and_location'] = @regalia['alternate']
+    end
+
+    verify_settings
+    clear_existant
+    check_aura
+    spellcast("Enrichment", nil, 30) if @regalia['enrichment']
+    @regalia['armor_type_and_location'].each { |piece| spellcast("regalia", piece, @regalia['regalia-mana']) }
+    DRC.wait_for_script_to_complete("weararmor") unless args.alternate # checks your gearset
+  end
+
+  def clear_existant
+    DRC.bput('prepare symbiosis', 'You recall the exact details of the', 'But you\'ve already prepared', 'Please don\'t do that here')
+    DRC.bput('release symbiosis', 'You release', 'But you haven\'t prepared')
+    DRC.bput('release spell', 'You let your concentration lapse', "You aren't preparing a spell") unless checkprep == 'None'
+    DRC.bput('release mana', 'You release all', "You aren't harnessing any mana")
+
+    fput "release regalia" if DRSpells.active_spells['Regalia']
+    fput "release enrichment" if DRSpells.active_spells['Enrichment'] < 2
+  end
+
+  def verify_settings
+    if !@regalia['armor_type_and_location']
+      DRC.message("No armor defined, see docs")
+      exit
+    end
+
+    if @regalia['enrichment'] && !DRSpells.known_spells['Enrichment']
+      DRC.message("You've elected to use enrichment but don't know the spell, deleting enrichment")
+      @regalia['enrichment'] = false
+    end
+
+    if !DRSpells.known_spells['Regalia']
+      DRC.message("You do not know spell Regalia, this script will not work until you do")
+      exit
+    end
+
+    if !DRSpells.known_spells['Bespoke Regalia'] && @regalia['armor_type_and_location'].size > 1
+      DRC.message("You do not have spell Bespoke Regalia, which is required for casting specific pieces")
+      exit
+    end
+  end
+
+  def check_aura
+    aura = DRCA.perc_aura
+    if aura['level'] > 1
+      DRC.message("Your aura is at an acceptable level, lets begin")
+    elsif aura['level'] < 2 && @regalia['enrichment'] && DRSpells.active_spells['Stellar Collector'] && DRSpells.stellar_percentage > 10
+      DRC.message("Aura is low for enrichment, lets recharge at our collector!")
+      if use_stellar_collector?
+        DRC.message("Recharge successful")
+      else
+        DRC.message("Aura is a bit low for this routine, and recharge failed, so lets delete enrichment")
+        @regalia['enrichment'] = false
+      end
+    else
+      DRC.message("Very low aura, lets delete enrichment")
+      @regalia['enrichment'] = false
+    end
+  end
+
+  def use_stellar_collector?
+    return false unless @regalia['collector-room'] && DRSpells.active_spells['Stellar Collector']
+
+    DRCT.walk_to(@regalia['collector-room'])
+    /Your aura already contains|With an instinctive/ =~ DRC.bput("invoke apparatus", /^With an instinctive, sharp inhalation/, /^There is no power/, /^You should probably be holding/, /^Your aura already contains as much starlight as you can safely handle/)
+  end
+
+  def create_stellar_collector
+    if DRSpells.active_spells['Stellar Collector'] && UserVars.stellar_collector_room
+      DRC.message("Stellar Collector already active in room ##{UserVars.stellar_collector_room}")
+      exit
+    elsif DRSpells.active_spells['Stellar Collector']
+      /(\[.*\])/ =~ DRC.bput("perceive", /You sense your Stellar Collector spell.*Deployed at (\[.*\]), it/)
+      location = Regexp.last_match(1)
+      DRC.message("Stellar Collector already active in this room: #{location}. If this is not the same room as room##{@regalia['collector-room']}, you will need to move it to the latter location.")
+      exit
+    elsif @regalia['collector-room'] && @settings.waggle_sets['collector']
+      DRCT.walk_to(@regalia['collector-room'])
+      DRCA.cast_spell(@settings.waggle_sets['collector'], @settings) until DRSpells.active_spells['Stellar Collector']
+      fput "drop my apparatus"
+      UserVars.stellar_collector_room = Room.current.id
+    else
+      DRC.message("Requires 'collector' waggle set, knowledge of the STC spell, and a room defined for storage (must be able to see the sky).")
+      exit
+    end
+  end
+
+  def spellcast(spell, cast_command, mana = 15)
+    DRCA.prepare?(spell, mana)
+    waitcastrt?
+    case DRC.bput("cast #{cast_command}", /within the fluid (starlight|moonlight), manifesting/, /the liquid light finds no purchase/, /backfires/, /Incited by the spell, your starlight aura blooms/)
+    when /backfires/
+      spellcast(spell, cast_command, mana)
+    when /purchase/
+      DRC.message("Overlapping pieces, may need to reorder yaml going smallest pieces up to largest eg hands before arms, etc")
+      DRC.beep
+      exit
+    end
+  end
+end
+
+Regalia.new

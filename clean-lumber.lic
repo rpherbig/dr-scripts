@@ -2,71 +2,127 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#clean-leather
 =end
 
-custom_require.call(%w[common common-crafting])
+custom_require.call(%w[common common-arcana common-items common-crafting common-money common-travel drinfomon])
 
 class CleanLumber
+
   def initialize
     arg_definitions = [
       [
         { name: 'type', regex: /\w+/, description: 'wood type to process' },
         { name: 'source', regex: /\w+/, description: 'container' },
-        { name: 'storage', regex: /\w+/, description: 'container to put lumber in' }
+        { name: 'storage', regex: /\w+/, description: 'container to put lumber in' },
+        { name: 'table_saw', regex: /^table_saw/, optional: true, description: 'Use table saw' },
+        { name: 'stack', regex: /\d+/, optional: true, description: 'Optional stack size'}
       ]
     ]
     args = parse_args(arg_definitions)
-    settings = get_settings
-    @bag = settings.crafting_container
-    @bag_items = settings.crafting_items_in_container
-    @belt = settings.engineering_belt
+    @settings = get_settings
+    @bag = @settings.crafting_container
+    @bag_items = @settings.crafting_items_in_container
+    @belt = @settings.engineering_belt
+    @self_repair = @settings.workorders_repair_own_tools || @settings.mine_repair_own_tools
+    @stack = args.stack ? args.stack.to_i : 45
+    @saw = @settings.shaping_tools.find { |tool| tool =~ /.*saw/ }
+    @drawknife = @settings.shaping_tools.find { |tool| tool =~ /.*drawknife/}
+   
+    unless args.table_saw
+      unless @saw && @drawknife
+        DRC.message("Must define both saw and drawknife in yaml under shaping_tools")
+        exit
+      end
+      DRCI.stow_hands
+      DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@settings.hometown], [@saw, @drawknife], @bag, @bag_items, @belt) if @self_repair
+      DRCC.get_crafting_item(@saw, @bag, @bag_items, @belt)
+    end
 
-    %w[stick log branch limb deed].each { |size| process_size(args, size) }
+    %w[stick log branch limb deed].each do |size| 
+      loop do
+        break unless process_size(args, size)
+        cut_to_lumber(args, size)
+      end
+    end
+    DRCC.stow_crafting_item(@saw, @bag, @belt) unless args.table_saw
+    unless (args.table_saw && DRC.left_hand) || DRCI.lift_specific?("#{args.type} lumber")
+      magic_cleanup
+      exit
+    end
+    magic_cleanup
+    DRCI.get_item?("deed packet")
+    DRC.bput("push my #{args.type} lumber with packet", /^You push the lumber to the side/)
+    DRCI.stow_item?("deed packet")
+    DRCI.put_away_item?("#{args.type} deed", args.storage)
+    DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@settings.hometown], [@saw, @drawknife], @bag, @bag_items, @belt) unless args.table_saw || !@self_repair
   end
 
   def process_size(args, size)
-    while DRC.bput("get #{args.type} #{size} from my #{args.source}", 'You get', 'You carefully remove', 'What were you') != 'What were you'
+    unless DRCI.get_item?("#{args.type} #{size}", args.source)
       if size == 'deed'
-        was_deed = true
-        fput('tap my deed')
-        pause
-        until DRC.right_hand
-          fput('swap')
-          pause
-        end
-        size = DRC.right_hand.split.last
-      end
-      unless DRCC.get_crafting_item('saw', @bag, @bag_items, @belt) != /woodcutting saw|wood saw/
-        DRCC.stow_crafting_item('saw', @bag, @belt)
-        case DRC.bput("get saw from #{@bag}", 'You get', 'What were')
-        when /What were/
-          echo('No saw found')
-          exit
+        if /The worker explains/ =~ DRC.bput("Tap my deed", /^You pick up the/, /^The worker explains/)
+          DRCI.put_away_item?("#{args.type} deed", args.storage)
+          return process_size(args, size)
         end
       end
-      until DRC.bput("cut #{size} with my saw", 'roundtime', 'you complete', 'ready to be carved') =~ /you complete|ready to be carved/
-        waitrt?
-      end
-      pause
-      waitrt?
-      DRCC.stow_crafting_item('saw', @bag, @belt)
-      DRCC.get_crafting_item('drawknife', @bag, @bag_items, @belt)
-      until DRC.bput("scrape #{size} with my drawknife", 'roundtime', 'work completes') == 'work completes'
-        waitrt?
-      end
-      pause
-      waitrt?
-      DRCC.stow_crafting_item('drawknife', @bag, @belt)
-
-      fput("get #{args.type} lumber from my #{args.storage}")
-      fput('combine')
-
-      if args.storage
-        fput("put my lumber in my #{args.storage}")
-      else
-        fput('stow lumber')
-      end
-
-      size = 'deed' if was_deed
+      return true
     end
+    false    
+  end
+
+  def cut_to_lumber(args, size)
+    DRCA.crafting_magic_routine(@settings)
+    if args.table_saw && DRC.right_hand
+      size = DRC.right_hand.split.last
+      DRC.bput("cut #{size} with table saw", /Roundtime/)
+    elsif args.table_saw
+      size = DRC.left_hand.split.last
+      DRC.bput("cut #{size} with table saw", /Roundtime/)
+    else
+      size = DRC.left_hand.split.last
+      until DRC.bput("cut #{size} with my #{@saw}", /^Roundtime/, /^Finally you complete/, 'ready to be carved') =~ /you complete|ready to be carved/
+        waitrt?
+        DRCA.crafting_magic_routine(@settings)
+      end
+      pause
+      waitrt?
+      DRCC.stow_crafting_item(@saw, @bag, @belt)
+      DRCC.get_crafting_item(@drawknife, @bag, @bag_items, @belt)
+      until DRC.bput("scrape #{size} with my #{@drawknife}", /^Roundtime/, /^At last your work completes/) =~ /work completes/
+        waitrt?
+        DRCA.crafting_magic_routine(@settings)
+      end
+      DRCC.stow_crafting_item(@drawknife, @bag, @belt)
+    end
+    stack(args)
+  end
+
+  def stack(args)
+    if args.table_saw
+      waitrt?
+      DRC.bput('combine', /^You combine the stacks/, /^You must be holding/)
+    else
+      if DRCI.lift_specific?("#{args.type} lumber") || DRCI.get_item?("#{args.type} lumber", args.storage)
+        DRC.bput('combine', /^You combine the stacks/, /^You must be holding/)
+      end
+    end
+    /(\d+)/ =~ DRC.bput("Count my #{args.type} lumber", 'You count out \d+ pieces of lumber remaining')
+    if Regexp.last_match(1).to_i > @stack
+      DRCI.get_item?("deed packet")
+      DRC.bput("push my #{args.type} lumber with packet", /^You push the lumber to the side/)
+      DRCI.stow_item?("deed packet")
+      DRCI.put_away_item?("#{args.type} deed", args.storage)
+    end
+    unless args.table_saw
+      DRCI.lower_item?("#{args.type} lumber")
+      DRCC.get_crafting_item(@saw, @bag, @bag_items, @belt)
+    end
+  end
+
+  def magic_cleanup
+    return if @settings.crafting_training_spells.empty?
+    DRC.bput('prepare symbiosis', /^You recall the exact details of the/, /^But you've already prepared/, /^Please don't do that here/)
+    DRC.bput('release symbiosis', /^You release/, /^But you haven't prepared/)
+    DRC.bput('release spell', /^You let your concentration lapse/, /^You aren't preparing a spell/)
+    DRC.bput('release mana', /^You release all/, /^You aren't harnessing any mana/)
   end
 end
 

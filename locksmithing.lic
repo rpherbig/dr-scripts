@@ -9,24 +9,30 @@ class Locksmithing
     settings = get_settings
     @equipment_manager = EquipmentManager.new(settings)
     @daily_trainer = settings.have_training_box
-    @box = settings.picking_lockbox
+    @daily_box = settings.picking_lockbox
+    @daily_boxes = settings.picking_lockboxes
     @worn_lockbox = settings.picking_worn_lockbox
     @lockbox_quantity = settings.picking_lockbox_quantity.to_i
     @exp_max_threshold = settings.crossing_training_max_threshold
-    @box_locked = false
     @liveboxes = settings.pick_live_boxes
     @consumable_trainers = settings.consumable_lockboxes
     @consumable_container = settings.burgle_settings['loot_container']
     @use_lockpick_ring = settings.use_lockpick_ring
     @lockpick_container = settings.lockpick_container
     @sell_loot = settings.sell_loot
-    @safe_room = settings.safe_room
-    @equipment_manager.empty_hands
+    @safe_room = settings.safe_room   
     @performance_pause = settings.performance_pause
 
-    @lockbox_quantity = @lockbox_quantity < 2 ? 0 : @lockbox_quantity - 1
+    @lockbox_quantity = 1 if @lockbox_quantity < 1
+
+    @equipment_manager.empty_hands
 
     return if DRSkill.getxp('Locksmithing') >= @exp_max_threshold
+
+    if @daily_boxes.nil?
+      @daily_boxes = Array.new
+      @daily_boxes.push(@daily_box)
+    end
 
     live_boxes if @liveboxes
 
@@ -39,54 +45,42 @@ class Locksmithing
     DRCI.put_away_item?('lockpick', @lockpick_container) unless @use_lockpick_ring
   end
 
+  def box_loop(lockboxes, container, lockbox_quantity)
+    lockboxes.each do |box|
+      return if DRSkill.getxp('Locksmithing') >= @exp_max_threshold
+
+      lockbox_quantity.times do |i|
+        return if DRSkill.getxp('Locksmithing') >= @exp_max_threshold
+        DRCI.get_item("#{$ORDINALS[i]} #{box}", container)
+        pick_box(box)
+        DRCI.stow_hand('right') if DRC.right_hand
+      end
+    end
+  end
+
   def daily_lockbox
     return if DRSkill.getxp('Locksmithing') >= @exp_max_threshold
 
     if @worn_lockbox
-      case DRC.bput("remove my #{@box}", 'You take', 'Remove what', "You aren't wearing that", 'You sling', 'You remove', 'You detach')
+      case DRC.bput("remove my #{@daily_box}", 'You take', 'Remove what', "You aren't wearing that", 'You sling', 'You remove', 'You detach')
       when 'Remove what', "You aren't wearing that"
         DRC.message('Lockbox is not worn but you declared it is in your yaml, exiting')
         return
       end
-      DRC.bput("close my #{@box}", 'You close', 'That is already', "You can't close that")
-      pick_box(@box)
+      DRC.bput("close my #{@daily_box}", 'You close', 'That is already', "You can't close that")
+      pick_box(@daily_box)
+      DRC.bput("pick my #{@daily_box}", 'not making any progress', 'it opens.', "isn't locked", 'The lock feels warm')
+      DRC.bput("wear my #{@daily_box}", 'You put', 'You sling', 'You attach')
+      DRC.bput("open my #{@daily_box}", 'You open', "You can't open that", 'It is locked')
     else
-      for i in 0..@lockbox_quantity do
-        case DRC.bput("get my #{$ORDINALS[i]} #{@box}", 'You get a', 'What were')
-        when 'What were'
-          DRC.message('Lockbox not found. Check your settings.')
-          next
-        end
-        pick_box(@box)
-      end
+      box_loop(@daily_boxes, nil, @lockbox_quantity)      
     end
-
-    if @worn_lockbox
-      DRC.bput("pick my #{@box}", 'not making any progress', 'it opens.', "isn't locked", 'The lock feels warm')
-      DRC.bput("wear my #{@box}", 'You put', 'You sling', 'You attach')
-    else
-      @equipment_manager.empty_hands
-    end
-    DRC.bput("open my #{@box}", 'You open', "You can't open that", 'It is locked')
   end
 
   def consumable_lockbox
     return if DRSkill.getxp('Locksmithing') >= @exp_max_threshold
 
-    consumables = @consumable_trainers
-    consumables.each do |consumable|
-      case DRC.bput("get my #{consumable} from my #{@consumable_container}", 'You get', 'What were', "But you aren't holding")
-      when /But you aren't holding/
-        echo("#{consumable} may not be specific enough - catching interference from another item")
-      when /You get/
-        @box = consumable
-        pick_box(@box)
-        DRC.bput("put my #{@box} in my #{@consumable_container}", 'You put', 'What were') if DRC.right_hand
-      when /What were/
-        echo("#{consumable} NOT found!  If you're really out of them, trim or rearrange your yaml to avoid spam.")
-      end
-    end
-    DRC.bput("put my #{@box} in my #{@consumable_container}", 'You put', 'What were') if DRC.right_hand
+    box_loop(@consumable_trainers, @consumable_container, 1)
   end
 
   def live_boxes
@@ -108,7 +102,7 @@ class Locksmithing
 
       case DRC.bput("pick my #{trainer}", 'Maybe you should close', 'not making any progress', "why bother", "it opens.", "isn't locked", 'The lock feels warm', 'The lock looks weak', 'Pick what', 'You need some type of tool to pick', "But you aren't holding")
       when /You need some type of tool to pick/
-        DRC.message('YOU HAVE NO LOCKPICKS ON YOUR LOCKPICK RING/BELT.  SORT THAT OUT!')
+        DRC.message('YOU HAVE NO LOCKPICKS ON YOUR LOCKPICK RING/BELT.')
         exit
       when /(you should close)|(it opens)|(isn't locked)/
         DRC.bput("close my #{trainer}", 'You close', 'already closed', "You can't close that")
@@ -120,15 +114,15 @@ class Locksmithing
         case DRC.bput("study my #{trainer}", /0 more times/, /risk breaking the lock/, 'Study what')
         when /0 more times/
           DRC.bput("drop my #{trainer}", 'You drop')
-          consumable_lockbox
+          return
         end
       when /But you aren't holding/
         DRC.message("Description: '#{trainer}' may not be specific enough or is in a wrong container - something is interfering.")
-        exit
+        return
       when /why bother/
         DRC.message("The #{trainer} is not a valid option but shares a noun - move it out of your burgle bag to avoid hangups.")
         DRC.bput('stow', 'You')
-        consumable_lockbox
+        return
       when /Pick what/
         return
       end

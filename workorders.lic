@@ -66,9 +66,10 @@ class WorkOrder
     @max_items                      = @settings.workorder_max_items
     @recipe_overrides               = @settings.workorder_recipes || {}
     @cash_on_hand                   = @settings.workorder_cash_on_hand
-    @craft_max_mindstate            = @settings.craft_max_mindstate.to_i || 34
+    @craft_max_mindstate            = @settings.craft_max_mindstate
     @retain_crafting_materials      = @settings.retain_crafting_materials
     @workorders_repair              = @settings.workorders_repair
+    @workorders_override_store      = @settings.workorders_override_store
     @workorders_repair_own_tools    = @settings.workorders_repair_own_tools
     @workorders_materials           = @settings.workorders_materials
     @workorders_deed_storage        = @settings.workorders_deed_storage || @bag
@@ -85,12 +86,19 @@ class WorkOrder
     wod_disc = discipline # copying this variable for later modification
     info = if discipline =~ /weaponsmithing|armorsmithing/i
              @crafting_data['blacksmithing'][@hometown]
+           elsif discipline == 'leatherworking'
+             @crafting_data['tailoring'][@hometown]
+           elsif discipline == 'tinkering'
+             @crafting_data['shaping'][@hometown]
            else
              @crafting_data[discipline][@hometown]
            end
+
     if discipline == 'carving'
       wod_disc = [@carving_type, discipline].join('_')
       echo "wod_disc set as #{wod_disc} for the purposes of carving recipes" + debug_line if @debug
+    elsif discipline == 'leatherworking'
+      discipline = 'tailoring'
     end
 
     case @settings.workorder_diff[wod_disc]
@@ -119,14 +127,6 @@ class WorkOrder
       recipe_array = WOD.send wod_disc
     end
 
-    if @recipe_overrides[discipline].size == 12
-      recipe_array = @recipe_overrides[discipline]
-    else
-      echo("Custom recipe list for #{wod_disc} size: #{@recipe_overrides[wod_disc].size}") + debug_line if @debug
-      DRC.message("You have a list of custom recipes, but number of recipes must be 12 (one for each tier of difficulty) to use custom recipe selections for training. Defaulting to master list.")
-      recipe_array = WOD.send wod_disc
-    end
-
     if @settings.workorder_diff.is_a?(Hash) && @settings.workorder_diff[wod_disc]
       echo "Difficulty is a Hash, using your difficulty setting for #{wod_disc}: #{@settings.workorder_diff[wod_disc]}" + debug_line if @debug
       recipe_selections = WOD.send(@settings.workorder_diff[wod_disc] + '_thresholds').zip(recipe_array) # gets our filled hash
@@ -139,20 +139,22 @@ class WorkOrder
     echo recipe_selections if @debug
 
     recipe_name = recipe_selections.find { |rank, _item| DRSkill.getrank(WOD.rank_map[wod_disc]) <= rank }.last # Selects first recipe with rank threshold higher than your current skill.
+    echo "recipe_name is #{recipe_name}" if @debug
+
     item = DRCC.recipe_lookup(get_data('recipes')[discipline], recipe_name) # populates recipe data from base-recipes for a given item selected above
     echo "Recipe information for #{recipe_name}: #{item}" + debug_line if @debug
 
-    quantity = (@craft_max_mindstate - DRSkill.getxp(WOD.rank_map[discipline])) / 10 # sets quantity based on current mindstate, max of 3 items.
+    quantity = (34 - DRSkill.getxp(WOD.rank_map[wod_disc])) / 10 # sets quantity based on current mindstate, max of 3 items.
     @items_remaining = quantity # for disposal of stock/parts if we hit our mindstate early
 
     unless quantity > 0 # mindstate of 25 or greater ends the training prematurely
-      DRC.message("Current mindstate in #{WOD.rank_map[discipline]} is #{DRSkill.getxp(WOD.rank_map[discipline])}, which is above training threshold of 24. Exiting")
+      DRC.message("Current mindstate in #{WOD.rank_map[wod_disc]} is #{DRSkill.getxp(WOD.rank_map[wod_disc])}, which is above training threshold of 24. Exiting")
       exit
     end
 
-    craft_method, book, script, base, tools, @belt, @work_room, materials_info = set_discipline_info(discipline, item, quantity)
+    craft_method, book, script, base, tools, @belt, @work_room, materials_info = set_discipline_info(wod_disc, item, quantity)
 
-    DRC.message("Crafting #{item['name']} #{quantity} times to train #{WOD.rank_map[discipline]} from #{DRSkill.getxp(WOD.rank_map[discipline])}/34")
+    DRC.message("Crafting #{item['name']} #{quantity} times to train #{WOD.rank_map[wod_disc]} from #{DRSkill.getxp(WOD.rank_map[wod_disc])}/34")
 
     withdraw_funds(item, book, quantity, base, materials_info)
 
@@ -171,24 +173,31 @@ class WorkOrder
     ##################  SETTING DEFAULTS  ##################
 
     wod_disc = discipline # copying this variable for later modification
-    recipes = if @recipe_overrides[discipline]
-                get_data('recipes')[discipline].select { |recipe| @recipe_overrides[discipline].find { |name| recipe['name'] =~ /#{name}/i } }
+
+    if discipline == 'carving'
+      wod_disc = [@carving_type, discipline].join('_')
+      echo "wod_disc set as #{wod_disc} for the purposes of carving recipes" + debug_line if @debug
+    elsif discipline == 'leatherworking'
+      discipline = 'tailoring'
+    end
+
+    recipes = if @recipe_overrides[wod_disc]
+                get_data('recipes')[discipline].select { |recipe| @recipe_overrides[wod_disc].find { |name| recipe['name'] =~ /#{name}/i } }
               else
                 get_data('recipes')[discipline].select { |recipe| recipe['work_order'] }
               end
 
     info = if discipline =~ /weaponsmithing|armorsmithing/i
              @crafting_data['blacksmithing'][@hometown]
+           elsif discipline == 'leatherworking'
+             @crafting_data['tailoring'][@hometown]
+           elsif discipline == 'tinkering'
+             @crafting_data['shaping'][@hometown]
            else
              @crafting_data[discipline][@hometown]
            end
 
     recipes = discipline == 'carving' ? recipes.select { |x| x['material'] == @carving_type } : recipes
-
-    if discipline == 'carving'
-      wod_disc = [@carving_type, discipline].join('_')
-      echo "wod_disc set as #{wod_disc} for the purposes of carving recipes" + debug_line if @debug
-    end
 
     ##################  VERIFY SETTINGS ##################
 
@@ -230,9 +239,9 @@ class WorkOrder
 
     ##################  DRAFT WORKORDER  ##################
 
-    craft_method, book, script, base, tools, @belt, @work_room, materials_info = set_discipline_info(discipline, item, quantity)
+    craft_method, book, script, base, tools, @belt, @work_room, materials_info = set_discipline_info(wod_disc, item, quantity)
 
-    echo "Crafting #{item['name']} #{quantity} times to train #{WOD.rank_map[discipline]} for that sexy PRESTIGE"
+    echo "Crafting #{item['name']} #{quantity} times to train #{WOD.rank_map[wod_disc]} for that sexy PRESTIGE"
 
     ##################  EXECUTE WORKORDER  ##################
 
@@ -332,14 +341,17 @@ class WorkOrder
       end
     end
 
-    if @workorders_materials['custom'][base] && DRCI.exists?("#{type} #{base}", @bag)
-      deed_item("#{type} #{base}")
+    if @workorders_materials['custom'][base]
+      method = :deed_item
     else
-      if scrap && !@retain_crafting_materials && DRCI.get_item("#{materials_info['stock-name']} #{base}", @bag)
-        trash_crafting_item("#{materials_info['stock-name']} #{base}")
+      if scrap && !@retain_crafting_materials
+        method = :trash_crafting_item
       elsif scrap
-        deed_item("#{type} #{base}")
+        method = :deed_item
       end
+    end
+    while method && DRCI.get_item?("#{type} #{base}", @bag)
+      send(method, "#{type} #{base}")
     end
   end
 
@@ -451,8 +463,8 @@ class WorkOrder
     @counter ||= 0
     @counter += 30
     loop do
-      if Script.running?(script) && DRSkill.getxp(book.capitalize) >= @craft_max_mindstate
-        DRC.message("Stopping #{script} after #{@counter / 60} minutes because #{book.capitalize} has reached our training mindstate goal: #{@craft_max_mindstate}")
+      if Script.running?(script) && DRSkill.getxp(book.capitalize) == 34
+        DRC.message("Stopping #{script} after #{@counter / 60} minutes because #{book.capitalize} is mindlocked")
         stop_script(script)
         stop_script("forge") if Script.running?("forge")
         pause 1 while Script.running?(script)
@@ -481,6 +493,7 @@ class WorkOrder
       2.times do fput("empty feet") end
     else
       DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt)
+      DRCC.stow_crafting_item(DRC.right_hand, @bag, @belt) if DRCI.lift?
       DRCI.dispose_trash(DRC.left_hand, @settings.worn_trashcan, @settings.worn_trashcan_verb) if checkleft
     end
   end
@@ -686,7 +699,7 @@ class WorkOrder
         else
           DRCT.buy_item(data['part-room'], part)
         end
-        DRCC.stow_crafting_item(part, @bag, @belt)
+        DRCC.stow_crafting_item(part.split.last, @bag, @belt)
       end
     end
   end
@@ -798,14 +811,26 @@ class WorkOrder
     volume = 0
     while volume < (item['volume'] * quantity)
       if DRCI.get_item?("#{type} #{base}", @bag)
-        fput('combine')
+        # fput('combine')
+        if /too large/ =~ DRC.bput("combine", /^You combine/, /^You must be holding both substances/, /^That .* is too large to add more to/, /^The resulting stack of .*would be too large and unwieldy/)
+          # here we're stowing the first piece we had, which was too small
+          # The problem we can run into is with an order over half the size of a fresh deed,
+          # but we have two stacks which are both over half (can't combine) while neither are sufficient size
+          # It's not clear there is an elegant fix for this, the hope is it just doesn't crop up often enough
+          DRCI.put_away_item?("second #{type} #{base}", @bag)
+        end
         volume = material_volume(type, base)
         next
       end
       if volume < (item['volume'] * quantity)
         if redeem_deed(type, base)
           if [DRC.right_hand, DRC.left_hand].compact.size > 1
-            fput("combine")
+            if /too large/ =~ DRC.bput("combine", /^You combine/, /^You must be holding both substances/, /^That .* is too large to add more to/, /^The resulting stack of .*would be too large and unwieldy/)
+              # here we're stowing the first piece we had, which was too small
+              # The issue is when redeeming a new deed, it's likely to be a full stack
+              # so we want to just use the full stack, and we'll try combining them next time.
+              DRCI.put_away_item?("second #{type} #{base}", @bag)
+            end
           end
           volume = material_volume(type, base)
         else
@@ -870,7 +895,7 @@ class WorkOrder
     [DRC.right_hand, DRC.left_hand].compact.each { |thing| DRCI.put_away_item?(thing, @bag) }
     500.times do
       find_npc(npc_rooms, npc_last_name)
-      DRCC.get_crafting_item("#{logbook} logbook", @bag, @bag_items, @belt)
+      DRCC.get_crafting_item("#{logbook} logbook", @bag, @bag_items, @belt) unless DRCI.in_hands?('logbook')
       case DRC.bput("ask #{npc} for #{diff} #{discipline} work", '^To whom', 'order for .* I need \d+ ', 'order for .* I need \d+ stacks \(5 uses each\) of .* quality', 'You realize you have items bundled with the logbook', 'You want to ask about shadowlings')
       when 'You want to ask about shadowlings'
         pause 10
@@ -919,7 +944,7 @@ class WorkOrder
     DRCC.get_crafting_item("alchemy logbook", @bag, @bag_items, @belt)
     quantity.times do
       DRCI.get_item("#{mod}#{name}", @bag)
-      unless /You notate the/ =~ DRC.bput("bundle my #{name} with my logbook", /^You notate the/, /^The workorder requires/)
+      unless /You notate the/ =~ DRC.bput("bundle my #{name} with my logbook", /^You notate the/, /^Th(at|e|is) (work order|isn\'t the correct) (has expired|requires items|type of item)/, /^You notice the work ?order/)
         DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
       end
     end

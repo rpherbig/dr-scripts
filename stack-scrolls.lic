@@ -30,6 +30,8 @@ class ScrollStack
 
     args = parse_args(arg_definitions)
 
+    @worn_book_list = []
+
     unless args.container
       if args.get
         search_scrolls(args.query, stacker_container)
@@ -59,12 +61,40 @@ class ScrollStack
     end
 
     normalized_data.each do |data|
-      respond("  #{data.first.to_s.ljust(30)} #{data[1].to_s.ljust(30)}#{data[2].to_s.ljust(15)} Page:#{data[3]}")
+      respond("  #{data.first.to_s.ljust(30)} #{data[1].to_s.ljust(10)}#{data[2].to_s.ljust(50)} Page:#{data[3]}")
     end
 
     respond("  Free Slots Remaining: #{UserVars.stackers.flat_map { |stacker| stacker['contents'] }.select(&:empty?).size}")
   end
-
+  
+  def determine_stacker_short_name(stacker)
+    case stacker
+      when String
+        full_name = stacker
+      when Hash
+        full_name = stacker['name']
+    end
+    full_name.include?("worn book") ? "worn book" : full_name
+  end
+  
+  def get_stacker(stacker, stacker_container=nil)
+    short_name = determine_stacker_short_name(stacker)
+    if stacker == Hash && stacker['short_name'].nil?
+        UserVars.stackers[stacker['name']['short_name']]= short_name
+    end
+    if !short_name.include?("worn book") || stacker == "worn book"
+      return DRCI.get_item?(stacker, stacker_container)
+    elsif stacker_container.nil?
+      DRC.message("In order to use this script with multiple worn books, you need to specify a stacker_container in your YAML.")
+      exit
+    else
+      @worn_book_list = DRCI.rummage_container(stacker_container).select { |item| item.include?("worn book") } if @worn_book_list.length == 0
+      target_book = @worn_book_list.find_index(stacker)
+      @worn_book_list.insert(0, @worn_book_list.delete_at(target_book)) # move the selected book to the front of the rummage list (which is where it'll be once put away)
+      return DRCI.get_item?("#{$ORDINALS[target_book]} worn book", stacker_container)
+    end
+  end
+  
   def search_scrolls(query, stacker_container)
     target = UserVars.stackers.find { |stacker| stacker['contents'].find { |data| data.first =~ /#{query}/i } }
     unless target
@@ -72,21 +102,17 @@ class ScrollStack
       exit
     end
 
-    if stacker_container
-      DRCI.get_item?(target['name'], stacker_container)
-    else
-      DRCI.stow_item?(target['name'])
-    end
-    fput("flip my #{target['name']}")
-    fput("open my #{target['name']}")
+    get_stacker(target['name'], stacker_container)
+    fput("flip my #{target['short_name']}")
+    fput("open my #{target['short_name']}")
 
     slot = target['contents'].find_index { |data| data.first =~ /#{query}/i }
 
     slot.times do
-      DRC.bput("turn my #{target['name']}", 'You turn to a new')
+      DRC.bput("turn my #{target['short_name']}", 'You turn to a new')
     end
 
-    case DRC.bput("pull my #{target['name']}", 'This was the last copy', 'Carefully')
+    case DRC.bput("pull my #{target['short_name']}", 'This was the last copy', 'Carefully')
     when /This was the last/i
       target['contents'][slot] = []
     when /Carefully/i
@@ -95,9 +121,9 @@ class ScrollStack
     end
 
     if stacker_container
-      DRCI.put_away_item?(target['name'], stacker_container)
+      DRCI.put_away_item?(target['short_name'], stacker_container)
     else
-      DRCI.put_away_item?(target['name'])
+      DRCI.put_away_item?(target['short_name'])
     end
     fput('look my scroll')
   end
@@ -113,13 +139,9 @@ class ScrollStack
   def populate_stackers(stackers, stacker_container)
     UserVars.stackers = []
     stackers.each do |stacker|
-      new_stacker = { 'name' => stacker, 'contents' => [] }
-      if stacker_container
-        DRCI.get_item?(stacker, stacker_container)
-      else
-        DRCI.get_item?(stacker)
-      end
-      fput("flip my #{stacker}")
+      new_stacker = { 'name' => stacker, 'contents' => [], 'short_name' => determine_stacker_short_name(stacker) }
+      get_stacker(stacker, stacker_container)
+      fput("flip my #{new_stacker['short_name']}")
       pause
       while (line = get?)
         case line
@@ -130,11 +152,11 @@ class ScrollStack
         end
       end
       UserVars.stackers << new_stacker
-      fput("open my #{stacker}")
+      fput("open my #{new_stacker['short_name']}")
       if stacker_container
-        DRCI.put_away_item?(stacker, stacker_container)
+        DRCI.put_away_item?(new_stacker['short_name'], stacker_container)
       else
-        DRCI.put_away_item?(stacker)
+        DRCI.put_away_item?(new_stacker['short_name'])
       end
     end
   end
@@ -181,12 +203,8 @@ class ScrollStack
   end
 
   def stack_new_scroll(target, scroll, spell_name, stacker_container)
-    if stacker_container
-      DRCI.get_item?(target['name'], stacker_container)
-    else
-      DRCI.get_item?(target['name'])
-    end
-    case DRC.bput("push my #{target['name']} with my #{scroll}", 'Not finding a match', 'you realize there')
+    get_stacker(target['name'], stacker_container)
+    case DRC.bput("push my #{target['short_name']} with my #{scroll}", 'Not finding a match', 'you realize there')
     when /you realize/i
       echo('Unexpected, please report error')
       exit
@@ -194,20 +212,16 @@ class ScrollStack
       slot = target['contents'].index([])
       target['contents'][slot] = [spell_name, 1]
       if stacker_container
-        DRCI.put_away_item?(target['name'], stacker_container)
+        DRCI.put_away_item?(target['short_name'], stacker_container)
       else
-        DRCI.put_away_item?(target['name'])
+        DRCI.put_away_item?(target['short_name'])
       end
     end
   end
 
   def stack_existing_scroll(target, scroll, spell_name, stacker_container)
-    if stacker_container
-      DRCI.get_item?(target['name'], stacker_container)
-    else
-      DRCI.get_item?(target['name'])
-    end
-    case DRC.bput("push my #{target['name']} with my #{scroll}", 'you find room', 'you realize there')
+    get_stacker(target['name'], stacker_container)
+    case DRC.bput("push my #{target['short_name']} with my #{scroll}", 'you find room', 'you realize there')
     when /you realize/i
       # todo
     when /you find room/i
@@ -220,9 +234,9 @@ class ScrollStack
     end
 
     if stacker_container
-      DRCI.put_away_item?(target['name'], stacker_container)
+      DRCI.put_away_item?(target['short_name'], stacker_container)
     else
-      DRCI.put_away_item?(target['name'])
+      DRCI.put_away_item?(target['short_name'])
     end
   end
 end

@@ -1,142 +1,320 @@
 =begin
-  * If smoke_image is not included with YAML setting, it will just smoke/inhale/exhale.
-  * Can use flint or a lighter with YAML.
-  * Can random an image, supports array or single.
-  * Supports warrior mage cantrip Burning Touch.
-  Use YAML settings:
-    smoke:
-      cigar_container:
-      smoke_image:
-      lighter:
-        type:
-        container:
-        blade:
+  smoke:
+    container: smoking jacket
+    pipe: glitvire pipe
+    lighter: lava drake
+    blade: serrated parazonium
+    time_between_exhales: 3
+    clean_list_of_mastered: true
+    smoke_images:
+    - deer
+    - tart
 =end
 
-custom_require.call(%w[common common-items events])
+custom_require.call(%w[common common-items common-travel equipmanager events])
 
 class Smoker
   def initialize
+    Flags.add('new-cig', 'That was the last of your', 'goes out and crumbles away'); Flags['new-cig'] = true
+    @full_image_list = ['deer', 'dragon', 'rabbit', 'pixie', 'kitten', 'troll', 'horse', 'paladin', 'whip', 'cloak', 'stump', 'fleas', 'daisies', 'unicorn', 'rams', 'bandit', 'ship', 'grave', 'fish', 'web', 'phoenix', 'bracelet', 'skeleton', 'tart', 'almanac', 'dartboard']
+    UserVars.smoke_images_known ||= @full_image_list
+    UserVars.smoke_images_mastered ||= []
     arg_definitions = [
       [
-        { name: 'cigar', regex: /\w+/i, variable: true, description: 'Cigar noun. (Only thing required if using YAML settings.)' }
+        { name: 'cigar', regex: /\w+?\s?cigar|cigar/i, variable: true, description: 'Cigar noun.' },
+        { name: 'image', options: UserVars.smoke_images_known, optional: true, description: 'Option to select a particular image out of your known images' },
+        { name: 'repeat', regex: /\d+/, optional: true, description: 'Smoke this many pieces of tobacco' },
+        { name: 'until_out', regex: /until_out/i, optional: true, description: 'Smoke until out of tobacco' }
       ],
       [
-        { name: 'image', regex: /\w+/i, variable: true, description: 'Smoke image to learn, can be an ARRAY, will random one.' },
-        { name: 'cigar', regex: /\w+/i, variable: true, description: 'Cigar noun.' },
-        { name: 'container', regex: /\w+/i, variable: true, description: "Cigar's container." },
-        { name: 'lighter', regex: /\w+/i, variable: true, description: "Lighter's noun." }
+        { name: 'pipe', regex: /pipe/i, description: 'Uses the pipe defined in your yaml settings' },
+        { name: 'image', options: UserVars.smoke_images_known, optional: true, description: 'Option to select a particular image out of your known images' },
+        { name: 'repeat', regex: /\d+/, optional: true, description: 'Smoke this many pieces of tobacco' },
+        { name: 'until_out', regex: /until_out/i, optional: true, description: 'Smoke until out of tobacco' }
+      ],
+      [
+        { name: 'smoke', regex: /cigar|pipe/i, description: 'smoke utensil to light' },
+        { name: 'light_only', regex: /light_only/i, description: 'lights the provided smoke utensil' }
+      ],
+      [
+        { name: 'reset_known', regex: /reset_known/i, description: 'Reset list of known smoke images, used after learning one or more new images' }
+      ],
+      [
+        { name: 'teach', regex: /teach|learn/i, description: 'teach or learn smoke images' },
+        { name: 'smoke', regex: /cigar|pipe/i, description: 'smoke implement to use' },
+        { name: 'player', options: DRRoom.pcs, description: 'Player to teach the image(s) to' },
+        { name: 'image', options: @full_image_list, optional: true, description: 'image to teach (optional, can use smoke list). Do not use if you are learning.' }
       ]
     ]
 
-    args = parse_args(arg_definitions)
+    args            = parse_args(arg_definitions)
+    @smoke_settings = get_settings.smoke
+    @equipmanager   = EquipmentManager.new
+    images          = args.image || @smoke_settings['smoke_images'] || UserVars.smoke_images_known
+    @bag            = @smoke_settings['container']
+    @pipe           = @smoke_settings['pipe']
+    @lighter        = @smoke_settings['lighter']
+    @blade          = @equipmanager.items.find { |gear| gear.short_regex =~ @smoke_settings['blade'] || gear.name =~ /\b#{@smoke_settings['blade']}\b/i }
+    @cigar          = args.cigar
+    @time_between   = @smoke_settings['time_between_exhales'] || 1
 
-    if args.image
-      @image = args.image
-      @cigar = args.cigar
-      @cigar_container = args.container
-      @lighter = args.lighter
-    else
-      smoke_settings = get_settings.smoke
-
-      @cigar = args.cigar
-      if smoke_settings['smoke_image']
-        @image = if smoke_settings['smoke_image'].is_a? Array
-                   smoke_settings['smoke_image'].sample
-                 else
-                   smoke_settings['smoke_image']
-                 end
-      end
-
-      @lighter_info = smoke_settings['lighter']
-      @cigar_container = smoke_settings['cigar_container']
-    end
-
-    Flags.add('new-cig', 'That was the last of your')
-
-    smoke_cig if cig? && light_cig?
-
-    Flags.delete('new-cig')
-  end
-
-  def cig?
-    unless DRCI.get_item?(@cigar, @cigar_container)
-      DRC.message 'Out of cigars, exiting.'
-      return false
-    end
-    true
-  end
-
-  def exhale_smoke
-    pause 3
-    output = 'exhale'
-    output = "exhale line #{@image}" if @image
-    DRC.bput(output.to_s, 'You (blow|breathe|exhale|loft|cast|need)')
-  end
-
-  def light_cig?
-    output = "get my #{@lighter}"
-    output = "get #{@lighter_info['type']} in my #{@lighter_info['container']}" unless @lighter_info.empty?
-    output = 'prep c b t' if @lighter_info['type'].eql? 'cantrip'
-
-    case DRC.bput(output.to_s, 'You get', 'What were', 'You are already', 'You are now prepared', 'You have no idea')
-    when 'You have no idea'
-      DRC.message "You don't know the cantrip you are trying to you! EXITING!"
+    if args.light_only
+      quick_light(args.smoke)
       exit
-    when 'You are now prepared'
-      case DRC.bput("gesture my #{@cigar}", 'You touch')
-      when 'You touch'
-        Flags.reset('new-cig')
-        return true
-      when 'What were'
-        DRC.message 'Cigar missing! Exiting!'
+    end
+
+    reset_known if args.reset_known
+    smoke_teach(args, images.to_a) if args.teach
+
+    unless args.image
+      images = check_images(images)
+      if UserVars.smoke_images_known.size == UserVars.smoke_images_mastered.size
+        DRC.message("All known images mastered, sampling from your known list")
+      elsif images.empty?
+        DRC.message("No valid images selected")
         exit
       end
-    when 'What were'
-      DRC.message 'No lighter found! Exiting.'
-      return false
     end
 
-    if @lighter_info['type'].include?('flint')
-      DRCI.lower_item?(@cigar)
-      DRC.bput("wield my #{@lighter_info['blade']}", 'You get', 'What were', 'You are already', 'You draw')
-    end
-
-    if @lighter
-      fput("point my #{@lighter} at #{@cigar}")
-      waitrt?
+    if args.until_out
+      smoke_loop(images.to_a, 99)
+    elsif args.repeat
+      smoke_loop(images.to_a, args.repeat.to_i)
     else
-      fput("light #{@cigar} with my #{@lighter_info['type']}")
-      waitrt?
-      DRC.bput("sheath my #{@lighter_info['blade']}", /You (sheath|put)/)
-      DRC.bput('lift', 'You pick up')
+      smoke_loop(images.to_a, 1)
     end
-
-    DRC.bput("put my #{@lighter_info['type']} in my #{@lighter_info['container']}", 'You put')
-
-    Flags.reset('new-cig')
-    true
   end
 
-  def smoke_cig
-    inhale_counter = 0
-    until Flags['new-cig']
-      if @image
-        DRC.bput("inhale my #{@cigar}", 'You take', 'What were', 'out of your lungs first')
-        exhale_smoke
-        waitrt?
-      else
-        output = "smoke my #{@cigar}"
-        output = "inhale my #{@cigar}" if inhale_counter.zero?
-        DRC.bput(output.to_s, 'You puff', 'You take', 'What were')
-        exhale_smoke if inhale_counter.zero?
-        pause 15
-        inhale_counter += 1
-        inhale_counter = 0 if inhale_counter > 2
-        next
+  def smoke_loop(images, number)
+    DRCT.walk_to(@smoke_settings['smoke_room'])
+    number.times do
+      if @cigar && Flags['new-cig']
+        Flags.reset('new-cig')
+        quick_light(@cigar)
+        @smoker = @cigar
+      elsif @pipe && Flags['new-cig']
+        Flags.reset('new-cig')
+        quick_light(@pipe)
+        @smoker = @pipe
       end
+      smoke(images) until Flags['new-cig']
+      images = check_images(images) if @smoke_settings['clean_list_of_mastered']
+    end
+    DRCI.put_away_item?(@pipe, @bag) if DRCI.in_hands?(@pipe)
+    DRC.message("Smoker Complete!")
+  end
+
+  def smoke_teach(args, images)
+    Flags.add('smoke-image-learned', /finally catches on to your instructions on how to make the .* smoke image/, /^You now know the basics of making the .* smoke image/)
+    Flags.add('teacher-smoked', /^#{args.player.capitalize} takes a long drag off of his/)
+    Flags.add('student-smoked', /^#{args.player.capitalize} tries to make the image/)
+    Flags.add('time-to-listen', /^#{args.player.capitalize} starts to tell you about (a|an|the) (?<image>\w+) smoke image/)
+    if args.smoke == 'pipe' && Flags['new-cig']
+      quick_light(@pipe)
+      @smoker = @pipe
+    elsif args.smoke =~ /cigar/ && Flags['new-cig']
+      quick_light(args.smoke)
+      @smoker = @pipe
+    end
+    send(args.teach + '_loop', images, args.player)
+  end
+
+  def teach_loop(images, player)
+    @time_between = 0
+    images.each do |image|
+      next unless offer_lesson(image, player)
+
+      until Flags['smoke-image-learned']
+        quick_light(@smoker) if Flags['new-cig']
+        smoke(image)
+        pause 1 until Flags['student-smoked'] || Flags['smoke-image-learned']
+        Flags.reset('student-smoked')
+        pause 8 unless Flags['smoke-image-learned']
+      end
+      Flags.reset('smoke-image-learned')
     end
   end
+
+  def learn_loop(_images, player)
+    @time_between = 0
+    loop do
+      if /make a (?<image>\w+) smoke image/ =~ DRC.bput("Listen #{player}", /^You .* paying attention to Scrounger's advice on how to make a (?<image>\w+) smoke image/, /^#{player.capitalize} isn't teaching a class/)
+        image = Regexp.last_match[:image]
+      else
+        pause 1 until Flags['time-to-listen']
+        image = Flags['time-to-listen'][:image]
+        DRC.bput("Listen #{player}", /You start paying attention to/)
+      end
+      until Flags['smoke-image-learned']
+        pause 1 until Flags['teacher-smoked'] || Flags['smoke-image-learned']
+        Flags.reset('teacher-smoked')
+        break if Flags['smoke-image-learned']
+
+        pause 1
+        quick_light(@smoker) if Flags['new-cig']
+        smoke(image)
+      end
+      Flags.reset('smoke-image-learned')
+      Flags.reset('time-to-listen')
+    end
+  end
+
+  def offer_lesson(image, player)
+    case DRC.bput("smoke teach #{image} #{player}", { 'timeout' => 45, 'suppress_no_match' => true }, /^#{player.capitalize} starts paying attention to your advice on how to make/, /^#{player.capitalize} nods to you/, /already knows how to make that smoke image/)
+    when /paying attention/, /nods to you/
+      true
+    when /already knows how/
+      false
+    else
+      DRC.message("Student Unresponsive")
+      exit
+    end
+  end
+
+  def load_pipe
+    exit unless DRCI.get_item_if_not_held?(@pipe, @bag)
+    contents = DRC.bput("look in my #{@pipe}", /^In the .* you see (a|an|some) .*/, /^There is nothing in there/)
+    case contents
+    when /burning/
+      return true
+    when /There is nothing/
+      DRCI.get_item?('tobacco', @bag)
+      DRCI.put_away_item?('tobacco', @pipe)
+    end
+    light_tobacco("tobacco in pipe")
+  end
+
+  def quick_light(smoker)
+    Flags.reset('new-cig')
+    case smoker
+    when /pipe/
+      load_pipe
+    when /cigar/
+      exit unless DRCI.get_item_if_not_held?(smoker, @bag)
+      light_tobacco(smoker)
+    end
+  end
+
+  def light_tobacco(target) # loaded pipe or cigar in hand, ends with either in hand, ready to rip
+    if DRStats.warrior_mage?
+      DRC.bput("prep c b t", /^You are now prepared/)
+      DRC.bput("gesture #{target}", /^You touch/, /^That's already burning/)
+    elsif @lighter
+      unless DRCI.get_item?(@lighter)
+        DRC.message("#{@lighter} appears to be awol, going to try flint and steel")
+        @lighter = false
+        return light_tobacco(target)
+      end
+      DRC.bput("point my #{@lighter} at #{target}", /making the .* quickly catch fire/, /^That's already burning/)
+      DRCI.put_away_item?(@lighter, @bag)
+    else # flint
+      unless DRCI.get_item?("flint")
+        DRC.message("Missing flint, scoot to your local shop and pick some up, every adventurer should have flint and steel")
+        DRCI.put_away_item?(DRC.right_hand, @bag)
+        exit
+      end
+      DRCI.lower_item?(target.split.last)
+      @equipmanager.get_item?(@blade)
+      DRC.bput("light #{target} with my flint", /^Roundtime/, /^That's already burning/)
+      DRCI.stow_item?("flint")
+      @equipmanager.return_held_gear
+      DRCI.lift?
+    end
+  end
+
+  def exhale_smoke(image)
+    case DRC.bput("exhale line #{image}", /^Roundtime/, /^You are untrained in the ways of making that image./, /^You now know the basics of making/)
+    when /untrained/
+      fput 'exhale ring'
+    when /You need to observe your teacher performing/
+      DRC.message("Teaching borked, give it some time and try again")
+      exit
+    when /You now know/
+      DRC.message("Image learned, waiting for the next")
+    end
+  end
+
+  def inhale(image)
+    if /out of your lungs first/ =~ DRC.bput("inhale my #{@smoker}", /^You take/, /out of your lungs first/)
+      exhale_smoke(image, true)
+      return inhale(image)
+    end
+  end
+
+  def smoke(images)
+    # pull a random image from our list of images
+    image = images.to_a.sample
+    inhale(image)
+    pause 1
+    exhale_smoke(image)
+    waitrt?
+    pause @time_between
+  end
+
+  def reset_known
+    # Resetting our known images to the master list
+    UserVars.smoke_images_known = @full_image_list
+    # and our mastered images to an empty list
+    UserVars.smoke_images_mastered = []
+    # Then cleaning out images we don't know, getting a list of images we've mastered
+    # and providing a list of images to train
+    training_list = check_images(@full_image_list)
+    if training_list.empty?
+      DRC.message("All known images are mastered. Set a list under smoke_images in your yaml, or smoker will select from your known images at random")
+    else
+      DRC.message("New Training List: #{training_list.join(' ')}")
+    end
+    exit
+  end
+
+  def check_images(images)
+    # Here we're returning IF the provided list of images is identical to our known image size, and the follow-on comparison suggests we've mastered everything we know.
+    return images if images.size == UserVars.smoke_images_known.size && UserVars.smoke_images_known.size == UserVars.smoke_images_mastered.size
+
+    smoke_list = []
+    fput 'smoke list'
+    loop do
+      line = get
+      break if line =~ /Total images known/ # last line after smoke list
+      break if line =~ /You don't know any smoke images/ # last line of empty smoke list
+      next if line.include?('IMAGE - SKILL') # topline that would normally match
+
+      smoke_list << line.scan(/\w+\s-\s\w+\*?|\w+\s-\s\s\s\s\s\s\s\s\s/) # grabbing lines: "<image> - <mastery level>       <image> - <mastery level>        <image> - <mastery level>"
+    end
+    smoke_list.flatten!
+    # This draws off our array of known images, creating a new array of images found on our smoke list.
+    # effectively comparing the two, and removing images we don't know
+    # smoke_images_known, unless already defined, contains a list of all possible images, so this is important
+    images_you_know = UserVars.smoke_images_known.select { |image| smoke_list.any? { |image_and_mastery| image_and_mastery.include?(image) } }
+    # smoke_images_known, unless already defined, contains a list of all possible images, so this is important
+    UserVars.smoke_images_known = images_you_know
+    unless (images - images_you_know).empty? # skip if we haven't asked to smoke any images we don't know
+      DRC.message("Removing images you do not know: #{(images - images_you_know).join(' ')}") # prints out a string representing the difference between what images we know and what images we wanted to smoke
+      images -= (images - images_you_know) # creates an array of images we don't know, and removes them from our list of images we were hoping to smoke
+    end
+    # Here we might want to just smoke a curated list of images, regardless of whether we've mastered one or more
+    # TODO: support for non-halfling mastery?
+    return images unless @smoke_settings['clean_list_of_mastered']
+
+    # Here we're using the originally generated list like a hash
+    images_mastered = smoke_list
+                      .select { |image_and_mastery| image_and_mastery.include?('master*') || image_and_mastery.include?('        ') } # selecting only those images we've fully mastered. non-olvi mastery is represented by a blank field after the image name.
+                      .join(' ') # making a string of image names, dashes, and 'master*'
+                      .split # creating a new array with all of those items as elements
+                      .reject { |item| item =~ /-|master*/ } # removing the dashes and 'master*' elements, leaving us with just an array of images we've mastered
+                      .select { |image| images.include?(image) } # then comparing our original images list to the list of mastered images, and removing any matches.
+    DRC.message("Removing already mastered images: #{images_mastered.join(' ')}") unless images_mastered.empty? # images_mastered here means images from our variable 'images' that we sent this method
+    UserVars.smoke_images_mastered |= images_mastered # here we're adding any mastered images we found on our list of mastered to our uservar, but only if they're not already present.
+    images - UserVars.smoke_images_mastered # Finally, we return our original list minus any images we've mastered.
+  end
+end
+
+before_dying do
+  Flags.delete('new-cig')
+  Flags.delete('smoke-image-learned')
+  Flags.delete('teacher-smoked')
+  Flags.delete('student-smoked')
+  Flags.delete('time-to-listen')
 end
 
 Smoker.new

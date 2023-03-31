@@ -1,123 +1,145 @@
 =begin
-  Documentation: https://elanthipedia.play.net/Lich_script_repository#locksmithing
+  YAML SETTINGS:
+
+  training_box_list:                            # Array of adj/nouns of daily lockpicking trainers
+    - locksmith box
+  picking_worn_lockbox: true                    # true if your daily trainer is worn
+  consumable_lockboxes:                      # Array of adj/nouns of consumable lockpicking trainers
+    - keepsake box
+    - jewelry box
+    - liquor cabinet
+  prioritize_consumable_lockboxes: true         # Use up consumables before leaning on daily trainer charges
+  pick_live_boxes: true                         # Pick live boxes before doing trainers
+  use_lockpick_ring: true                       # Alternative is using a loose lockpick
+  lockpick_container:                           # Must be defined to use a loose lockpick
 =end
 
 custom_require.call(%w[common common-items equipmanager])
 
 class Locksmithing
   def initialize
-    settings = get_settings
-    @equipment_manager = EquipmentManager.new(settings)
-    @daily_trainer = settings.have_training_box
-    @box = settings.picking_lockbox
-    @worn_lockbox = settings.picking_worn_lockbox
-    @box_locked = false
-    @liveboxes = settings.pick_live_boxes
-    @consumable_trainers = settings.consumable_lockboxes
-    @consumable_container = settings.burgle_settings['loot_container']
-    @use_lockpick_ring = settings.use_lockpick_ring
-    @lockpick_container = settings.lockpick_container
-    @sell_loot = settings.sell_loot
-    @safe_room = settings.safe_room
-    @equipment_manager.empty_hands
+    arg_definitions = [
+      [
+        { name: 'once', regex: /once/i, optional: true, description: 'Pick a trainer once, for use with CT' }
+      ]
+    ]
 
+    args                    = parse_args(arg_definitions)
+    settings                = get_settings
+    @equipment_manager      = EquipmentManager.new(settings)
+    @daily_trainers         = settings.training_box_list.to_a
+    @worn_lockbox           = settings.picking_worn_lockbox
+    consumable_lockboxes    = settings.consumable_lockboxes.to_a
+    prioritize_consumables  = settings.prioritize_consumable_lockboxes
+    @liveboxes              = settings.pick_live_boxes
+    @consumable_container   = settings.burgle_settings['loot_container']
+    @use_lockpick_ring      = settings.use_lockpick_ring
+    @lockpick_container     = settings.lockpick_container
+    @sell_loot              = settings.sell_loot
+    @safe_room              = settings.safe_room
+    @worn_trashcan          = settings.worn_trashcan
+    @worn_trashcan_verb     = settings.worn_trashcan_verb
+    @pick_once              = args.once
+    warn_old_settings(settings)
+    @box_list = @daily_trainers + consumable_lockboxes
+    @box_list.reverse! if prioritize_consumables
+  end
+
+  def warn_old_settings(settings)
+    return unless settings.have_training_box || settings.picking_lockbox
+
+    DRC.message("Yaml setting: have_training_box no longer used. Instead, put the name of your training box(es) under the settings header: training_box_list in array format") if settings.have_training_box
+    if settings.picking_lockbox
+      DRC.message("Yaml setting: picking_lockbox no longer used. Instead, put the name of your training box(es) under the settings header: training_box_list in array format")
+      @daily_trainers << settings.picking_lockbox
+    end
+  end
+
+  def queue_work
+    pick_once if @pick_once
     live_boxes if @liveboxes
-    # Practice some music while use lock trainers
     start_script('performance', ['noclean']) unless Script.running?('performance')
     pause 3
+    @equipment_manager.empty_hands
     DRCI.get_item_if_not_held?('lockpick', @lockpick_container) unless @use_lockpick_ring
-    daily_lockbox if @daily_trainer
-    consumable_lockbox if @consumable_trainers
+    lock_box_trainers(@box_list)
     DRCI.put_away_item?('lockpick', @lockpick_container) unless @use_lockpick_ring
   end
 
-  def daily_lockbox
-    if DRSkill.getxp('Locksmithing') < 34
-      if @worn_lockbox
-        case DRC.bput("remove my #{@box}", 'You take', 'Remove what', "You aren't wearing that", 'You sling', 'You remove', 'You detach')
-        when 'Remove what', "You aren't wearing that"
-          DRC.message('Lockbox is not worn but you declared it is in your yaml, exiting')
-          return
-        end
-        DRC.bput("close my #{@box}", 'You close', 'That is already', "You can't close that")
-      else
-        case DRC.bput("get my #{@box}", 'You get a', 'What were')
-        when 'What were'
-          DRC.message('Daily Trainer not found! Where is it?')
-          return
-        end
-      end
-
-      pick_box(@box)
-
-      if @worn_lockbox
-        DRC.bput("pick my #{@box}", 'not making any progress', 'it opens.', "isn't locked", 'The lock feels warm')
-        DRC.bput("wear my #{@box}", 'You put', 'You sling', 'You attach')
-      else
-        @equipment_manager.empty_hands
-      end
+  def pick_once
+    exit if checkright =~ /bow|sling|arbalest/
+    if checkright && checkleft
+      temp = checkleft
+      DRCI.lower_item?(temp)
     end
-    DRC.bput("open my #{@box}", 'You open', "You can't open that", 'It is locked')
-  end
-
-  def consumable_lockbox
-    consumables = @consumable_trainers
-    if DRSkill.getxp('Locksmithing') < 34
-      consumables.each do |consumable|
-        case DRC.bput("get my #{consumable} from my #{@consumable_container}", 'You get', 'What were', "But you aren't holding")
-        when /But you aren't holding/
-          echo("#{consumable} may not be specific enough - catching interference from another item")
-        when /You get/
-          @box = consumable
-          pick_box(@box)
-          DRC.bput("put my #{@box} in my #{@consumable_container}", 'You put', 'What were') if DRC.right_hand
-        when /What were/
-          echo("#{consumable} NOT found!  If you're really out of them, trim or rearrange your yaml to avoid spam.")
-        end
-      end
-    end
-    DRC.bput("put my #{@box} in my #{@consumable_container}", 'You put', 'What were') if DRC.right_hand
+    lock_box_trainers(@box_list)
+    DRCI.lift? if temp
+    exit
   end
 
   def live_boxes
-    if DRSkill.getxp('Locksmithing') < 34
-      start_time = Time.now
-      DRC.wait_for_script_to_complete('pick')
-      if (Time.now - start_time > 15) && @sell_loot
-        DRC.wait_for_script_to_complete('sell-loot')
-        DRCT.walk_to @safe_room
+    DRC.wait_for_script_to_complete('pick') if @liveboxes
+    DRC.wait_for_script_to_complete('sell-loot') if @sell_loot
+    DRCT.walk_to(@safe_room) if @sell_loot
+    exit unless DRSkill.getxp('Locksmithing') < 34
+  end
+
+  def lock_box_trainers(boxes)
+    boxes.each do |box|
+      break if @once_picked_twice_shy
+
+      @ords = $ORDINALS.dup
+      while DRSkill.getxp('Locksmithing') < 34 && !@once_picked_twice_shy && get_box(box)
+        pick_box(box)
+        DRCI.wear_item?(box) if @worn_lockbox && get_settings.training_box_list.include?(box)
+        DRCI.put_away_item?(box, @consumable_container) if DRCI.in_hands?(box)
       end
+    end
+  end
+
+  def get_box(box)
+    if get_settings.training_box_list.include?(box)
+      box = "#{@ords.shift} #{box}"
+      if @worn_lockbox
+        DRCI.remove_item?(box)
+      else
+        DRCI.get_item?(box)
+      end
+    else
+      DRCI.get_item?(box, @consumable_container)
     end
   end
 
   def pick_box(trainer)
-    while (DRSkill.getxp('Locksmithing') < 34 && DRC.right_hand)
+    while (DRSkill.getxp('Locksmithing') < 34 && DRCI.in_hands?(trainer))
+      if @pick_once && DRC.retreat
+        fput 'engage'
+      end
       case DRC.bput("pick my #{trainer}", 'Maybe you should close', 'not making any progress', "why bother", "it opens.", "isn't locked", 'The lock feels warm', 'The lock looks weak', 'Pick what', 'You need some type of tool to pick', "But you aren't holding")
       when /You need some type of tool to pick/
         DRC.message('YOU HAVE NO LOCKPICKS ON YOUR LOCKPICK RING/BELT.  SORT THAT OUT!')
         exit
-      when /(you should close)|(it opens)|(isn't locked)/
+      when /(you should close)|(isn't locked)/
+        DRC.bput("close my #{trainer}", 'You close', 'already closed', "You can't close that")
+        DRC.bput("lock my #{trainer}", 'You quickly lock', 'already locked')
+      when /it opens/
+        @once_picked_twice_shy = @pick_once
         DRC.bput("close my #{trainer}", 'You close', 'already closed', "You can't close that")
         DRC.bput("lock my #{trainer}", 'You quickly lock', 'already locked')
       when /The lock feels warm/
-        DRC.message('Charges Burned!, checking for other settings.')
-        return
+        DRC.message('Charges Burned, moving on.')
+        break
       when /The lock looks weak/
-        case DRC.bput("study my #{trainer}", /0 more times/, /risk breaking the lock/, 'Study what')
-        when /0 more times/
-          DRC.bput("drop my #{trainer}", 'You drop')
-          consumable_lockbox
-        end
+        DRCI.dispose_trash(trainer, @worn_trashcan, @worn_trashcan_verb)
+        break
       when /But you aren't holding/
         DRC.message("Description: '#{trainer}' may not be specific enough or is in a wrong container - something is interfering.")
-        exit
+        break
       when /why bother/
         DRC.message("The #{trainer} is not a valid option but shares a noun - move it out of your burgle bag to avoid hangups.")
-        DRC.bput('stow', 'You')
-        consumable_lockbox
-      when /Pick what/
-        return
+        break
       end
+      break if @once_picked_twice_shy
     end
   end
 
@@ -126,4 +148,4 @@ class Locksmithing
   end
 end
 
-Locksmithing.new
+Locksmithing.new.queue_work

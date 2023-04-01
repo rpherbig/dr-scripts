@@ -10,7 +10,7 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '1.5.2'
+$DEPENDENCY_VERSION = '1.6.0'
 $MIN_RUBY_VERSION = '2.5.5'
 
 no_pause_all
@@ -190,13 +190,21 @@ class ScriptManager
     @status_repo = Settings['status_repo'] || 'rpherbig/dr-scripts'
     @status_branch = Settings['status_branch'] || 'master'
     update_status_url
-    @lich_url = 'https://api.github.com/repos/dragon-realms/dr-lich/git/trees/master'
+    # Gating setting lich_url on lich version
+    unless LICH_VERSION.match?(/^5/)
+      @lich_url = 'https://api.github.com/repos/dragon-realms/dr-lich/git/trees/master'
+    end
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
     UserVars.autostart_scripts = UserVars.autostart_scripts - ['dependency']
     Settings['autostart'] ||= []
     Settings['autostart'].uniq!
     Settings['autostart'] = Settings['autostart'] - ['dependency']
+
+    # Setting Settings['lich_fork_sha'] to nil if using lich5. This setting isn't used anymore.
+    if LICH_VERSION.match?(/^5/)
+      Settings['lich_fork_sha'] = nil if Settings['lich_fork_sha']
+    end
 
     Settings['base_versions'] ||= {}
     CharSettings['next_ruby_version_check_datetime'] = Time.now
@@ -210,9 +218,13 @@ class ScriptManager
     @thievery_queue = []
     @shop_update_queue = []
 
-    @enable_fork = LICH_VERSION =~ /f/
     @request_authorization = manage_github_token
     @versions = nil
+
+    # Gating lich fork code to non-lich5
+    unless LICH_VERSION.match?(/^5/)
+      @enable_fork = LICH_VERSION =~ /f/
+    end
   end
 
   def updated_dependency?
@@ -303,12 +315,15 @@ class ScriptManager
       @remove_autos.each { |script| Settings['autostart'].delete(script) }
       @remove_autos = []
     end
-    if @disable_fork
-      stop_download_lich
-      @disable_fork = nil
-    elsif @enable_fork
-      download_lich
-      @enable_fork = nil
+    # No lich fork with lich5
+    unless LICH_VERSION.match?(/^5/)
+      if @disable_fork
+        stop_download_lich
+        @disable_fork = nil
+      elsif @enable_fork
+        download_lich
+        @enable_fork = nil
+      end
     end
 
     submit_thieving_update(*@thievery_queue.pop) unless @thievery_queue.empty?
@@ -365,30 +380,32 @@ class ScriptManager
     end
   end
 
-  def queue_lich
-    @enable_fork = true
-  end
-
-  def unqueue_lich
-    @disable_fork = true
-  end
-
-  def download_lich
-    return if @developer
-
-    lich_data = make_request(@lich_url)['tree'].find { |data| data['path'] == 'lich.rbw' }
-    if LICH_VERSION =~ /f/ && Settings['lich_fork_sha'] == lich_data['sha']
-      echo('latest version of lich fork already downloaded.')
-      return
+  unless LICH_VERSION.match?(/^5/)
+    def queue_lich
+      @enable_fork = true
     end
-    blob = make_request(lich_data['url'])
-    File.open('lich.rbw', 'w') { |file| file.print(Base64.decode64(blob['content'])) }
-    Settings['lich_fork_sha'] = lich_data['sha']
-    echo('New version of lich installed, please restart Lich.')
-  end
 
-  def stop_download_lich
-    Settings['lich_fork_sha'] = nil
+    def unqueue_lich
+      @disable_fork = true
+    end
+
+    def download_lich
+      return if @developer
+
+      lich_data = make_request(@lich_url)['tree'].find { |data| data['path'] == 'lich.rbw' }
+      if LICH_VERSION =~ /f/ && Settings['lich_fork_sha'] == lich_data['sha']
+        echo('latest version of lich fork already downloaded.')
+        return
+      end
+      blob = make_request(lich_data['url'])
+      File.open('lich.rbw', 'w') { |file| file.print(Base64.decode64(blob['content'])) }
+      Settings['lich_fork_sha'] = lich_data['sha']
+      echo('New version of lich installed, please restart Lich.')
+    end
+
+    def stop_download_lich
+      Settings['lich_fork_sha'] = nil
+    end
   end
 
   def download_script(filename, force = false)
@@ -1629,32 +1646,34 @@ def check_dependency
   echo "Use '#{$clean_lich_char}e ignore_dependency' and '#{$clean_lich_char}e unignore_dependency' to change."
 end
 
-def use_lich_fork
-  echo 'Now switching onto the DR lich fork...'
-  start_script('repository', ['unset-lich-updatable'])
-  pause 1 while Script.running?('repository')
-  echo 'Turning off updates from main lich branch on go2...'
-  start_script('repository', ['unset-updatable', 'go2'])
-  $manager.queue_lich
-end
+unless LICH_VERSION.match?(/^5/)
+  def use_lich_fork
+    echo 'Now switching onto the DR lich fork...'
+    start_script('repository', ['unset-lich-updatable'])
+    pause 1 while Script.running?('repository')
+    echo 'Turning off updates from main lich branch on go2...'
+    start_script('repository', ['unset-updatable', 'go2'])
+    $manager.queue_lich
+  end
 
-def use_lich_main
-  echo 'Now switching onto the lich mainline...'
-  start_script('repository', ['set-lich-updatable'])
-  pause 1 while Script.running?('repository')
+  def use_lich_main
+    echo 'Now switching onto the lich mainline...'
+    start_script('repository', ['set-lich-updatable'])
+    pause 1 while Script.running?('repository')
 
-  echo 'Turning updates from main lich branch on go2 back on...'
-  start_script('repository', ['set-updatable', 'go2'])
-  pause 1 while Script.running?('repository')
+    echo 'Turning updates from main lich branch on go2 back on...'
+    start_script('repository', ['set-updatable', 'go2'])
+    pause 1 while Script.running?('repository')
 
-  start_script('repository', ['download-lich'])
-  pause
-  pause 1 while Script.running?('repository')
-  echo('New version of lich installed, please restart Lich.')
-end
+    start_script('repository', ['download-lich'])
+    pause
+    pause 1 while Script.running?('repository')
+    echo('New version of lich installed, please restart Lich.')
+  end
 
-def toggle_lich_fork
-  echo "THIS METHOD IS NO LONGER USED. USE #{$clean_lich_char}e use_lich_fork and #{$clean_lich_char}e use_lich_main"
+  def toggle_lich_fork
+    echo "THIS METHOD IS NO LONGER USED. USE #{$clean_lich_char}e use_lich_fork and #{$clean_lich_char}e use_lich_main"
+  end
 end
 
 def set_custom_status_repo(repo, branch = 'master')
@@ -1789,6 +1808,12 @@ echo("DRinfomon ready.")
 $manager.check_base_files
 $manager.check_data_files
 $manager.start_scripts
+
+if LICH_VERSION.match?(/^4/)
+  respond("Lich version 4 detected. This version of lich was deprecated in mid-2022.")
+  respond("Please see <https://github.com/rpherbig/dr-scripts/wiki/First-Time-Setup>")
+  respond("For an update path")
+end
 
 if $manager.updated_dependency?
   echo('Update found for dependency.lic')

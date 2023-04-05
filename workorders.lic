@@ -22,7 +22,7 @@ class WOData
     @remedies       = ['some blister cream', 'some moisturizing ointment', 'some chest salve', 'a neck potion', 'some limb salve', 'some chest ungent', 'some neck tonic', 'some eye tonic', 'a body elixir', 'a general elixir', 'some refreshment elixir', 'some vigor poultices']
     @artificing     = ['a radiant trinket', 'a mana trinket', 'a wind trinket', 'an earth trinket', 'a fire trinket', 'a water trinket', 'simple gwethsmasher', 'a destructive focus', 'a fire focus', 'a frost focus', 'an electric focus', 'an electric focus']
     @bone_carving   = ['a bone toe ring', 'a bone pin', 'a shallow bone cup', 'a bone medallion', 'a bone brooch', 'a bone armband', 'a bone tiara', 'an articulated bone necklace', 'a bone crown', 'a bone comb', 'a bone haircomb', 'an ornate bone burin']
-    @stone_carving  = ['a small stone block', 'a thin stone slab', 'a short stone pole', 'a shallow stone basin', 'a small stone sphere', 'a stone armband', 'a stone choker', 'a stone circlet', 'a stone crown', 'a stone mask', 'an ornate runestone', 'an ornate runestone']
+    @stone_carving  = ['a small stone block', 'a thin stone slab', 'a short stone pole', 'a shallow stone basin', 'a small stone sphere', 'a stone armband', 'a stone choker', 'a stone circlet', 'a stone crown', 'a stone mask', 'a bone haircomb', 'an ornate runestone']
     @shaping        = ['a wood band', 'a wood bracelet', 'a wood cloak pin', 'a wood amulet', 'a wood brooch', 'a wood armband', 'a wood choker', 'an articulated wood necklace', 'a wood crown', 'a wood comb', 'a wood haircomb', 'a detailed wood statue']
     @tinkering      = ['a toy crossbow', 'a simple crossbow', 'a small music box', 'a light crossbow', 'a flight crossbow', 'a miniature male soldier', 'a musical box', 'a telescope', 'a competition crossbow', 'a competition arbalest', 'a wood haircomb', 'a clockwork telescope']
 
@@ -145,7 +145,6 @@ class WorkOrder
     echo "Recipe information for #{recipe_name}: #{item}" + debug_line if @debug
 
     quantity = (34 - DRSkill.getxp(WOD.rank_map[wod_disc])) / 10 # sets quantity based on current mindstate, max of 3 items.
-    @items_remaining = quantity # for disposal of stock/parts if we hit our mindstate early
 
     unless quantity > 0 # mindstate of 25 or greater ends the training prematurely
       DRC.message("Current mindstate in #{WOD.rank_map[wod_disc]} is #{DRSkill.getxp(WOD.rank_map[wod_disc])}, which is above training threshold of 24. Exiting")
@@ -332,7 +331,7 @@ class WorkOrder
     quantity.times do
       if @skip_logging
         training_monitor(script, [item['chapter'], item['name'], type, item['noun']], book, item['noun'])
-        break if training_done?(book, item['part'], base, type)
+        break if training_done?(book)
       else
         break unless check_logbook_count(book)
 
@@ -340,27 +339,8 @@ class WorkOrder
         DRCC.logbook_item(book, item['noun'], @bag)
       end
     end
-
-    if @workorders_materials['custom'][base]
-      method = :deed_item
-    else
-      if scrap && !@retain_crafting_materials
-        method = :trash_crafting_item
-      elsif scrap
-        method = :deed_item
-      end
-    end
-    while method && DRCI.get_item?("#{type} #{base}", @bag)
-      send(method, "#{type} #{base}")
-    end
-    item['part'].each do |part|
-      part.sub!('leather shield handle', 'shield handle')
-      next if part.match(/mechanism/)
-
-      while DRCI.get_item?(part, @bag)
-        trash_crafting_item(part)
-      end
-    end
+    dispose_parts(item['part'])
+    dispose_stock_materials(type, base) if scrap
   end
 
   def stone_prep(info, materials_info, item, quantity, book, script, _base)
@@ -368,14 +348,18 @@ class WorkOrder
     order_parts(item['part'], quantity) if item['part']
     DRCC.find_shaping_room(@hometown)
     quantity.times do
-      break unless check_logbook_count(book)
-
-      DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], materials_info['stock-name'], item['noun']])
-      DRCC.logbook_item(book, item['noun'], @bag)
+      if @skip_logging
+        training_monitor(script, [item['chapter'], item['name'], materials_info['stock-name'], item['noun']], book, item['name'])
+        break if training_done?(book)
+      else
+        DRC.wait_for_script_to_complete(script, [item['chapter'], item['name'], materials_info['stock-name'], item['noun']])
+        DRCC.logbook_item(book, item['noun'], @bag)
+      end
     end
+    dispose_parts(item['part'])
   end
 
-  def remedy_prep(info, materials_info, item, quantity, book, _script, base)
+  def remedy_prep(info, materials_info, item, quantity, book, _script, _base)
     @leftovers = buy_remedies(info, materials_info, item, quantity)
     @bag_items << @leftovers
     DRCT.walk_to(@work_room)
@@ -384,7 +368,7 @@ class WorkOrder
       name = DRC.right_hand
       if @skip_logging
         DRCI.dispose_trash(name, @settings.worn_trashcan, @settings.worn_trashcan_verb)
-        break if training_done?(book, @leftovers, base)
+        break if training_done?(book)
       else
         break if finished_remedies(name) >= quantity * 5
 
@@ -392,31 +376,29 @@ class WorkOrder
       end
     end
     log_remedy(item['noun'], quantity) unless @skip_logging
-    @leftovers.each do |part|
-      while DRCI.get_item?(part, @bag)
-        trash_crafting_item(part)
-      end
-    end
+    dispose_parts(@leftovers)
   end
 
-  def enchant_prep(info, materials_info, item, quantity, book, _script, base)
+  def enchant_prep(info, materials_info, item, quantity, book, _script, _base)
+    quantity += 1 # To account for the poor training ratio (rt:mindstate) in enchanting.
     item['part'].each do |part|
       buy_material_singles(info, materials_info[part], quantity, part)
     end
+    base_item = item['part'].find { |part| part.match(/sphere|rod|totem|ring|ingot|runestone|pole|burin|wand|pebble/) }
     DRCC.fount(info['tool-room'], 1, info['fount'], quantity, @bag, @bag_items, @belt)
     DRCI.put_away_item?("fount", @bag)
-    # Start crafting #
+
     DRCC.find_enchanting_room(@hometown, @work_room)
     quantity.times do
       if @skip_logging
-        DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
-        DRCI.dispose_trash(item['noun'], @settings.worn_trashcan, @settings.worn_trashcan_verb)
-        break if training_done?(book, item['part'], base)
+        training_monitor('enchant', [item['chapter'], item['name'], item['noun'], base_item], book, item['noun'])
+        break if training_done?(book)
       else
-        DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun']])
+        DRC.wait_for_script_to_complete('enchant', [item['chapter'], item['name'], item['noun'], base_item])
         DRCC.logbook_item('enchanting', item['noun'], @bag)
       end
     end
+    dispose_parts(item['part'])
   end
 
   def forge_prep(info, materials_info, item, quantity, book, script, base)
@@ -440,7 +422,7 @@ class WorkOrder
       buy_material_singles(info, materials_info, @bingot) if @bingot == quantity # we're using one bingot for each item, so we'll buy them one at a time.
       if @skip_logging
         training_monitor(script, [type, item['name']], book, item['noun'])
-        break if training_done?(book, item['part'], base, type)
+        break if training_done?(book)
       else
         break unless check_logbook_count("forging")
 
@@ -506,24 +488,10 @@ class WorkOrder
     end
   end
 
-  def training_done?(book, parts, base, type = '')
-    @items_remaining -= 1 # reduce remaining by 1 each time we come here, reflecting a completed use of materials.
+  def training_done?(book)
     return false unless DRSkill.getxp(book.capitalize) > 28 # not yet at our mindstate goal
-    return false if @items_remaining <= 0 # met our mindstate goal, but also finished using our materials
 
     DRC.message("Stopping #{book.capitalize} training after #{@counter / 60} minutes because #{book.capitalize} is above training threshold of 28")
-
-    parts.each do |part| # dumping all excess parts, this covers all of enchanting/remedies
-      while DRCI.get_item?(part, @bag)
-        DRCI.dispose_trash(part, @settings.worn_trashcan, @settings.worn_trashcan_verb)
-      end
-    end
-    # don't trash stock materials if doing remedies|artificing(no stock materials to trash), if we're using custom materials(we'll be deeding remainder), or if we've specifically elected to retain them.
-    return true if book =~ /enchanting|alchemy/i || @workorders_materials['custom'][base] == type || @retain_crafting_materials
-
-    while DRCI.get_item?("#{type} #{base}", @bag)
-      DRCI.dispose_trash("#{type} #{base}", @settings.worn_trashcan, @settings.worn_trashcan_verb)
-    end
     true
   end
 
@@ -689,6 +657,16 @@ class WorkOrder
     [base_to_buy, scrap]
   end
 
+  def dispose_stock_materials(type, base)
+    while DRCI.get_item?("#{type} #{base}", @bag)
+      if @workorders_materials['custom'][base] == type || @retain_crafting_materials
+        deed_item("#{type} #{base}")
+      else # otherwise, just using store bought, so dump what we have
+        trash_crafting_item("#{type} #{base}")
+      end
+    end
+  end
+
   ################          PARTS HANDLING           ######################
 
   def buy_parts(parts, partroom)
@@ -708,6 +686,17 @@ class WorkOrder
           DRCT.buy_item(data['part-room'], part)
         end
         DRCC.stow_crafting_item(part.split.last, @bag, @belt)
+      end
+    end
+  end
+
+  def dispose_parts(parts)
+    parts.each do |part| # dumping all excess parts, this covers all of enchanting/remedies
+      part.sub!('leather shield handle', 'shield handle')
+      next if part.match(/mechanism/)
+
+      while DRCI.get_item?(part, @bag)
+        trash_crafting_item(part)
       end
     end
   end
@@ -806,7 +795,7 @@ class WorkOrder
   end
 
   def deed_volume(material)
-    result = DRC.bput("read my #{material} deed", /Volume:\s*\d+/, /Amount:\s*\d+/, /Pieces:\s*\d+/, /^I could not find/, /^What were you referring/)
+    result = DRC.bput("read my #{material} deed", /Volume:\s*\d+/, /Amount:\s*\d+/, /Pieces:\s*\d+/, /I could not find/, /What were you referring/)
     case result
     when /\d+/
       result.scan(/\d+/).first.to_i
@@ -888,8 +877,7 @@ class WorkOrder
 
   def smelt(type)
     DRCC.find_empty_crucible(@hometown)
-    2.times do
-      DRCI.get_item?("#{type} ingot", @bag)
+    while DRCI.get_item?("#{type} ingot", @bag)
       DRCI.put_away_item_unsafe?("#{type} ingot", "crucible")
     end
     DRC.wait_for_script_to_complete('smelt')

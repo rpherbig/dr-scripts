@@ -447,9 +447,22 @@ class LootProcess
     @gem_pouch_noun = settings.gem_pouch_noun
     echo("  @gem_pouch_noun: #{@gem_pouch_noun}") if $debug_mode_ct
 
+    @autoloot_container = settings.autoloot_container
+    echo("  @autoloot_container: #{@autoloot_container}") if $debug_mode_ct
+
+    @autoloot_gems = settings.autoloot_gems
+    echo("  @autoloot_gems: #{@autoloot_gems}") if $debug_mode_ct
+
+    @autoloot_fill_gem_pouch_delay = settings.autoloot_fill_gem_pouch_delay
+    echo("  @autoloot_fill_gem_pouch_delay: #{@autoloot_fill_gem_pouch_delay}") if $debug_mode_ct
+
+    @autoloot_fill_gem_pouch_timer = Time.now
+    echo("  @autoloot_fill_gem_pouch_timer: #{@autoloot_fill_gem_pouch_timer}") if $debug_mode_ct
+
     @loot_delay = settings.loot_delay
-    @loot_timer = Time.now - @loot_delay
     echo("  @loot_delay: #{@loot_delay}") if $debug_mode_ct
+
+    @loot_timer = Time.now - @loot_delay
     echo("  @loot_timer: #{@loot_timer}") if $debug_mode_ct
 
     @loot_bodies = settings.loot_bodies
@@ -488,6 +501,18 @@ class LootProcess
       fput 'DUMP JUNK'
       @dump_timer = Time.now
     end
+    if @autoloot_container && @autoloot_gems && (Time.now - @autoloot_fill_gem_pouch_timer > @autoloot_fill_gem_pouch_delay)
+      DRCI.fill_gem_pouch_with_container(
+        @gem_pouch_adjective,
+        @gem_pouch_noun,
+        @autoloot_container,
+        @full_pouch_container,
+        @spare_gem_pouch_container,
+        @tie_pouch
+      )
+      @autoloot_fill_gem_pouch_timer = Time.now
+    end
+
     game_state.mob_died = false
     dispose_body(game_state)
     stow_lootables(game_state)
@@ -512,13 +537,8 @@ class LootProcess
     Flags.reset('container-full')
 
     special = @loot_specials.find { |x| x['name'] == item }
-    if special
-      if DRC.bput("get #{item}", 'You pick up', 'There isn\'t any more room', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory') == 'already in your inventory'
-        DRC.bput("get other #{item}", 'You pick up', 'You get', 'You need a free hand', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory')
-      end
-      pause 0.25
-      DRC.bput("put #{item} in my #{special['bag']}", 'you put')
-      return
+    if special && DRCI.get_item_unsafe(item)
+      return if DRCI.put_away_item?(item, special['bag'])
     end
 
     case DRC.bput("stow #{item}", 'You pick up', 'You put', 'You get', 'You need a free hand', 'needs to be tended to be removed', 'There isn\'t any more room', 'You just can\'t', 'push you over the item limit', 'You stop as you realize the .* is not yours', 'Stow what', 'already in your inventory', 'The .* is not designed to carry anything', 'rapidly decays away', 'cracks and rots away')
@@ -1960,7 +1980,7 @@ class SpellProcess
     command = data['prep_type'] if data['prep_type']
 
     if command == 'segue'
-      return if segue?(data['abbrev'], data['mana'])
+      return if DRCA.segue?(data['abbrev'], data['mana'])
 
       command = 'prep'
     end
@@ -2189,6 +2209,12 @@ class AbilityProcess
     @warhorn_cooldown = settings.warhorn_cooldown.to_i || 1200
     echo("  @warhorn_cooldown: #{@warhorn_cooldown}") if $debug_mode_ct
 
+    @stomp_on_cooldown = settings.war_stomp_on_cooldown
+    echo("  @stomp_on_cooldown: #{@stomp_on_cooldown}") if $debug_mode_ct
+
+    @pounce_on_cooldown = settings.pounce_on_cooldown
+    echo("  @pounce_on_cooldown: #{@pounce_on_cooldown}") if $debug_mode_ct
+
     # Egg settings, for egg only
     @egg = settings.egg
     echo("  @egg: #{@egg}") if $debug_mode_ct
@@ -2214,6 +2240,8 @@ class AbilityProcess
     check_nonspell_buffs(game_state)
     check_battle_cries(game_state)
     use_warhorn_or_egg(game_state) unless @warhorn_or_egg.nil? || @warhorn_or_egg.empty?
+    game_state.stomp if @stomp_on_cooldown && game_state.npcs && Flags['war-stomp-ready']
+    game_state.pounce if DRStats.ranger? && @pounce_on_cooldown && game_state.npcs && Flags['pounce-ready']
     false
   end
 
@@ -2598,7 +2626,8 @@ class TrainerProcess
       'Stealth'                    => 'Stealth',
       'Tactics'                    => 'Tactics',
       'Teach'                      => 'Scholarship',
-      'Tessera'                    => 'Trading'
+      'Tessera'                    => 'Trading',
+      'Locksmithing'               => 'Locksmithing'
     }
 
     @skill_map['Hunt'] = %w[Perception Instinct] if DRStats.ranger?
@@ -2794,7 +2823,7 @@ class TrainerProcess
     when /^Collect$/i
       game_state.sheath_whirlwind_offhand
       DRC.retreat
-      put('engage') unless game_state.npcs.empty? || game_state.retreating?
+      game_state.engage unless game_state.npcs.empty? || game_state.retreating?
       DRC.collect(@forage_item)
       waitrt?
       game_state.wield_whirlwind_offhand
@@ -2802,6 +2831,8 @@ class TrainerProcess
     when /^Almanac$/i
       UserVars.almanac_last_use ||= Time.now - 600
       use_almanac(game_state)
+    when /^Locksmithing$/i
+      DRC.wait_for_script_to_complete('locksmithing', ['once'])
     when /^Smite$/i
       smite(game_state)
     when /^Herbs$/i
@@ -2854,7 +2885,7 @@ class TrainerProcess
 
     game_state.sheath_whirlwind_offhand if game_state.currently_whirlwinding
     DRC.retreat
-    fput('engage') unless game_state.npcs.empty? || game_state.retreating?
+    game_state.engage unless game_state.npcs.empty? || game_state.retreating?
     DRC.bput("get my #{@almanac}", 'You get', 'What were')
     if training_skill
       DRC.bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn')
@@ -3005,12 +3036,11 @@ class TrainerProcess
     when 'Analyze what'
       case DRC.bput('face next', 'There is nothing else', 'You turn', 'What are you trying', 'Face what')
       when 'There is nothing else', 'What are you trying'
-        fput('engage')
-        pause 2
+        game_state.engage
       end
       analyze(game_state, fail_count)
     when 'You must be closer'
-      fput('engage')
+      game_state.engage
     when 'Your analysis reveals a massive opening'
       return
     when 'You fail to find any holes'
@@ -3047,7 +3077,7 @@ class TrainerProcess
     if DRSkill.getrank('Astrology') <= 120
       DRCMM.predict('weather')
       waitrt?
-      fput('engage')
+      game_state.engage
     else
       DRC.retreat
       check_heavens(game_state)
@@ -3229,6 +3259,8 @@ class AttackProcess
     Flags.add('ct-aim-failed', 'you stop aiming', 'stop concentrating on aiming')
     Flags.add('ct-ranged-ready', 'You think you have your best shot possible now.')
     Flags.add('ct-face-what', 'Face what')
+    Flags.add('war-stomp-ready', 'You feel ready to perform another War Stomp'); Flags['war-stomp-ready'] = true
+    Flags.add('pounce-ready', 'You think you have the strength to pounce upon prey once again.'); Flags['pounce-ready'] = true
     Flags.add('ct-maneuver-cooldown-reduced', "With expert skill you end the attack and maneuver into a better position")
     Flags.add('ct-attack-out-of-range', "You aren't close enough to attack")
   end
@@ -3279,7 +3311,7 @@ class AttackProcess
   def check_face(game_state)
     return unless Flags['ct-face-what']
 
-    fput("engage #{game_state.npcs.first}")
+    game_state.engage
     Flags.reset('ct-face-what')
   end
 
@@ -3346,8 +3378,7 @@ class AttackProcess
     end
 
     if reget(5, 'You aren\'t close enough to attack', 'It would help if you were closer')
-      fput('engage')
-      pause 6
+      game_state.engage
     else
       game_state.action_taken
     end
@@ -3370,12 +3401,28 @@ class AttackProcess
     end
 
     retrieve_action = game_state.thrown_retrieve_verb
-    case DRC.bput(retrieve_action, 'You are already holding', 'You pick up', 'You get', 'You catch', 'What were you', "You don't have any bonds to invoke")
+    bonded_invoke_success = [ # standard and custom invoke messages
+      /reuniting you with your lost belonging/,
+      /In its place, you are left with your/,
+      /returning .* to your/,
+      /depositing .* back to the rightful owner/,
+      /Your .* appears within reach/,
+      /you are reunited with your/,
+      /A tiny ripplegate gurgles into being near your/
+    ]
+
+    case DRC.bput(retrieve_action,
+                  /^You are already holding/,
+                  /^You pick up/,
+                  /^You get/,
+                  /^What were you/,
+                  /^You don't have any bonds to invoke/,
+                  *bonded_invoke_success)
     when 'What were you'
       # Workaround for a game bug when you lob an unblessed weapon at a noncorporeal mob
       # The weapon lands on the ground, not in the 'at feet' slot, and 'my' will not work
       DRC.bput("get #{game_state.weapon_name}", 'You pick up', 'You get')
-    when 'You catch'
+    when *bonded_invoke_success
       DRC.bput('swap', 'You move', 'You have nothing') if game_state.offhand?
     end
 
@@ -3625,8 +3672,7 @@ class AttackProcess
     when 'close enough', 'must be closer'
       return false if game_state.retreating?
 
-      fput('engage')
-      pause 2.5
+      game_state.engage
     when 'What are you', 'There is nothing'
       return false unless action.include?('whip')
 
@@ -3694,8 +3740,7 @@ class AttackProcess
       game_state.set_dance_queue
       case DRC.bput(game_state.next_dance_action, 'You must be closer', 'There is nothing else', 'What are you trying', /.*/)
       when 'You must be closer', 'There is nothing else', 'What are you trying'
-        fput('engage')
-        pause 2
+        game_state.engage
       end
       pause 0.5
       waitrt?
@@ -3753,7 +3798,10 @@ class AttackProcess
 
     waitrt?
 
-    return false if Flags['ct-attack-out-of-range']
+    if Flags['ct-attack-out-of-range']
+      game_state.engage
+      return use_charged_maneuver(action, game_state)
+    end
 
     case attempt
     when /^You must rest a bit longer before attempting that maneuver again/
@@ -3816,7 +3864,7 @@ class AttackProcess
     # The majority of the time, if not always, the words to reference the item are the first and last (e.g. matte sphere).
     ammo_parts = ammo.strip.split(' ')
     ammo = [ammo_parts.first, ammo_parts.last].compact.uniq.join(' ')
-    case DRC.bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what', 'needs to be tended to be removed')
+    case DRC.bput("stow my #{ammo}", 'You pick up', 'You put your', 'Stow what', 'needs to be tended to be removed', 'As you reach for a glowing')
     when 'You pick up', 'You put your'
       stow_ammo(ammo, quantity - 1)
     when 'Stow what'
@@ -4204,6 +4252,18 @@ class GameState
     @flame_expertise_training_threshold = settings.flame_expertise_training_threshold
     echo("  @flame_expertise_training_threshold: #{@flame_expertise_training_threshold}") if $debug_mode_ct
 
+    @stomp_on_cooldown = settings.war_stomp_on_cooldown
+    echo("  @stomp_on_cooldown: #{@stomp_on_cooldown}") if $debug_mode_ct
+
+    @stomp_to_engage = settings.stomp_to_engage
+    echo("  @stomp_to_engage: #{@stomp_to_engage}") if $debug_mode_ct
+
+    @pounce_on_cooldown = settings.pounce_on_cooldown
+    echo("  @pounce_on_cooldown: #{@pounce_on_cooldown}") if $debug_mode_ct
+
+    @pounce_to_engage = settings.pounce_to_engage
+    echo("  @pounce_to_engage: #{@pounce_to_engage}") if $debug_mode_ct
+
     @avtalia_array = settings.avtalia_array
     echo("  @avtalia_array: #{@avtalia_array}") if $debug_mode_ct
 
@@ -4345,6 +4405,70 @@ class GameState
     return if skill.eql?('Tactics')
 
     @equipment_manager.stow_weapon(weapon_training[skill])
+  end
+
+  def engage
+    return if stomp
+    return if pounce
+
+    case DRC.bput("engage", /^You (are already|begin to) (stealthily )?(advanc(e|ing)|at melee)/, /^There is nothing else/, /is already quite dead/, /^What do you want to advance towards/)
+    when /You are already advancing/, /You begin to advance/, /You begin to stealthily advance/
+      pause 2
+    end
+  end
+
+  def stomp
+    return false unless DRStats.barbarian? && DRStats.circle >= 100 # basic qualifications for use
+    return false unless (@stomp_to_engage || @stomp_on_cooldown) && Flags['war-stomp-ready'] # ability is off cooldown and we've elected to use it
+
+    Flags.reset('war-stomp-ready')
+    case DRC.bput("stomp",
+                  /^As you feel your inner fire/,
+                  /^With a heaving flex of masterfully controlled muscles/,
+                  /You leap forward, kicking in a somersault/,
+                  /You begin sprinting forward, feeling as the wind/,
+                  /You spring lightly into the air. For one frozen moment/,
+                  /Like a dust devil sent by Gizzbolf, you hop spinning wildly into the air/,
+                  /Bringing your prodigious Togpower to bear on/,
+                  /Swift and agile, you handspring into an easy/,
+                  /You crouch for but a heartbeat, and then leap with the acrobatic ease/,
+                  /Like an indefatigable avatar of Coshivi, you lope across the distance/,
+                  /You set yourself, poised for the opportunity that will see you vanquish your adversary/,
+                  /^You are not ready to perform another War Stomp/, /^What are you trying to attack/,
+                  /^You have not yet been taught the proper techniques to perform a War Stomp/,
+                  /^Stomp where/,
+                  /^You are too fatigued to perform a War Stomp/)
+    when /You have not yet been taught the proper techniques to perform a War Stomp/, /Stomp where/
+      DRC.message("You have elected to War Stomp, but you do not know the ability. Learn it or remove war_stomp_on_cooldown from your yaml")
+      @stomp_to_engage, @stomp_on_cooldown = [false, false]
+      Flags.delete('war-stomp-ready')
+      false
+    when /You are not ready to perform another War Stomp/, /You are too fatigued to perform a War Stomp/
+      false
+    else
+      true
+    end
+  end
+
+  def pounce
+    return false unless DRStats.ranger? # Current basic qualifications for use
+    return false unless (@pounce_on_cooldown || @pounce_to_engage) && Flags['pounce-ready'] # ability is off cooldown and we've elected to use
+
+    Flags.reset('pounce-ready')
+    case DRC.bput("pounce",
+                  /You angle yourself to knock .* to the ground/,
+                  /^You spring towards .*, with the/,
+                  /^What are you trying to attack/,
+                  /Doing your best impression of a house cat, you pounce on absolutely nothing at all./,
+                  /You're too tired from the last time you pounced on some prey./)
+    when /Doing your best impression/ # Not a ranger
+      Flags.delete('pounce-ready')
+      false
+    when /You're too tired/ # ability not actually off cooldown
+      false
+    else
+      true
+    end
   end
 
   # Wields a weapon to train the specified skill,
@@ -5102,7 +5226,7 @@ class GameState
       Flags.reset("ct-#{combo_type}-ready")
       return false
     when 'You must be closer'
-      fput('engage')
+      engage
     when 'You fail to find any'
       perform_analyze?(combo_type, expertise_requirement)
     when 'Analyze what?'
@@ -5180,6 +5304,8 @@ before_dying do
   Flags.delete('ct-battle-cry-not-facing')
   Flags.delete('ct-barbarian-whirlwind')
   Flags.delete('ct-barbarian-whirlwind-expired')
+  Flags.delete('war-stomp-ready')
+  Flags.delete('pounce-ready')
 end
 
 $COMBAT_TRAINER = CombatTrainer.new

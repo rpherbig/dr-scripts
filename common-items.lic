@@ -70,7 +70,8 @@ module DRCI
     /^You deftly remove/,
     /^You are already holding/,
     /^You fade in for a moment as you/,
-    /^You carefully lift/
+    /^You carefully lift/,
+    /^You carefully remove .* from the bundle/
   ]
 
   @@get_item_failure_patterns = [
@@ -81,6 +82,7 @@ module DRCI
     /^You stop as you realize the .* is not yours/,
     /^You can't reach that from here/, # on a mount like a flying carpet
     /^You don't seem to be able to move/,
+    /^You should untie/,
     /^Get what/,
     /^I could not/,
     /^What were you/,
@@ -139,6 +141,8 @@ module DRCI
     /^You don't seem to be able to move/,
     /^There's no more free ties/,
     /^You must be holding/,
+    /^Your wounds hinder your ability to do that/,
+    /doesn't seem to fit/,
     /^Tie what/
   ]
 
@@ -201,7 +205,8 @@ module DRCI
     # The following are success messages for putting an item in a container OFF your person.
     /^You drop/i,
     /^You set/i,
-    /^You put/i
+    /^You put/i,
+    /^You carefully fit .* into your bundle/
   ]
 
   @@put_away_item_failure_patterns = [
@@ -346,6 +351,37 @@ module DRCI
     /^Please rephrase that command/,
     /^What were you referring to/,
     /^I could not find what you were referring to/
+  ]
+
+  @@lift_success_patterns = [
+    /^You pick up/
+  ]
+
+  @@lift_failure_patterns = [
+    /^There are no items lying at your feet/,
+    /^What did you want to try and lift/,
+    /can't quite lift it/,
+    /^You are not strong enough to pick that up/
+  ]
+
+  @@give_item_success_patterns = [
+    /has accepted your offer/,
+    /your ticket and are handed back/,
+    /Please don't lose this ticket!/,
+    /^You hand .* gives you back a repair ticket/,
+    /^You hand .* your ticket and are handed back/
+  ]
+
+  @@give_item_failure_patterns = [
+    /I don't repair those here/,
+    /There isn't a scratch on that/,
+    /give me a few more moments/,
+    /I will not repair something that isn't broken/,
+    /I can't fix those/,
+    /has declined the offer/,
+    /^Your offer to .* has expired/,
+    /^You may only have one outstanding offer at a time/,
+    /^What is it you're trying to give/
   ]
 
   #########################################
@@ -723,18 +759,19 @@ module DRCI
   def tie_item?(item, container)
     case DRC.bput("tie my #{item} to my #{container}", @@tie_item_success_patterns, @@tie_item_failure_patterns)
     when *@@tie_item_success_patterns
-      return true
+      true
     else
-      return false
+      false
     end
   end
 
-  def untie_item?(item, container)
-    case DRC.bput("untie my #{item} from my #{container}", @@untie_item_success_patterns, @@untie_item_failure_patterns)
+  def untie_item?(item, container = nil)
+    place = container ? "from my #{container}" : nil
+    case DRC.bput("untie my #{item} #{place}", @@untie_item_success_patterns, @@untie_item_failure_patterns)
     when *@@untie_item_success_patterns
-      return true
+      true
     else
-      return false
+      false
     end
   end
 
@@ -836,6 +873,26 @@ module DRCI
     case DRC.bput("lower ground #{hand}", *@@lower_success_patterns, *@@lower_failure_patterns)
     when *@@lower_success_patterns
       true
+    else
+      false
+    end
+  end
+
+  ## Implementing a suggestion by Gildaren for a simple predicate method
+  ## You can pass this only an item and it will attempt to lift that item and return true/false
+  ## You can pass this both an item and true and it will lift that item and return the result of stow_item? on that item
+  ## You can pass this both an item and the name of a container and return the result of put_away_item? on that item and that container
+  def lift?(item = nil, stow = nil)
+    item = item.split.last # Necessary until adjectives are implemented for lift
+    case DRC.bput("lift #{item}", @@lift_success_patterns, @@lift_failure_patterns)
+    when *@@lift_success_patterns
+      if stow.is_a?(String)
+        put_away_item?(item, stow)
+      elsif stow
+        stow_item?(item)
+      else
+        true
+      end
     else
       false
     end
@@ -1011,14 +1068,22 @@ module DRCI
   # GIVE/ACCEPT ITEM
   #########################################
 
-  def give_item?(target, item)
-    # An offer expires after 30 seconds.
-    # The timeout is set to 35 to give some buffer for clock skew.
-    case DRC.bput("give my #{item} to #{target}", { 'timeout' => 35 }, "has accepted your offer", "has declined the offer", "Your offer to .* has expired", "You may only have one outstanding offer at a time", "What is it you're trying to give", "There's nothing in your right hand to give away")
-    when "has accepted your offer"
+  def give_item?(target, item = nil)
+    command = item ? "give my #{item} to #{target}" : "give #{target}"
+    case DRC.bput(command, { 'timeout' => 35 }, /give it to me again/, /^You don't need to specify the object/, @@give_item_success_patterns, @@give_item_failure_patterns)
+    when *@@give_item_success_patterns
       true
-    else
+    when *@@give_item_failure_patterns
       false
+    when /give it to me again/
+      give_item?(target, item)
+    when /You don't need to specify the object/
+      if DRC.right_hand.include?(item)
+        give_item?(target)
+      elsif DRC.left_hand.include?(item)
+        fput("swap")
+        give_item?(target)
+      end
     end
   end
 

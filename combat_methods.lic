@@ -1,0 +1,796 @@
+custom_require.call(%w[drinfomon common weapon_swap util_methods spellmonitor])
+
+# mandatory for many things including hide?
+include DRC
+include WeaponSwap
+include UtilMethods
+
+class Combat
+
+  # this could be concentration based too
+  @@interval_gazecrystal = 180
+  @@timer_gazecrystal = Time.now - @@interval_gazecrystal # set to start right away
+
+  @@interval_hunt = 75
+  @@timer_hunt = Time.now - @@interval_hunt # set to start right away
+
+  @@dissect_attempts = 0
+  @@dissect_success = 0
+  @@dissect_learns = 0
+
+  def train_weapon(skill, attack_method, params: nil, swap: false, swap_str: nil, exp_incr: 5, exp_max: 34, setup_method: nil, setup_params: nil, teardown_method: nil, teardown_params: nil)
+    times = 6
+    attack_method_sym = method(attack_method.to_sym)
+    setup_method_sym = setup_method.nil? ? nil : method(setup_method.to_sym)
+    teardown_method_sym = teardown_method.nil? ? nil : method(teardown_method.to_sym)
+    set_goal_mindstate(skill, exp_incr, exp_max)
+    do_while_below_learning_goal(skill, method(:repeat_action), [attack_method_sym, params, setup_method_sym, setup_params, teardown_method_sym, teardown_params, times])
+  end
+
+  def corpse?
+    # can also use this to get the first dead noun
+    #mob_noun = DRRoom.dead_npcs.first # from combat-trainer.lic (check implementation)
+    if DRRoom.dead_npcs.empty?
+      return false
+    else
+      return true
+    end
+  end
+
+  # set a flag for the words 'melee range', 'pole weapon range', and 'missile range'
+  # assess and check which flags are tripped
+  def engaged?
+    Flags.add('at_melee', 'melee range')
+    Flags.add('at_pole', 'pole weapon range')
+    #Flags.add('at_missile', 'missile range')
+    bput('assess', 'You assess your combat situation...')
+    if Flags['at_melee'] || Flags['at_pole']
+      result = true
+    else
+      result = false
+    end
+    Flags.reset('at_melee')
+    Flags.reset('at_pole')
+    #Flags.reset('at_missile')
+    return result
+  end
+
+  def mobs?
+    pause
+    waitrt?
+    test_advance = fput "advance", "What do you want to advance towards?", "You"
+    if test_advance != "What do you want to advance towards?"
+      return true
+    end
+    pause
+    waitrt?
+    test_facenext = fput "face next", "There is nothing else to face!", "You"
+    if test_facenext != "There is nothing else to face!"
+      return true
+    end
+    return false
+  end
+
+  def waitfor_mobs
+    while !mobs?
+      pause 2
+    end
+  end
+
+  def set_stance(stance)
+
+    if stance == "shield"
+      fput "stance set 86 0 100 100", "Setting your"
+
+    elsif stance == "parry"
+      fput "stance set 86 100 0 100", "Setting your"
+
+    elsif stance == "evasion"
+      fput "stance set 100 86 0 100", "Setting your"
+
+    elsif stance == "balanced"
+      fput "stance set 100 43 43 100", "Setting your"
+
+    else
+      fput "stance set 100 86 0 100", "Setting your"
+    end
+
+  end
+
+  def sheath_right
+    pause
+    waitrt?
+    put "sheath right"
+  end
+
+  def lob
+    pause
+    waitrt?
+    put "lob"
+  end
+
+  def lob_and_recover(weapon)
+    pause
+    waitrt?
+    put "lob"
+    getmyitem(weapon)
+  end
+
+  def load_missile
+    pause
+    waitrt?
+    put "load"
+  end
+
+  def unload
+    pause
+    waitrt?
+    put "unload"
+  end
+
+  def aim
+    pause
+    waitrt?
+    put "aim"
+  end
+
+  def fire
+    pause
+    waitrt?
+    put "fire"
+  end
+
+  def missile_sequence(ammo)
+    load_missile
+    waitfor_mobs
+    aim
+    pause 5
+    fire
+    # would be better to get for sling/pelletbow since there is just 1 in stack
+    # or even for arrow, just incorporate having held when loading
+    stowitem(ammo)
+    #getitem(ammo) # defend against lootsack hoarding
+    #stowmyitem(ammo)
+  end
+
+  def facenext
+    pause
+    waitrt?
+    put "face next"
+  end
+
+  def advance
+    pause
+    waitrt?
+    put "advance"
+  end
+
+  def hide
+    pause
+    waitrt?
+    hide?
+  end
+
+  def retreat
+    pause
+    waitrt?
+    put "retreat"
+  end
+
+  def retreat_to_missile
+    retreat
+    retreat
+    retreat
+  end
+
+  def stow_ammo(ammo)
+    fput "stow #{ammo}", "You stow", "Stow what?"
+  end
+
+  def arrange
+    pause
+    waitrt?
+    put "arrange"
+  end
+
+  def skin
+    pause
+    waitrt?
+    put "skin"
+  end
+
+  def dissect
+    # TODO: cannot dissect construct, undead. messages on wiki: https://elanthipedia.play.net/Dissect_command
+    pause
+    waitrt?
+    failed_dissect_str = "You'll gain no insights from this attempt."
+    nothing_to_dissect_str = "What exactly are you trying to dissect?"
+    dissect_too_difficult_str = "You'll gain no insights from this attempt."
+    dissect_result = fput "dissect", failed_dissect_str, nothing_to_dissect_str, dissect_too_difficult_str, "You"
+    # return false if a fail case is hit
+    # "too difficult" is a fail case, because we don't want to measure learning if we hit this
+    [failed_dissect_str, nothing_to_dissect_str, dissect_too_difficult_str].each do |failcase|
+      if dissect_result == failcase
+        return false
+      end
+    end
+    return true
+  end
+
+  def dissect_training?
+    # require 40% success rate for either learning or failing (above or below rank range)
+    if @@dissect_attempts > 5 and @@dissect_success < @@dissect_attempts * 2/5
+      return false
+    elsif @@dissect_attempts > 5 and @@dissect_learns < @@dissect_attempts * 2/5
+      return false
+    else
+      return true
+    end
+  end
+
+  def skin_or_dissect?
+    dissected = false
+    # always arrange for some skinning exp
+    arrange
+    # note: very suboptimal if most dissects are failing, it's better to train it up and add later
+    # TODO: deterimine dissectable and stop trying if you cannot dissect (construct, undead, ?)
+    # TODO: work on the decider dissect_training? currently requires 40% succcess (see method for impl)
+    if DRSkill.getxp("First Aid") < 34 and dissect_training?
+      firstaid_xp = DRSkill.getxp("First Aid")
+      dissected = dissect
+      @dissect_learns += 1
+      if dissected
+        @dissect_success += 1
+      end
+      if DRSkill.getxp("First Aid") > firstaid_xp
+        @@dissect_learns += 1
+      end
+    end
+    # skip skinning when locked, maybe override later if skins are desired over saved time
+    if !dissected and DRSkill.getxp("Skinning") < 34
+      skin
+    end
+  end
+
+  def cleanup_one_ammo
+    # any? usage is not quite right
+    DRRoom.room_objs.any? do |obj|
+      if obj.include?("boar-tusk arrow")
+        stowitem("boar-tusk arrow")
+        return true
+      end
+      if obj.include?("small rock")
+        stowitem("small rock")
+        return true
+      end
+    end
+    return false
+  end
+
+  def cleanup_abbr
+    # just grab ammo and loot, save time
+    skin_or_dissect?
+    pause
+    waitrt?
+    put "loot goods"
+  end
+
+  def cleanup
+
+    # function to look and set variables: coin, gem, box, scroll
+    # need to "look junk" and "look"
+    # any helper functions for this in common? check combat-training?
+    # at each step if these are set, then grab them
+    skin_or_dissect?
+
+    pause
+    waitrt?
+    put "loot goods"
+    pause
+    waitrt?
+    put "stow coin"
+    pause
+    waitrt?
+    put "stow gem"
+    pause
+    waitrt?
+    put "fill my red pou with my poke"
+  end
+
+  def cleanupall
+    skin_or_dissect?
+
+    pause
+    waitrt?
+    put "loot goods"
+    pause
+    waitrt?
+    put "stow coin"
+    pause
+    waitrt?
+    put "stow gem"
+    pause
+    waitrt?
+    put "fill my red pou with my poke"
+  end
+
+  def attack
+    pause
+    waitrt?
+    put "attack"
+  end
+
+  def attack_left
+    pause
+    waitrt?
+    put "attack left"
+  end
+
+  def ambush_attack
+
+    hide
+
+    if hiding?
+      advance
+    end
+
+    if hiding?
+      attack
+    end
+  end
+
+  def feint
+    pause
+    waitrt?
+    put "feint"
+  end
+
+  def feint_left
+    pause
+    waitrt?
+    put "feint left"
+  end
+
+  def jab
+    pause
+    waitrt?
+    put "jab"
+  end
+
+  def jab_left
+    pause
+    waitrt?
+    put "jab left"
+  end
+
+  def ambush_jab
+
+    hide
+
+    if hiding?
+      advance
+    end
+
+    if hiding?
+      jab
+    end
+  end
+
+  def blindside
+    pause
+    waitrt?
+    put "blindside"
+  end
+
+
+  def ambush_blindside
+
+    hide
+
+    if hiding?
+      advance
+    end
+
+    if hiding?
+      blindside
+    end
+  end
+
+  def ambush_feint
+
+    hide
+
+    if hiding?
+      advance
+    end
+
+    if hiding?
+      feint
+    end
+  end
+
+  def circle
+    pause
+    waitrt?
+    put "circle"
+  end
+
+  def elbow
+    pause
+    waitrt?
+    put "elbow"
+  end
+
+  def gazecrystal
+    #echo "Now #{Time.now}"
+    #echo "Timer: #{@@timer_gazecrystal}"
+    #echo "Difference: #{Time.now - @@timer_gazecrystal}"
+    if (Time.now - @@timer_gazecrystal) > @@interval_gazecrystal
+      @@timer_gazecrystal = Time.now
+      pause
+      waitrt?
+      put "exhale my sano crystal"
+    end
+  end
+
+  def hunt
+    if (Time.now - @@timer_hunt) > @@interval_hunt
+      @@timer_hunt = Time.now
+      pause
+      waitrt?
+      put "hunt"
+    end
+  end
+
+  def app_critter(critter)
+    pause
+    waitrt?
+    put "app #{critter}"
+  end
+
+  def recall_critter(critter)
+    pause
+    waitrt?
+    put "recall #{critter}"
+  end
+
+  def analyze
+    pause
+    waitrt?
+    put "analyze"
+  end
+
+  def safe_target_cast
+    already_targeted = "Your target pattern is already around"
+    start_targeting = "You begin to weave mana lines"
+    target_result = bput("target", already_targeted, start_targeting)
+
+    if target_result == "You must be preparing a spell in order to target it!"
+      return 1 # start over
+    end
+
+    if target_result == start_targeting
+      pause 5 # give the targeting a minimal amount of time
+      return safe_target_cast # try again and just return the outcome, hopefully the stack doesn't get too deep
+    end
+
+    action_completed = "You gesture at"
+    no_spell = "You don't have a spell prepared!"
+    your_target_died = "Your target pattern dissipates"
+    if target_result == already_targeted
+      cast_result = bput("cast", action_completed, no_spell, your_target_died)
+    end
+
+    if cast_result.include?(action_completed)
+      return 0 # continue
+    elsif cast_result.include?(no_spell)
+      return 1 # start over
+    elsif cast_result.include?(your_target_died)
+      # what happens if I `target pd 18` a dead thing? i think face the next thing
+      return 1 # start over
+    end
+
+    return 0 # continue
+  end
+
+  def target_pd
+    pause
+    waitrt?
+    fput "target pd 40", "attunement", "already"
+
+    pause # 1 sec
+    waitrt?
+    # how to abstract this with the method??
+    result = fput "circle", "You", "There is nothing else to face!" # 4 sec
+
+    circle
+    circle
+
+    if result == "There is nothing else to face!"
+      return
+    end
+
+    # this code pattern works anywhere, but we target_pd from this function all the time anyways
+    res = safe_target_cast
+    if res == 1 # return code for 'start over'
+      target_pd # hope the stack doesn't get too deep
+    end
+
+  end
+
+  def elbow_pd
+    pause
+    waitrt?
+    fput "target pd 40", "attunement", "already"
+
+    pause # 1 sec
+    waitrt?
+    # how to abstract this with the method??
+    result = fput "circle", "You", "There is nothing else to face!" # 4 sec
+
+    elbow
+    elbow
+    elbow
+
+    if result == "There is nothing else to face!"
+      return
+    end
+
+    circle
+
+    # this code pattern works anywhere, but we target_pd from this function all the time anyways
+    res = safe_target_cast
+    if res == 1 # return code for 'start over'
+      target_pd # hope the stack doesn't get too deep
+    end
+
+  end
+
+  def kill_pd
+    pause
+    waitrt?
+    #out_of_mana_str = "You feel intense strain as you try to manipulate"
+    out_of_mana_str = "You feel intense strain as you try to manipulate the mana streams to form this pattern, and you are not certain that you will have enough mental stamina to complete it."
+    res = bput("target pd 40", out_of_mana_str, "attunement", "already")
+    if res == out_of_mana_str
+      return false
+    end
+
+    pause # 1 sec
+    waitrt?
+    # how to abstract this with the method??
+    result = fput "attack", "You", "There is nothing else to face!" # 4 sec
+
+    attack
+    attack
+    attack
+
+    if result == "There is nothing else to face!"
+      put("release spell")
+      return false
+    end
+
+    # this code pattern works anywhere, but we target_pd from this function all the time anyways
+    res = safe_target_cast
+    if res == 1 # return code for 'start over'
+      target_pd # hope the stack doesn't get too deep
+    end
+
+  end
+
+  def release_shw
+      pause
+      waitrt?
+      put "release shw"
+  end
+
+  def debil_shw
+    if !DRSpells.active_spells.include?('Shadow Web')
+      pause
+      waitrt?
+      put "prep shw 18"
+
+      pause # 1 sec
+      waitrt?
+      # how to abstract this with the method??
+      result = fput "circle", "You", "There is nothing else to face!" # 4 sec
+
+      # 3 sec
+      elbow
+      # 3 sec
+      elbow
+      # 3 sec
+      elbow
+      # 3 sec
+      elbow
+
+      pause
+      waitrt?
+      fput "cast", "You"
+    end
+  end
+
+  def debil
+    pause
+    waitrt?
+    put "prep mb 20"
+
+    pause # 1 sec
+    waitrt?
+    # how to abstract this with the method??
+    result = fput "circle", "You", "There is nothing else to face!" # 4 sec
+
+    # 3 sec
+    elbow
+
+    # 3 sec
+    elbow
+
+    if result == "There is nothing else to face!"
+      put("release spell")
+      return
+    end
+
+    pause
+    waitrt?
+    fput "cast", "You"
+  end
+
+  def pd_trainer
+    if DRSkill.getxp('Debilitation') < 34
+      debil
+    end
+    target_pd
+    target_pd
+    target_pd
+    cleanup
+  end
+
+  def combat_teardown(weapon=nil)
+    if corpse?
+      cleanup
+    end
+    loop {
+      break if !cleanup_one_ammo
+    }
+    if weapon
+      stowmyitem(weapon)
+    end
+  end
+
+  def ranged_teardown(weapon=nil)
+    if corpse?
+      cleanup
+    end
+    loop {
+      break if !cleanup_one_ammo
+    }
+    if weapon
+      unload
+      stowmyitem(weapon)
+    end
+  end
+
+  def advance_setup(weapon=nil, swap=nil, swap_str=nil)
+    stowheld
+    if weapon
+      getmyitem(weapon)
+    end
+    if swap
+      swapitem(weapon, swap_str)
+    end
+    waitfor_mobs
+    advance
+  end
+
+  def ranged_setup(weapon=nil)
+    set_stance("shield")
+    stowheld
+    if weapon
+      getmyitem(weapon)
+    end
+    waitfor_mobs
+  end
+
+  def offhand_setup(weapon1, weapon2)
+    stowheld
+    getmyitem(weapon1)
+    getmyitem(weapon2)
+    waitfor_mobs
+    advance
+  end
+
+  def offhand_teardown(weapon1, weapon2)
+    if corpse?
+      cleanup
+    end
+    loop {
+      break if !cleanup_one_ammo
+    }
+    stowheld # stow both
+  end
+
+  def train_small_edged(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon]
+    train_weapon('Small Edged', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_large_edged(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Large Edged', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_2he(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Twohanded Edged', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_2hb(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Twohanded Blunt', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_large_blunt(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Large Blunt', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_small_blunt(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Small Blunt', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_polearms(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Polearms', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_staves(weapon, swap=nil, swap_str=nil)
+    setup_params = [weapon, swap, swap_str]
+    train_weapon('Staves', 'attack', setup_method: 'advance_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_offhand(weapon1, weapon2)
+    setup_params = [weapon1, weapon2]
+    teardown_params = [weapon1, weapon2]
+    train_weapon('Offhand Weapon', 'attack_left', setup_method: 'offhand_setup', setup_params: setup_params, teardown_method: 'offhand_teardown', teardown_params: teardown_params)
+  end
+
+  def train_brawling
+    train_weapon('Brawling', 'elbow', setup_method: 'advance_setup', teardown_method: 'combat_teardown')
+  end
+
+  def train_tactics
+    train_weapon('Tactics', 'circle', setup_method: 'advance_setup', teardown_method: 'combat_teardown')
+  end
+
+  def train_ht(weapon)
+    setup_params = [weapon]
+    params = [weapon]
+    train_weapon('Heavy Thrown', 'lob_and_recover', params: params, setup_method: 'ranged_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_lt(weapon)
+    setup_params = [weapon]
+    params = [weapon]
+    train_weapon('Light Thrown', 'lob_and_recover', params: params, setup_method: 'ranged_setup', setup_params: setup_params, teardown_method: 'combat_teardown')
+  end
+
+  def train_bow(weapon, ammo)
+    setup_params = [weapon]
+    params = [ammo]
+    train_weapon('Bow', 'missile_sequence', params: params, setup_method: 'ranged_setup', setup_params: setup_params, teardown_method: 'ranged_teardown')
+  end
+
+  def train_xbow(weapon, ammo)
+    setup_params = [weapon]
+    params = [ammo]
+    train_weapon('Crossbow', 'missile_sequence', params: params, setup_method: 'ranged_setup', setup_params: setup_params, teardown_method: 'ranged_teardown')
+  end
+
+  def train_sling(weapon, ammo)
+    setup_params = [weapon]
+    params = [ammo]
+    train_weapon('Slings', 'missile_sequence', params: params, setup_method: 'ranged_setup', setup_params: setup_params, teardown_method: 'ranged_teardown')
+  end
+end

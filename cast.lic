@@ -74,9 +74,12 @@
     casting. Set this as either `-s` or `-symbiosis`, and UNset it as either
     `-!s` or `-!symbiosis`.
   
-  * `force`/`wait`/`fail`: what to do if your attunement, concentration, or
-    fatigue are below configured thresholds. Will fail by default. Set with
-    `-force`/`-f`, `-wait`/`-w`, and `-fail`.
+  * `force`: bypass checks like mana thresholds and recast timers. Always cast.
+    Set as `-force`/`-f` or unset as `-!force`/`-!f`
+
+  * `wait`: if fatigue, attunement, or concentration are below configured
+    thresholds, then wait until they have recovered and then cast. By default,
+    the cast will simply fail. Set as `-wait`/`-w` or unset as `-!wait`/`-!w`
   
   SAVING DEFAULT PARAMETERS
   -------------------------
@@ -222,8 +225,10 @@ class Cast
         description: "Invoke this runestone (or similar item) to prep" },
       { name: "-symbiosis", regex: /^-!?s(?:ymbiosis)?$/i, optional: true,
         description: "Prepare (or not) with your currently studied symbiosis" },
-      { name: "-force/-wait/-fail", regex:/^-(?:f(?:orce)?|w(?:ait)?|fail)$/i, optional: true,
-        description: "What to do if attune/conc/fatigue is below threshold"},
+      { name: "-force", regex:/^-f(?:orce)?$/i, optional: true,
+        description: "Force the cast even if checks should prevent it" },
+      { name: "-wait", regex:/^-w(?:ait)?$/i, optional: true,
+        description: "If below attune/conc/fatigue thresholds, wait to cast" },
       { name: "-MODE", regex:/^-(?:save(=\w+)?|test|clear|yaml)$/i, optional: true,
         description: "Options: -save[=??], -test, -clear, -yaml (see documentation)"},
       { name: "-debug", regex: /^-d(ebug)?$/i, optional: true,
@@ -291,7 +296,8 @@ class Cast
     @target = @params["target"]
     @symbiosis = !!@params["symbiosis"]
     @runestone = @params["runestone"]
-    @below_threshold = @params["below_threshold"]
+    @force = @params["force"]
+    @wait = @params["wait"]
     logd "PARAMS --", {
       total_mana: @total_mana.nil? ? "(will discern)" : @total_mana,
       charge: @charge,
@@ -299,7 +305,8 @@ class Cast
       target: @target,
       symbiosis: @symbiosis,
       runestone: @runestone,
-      below_threshold: @below_threshold,
+      force: @force,
+      wait: @wait,
     }
 
     @arcana_ranks = DRSkill.getmodrank("Arcana")
@@ -323,8 +330,12 @@ class Cast
     when :yaml
       export_yaml
     when :cast
-      validate_focus
-      validate_thresholds
+      if @force
+        respond "CAST: WARNING: forcing cast and bypassing validation checks."
+      else
+        validate_focus
+        validate_thresholds
+      end
       # DRCA's cast_spell? method doesn't reliably report success and failure -- rituals always
       # appear to fail, for example. Also, failing to cast with a runestone because it's spent
       # counts as a success. So we will manually look for failures.
@@ -397,7 +408,7 @@ class Cast
     logd "merge_params: saved parameters are...", saved
     logd "merge_params: default parameters are...", default
 
-    keys = %w{total_mana charge prep_time target symbiosis runestone below_threshold}
+    keys = %w{total_mana charge prep_time target symbiosis runestone force wait}
     Hash[*keys.flat_map do |key|
       value = declared[key] || saved[key] || default[key]
       [key, value]
@@ -425,17 +436,11 @@ class Cast
     when /^-r(?:unestone)?=([a-z.]+)$/i
       params["runestone"] = Regexp.last_match(1).downcase
     end
-    case args["-force/-wait/-fail"]
-    when "-force", "-f"
-      params["below_threshold"] = :force
-    when "-wait", "-w"
-      params["below_threshold"] = :wait
-    when "-fail"
-      params["below_threshold"] = :fail
-    end
 
     params["target"] = args["target"] if args["target"]
     params["symbiosis"] = !args["-symbiosis"].start_with?("-!") if args["-symbiosis"]
+    params["force"] = !args["-force"].start_with?("-!") if args["-force"]
+    params["wait"] = !args["-wait"].start_with?("-!") if args["-wait"]
     params
   end
 
@@ -612,7 +617,8 @@ class Cast
 
   def validate_focus
     if @spell_data["ritual"] && !@ritual_focus
-      respond "CAST: ERROR: will not cast a ritual spell without a ritual focus! See 'ritual_focus' in your YAML settings."
+      respond "CAST: ERROR: will not cast a ritual spell without a ritual focus! " +
+        "See 'ritual_focus' in your YAML settings, or -force to cast."
       exit
     end
   end
@@ -635,10 +641,7 @@ class Cast
   def validate_thresholds
     return if thresholds_ok?
     
-    case @below_threshold
-    when :force
-      respond "CAST: WARNING: #{threshold_status}, but forced to cast anyway."
-    when :wait
+    if @wait
       respond "CAST: WARNING: #{threshold_status}. Waiting until it's possible to cast."
       loop do
         respond "CAST: #{threshold_status}"
@@ -646,7 +649,7 @@ class Cast
         break if thresholds_ok?
       end
     else
-      respond "CAST: ERROR: #{threshold_status}. Use -force or -wait to cast."
+      respond "CAST: Cast failed. #{threshold_status}. Use -force or -wait to cast."
       exit
     end
   end

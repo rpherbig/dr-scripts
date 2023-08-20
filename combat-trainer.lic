@@ -293,6 +293,7 @@ class SetupProcess
 
     # Invoke Focus
     return unless game_state.weapon_skill == 'Targeted Magic' && game_state.weapon_name
+    return unless DRCI.get_item?(game_state.weapon_name)
 
     DRC.bput("invoke #{game_state.weapon_name}", 'You')
     waitrt?
@@ -339,6 +340,12 @@ class LootProcess
     @equipment_manager = equipment_manager
     echo('New LootProcess') if $debug_mode_ct
     skinning = settings.skinning
+
+    @worn_trashcan = settings.worn_trashcan
+    echo("  @worn_trashcan: #{@worn_trashcan}") if $debug_mode_ct
+
+    @worn_trashcan_verb = settings.worn_trashcan_verb
+    echo("  @worn_trashcan_verb: #{@worn_trashcan_verb}") if $debug_mode_ct
 
     @skin = skinning['skin'] || false
     echo("  @skin: #{@skin}") if $debug_mode_ct
@@ -497,6 +504,9 @@ class LootProcess
   end
 
   def execute(game_state)
+    if DRRoom.room_objs.include?("junk")
+      @dump_item_count -= 3
+    end
     if (Time.now - @dump_timer > 300) && @dump_junk && DRRoom.room_objs.count >= @dump_item_count
       fput 'DUMP JUNK'
       @dump_timer = Time.now
@@ -874,6 +884,8 @@ class LootProcess
         break
       when 'cannot be skinned'
         game_state.unskinnable(mob_noun)
+        @dissect_cycle_skills.delete("Skinning")
+        @skin = false
         break
       when 'That creature cannot'
         arranges = 0
@@ -952,6 +964,9 @@ class LootProcess
       return false
     when 'While likely a fascinating study', "That'd be a waste of time.", 'You do not yet possess the knowledge'
       game_state.undissectable(mob_noun)
+      @dissect_cycle_skills.delete("First Aid")
+      @dissect_cycle_skills.delete("Thanatology") if @dissect_for_thanatology
+      @dissect = false
       return false
     when 'would probably object', "should be left alone."
       dissected?('', game_state)
@@ -1047,17 +1062,17 @@ class SafetyProcess
   end
 
   def execute(game_state)
-    if @untendable_counter > 0
+    if @untendable_counter >= 3
       echo('Skipping tendme check due to untendable backoff') if $debug_mode_ct
-      @untendable_counter -= 1
+      echo("Couldn't tend bleeders after trying three times. Stopping hunt to heal.")
+      $HUNTING_BUDDY.stop_hunting
+      $COMBAT_TRAINER.stop
     elsif bleeding? && !Script.running?('tendme')
       echo('Checking for tendable bleeders...') if $debug_mode_ct
       if DRCH.has_tendable_bleeders?
-        custom_require.call('tendme')
-      else
-        echo('Setting untendable wound backoff to prevent tendme spam...') if $debug_mode_ct
-        @untendable_counter = 3
+        DRC.wait_for_script_to_complete('tendme')
       end
+      @untendable_counter += 1
     end
 
     fput 'exit' if DRStats.health < @health_threshold
@@ -2782,7 +2797,7 @@ class TrainerProcess
       waitrt?
       DRC.fix_standing
     when /^Tactics$/i
-      DRC.bput($tactics_actions.sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty?
+      DRC.bput($tactics_actions.sample, 'roundtime', 'There is nothing else', 'Face what', 'You must be closer', 'You must be standing', 'Strangely, you don\'t feel like fighting right now', 'flying too high for you to attack') unless game_state.npcs.empty? || game_state.retreating?
     when /^Analyze$/i
       analyze(game_state, 0)
     when /^Hunt$/i
@@ -3047,7 +3062,7 @@ class TrainerProcess
   end
 
   def analyze(game_state, fail_count)
-    return if game_state.npcs.empty?
+    return if game_state.npcs.empty? || game_state.retreating?
     return if fail_count > @analyze_retry_count
     return if DRSkill.getxp('Tactics') >= @combat_training_abilities_target
 
@@ -3420,6 +3435,7 @@ class AttackProcess
     end
 
     retrieve_action = game_state.thrown_retrieve_verb
+
     bonded_invoke_success = [ # standard and custom invoke messages
       /reuniting you with your lost belonging/,
       /In its place, you are left with your/,
@@ -3427,6 +3443,7 @@ class AttackProcess
       /depositing .* back to the rightful owner/,
       /Your .* appears within reach/,
       /you are reunited with your/,
+      /You catch/,
       /A tiny ripplegate gurgles into being near your/
     ]
 
@@ -3753,7 +3770,9 @@ class AttackProcess
   end
 
   def dance(game_state)
-    if game_state.npcs.empty?
+    return if game_state.retreating?
+
+    if game_state.npcs.empty? || game_state.retreating?
       pause 1
     else
       game_state.set_dance_queue
@@ -4022,11 +4041,11 @@ class GameState
   $blunt_skills = ['Small Blunt', 'Large Blunt', 'Twohanded Blunt']
   $staff_skills = ['Staves']
   $polearm_skills = ['Polearms']
-  $melee_skills = $edged_skills + $blunt_skills + $staff_skills + $polearm_skills
+  $melee_skills = $edged_skills + $blunt_skills + $staff_skills + $polearm_skills + ['Melee Mastery']
   $thrown_skills = ['Heavy Thrown', 'Light Thrown']
   $twohanded_skills = ['Twohanded Edged', 'Twohanded Blunt']
   $aim_skills = ['Bow', 'Slings', 'Crossbow']
-  $ranged_skills = $thrown_skills + $aim_skills
+  $ranged_skills = $thrown_skills + $aim_skills + ['Missile Mastery']
   $non_dance_skills = $ranged_skills + ['Brawling', 'Offhand Weapon']
   $tactics_actions = ['bob', 'weave', 'circle']
 
@@ -4427,6 +4446,7 @@ class GameState
   end
 
   def engage
+    return if retreating?
     return if stomp
     return if pounce
 
@@ -4437,6 +4457,7 @@ class GameState
   end
 
   def stomp
+    return if retreating?
     return false unless DRStats.barbarian? && DRStats.circle >= 100 # basic qualifications for use
     return false unless npcs.any? # We should have an NPC to pounce on
     return false unless (@stomp_to_engage || @stomp_on_cooldown) && Flags['war-stomp-ready'] # ability is off cooldown and we've elected to use it
@@ -4538,6 +4559,7 @@ class GameState
   #   If not specified then defaults to true unless currently training 'Offhand Weapon' skill.
   # @returns name of the wielded weapon
   def wield_weapon(skill = weapon_skill, equip_main_hand = !offhand?)
+    return unless skill
     return if skill.eql?('Brawling')
     return if skill.eql?('Tactics')
 
@@ -4706,7 +4728,7 @@ class GameState
   end
 
   def skinnable?(mob_noun)
-    !@no_skins.include?(mob_noun)
+    @no_skins.none?(mob_noun)
   end
 
   def unskinnable(mob_noun)
@@ -4715,7 +4737,7 @@ class GameState
   end
 
   def dissectable?(mob_noun)
-    !@no_dissect.include?(mob_noun)
+    @no_dissect.none?(mob_noun)
   end
 
   def undissectable(mob_noun)

@@ -1,37 +1,41 @@
 =begin
 
-  logs the game to lich\logs\<game code>-<char name>\<date>-<number>.log
+  Logs raw XML output to lich\logs\<game code>-<char name>\<date>-<number>.xml
   starts a new file after 30,000 lines (somewhere around 1mb)
 
-  SYNTAX:  ;log
-           ;log --timestamp="%F %T %Z"
-           ;autostart add --global log --timestamp=\"%F %T %Z\"
+  SYNTAX:  ;logxml
+           ;logxml --timestamp="%F %T %Z"
+           ;autostart add --global logxml --timestamp=\"%F %T %Z\"
            log format based on https://apidock.com/ruby/DateTime/strftime
 
+  Shamelessly stolen and slightly altered (to use XML) from Tillmen's log script.
+
+  Messages from the client will be wrapped in <!-- CLIENT -->...<!-- ENDCLIENT --> tags.
+
        author: elanthia-online
- contributors: Tillmen, Tysong, Xanlin
+ contributors: LostRanger, Xanlin, Tysong
          game: gs
-      version: 0.7
-     required: Lich > 5.0.1
+      version: 0.5.0 (2023-03-31)
 
   changelog:
-    0.7 (2023-03-31):
+    0.5.0 (2023-03-31):
       * Rubocop code cleanup
       * Adjust filename to include hours, minutes, seconds
       * Save into subdirectories by year/month
       * Starts a new file when the day changes
       * Add log timestamp CLI option for non-DragonRealms
-    0.6 (2023-01-23):
-      * Update for Ruby v3 compatibility
-    0.5 (2022-11-24):
-      * Remove reference to $SAFE
-    0.4 (2022-01-10):
-      * Making datetime stamps customizeable, and tuneable in a character's yaml.
-    0.3 (2022-01-04):
-      * prepend datetime stamps to logged lines
-    0.2 (2015-01-13):
-      * create log directory if needed
-
+    0.4.1 (2019-12-28):
+      * Implement 0.4, correctly.
+    0.4 (2019-12-28):
+      * ';logxml streams' will now include pushStream and popStream messages.  Note that this may be very, very noisy
+        due to room window updates and such.
+    0.3 (2017-04-24):
+      * fix output including both XML and plaintext from downstream.
+    0.2 (2017-04-23):
+      * Indicate where full logging started in the log file (as opposed to contents from regetall).  Client data before
+        this point can't be fully logged due to Lich not loading the script in time, so yell about it.
+      * Use a more configuration-safe mechanism of complaining about not being trusted.  Also, explain why trust is
+        needed.
 =end
 
 unless defined?(Script.current.want_script_output)
@@ -51,18 +55,22 @@ if defined?(get_settings)
   stamp_enable = settings.log_timestamp
   stamp_format = settings.log_timestamp_format
 end
-Script.current.want_script_output = true
+Script.current.want_script_output = false
 Script.current.want_upstream = true
+Script.current.want_downstream = false
+Script.current.want_downstream_xml = true
 
 if Script.current.vars[0] =~ /\-\-timestamp="(.*)"/
   stamp_format = Regexp.last_match[1]
   stamp_enable = true
 end
 
+log_streams = Script.current.vars.include?("streams")
+
 Thread.new {
   begin
     loop {
-      Script.current.downstream_buffer.push ">#{upstream_get.sub(/^<c>/, '')}"
+      Script.current.downstream_buffer.push "<!-- CLIENT -->#{upstream_get}<!-- ENDCLIENT -->"
     }
   rescue
     echo $!
@@ -74,23 +82,24 @@ loop {
   dir = File.join(LICH_DIR, 'logs', "#{XMLData.game}-#{XMLData.name}", Time.now.strftime("%Y"), Time.now.strftime("%m"))
   FileUtils.mkdir_p(dir) unless File.exist?(dir)
   thisdate = Time.now.strftime("%Y-%m-%d")
-  filename = File.join(dir, "#{Time.now.strftime("%Y-%m-%d_%H-%M-%S")}.log")
+  filename = File.join(dir, "#{Time.now.strftime("%Y-%m-%d_%H-%M-%S")}.xml")
   file = File.open(filename, 'a')
   file.sync = true
-  file.puts "#{Time.now.strftime("%Y-%m-%d %H:%M:%S.%L %:z")}\n"
+  file.puts "#{Time.now.strftime("%Y-%m-%d %I:%M%P").sub(/0([0-9]+\:)/) { "#{$1}" }}\n"
   unless started
     if (Time.now - $login_time) < 30
       file.puts(reget)
       file.puts "<!-- Above contents from reget; full logging now active -->\n"
     end
 
-    echo "Non-XML Logging started, currently logging to #{filename}"
+    echo "XML Logging started, currently logging to #{filename}"
     started = true
   end
+
   begin
     30000.times {
       line = get
-      unless line =~ /^<(?:push|pop)Stream/
+      if log_streams or line !~ /^<(?:push|pop)Stream/
         unless defined?(stamp_enable)
           file.puts line
         else

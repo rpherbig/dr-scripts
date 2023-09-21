@@ -1,0 +1,617 @@
+custom_require.call(%w[common common-items common-travel])
+
+class TaskForage
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'town', optional: true, options: %w[crossing shard], variable: true,
+          description: 'Which town you want to run tasks in. If none provided, your hometown is used.' }
+      ]
+    ]
+
+    @args = parse_args(arg_definitions)
+
+    @settings = get_settings
+    @forage_settings = @settings.task_forage_settings
+    @hometown = @settings.hometown
+    @foraging_data = get_data('forage').foragables
+    @forage_settings['forage_locations'].each do |entry|
+      existing_item_index = @foraging_data.index { |item| item['item'] == entry['item'] }
+      if existing_item_index
+        @foraging_data[existing_item_index] = entry
+        echo "Successfully imported '#{entry['item']}' settings." if @debug
+      else
+        @foraging_data << entry
+        echo "Added '#{entry['item']}' as a new forgable." if @debug
+      end
+    end
+
+    @shard_path = {
+      2544   => ['s'],
+      2550   => ['sw'],
+      2556   => ['sw'],
+      2557   => ['sw'],
+      2558   => ['w'],
+      2559   => ['w'],
+      2560   => ['w'],
+      2561   => ['w'],
+      2562   => ['nw'],
+      2522   => ['nw'],
+      19_287 => ['nw'],
+      2517   => ['n'],
+      2516   => ['n'],
+      2518   => ['ne'],
+      2520   => ['ne'],
+      2521   => ['ne'],
+      2523   => ['e'],
+      2524   => ['e'],
+      2525   => ['s'],
+      2526   => ['s'],
+      2527   => ['s'],
+      2528   => ['s'],
+      2529   => ['s'],
+      2536   => ['s'],
+      2537   => ['s'],
+      2538   => ['go gate'],
+      2611   => ['s'],
+      2503   => ['w'],
+      2502   => ['sw'],
+      2501   => ['s'],
+      2496   => ['w'],
+      2497   => ['w'],
+      2498   => ['go brid', 'w'],
+      2511   => ['w'],
+      2512   => ['w'],
+      2513   => ['w'],
+      2514   => ['w'],
+      2515   => ['e', 'e', 'e', 'e', 'go brid', 'e', 'e', 'e', 's'],
+      2499   => ['se'],
+      2500   => ['e'],
+      2581   => ['s'],
+      2596   => ['go gate'],
+      2575   => ['s'],
+      2573   => ['s'],
+      2570   => ['s'],
+      2567   => ['s'],
+      2565   => ['s'],
+      2566   => ['s'],
+      2564   => ['s'],
+      2563   => ['s', 'e', 'e', 'ne', 'go brid'],
+      2582   => ['nw'],
+      2585   => ['nw'],
+      2586   => ['nw'],
+      2589   => ['nw'],
+      2597   => %w[nw nw e],
+      2598   => ['ne'],
+      2599   => ['n'],
+      2600   => ['e'],
+      2601   => ['e'],
+      2612   => ['go brid'],
+      2607   => ['e'],
+      2549   => ['e'],
+      2548   => ['e'],
+      2547   => ['e'],
+      2545   => ['e'],
+      2621   => ['e', 'w', 'w', 'w', 'w', 'w', 'go wrens', 'nw', 'sw'],
+      2613   => ['ne'],
+      2608   => ['ne'],
+      2617   => ['ne'],
+      2633   => ['ne'],
+      2632   => ['ne'],
+      2631   => %w[sw sw sw sw sw sw nw],
+      2504   => ['nw'],
+      2505   => ['nw'],
+      2506   => ['nw'],
+      2507   => ['nw'],
+      2508   => ['nw'],
+      2509   => ['go brid', 'ne', 'e', 'e', 'e', 'e', 'se'],
+      2574   => ['nw'],
+      2540   => ['w'],
+      2539   => %w[e se se],
+      2541   => ['se'],
+      2543   => ['nw', 'nw', 'go brid', 'sw', 'sw', 'sw', 'sw', 'sw', 'sw', 'e'],
+      2603   => ['se'],
+      2602   => %w[s s sw w sw],
+      2583   => ['sw'],
+      2584   => ['sw'],
+      2592   => ['sw'],
+      2593   => ['sw'],
+      2594   => ['sw'],
+      2595   => ['go brid', 'se', 'e', 'e', 'n', 'n', 'n', 'n', 'n', 'w'],
+      2571   => ['sw'],
+      2572   => ['s'],
+      2569   => ['se'],
+      2568   => %w[e s s s s e e ne ne ne n]
+    }
+
+    @move_regex = [/The flower peddler gathers her skirts and glides (<?direction>north|south|east|west|northeast|southeast|southwest|northwest)\./]
+    Flags.add('combat', 'You cannot forage while in combat!', 'closes to pole weapon range on you!',
+              'begins to advance on you!')
+    Flags.add('giver-move', *@move_regex)
+
+    @task_givers = { 'shard'    => { 'npc' => 'peddler', 'location' => @shard_path },
+                     'crossing' => { 'npc' => 'Mags', 'location' => '954' } }
+
+    UserVars.task_forage = {} if UserVars.task_forage.nil?
+    # Track how the last time you were unable to forage an item
+    UserVars.task_forage['item_failures'] = {} if UserVars.task_forage['item_failures'].nil?
+    # Used to store the last known location of wandering task givers
+    UserVars.task_forage['npcs'] = {} if UserVars.task_forage['npcs'].nil?
+
+    @task_town = (@args.town.nil? ? @hometown : @args.town).downcase
+    @task_giver = @task_givers[@task_town]['npc']
+
+    @forage_container = @forage_settings['container'] || @settings.forage_container || 'backpack'
+    @trading_limit = @forage_settings['trading_limit'] || 30
+    @never_wait = @forage_settings['never_wait'].nil? ? false : @forage_settings['never_wait']
+    @use_boosts = @forage_settings['task_boosts'].nil? ? false : @forage_settings['task_boosts']
+    @collect = @forage_settings['collect'].nil? ? false : @forage_settings['collect']
+    @debug = @forage_settings['debug'].nil? ? false : @forage_settings['debug']
+
+    @boosted = nil
+    @number = nil
+    @item = nil
+    @item_location = nil
+    @tasks_completed = 0
+    @tasks_failed = 0
+
+    echo 'UserVars:' if @debug
+    echo UserVars.task_forage.to_yaml if @debug
+    echo 'forage_settings:' if @debug
+    echo @forage_settings.to_yaml if @debug
+
+    while determine_task_necessary
+      find_giver
+      get_task
+      gather_items
+      find_giver
+      complete_task
+    end
+  end
+
+  def follow_wanderer
+    echo 'follow_wanderer' if @debug
+    echo "giver-move flag: #{Flags['giver-move']}" if @debug
+    return unless Flags['giver-move']
+
+    direction = nil
+    @move_regex.each do |regex|
+      direction = Regexp.last_match[1] if Flags['giver-move'].to_s =~ regex
+    end
+    Flags.reset('giver-move')
+    return false unless direction
+
+    return false unless XMLData.room_exits.include?(direction)
+
+    move(direction)
+    true
+  end
+
+  def find_giver
+    echo 'find_giver' if @debug
+    if @task_givers[@task_town]['location'].instance_of? Hash # If the NPC is a wanderer...
+      if Flags['giver-move'] # Did we see the task giver wander away?
+        follow_wanderer
+        search_routine unless check_giver
+      elsif !UserVars.task_forage['npcs'][@task_giver].nil? # Check the last seen location (if known)
+        echo 'Traveling to last known location' if @debug
+        DRCT.walk_to(UserVars.task_forage['npcs'][@task_giver])
+        search_routine unless check_giver
+      else
+        echo 'No last known location. Starting from scratch.' if @debug
+        search_routine
+        check_giver
+      end
+    elsif @task_givers[@task_town]['location'].instance_of? String # If the NPC is not a wanderer, head straight there
+      echo 'Stationary giver. Heading straight there.' if @debug
+      DRCT.walk_to(@task_givers[@task_town]['location'])
+      unless check_giver
+        DRC.message("ERROR: Unable to locate stationary NPC giver #{@task_giver}.")
+        safe_exit
+      end
+    end
+  end
+
+  # To find wandering task givers, there are two methods.
+  # The preferred method is a "compiled" route, speeding you through every possible location in the city, and looking for the NPC.
+  # This is similar to find.lic - but that does a "go2" in every single room, which is slow and unnecessary (unless Shard's streets change layout)
+  # If the compiled route doesn't work for some reason, then the back-up is to use find.lic
+  def search_routine
+    echo 'search_routine' if @debug
+    find_result = fast_find(@task_givers[@task_town]['location'])
+    return if find_result
+
+    echo 'old find' if @debug
+    DRC.wait_for_script_to_complete('find', [@task_town, @task_giver])
+    return if check_giver
+
+    DRC.message('Unable to locate the wandering task giver.')
+    safe_exit
+  end
+
+  def in_room?(npc)
+    DRRoom.npcs.any? { |room_npc| room_npc =~ /\b#{npc}\b/i }
+  end
+
+  def determine_task_necessary
+    echo 'determine_task_necessary' if @debug
+    echo "tasks_completed: #{@tasks_completed}" if @debug
+    echo "tasks_failed: #{@tasks_failed}" if @debug
+    echo "trading_limit: #{@trading_limit}" if @debug
+    safe_exit if DRSkill.getxp('Trading') >= @trading_limit
+    safe_exit if @tasks_failed >= 3
+    true
+  end
+
+  def check_giver
+    echo 'check_giver' if @debug
+    return false unless DRRoom.npcs.include?(@task_giver)
+
+    echo 'Found the task giver' if @debug
+    Flags.reset('giver-move')
+    UserVars.task_forage['npcs'][@task_giver] = Room.current.id
+    exit unless room_safe?
+    true
+  end
+
+  def room_safe?
+    echo 'room_safe?' if @debug
+    if Room.current.id == 2521 && @item.nil? # Don't hang around in the room that lets you get struck by lightning.
+      move('ne')
+      move('e')
+      DRC.message("#{@task_giver} is in a dangerous area.")
+      false
+    else
+      echo 'room_safe = true' if @debug
+      true
+    end
+  end
+
+  # fast_find runs you through a pre-calculated route, which should be the same route that running "find" does.
+  # But because it's pre-calculated, it's much faster than running a "go2" on each adjacent destination room dozens of times over and over (the method "find" uses)
+  def fast_find(rooms)
+    echo 'fast_find' if @debug
+    target_rooms = rooms.keys
+    start_index = target_rooms.index(Room.current.id) || 0 # If our current room is in the search area, just start there
+    target_rooms = target_rooms.rotate(start_index)
+    DRCT.walk_to(target_rooms.first)
+    failures = 0
+    target_rooms.each do |room|
+      rooms[room].each do |movement|
+        return true if check_giver
+
+        old_room = Room.current.id
+        move(movement)
+        if old_room == Room.current.id
+          failures += 1
+          echo "Failure to move - #{failures}" if @debug
+        end
+        return false if failures >= 3
+      end
+    end
+    false
+  end
+
+  def get_task
+    loop do
+      echo 'get_task' if @debug
+      result = DRC.bput("ask #{@task_giver} for task", /I need (\d+) ([^.]+)/, /You are already on a task/,
+                        /I am sorry, you must wait/, /I have a small item that needs/, /To whom are you speaking?/)
+      case result
+      when /I need (\d+) ([^.]+)/
+        @number = Regexp.last_match(1).to_i
+        @item = Regexp.last_match(2)
+        echo "Gathering #{@number} of #{@item}" if @debug
+        next unless evaluate_item
+
+        accept_task
+        break
+      when /To whom are you speaking?/
+        echo 'Task giver wandered away' if @debug
+        find_giver
+        next
+      when /I have a small item that needs/
+        echo 'Wrong task type' if @debug
+        decline_task
+        kill_time(2)
+        next
+      when /I am sorry, you must wait/
+        kill_time(1)
+        next
+      when /You are already on a task/
+        echo 'Already on a task. Canceling it' if @debug
+        cancel_task
+        kill_time(2)
+        next
+      end
+    end
+  end
+
+  def accept_task
+    echo 'accept_task' if @debug
+    case DRC.bput('accept task', 'Remember, I need', 'You have no offers to')
+    when /You have no offers to/
+      DRC.message('Task is missing.')
+      get_task
+    when /Remember, I need/
+      echo 'Task received' if @debug
+      DRCI.stow_hands
+    end
+  end
+
+  def decline_task
+    echo 'decline_task' if @debug
+    DRC.bput('decline task', 'I guess you do not wish to help', 'Please rephrase that command')
+  end
+
+  def cancel_task
+    echo 'cancel_task' if @debug
+    case DRC.bput("ask #{@task_giver} for task cancel", 'wish to end your current', 'do not currently have a',
+                  'frowns and shakes', 'To whom are you speaking?')
+    when /do not currently have a/, /frowns and shakes/
+      echo 'No task' if @debug
+      true
+    when /To whom are you speaking?/
+      find_giver
+      cancel_task
+    when /wish to end your current/
+      echo 'Cancel step 1' if @debug
+      case DRC.bput("ask #{@task_giver} for task cancel", 'I see that you no longer wish to assist',
+                    'do not currently have a')
+      when /do not currently have a/, /I see that you no longer wish to assist/
+        echo 'Cancel step 2' if @debug
+        true
+      end
+    end
+    kill_time(2) if determine_task_necessary
+  end
+
+  def use_boosts
+    echo 'use_boosts' if @debug
+
+    # Check to see if a boost is already active
+    case DRC.bput('info', { 'timeout' => 0.5, 'suppress_no_match' => true }, ' +Task Master, expiring ')
+    when / +Task Master, expiring /
+      echo 'Already boosted' if @debug
+      @boosted = true
+      return true
+    else
+      echo 'Not boosted' if @debug
+      case DRC.bput('boost task', 'You\'ve activated the Task Master boost',
+                    'You don\'t have enough credits for the Task Master boost')
+      when /You've activated the Task Master boost/
+        echo 'Boost now activated' if @debug
+        @boosted = true
+        return true
+      when /You don't have enough credits for the Task Master boost/
+        echo 'Can\'t boost' if @debug
+        @boosted = false
+        return false
+      end
+    end
+    echo 'Unable to determine boost status' if @debug
+    @boosted = false
+    return false
+  end
+
+  def kill_time(repetitions = 1)
+    echo "kill_time: #{repetitions}" if @debug
+    echo "use_boosts: #{@use_boosts}, and current status is #{@boosted}" if @debug
+    echo "never_wait: #{@never_wait}" if @debug
+    use_boosts if @use_boosts && @boosted.nil?
+
+    # No need to kill time if we're using a boost
+    return if @boosted
+
+    safe_exit if @never_wait
+
+    DRCI.stow_hands
+    repetitions.times do |_i|
+      DRC.collect('rock')
+      waitrt?
+      DRC.kick_pile? unless DRC.kick_pile?('rock')
+    end
+  end
+
+  def time_to_room(destination)
+    echo "time_to_room: #{destination}" if @debug
+    _previous, shortest_paths = Map.dijkstra(Room.current.id, destination)
+    echo "Expected travel time is #{shortest_paths[destination]}" if @debug
+    shortest_paths[destination]
+  end
+
+  # NPCs sometimes ask for items with names that don't match what you actually forage for, or what shows up in FORAGE RECALL.
+  # Check to make sure we have data on this item, and know the correct name.
+  def known_item?
+    echo 'known_item?' if @debug
+    if @foraging_data.any? { |item| item['item'] == @item }
+      # no change necessary
+    elsif @foraging_data.any? { |item| item['item'] == @item.chomp('s') }
+      @item = @item.chomp('s')
+    elsif @foraging_data.any? { |item| item['item'] == @item.gsub('leaves', 'leaf') }
+      @item = @item.gsub('leaves', 'leaf')
+    elsif @foraging_data.any? { |item| item['item'] == @item.gsub('berries', 'berry') }
+      @item = @item.gsub('berries', 'berry')
+    elsif @foraging_data.any? { |item| item['item'] == @item.gsub(/es\z/, '') } # grasses, mosses, etc.
+      @item = @item.gsub(/es\z/, '')
+    elsif @item == 'sprigs of lavender'
+      @item = 'lavender'
+    elsif @item == 'pieces of wild corn'
+      @item = 'corn'
+    elsif @item == 'sticks, branches or limbs'
+      @item = 'stick'
+    elsif @item == 'bits of dirt'
+      @item = 'dirt'
+    elsif @item == 'bits of sap'
+      @item = 'sap'
+    elsif @item == 'jasmine flowers'
+      @item = 'jasmine blossom'
+    elsif ['sharkteeth', 'shark teeth'].include?(@item)
+      @item = 'shark tooth'
+    else
+      DRC.message("I don't know where to find #{@item}")
+      return false
+    end
+    echo 'known = true' if @debug
+    true
+  end
+
+  # Check if we have a location for the item
+  def mapped_item?
+    echo 'mapped_item?' if @debug
+    rooms = @foraging_data.find { |item| item['item'] == @item }['rooms']
+    return false if rooms.empty?
+
+    echo 'mapped = true' if @debug
+    true
+  end
+
+  # Check if the item is off of a failure cooldown
+  def ready_item?
+    echo 'ready_item?' if @debug
+    if UserVars.task_forage['item_failures'][@item] && Time.now < UserVars.task_forage['item_failures'][@item] + 7_200
+      return false
+    end
+
+    echo 'ready = true' if @debug
+    true
+  end
+
+  # Check if the item is reasonably close
+  def closeby_item?
+    echo 'closeby_item?' if @debug
+    @item_location = locate_item
+
+    if time_to_room(@item_location) >= 50
+      DRC.message("The nearest known location where you can forage this item is too far away: #{@item_location}")
+      false
+    else
+      echo 'closeby_item = true' if @debug
+      true
+    end
+  end
+
+  def evaluate_item
+    echo "evaluate_item: #{@item}" if @debug
+    unless known_item? && mapped_item? && ready_item? && closeby_item?
+      @tasks_failed += 1
+      cancel_task
+      return false
+    end
+    true
+  end
+
+  # Check in base-foraging to find the nearest available foraging spot
+  def locate_item
+    echo "locate_item #{@item}" if @debug
+    item_info = @foraging_data.find { |item| item['item'] == @item }
+
+    return Room.current.id if item_info['rooms'].include?('any')
+
+    rooms = DRCT.sort_destinations(item_info['rooms'])
+    rooms.first
+  end
+
+  # Travel to the nearest foraging spot and start to gather them
+  def gather_items
+    echo 'gather_items' if @debug
+    Flags.reset('combat')
+    DRCT.walk_to(@item_location)
+    item_count = 0
+
+    if @collect && @number >= 8
+      DRC.collect(@item)
+      while item_count < @number
+        DRCI.get_item_unsafe(@item)
+        if DRCI.put_away_item?(@item, @forage_container)
+          item_count += 1
+        else
+          DRC.message('Unable to store item.')
+          cancel_task
+          safe_exit
+        end
+      end
+      DRC.kick_pile? unless DRC.kick_pile?(@item.to_s)
+    else
+      while item_count < @number
+        echo "combat flag: #{Flags['combat']}" if @debug
+        DRC.retreat if Flags['combat']
+        if DRC.forage?(@item, 5)
+          item_count += 1
+          unless DRCI.put_away_item?(@item, @forage_container)
+            DRC.message("You need to make more room in your #{@forage_container}")
+            cancel_task
+            safe_exit
+          end
+        else
+          invalid_room?
+          if DRSkill.getrank('Outdoorsmanship') <= 800
+            DRC.message('Unable to find the item. You may not be skilled enough to find it. You might have more success during the day, during better weather, or in a different season.')
+            DRC.message('task-forage will decline tasks for this item for 2 hours.')
+            DRC.message('You can permanently blacklist this item by defining its foraging_locations rooms as blank in your YAML.')
+            echo("EXAMPLE BLACKLIST YAML:\n\ntask_forage_settings:\n    forage_locations:\n      - item: #{@item}\n        rooms: []\n\n\n ")
+            UserVars.task_forage['item_failures'][@item] = Time.now
+          end
+          find_giver
+          cancel_task
+          @tasks_failed += 1
+          determine_task_necessary
+          get_task
+        end
+      end
+    end
+  end
+
+  def invalid_room?
+    # This should be extremely rare - either because the user manually specified a room you can't forage in, or somehow got dragged to one
+    lines = reget(10).reverse
+    lines.each do |line|
+      case line
+      when /You survey the area and realize that any foraging efforts would be futile/
+        DRC.message('Unable to forage in this room.')
+        return true
+      end
+    end
+    false
+  end
+
+  def give_item
+    echo 'give_item' if @debug
+    case DRC.bput("give #{@task_giver}", 'and says, "Thanks,', '^What is it you\'re trying to give?',
+                  ' I have a few things here for you, thank you so much for your help')
+    when /^What is it you're trying to give?/
+      find_giver
+      give_item
+    when /I have a few things here for you, thank you so much for your help/
+      @tasks_completed += 1
+      @item = nil
+      kill_time(2) if determine_task_necessary
+    end
+  end
+
+  def complete_task
+    echo 'complete_task' if @debug
+    UserVars.task_forage['item_failures'].delete(@item) unless UserVars.task_forage['item_failures'][@item].nil?
+    @number.times do
+      if !DRCI.get_item?(@item, @forage_container)
+        DRC.message('ERROR: Task item not found.')
+        safe_exit
+      else
+        give_item
+      end
+    end
+  end
+
+  # Make sure we never leave the user in a lightning room
+  def safe_exit
+    room_safe?
+    exit
+  end
+end
+
+before_dying do
+  Flags.delete('combat')
+  Flags.delete('giver-move')
+end
+
+TaskForage.new

@@ -1,5 +1,3 @@
-# frozen_string_literal: true
-
 custom_require.call(%w[common common-items common-travel])
 
 class TaskForage
@@ -164,9 +162,7 @@ class TaskForage
 
     while determine_task_necessary
       find_giver
-      until get_task
-        # loop until we have an appropriate foraging task
-      end
+      get_task
       gather_items
       find_giver
       complete_task
@@ -249,7 +245,7 @@ class TaskForage
 
   def check_giver
     echo 'check_giver' if @debug
-    return false unless in_room?(@task_giver)
+    return false unless DRRoom.npcs.include?(@task_giver)
 
     echo 'Found the task giver' if @debug
     Flags.reset('giver-move')
@@ -297,36 +293,37 @@ class TaskForage
   end
 
   def get_task
-    echo 'get_task' if @debug
-    result = DRC.bput("ask #{@task_giver} for task", /I need (\d+) ([^.]+)/, /You are already on a task/,
-                      /I am sorry, you must wait/, /I have a small item that needs/, /To whom are you speaking?/)
-    case result
-    when /I need (\d+) ([^.]+)/
-      @number = Regexp.last_match(1).to_i
-      @item = Regexp.last_match(2)
-      echo "Gathering #{@number} of #{@item}" if @debug
-      return false unless evaluate_item
+    loop do
+      echo 'get_task' if @debug
+      result = DRC.bput("ask #{@task_giver} for task", /I need (\d+) ([^.]+)/, /You are already on a task/,
+                        /I am sorry, you must wait/, /I have a small item that needs/, /To whom are you speaking?/)
+      case result
+      when /I need (\d+) ([^.]+)/
+        @number = Regexp.last_match(1).to_i
+        @item = Regexp.last_match(2)
+        echo "Gathering #{@number} of #{@item}" if @debug
+        next unless evaluate_item
 
-      accept_task
-      true
-
-    when /To whom are you speaking?/
-      echo 'Task giver wandered away' if @debug
-      find_giver
-      false
-    when /I have a small item that needs/
-      echo 'Wrong task type' if @debug
-      decline_task
-      kill_time(2)
-      false
-    when /I am sorry, you must wait/
-      kill_time(1)
-      false
-    when /You are already on a task/
-      echo 'Already on a task. Canceling it' if @debug
-      cancel_task
-      kill_time(2)
-      false
+        accept_task
+        break
+      when /To whom are you speaking?/
+        echo 'Task giver wandered away' if @debug
+        find_giver
+        next
+      when /I have a small item that needs/
+        echo 'Wrong task type' if @debug
+        decline_task
+        kill_time(2)
+        next
+      when /I am sorry, you must wait/
+        kill_time(1)
+        next
+      when /You are already on a task/
+        echo 'Already on a task. Canceling it' if @debug
+        cancel_task
+        kill_time(2)
+        next
+      end
     end
   end
 
@@ -371,29 +368,25 @@ class TaskForage
 
   def use_boosts
     echo 'use_boosts' if @debug
-    fput('info') # Check to see if a boost is already active
-    pause 0.25
 
-    lines = reget(50).reverse
-    lines.each do |line|
-      case line
-      when / +Task Master, expiring /
-        echo 'Already boosted' if @debug
+    # Check to see if a boost is already active
+    case DRC.bput('info', ' +Task Master, expiring ', ' +Encumbrance :', { 'timeout' => 0.5, 'suppress_no_match' => true })
+    when / +Task Master, expiring /
+      echo 'Already boosted' if @debug
+      @boosted = true
+      return true
+    when / +Encumbrance :/
+      echo 'Not boosted' if @debug
+      case DRC.bput('boost task', 'You\'ve activated the Task Master boost',
+                    'You don\'t have enough credits for the Task Master boost')
+      when /You've activated the Task Master boost/
+        echo 'Boost now activated' if @debug
         @boosted = true
         return true
-      when / +Encumbrance :/
-        echo 'Not boosted' if @debug
-        case DRC.bput('boost task', 'You\'ve activated the Task Master boost',
-                      'You don\'t have enough credits for the Task Master boost')
-        when /You've activated the Task Master boost/
-          echo 'Boost now activated' if @debug
-          @boosted = true
-          return true
-        when /You don't have enough credits for the Task Master boost/
-          echo 'Can\'t boost' if @debug
-          @boosted = false
-          return false
-        end
+      when /You don't have enough credits for the Task Master boost/
+        echo 'Can\'t boost' if @debug
+        @boosted = false
+        return false
       end
     end
   end
@@ -405,7 +398,7 @@ class TaskForage
     use_boosts if @use_boosts && @boosted.nil?
 
     # No need to kill time if we're using a boost
-    return if !@boosted.nil? && @boosted
+    return if @boosted
 
     safe_exit if @never_wait
 
@@ -464,7 +457,7 @@ class TaskForage
   def mapped_item?
     echo 'mapped_item?' if @debug
     rooms = @foraging_data.find { |item| item['item'] == @item }['rooms']
-    return false if rooms.empty? || rooms == ' '
+    return false if rooms.empty?
 
     echo 'mapped = true' if @debug
     true
@@ -473,7 +466,7 @@ class TaskForage
   # Check if the item is off of a failure cooldown
   def ready_item?
     echo 'ready_item?' if @debug
-    if !UserVars.task_forage['item_failures'][@item].nil? && Time.now < UserVars.task_forage['item_failures'][@item] + 7_200
+    if UserVars.task_forage['item_failures'][@item] && Time.now < UserVars.task_forage['item_failures'][@item] + 7_200
       return false
     end
 

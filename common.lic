@@ -636,7 +636,7 @@ module DRC
     g
   end
 
-  def play_song?(settings, song_list, worn = true, skip_clean = false, climbing = false)
+  def play_song?(settings, song_list, worn = true, skip_clean = false, climbing = false, skip_tuning = false)
     instrument = worn ? settings.worn_instrument : settings.instrument
 
     if UserVars.instrument.nil?
@@ -658,7 +658,7 @@ module DRC
       play_command = play_command + " on my #{instrument}"
     end
     fput('release ecry') if DRSpells.active_spells["Eillie's Cry"].to_i > 0
-    result = bput(play_command, 'too damaged to play', 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'Are you sure that\'s the right instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing', /^You really need to drain/)
+    result = bput(play_command, 'too damaged to play', 'dirtiness may affect your performance', 'slightest hint of difficulty', 'fumble slightly', /Your .+ is submerged in the water/, 'You begin a', 'You struggle to begin', 'You\'re already playing a song', 'You effortlessly begin', 'You begin some', 'You cannot play', 'Play on what instrument', 'Are you sure that\'s the right instrument', 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing', /^You really need to drain/, /Your .* tuning is off, and may hinder your performance/)
     case result
     when 'Play on what instrument', 'Are you sure that\'s the right instrument'
       snapshot = "#{right_hand}#{left_hand}"
@@ -666,20 +666,26 @@ module DRC
       return false if snapshot == "#{right_hand}#{left_hand}"
 
       fput("wear #{instrument}") if worn
-      play_song?(settings, song_list, worn, skip_clean, climbing)
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     when 'now isn\'t the best time to be playing', 'Perhaps you should find somewhere drier before trying to play', 'You should stop practicing'
       false
     when 'You\'re already playing a song'
       fput('stop play')
-      play_song?(settings, song_list, worn, skip_clean, climbing)
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     when 'You cannot play'
       wait_for_script_to_complete('safe-room')
+    when /Your .* tuning is off, and may hinder your performance/
+      return true if DRSkill.getrank('Performance') < 20
+      return true if skip_tuning
+      return true unless DRC.tune_instrument(settings)
+
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     when 'dirtiness may affect your performance', /^You really need to drain/
       return true if DRSkill.getrank('Performance') < 20
       return true if skip_clean
       return true unless clean_instrument(settings, worn)
 
-      play_song?(settings, song_list, worn, skip_clean, climbing)
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     when 'slightest hint of difficulty', 'fumble slightly'
       true
     when 'You begin a', 'You effortlessly begin', 'You begin some'
@@ -690,7 +696,7 @@ module DRC
       stop_playing
       UserVars.climbing_song = song_list[UserVars.climbing_song] || song_list.first.first if climbing
       UserVars.song = song_list[UserVars.song] || song_list.first.first unless climbing
-      play_song?(settings, song_list, worn, skip_clean, climbing)
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     when 'You struggle to begin'
       return true if song_to_play == song_list.first.first
       # Ignore difficulty messages if we have an offset
@@ -699,7 +705,7 @@ module DRC
       stop_playing
       UserVars.climbing_song = song_list.first.first if climbing
       UserVars.song = song_list.first.first unless climbing
-      play_song?(settings, song_list, worn, skip_clean, climbing)
+      play_song?(settings, song_list, worn, skip_clean, climbing, skip_tuning)
     else
       false
     end
@@ -761,6 +767,66 @@ module DRC
     DRCI.wear_item?(instrument) if worn
     DRCI.stow_item?(cloth)
     true
+  end
+
+  def tune_instrument(settings)
+    instrument = settings.worn_instrument || settings.instrument
+
+    unless instrument
+      DRC.message("Neither worn_instrument, nor instrument set. Doing nothing.")
+      return false
+    end
+
+    DRC.stop_playing
+
+    unless (DRC.left_hand.nil? && DRC.right_hand.nil?) || DRCI.in_hands?(instrument)
+      DRC.message("Need two free hands. Not tuning now.")
+      return false
+    end
+
+    if settings.worn_instrument
+      unless DRCI.remove_item?(instrument) || DRCI.in_hands?(instrument)
+        DRC.message("Could not remove #{instrument}. Not trying to tune.")
+        DRC.beep
+        return false
+      end
+    else
+      unless DRCI.get_item?(instrument) || DRCI.in_hands?(instrument)
+        DRC.message("Could not get #{instrument}. Not trying to tune.")
+        DRC.beep
+        return false
+      end
+    end
+    DRC.do_tune(instrument)
+    waitrt?
+    pause 1
+    DRCI.wear_item?(instrument) if settings.worn_instrument
+    true
+  end
+
+  def do_tune(instrument, tuning = "")
+    unless instrument && DRCI.in_hands?(instrument)
+      DRC.message("No instrument found in hands. Not trying to tune.")
+      DRC.beep
+      return false
+    end
+
+    case DRC.bput("tune my #{instrument} #{tuning}",
+                  /^You should be sitting up/,
+                  /After a moment, you .* flat/,
+                  /After a moment, you .* sharp/,
+                  /After a moment, you .* perfect tune/)
+    when /After a moment, you .* perfect tune/
+      DRC.message("Already tuned. Breaking out of this section.")
+      return true
+    when /After a moment, you .* flat/
+      DRC.do_tune(instrument, "sharp")
+    when /After a moment, you .* sharp/
+      DRC.do_tune(instrument, "flat")
+    when /^You should be sitting up/
+      DRC.fix_standing
+      DRC.do_tune(instrument)
+    end
   end
 
   def pause_all

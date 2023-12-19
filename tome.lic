@@ -1,0 +1,134 @@
+custom_require.call(%w[common common-items drinfomon events])
+class Tome
+  def initialize
+    arg_definitions = [
+      [
+        { name: 'active', regex: /active/i, optional: true, description: 'Actively study until a scholarship goal is reached (as opposed to passively waiting for the appropriate time)' },
+        { name: 'debug', regex: /debug/i, optional: true, description: 'Verbose messaging for troubleshooting' }
+      ]
+    ]
+
+    args = parse_args(arg_definitions)
+    @settings = get_settings
+    @tome_settings = @settings.tome_settings
+    @debug = args.debug
+
+    @tome = @tome_settings['tome_name']
+    @quit_early = @tome_settings['quit_early']
+    @scholarship_limit = @tome_settings['scholarship_limit'] || 34
+    @passive_scripts = @tome_settings['passive_scripts']
+    @passive = args.active ? false : @tome_settings['passive']
+    @no_use_rooms = @settings.sanowret_no_use_rooms
+
+    @penultimate_pages = {
+      'tel\'athi treatise'      => "Most S'Kra, whether they call them such or not, are familiar with the Eight Gifts",
+      'mikkhalbamar manuscript' => "In both cases the rituals involving consignment are nearly identical",
+      'spiritwood tome'         => "Faenella is the goddess of creativity, revelry, and pride.",
+      'field guide'             => "Sacred to Harawep, wildling spiders are a sentient race that is associated with the cult of the Spidersworn",
+      'brinewood book'          => "While Merelew observed the stars and the moons crown,",
+      'kuwinite codex'          => "But, she is a great warrior with the fury of a mother",
+      'smokewood codex'         => "Rumor also has it that the Empire had great powers of magic or technology",
+      'togball manual'          => "A team may not enter the opposing team's Blood Zone"
+    }
+
+    if @quit_early
+      Flags.add('study-complete', Regexp.new(@penultimate_pages[@tome]))
+    else
+      Flags.add('study-complete', /^Having finished your studies,/)
+    end
+
+    echo @tome_settings.to_yaml if @debug
+    echo @args.to_yaml if @debug
+
+    monitor_routine
+  end
+
+  def should_train?
+    return false if DRSkill.getxp('Scholarship') >= @scholarship_limit
+    return true unless @passive
+    return false if hiding? || invisible?
+    return false if DRC.left_hand && DRC.right_hand && !DRCI.in_hands?(@tome)
+    return false if @no_use_rooms.any? { |name| /#{name}/ =~ DRRoom.title || name.to_s == Room.current.id.to_s }
+    if @passive_scripts.any? { |name|
+      echo "Passive script: #{name}" if Script.running?(name) && @debug
+      Script.running?(name)
+    }
+      return true
+    else
+      return false
+    end
+  end
+
+  def pause_scripts
+    until (@scripts_to_unpause = DRC.safe_pause_list)
+      echo("Cannot pause, trying again in 30 seconds.")
+      pause 30
+    end
+  end
+
+  # If at any time during a pausing period the primary training script exits, then safely store the book and go back into waiting mode.
+  def pause_safely(duration)
+    end_time = Time.now + duration
+
+    while Time.now < end_time
+      if !should_train?
+        pause_scripts if @passive
+        DRCI.stow_item?(@tome)
+        DRC.safe_unpause_list @scripts_to_unpause if @passive
+        return false
+      end
+      pause 1
+    end
+    return true
+  end
+
+  def monitor_routine
+    loop do
+      if DRSkill.getxp('Scholarship') >= @scholarship_limit && !@passive
+        DRC.fix_standing
+        exit
+      end
+      Flags.reset('study-complete')
+      if !@passive
+        DRC.bput('sit', 'You sit', 'You are already sitting', 'You rise', 'While swimming?') unless sitting?
+      end
+
+      pause 10 until should_train? and DRStats.concentration == 100
+      next unless should_train?
+
+      pause_scripts if @passive
+      unless DRCI.get_item?(@tome)
+        DRC.safe_unpause_list @scripts_to_unpause if @passive
+        next
+      end
+      result = DRC.bput("study my #{@tome}", "You immerse yourself in the wisdom of your", "You are unable to focus on studying your", "However, you find that you lack the concentration to focus on your studies", "Considering that you are in combat,", "However, you realize that you were already reading this book")
+      DRC.safe_unpause_list @scripts_to_unpause if @passive
+      case result
+      when /^You are unable to focus on studying your/,
+           /^However, you find that you lack the concentration to focus on your studies/,
+           /^Considering that you are in combat,/
+        pause_scripts if @passive
+        DRCI.stow_item?(@tome)
+        DRC.safe_unpause_list @scripts_to_unpause if @passive
+        pause 10
+        next
+      end
+      next unless pause_safely(10) # Wait for at least one page to be read
+
+      # Pause until we finish reading, the valid passive script completes, or concentration hits 100
+      # (which only will happen if we finished reading but somehow missed the completion flag - e.g., if another script stowed the book)
+      pause 1 until Flags['study-complete'] or !should_train? or DRStats.concentration == 100
+      pause_scripts if @passive
+      DRCI.stow_item?(@tome)
+      DRC.safe_unpause_list @scripts_to_unpause if @passive
+    end
+  end
+end
+
+before_dying do
+  Flags.delete('study-complete')
+  DRC.fix_standing
+  DRCI.stow_item?(@tome) if DRCI.in_hands?(@tome)
+end
+
+Tome.new

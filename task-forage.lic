@@ -15,6 +15,7 @@ class TaskForage
     @forage_settings = @settings.task_forage_settings
     @hometown = @settings.hometown
     @foraging_data = get_data('forage').foragables
+    @outdoors_room = @settings.outdoors_room || @settings.safe_room
     @forage_settings['forage_locations'].each do |entry|
       existing_item_index = @foraging_data.index { |item| item['item'] == entry['item'] }
       if existing_item_index
@@ -128,6 +129,7 @@ class TaskForage
     Flags.add('combat', 'You cannot forage while in combat!', 'closes to pole weapon range on you!',
               'begins to advance on you!')
     Flags.add('giver-move', *@move_regex)
+    Flags.add('cluttered', 'The room is too cluttered to find anything here', 'tries to forage for something, but can\'t find it with all the clutter here')
 
     @task_givers = { 'shard'    => { 'npc' => 'peddler', 'location' => @shard_path },
                      'crossing' => { 'npc' => 'Mags', 'location' => '954' } }
@@ -146,6 +148,7 @@ class TaskForage
     @never_wait = @forage_settings['never_wait'].nil? ? false : @forage_settings['never_wait']
     @use_boosts = @forage_settings['task_boosts'].nil? ? false : @forage_settings['task_boosts']
     @collect = @forage_settings['collect'].nil? ? false : @forage_settings['collect']
+    @wait_in_place = @forage_settings['wait_in_place'].nil? ? true : @forage_settings['wait_in_place']
     @debug = @forage_settings['debug'].nil? ? false : @forage_settings['debug']
 
     @boosted = nil
@@ -154,6 +157,7 @@ class TaskForage
     @item_location = nil
     @tasks_completed = 0
     @tasks_failed = 0
+    @item_count = 0
 
     echo 'UserVars:' if @debug
     echo UserVars.task_forage.to_yaml if @debug
@@ -245,7 +249,9 @@ class TaskForage
 
   def check_giver
     echo 'check_giver' if @debug
-    return false unless DRRoom.npcs.include?(@task_giver)
+
+    # If the rooms is cluttered, DRRoom will miss the task giver, even if they are stationary
+    return false unless (DRRoom.npcs.include?(@task_giver) || (@task_givers[@task_town]['location'].instance_of?(String) && Room.current.id == @task_givers[@task_town]['location'].to_i))
 
     echo 'Found the task giver' if @debug
     Flags.reset('giver-move')
@@ -299,6 +305,7 @@ class TaskForage
                         /I am sorry, you must wait/, /I have a small item that needs/, /To whom are you speaking?/)
       case result
       when /I need (\d+) ([^.]+)/
+        @item_count = 0
         @number = Regexp.last_match(1).to_i
         @item = Regexp.last_match(2)
         echo "Gathering #{@number} of #{@item}" if @debug
@@ -347,13 +354,15 @@ class TaskForage
   def cancel_task
     echo 'cancel_task' if @debug
     case DRC.bput("ask #{@task_giver} for task cancel", 'wish to end your current', 'do not currently have a',
-                  'frowns and shakes', 'To whom are you speaking?')
+                  'frowns and shakes', 'To whom are you speaking?', 'I see that you no longer wish to assist me')
     when /do not currently have a/, /frowns and shakes/
       echo 'No task' if @debug
       true
     when /To whom are you speaking?/
       find_giver
       cancel_task
+    when /I see that you no longer wish to assist me/
+      true
     when /wish to end your current/
       echo 'Cancel step 1' if @debug
       case DRC.bput("ask #{@task_giver} for task cancel", 'I see that you no longer wish to assist',
@@ -398,6 +407,7 @@ class TaskForage
     echo "kill_time: #{repetitions}" if @debug
     echo "use_boosts: #{@use_boosts}, and current status is #{@boosted}" if @debug
     echo "never_wait: #{@never_wait}" if @debug
+    echo "wait_in_place: #{@wait_in_place}" if @debug
     use_boosts if @use_boosts && @boosted.nil?
 
     # No need to kill time if we're using a boost
@@ -405,12 +415,32 @@ class TaskForage
 
     safe_exit if @never_wait
 
+    @wait_in_place ? outdoorsmanship_in_place(repetitions) : outdoorsmanship_script(repetitions * 4)
+  end
+
+  def outdoorsmanship_in_place(repetitions)
+    echo "outdoorsmanship_in_place #{repetitions}" if @debug
     DRCI.stow_hands
     repetitions.times do |_i|
       DRC.collect('rock')
       waitrt?
-      DRC.kick_pile? unless DRC.kick_pile?('rock')
+      if Flags['cluttered']
+        @wait_in_place = false
+        outdoorsmanship_script(8)
+        break
+
+      end
+      DRC.kick_pile?('rock')
     end
+  end
+
+  def outdoorsmanship_script(repetitions)
+    echo "outdoorsmanship_script #{repetitions}" if @debug
+    end_time = Time.now() + 30
+    DRCT.walk_to(@outdoors_room)
+    DRC.wait_for_script_to_complete('outdoorsmanship', [repetitions.to_s])
+    pause 0.5 until Time.now > end_time
+    find_giver
   end
 
   def time_to_room(destination)
@@ -436,6 +466,8 @@ class TaskForage
       @item = @item.gsub(/es\z/, '')
     elsif @item == 'sprigs of lavender'
       @item = 'lavender'
+    elsif @item == 'sprigs of sage'
+      @item = 'sage'
     elsif @item == 'pieces of wild corn'
       @item = 'corn'
     elsif @item == 'sticks, branches or limbs'
@@ -444,6 +476,12 @@ class TaskForage
       @item = 'dirt'
     elsif @item == 'bits of sap'
       @item = 'sap'
+    elsif @item == 'some chamomile'
+      @item = 'chamomile'
+    elsif @item == 'some moss'
+      @item = 'moss'
+    elsif @item == 'bits of hulnik grass'
+      @item = 'hulnik grass'
     elsif @item == 'jasmine flowers'
       @item = 'jasmine blossom'
     elsif ['sharkteeth', 'shark teeth'].include?(@item)
@@ -495,7 +533,7 @@ class TaskForage
     echo "evaluate_item: #{@item}" if @debug
     unless known_item? && mapped_item? && ready_item? && closeby_item?
       @tasks_failed += 1
-      cancel_task
+      decline_task
       return false
     end
     true
@@ -505,58 +543,91 @@ class TaskForage
   def locate_item
     echo "locate_item #{@item}" if @debug
     item_info = @foraging_data.find { |item| item['item'] == @item }
-
     return Room.current.id if item_info['rooms'].include?('any')
 
     rooms = DRCT.sort_destinations(item_info['rooms'])
     rooms.first
   end
 
+  def cluttered_gathering_room
+    echo "cluttered_room" if @debug
+    Flags.reset('cluttered')
+    # Prune the room from the list of possible locations so that we don't try to forage here again
+    @original_foraging = get_data('forage').foragables
+
+    @foraging_data.each_with_index do |item, index| # Replace all 'any' overrides with the original data
+      if item['rooms'].include?('any')
+        orig_item = @original_foraging.find { |o_item| o_item['item'] == item['item'] }
+        @foraging_data[index] = orig_item if orig_item
+      end
+    end
+
+    @foraging_data.each do |item| # Delete all references to the cluttered room
+      item['rooms'].delete(@item_location.to_i) if item['rooms'].include?(@item_location.to_i)
+    end
+
+    if evaluate_item
+      DRCT.walk_to(locate_item)
+    else
+      DRC.message("No available locations")
+      cancel_task
+      safe_exit
+    end
+  end
+
   # Travel to the nearest foraging spot and start to gather them
   def gather_items
     echo 'gather_items' if @debug
-    Flags.reset('combat')
     DRCT.walk_to(@item_location)
-    item_count = 0
+    Flags.reset('cluttered')
+    Flags.reset('combat')
 
-    if @collect && @number >= 8
-      DRC.collect(@item)
-      while item_count < @number
+    if @collect
+      DRC.collect(@item, false)
+      if Flags['cluttered']
+        cluttered_gathering_room
+        DRC.collect(@item, false)
+      end
+      while @item_count < @number
         DRCI.get_item_unsafe(@item)
         if DRCI.put_away_item?(@item, @forage_container)
-          item_count += 1
+          @item_count += 1
         else
           DRC.message('Unable to store item.')
           cancel_task
           safe_exit
         end
       end
-      DRC.kick_pile? unless DRC.kick_pile?(@item.to_s)
+      DRC.kick_pile?(@item.to_s)
     else
-      while item_count < @number
+      while @item_count < @number
         echo "combat flag: #{Flags['combat']}" if @debug
         DRC.retreat if Flags['combat']
         if DRC.forage?(@item, 5)
-          item_count += 1
+          @item_count += 1
           unless DRCI.put_away_item?(@item, @forage_container)
             DRC.message("You need to make more room in your #{@forage_container}")
             cancel_task
             safe_exit
           end
         else
-          invalid_room?
-          if DRSkill.getrank('Outdoorsmanship') <= 800
-            DRC.message('Unable to find the item. You may not be skilled enough to find it. You might have more success during the day, during better weather, or in a different season.')
-            DRC.message('task-forage will decline tasks for this item for 2 hours.')
-            DRC.message('You can permanently blacklist this item by defining its foraging_locations rooms as blank in your YAML.')
-            echo("EXAMPLE BLACKLIST YAML:\n\ntask_forage_settings:\n    forage_locations:\n      - item: #{@item}\n        rooms: []\n\n\n ")
-            UserVars.task_forage['item_failures'][@item] = Time.now
+          if Flags['cluttered']
+            cluttered_gathering_room
+          else
+            invalid_room?
+            if DRSkill.getrank('Outdoorsmanship') <= 600
+              DRC.message('Unable to find the item. You may not be skilled enough to find it. You might have more success during the day, during better weather, or in a different season.')
+              DRC.message('task-forage will decline tasks for this item for 2 hours.')
+              DRC.message('You can permanently blacklist this item by defining its foraging_locations rooms as blank in your YAML.')
+              echo("EXAMPLE BLACKLIST YAML:\n\ntask_forage_settings:\n    forage_locations:\n      - item: #{@item}\n        rooms: []\n\n\n ")
+              UserVars.task_forage['item_failures'][@item] = Time.now
+            end
+            find_giver
+            cancel_task
+            @tasks_failed += 1
+            determine_task_necessary
+            get_task
           end
-          find_giver
-          cancel_task
-          @tasks_failed += 1
-          determine_task_necessary
-          get_task
         end
       end
     end
@@ -577,8 +648,8 @@ class TaskForage
 
   def give_item
     echo 'give_item' if @debug
-    case DRC.bput("give #{@task_giver}", 'and says, "Thanks,', '^What is it you\'re trying to give?',
-                  ' I have a few things here for you, thank you so much for your help')
+    case DRC.bput("give #{@item} to #{@task_giver}", 'and says, "Thanks,', '^What is it you\'re trying to give?',
+                  ' I have a few things here for you, thank you so much for your help', 'Mags sighs and says')
     when /^What is it you're trying to give?/
       find_giver
       give_item
@@ -586,6 +657,9 @@ class TaskForage
       @tasks_completed += 1
       @item = nil
       kill_time(2) if determine_task_necessary
+    when /Mags sighs and says/
+      @item = nil
+      safe_exit
     end
   end
 

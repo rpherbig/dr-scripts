@@ -48,6 +48,7 @@ for filename in os.listdir(img_dir):
         file = os.path.join(img_dir, filename)
         img = Image.open(file)
         img = PIL.ImageOps.invert(img.convert('RGB'))
+        #below line changes yellow to cyan
         img = change_color(255, 255, 0, img, 0, 123, 167)
         img.save(file)
         print("finished: " + str(filename))

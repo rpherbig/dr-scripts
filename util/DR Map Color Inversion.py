@@ -19,7 +19,10 @@ change_color.  Colors are represented in RGB format.
 
 Circle.jpg is bypassed, since it does not need inversion.
 
-
+Requirements:
+-Must have Python installed
+-Must have Pillow (PIL) library installed
+    -can be installed by running:  pip install pillow
 Assumptions:
 -All files in directory are images (folders are ignored)
 -User has already backed up original files in a separate location

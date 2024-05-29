@@ -11,7 +11,7 @@ class ScrollSorter
       next if v['skill'] == 'cantrip'
 
       v['guild'] = 'Analogous' if v['mana_type'] == 'ap'
-      @all_spells.push([k, v['guild']])
+      @all_spells.push([k, v['guild'], v['abbrev']])
     end
     @settings = get_settings
     @default_container = @settings.default_container
@@ -47,47 +47,28 @@ class ScrollSorter
   def populate_cases
     c = Array.new
     DRCI.open_container?(@stacker_container)
-    DRC.bput("inv #{@stacker_container}", /^Inside.+you see:/)
-
-    loop do
-      line = get
-      if line.include?(@stacker)
-        /labeled "(.*)"/ =~ line
-        guild = Regexp.last_match(1)
-        c.push(guild)
+    capture = Lich::Util.issue_command("inv #{@stacker_container}", /^Inside.+you see:/)
+    capture.each do |line|
+      case line
+      when /^.*#{@stacker}.*labeled "(.*)"/
+        c.push(Regexp.last_match(1))
       end
-      break if line.include?('INVENTORY HELP')
     end
     return c
   end
 
   def unknown(guild)
     if guild.nil?
-      DRC.message("Spell not found.  Either a new spell was released and it hasn't been added to the script yet, or you misspelled the spell you're searching for.")
+      DRC.message("Spell not found.  Either a new spell was released and it hasn't been added to base-spells yet, or you misspelled the spell you're searching for.")
     else
       DRC.message("Analogous Pattern spells are not stored.")
     end
     exit
   end
 
-  def find_scrolls(container)
-    x = Array.new
-    DRC.bput("inv #{container}", /^Inside.+you see:/)
-
-    loop do
-      line = get
-      @scroll_nouns.each do |n|
-        x << n if line =~ / #{n}/
-      end
-      break if line.include?('INVENTORY HELP')
-    end
-    x
-  end
-
   def get_scroll(scroll)
-    case DRC.bput("get #{scroll} in my #{@default_container}", /You get/, /What were you referring/)
-    when /What were you referring/
-      DRC.message("  Can't find #{scroll} in your #{@default_container}!")
+    unless DRCI.get_item_safe?(scroll, @default_container)
+      DRC.message("#{Script.current.name}: Can't find #{scroll} in your #{@default_container}!")
       return false
     end
     return true
@@ -95,6 +76,10 @@ class ScrollSorter
 
   def find_guild(spell)
     return @all_spells.select { |s, _g| s.casecmp(spell) == 0 }.flatten[1]
+  end
+
+  def find_abbrev(spell)
+    return @all_spells.select { |s, _g| s.casecmp(spell) == 0 }.flatten[2]
   end
 
   def check_scroll(scroll)
@@ -122,7 +107,7 @@ class ScrollSorter
       return
     end
     ord = find_case(guild)
-    DRC.bput("get #{ord} #{@stacker} in my #{@stacker_container}", /You get/)
+    DRCI.get_item_safe?("#{ord} #{@stacker}", @stacker_container)
     case DRC.bput("push my #{@stacker} with my #{scroll}", /you find room in a matching section/, /flip to an empty section/, /you realize there's no more room/, /you need to open the #{@stacker.split.last} first/)
     when /you find room in a matching section/, /flip to an empty section/
       stow_and_refactor_cases(guild)
@@ -143,7 +128,7 @@ class ScrollSorter
   end
 
   def sort_scrolls
-    scrolls = find_scrolls(@default_container)
+    scrolls = DRCI.get_scroll_list_in_container(@default_container)
     scrolls.each do |s|
       next unless get_scroll(s)
 
@@ -159,15 +144,11 @@ class ScrollSorter
       unknown(guild) if guild.nil? || guild == 'Analogous'
     end
     ord = find_case(guild)
-    DRC.bput("get #{ord} #{@stacker} in my #{@stacker_container}", /You get/)
+    DRCI.get_item_safe?("#{ord} #{@stacker}", @stacker_container)
     spells = Array.new
-    start = Time.now
-    DRC.bput("flip my #{@stacker}", /You flip through the/)
 
-    loop do
-      line = get?
-      break if (Time.now - start) > 2
-
+    capture = Lich::Util.issue_command("flip my #{@stacker}", /^You flip through the #{@stacker.split.last}, checking each section before closing it.$/)
+    capture.each do |line|
       case line
       when /The (.+) section/
         spells.push(Regexp.last_match(1))
@@ -175,6 +156,7 @@ class ScrollSorter
         spells.push('BlankSection')
       end
     end
+
     num = spells.index { |i| i =~ /#{name}/i }
     if num.nil? && guild != 'Extras'
       stow_and_refactor_cases(guild)
@@ -183,7 +165,10 @@ class ScrollSorter
       DRC.message("You have no copies of #{name}!")
     else
       DRC.bput("open my #{@stacker}", /You open your/, /is already open/)
-      DRC.bput("turn #{DRC.get_noun(@stacker)} to #{name}", /^You turn/)
+      case DRC.bput("turn #{DRC.get_noun(@stacker)} to #{name}", /^You turn/, /^That spell does not seem to exist/)
+      when /^That spell does not seem to exist/
+        DRC.bput("turn #{DRC.get_noun(@stacker)} to #{find_abbrev(name)}", /^You turn/)
+      end
       DRC.bput("pull my #{@stacker}", /This was the last copy/, /Carefully, you remove a copy/)
     end
     DRC.bput("put my #{@stacker} in my #{@stacker_container}", /You put your/)

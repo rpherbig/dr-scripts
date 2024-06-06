@@ -2,7 +2,7 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#inventory-manager
 =end
 
-custom_require.call(%w[common])
+custom_require.call(%w[common common-items])
 
 class InventoryManager
   def initialize
@@ -41,7 +41,8 @@ class InventoryManager
         { name: 'storage_box', regex: /storage_box/i, optional: true, description: "Rummages caravan storage box for items." },
         { name: 'family_vault', regex: /family_vault/i, optional: true, description: "Rummages your family vault to save items NOTE: must be standing by your open vault." },
         { name: 'register', regex: /register/i, optional: true, description: "Reads contents of deed register." },
-        { name: 'eddy', regex: /eddy/i, optional: true, description: "Save the contents of an eddy (HE 436 Gift)." }
+        { name: 'eddy', regex: /eddy/i, optional: true, description: "Save the contents of an eddy (HE 436 Gift)." },
+        { name: 'scrolls', regex: /scrolls/i, optional: true, description: "Save spell scrolls tracked with sort-scrolls or stack-scrolls"}
       ],
       [
         { name: 'search', regex: /search/i, description: 'Start a search across all characters for specified item.' },
@@ -58,6 +59,7 @@ class InventoryManager
     ]
 
     args = parse_args(arg_definitions)
+    @settings = get_settings
 
     setup
 
@@ -74,6 +76,8 @@ class InventoryManager
       add_eddy_inv
     elsif args.storage_box
       add_storage_box_inv
+    elsif args.scrolls
+      add_scrolls
     elsif args.save
       add_current_inv
     elsif args.count
@@ -251,6 +255,63 @@ class InventoryManager
 
   def add_vault_regular_inv
     check_inventory("rummage vault", /^You rummage through a secure vault/, 'vault', 42)
+  end
+
+  def add_scrolls
+    stacker_container = (@settings.scroll_sorter['stacker_container'] || @settings.stacker_container)
+    unless stacker_container
+      DRC.message("You have no stacker_container defined for sort-scrolls!")
+      exit
+    end
+
+    if @item_data[@active_character]
+      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? "(spell_scroll)" }
+    else
+      @item_data[@active_character] = []
+    end
+
+    stacker = @settings.scroll_sorter['stacker']
+    scroll_stackers = @settings.scroll_stackers
+
+    DRCI.open_container?("my #{stacker_container}")
+
+    spells = []
+
+    if stacker
+      10.times do |n|
+        DRCI.get_item_safe?("tenth #{stacker}", stacker_container)
+        spells.concat(check_scroll_stacker(stacker))
+        DRCI.put_away_item?(stacker, stacker_container)
+      end
+    else
+      for scroll_stacker in scroll_stackers
+        DRCI.get_item_safe?(scroll_stacker, stacker_container)
+        spells.concat(check_scroll_stacker(scroll_stacker))
+        DRCI.put_away_item?(scroll_stacker, stacker_container)
+      end
+    end
+
+    for spell in spells.sort
+      @item_data[@active_character] << spell
+    end
+
+    DRC.message("Saving spell_scroll data for #{@active_character}!")
+    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml(line_width: -1)) }
+
+    DRCI.close_container?("my #{stacker_container}") if @settings.scroll_sorter['close_container']
+  end
+
+  def check_scroll_stacker(stacker)
+    spells = []
+    capture = Lich::Util.issue_command("flip my #{stacker.split.last}", /^You flip through the #{stacker.split.last}, checking each section before closing it.$/)
+    capture.each do |line|
+      if line =~ /The (.+) section has (\d+)/
+        spell = "#{Regexp.last_match(1)} (#{Regexp.last_match(2)})"
+        spell.concat(" (spell_scroll)")
+        spells << spell
+      end
+    end
+    spells
   end
 
   def list_character_inv(name)

@@ -113,6 +113,9 @@ class InventoryManager
 
     @item_data = OpenStruct.new(YAML.load_file(@item_db_path)).to_h
 
+    # The legacy version of this script posted character inventory without an identifier.
+    # Adding a version check and 'upgrade' mechanism to fix these entries, otherwise they would exist
+    # forever unless the entire character was deleted.
     @version_string = 'version'.to_sym
 
     version = @item_data[@version_string][0]
@@ -138,24 +141,43 @@ class InventoryManager
     end
   end
 
+  def get_item_data(inventory_type)
+    if @item_data[@active_character]
+      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? "(#{inventory_type})" }
+    else
+      @item_data[@active_character] = []
+    end
+  end
+
+  def save_item_data(inventory_type)
+    DRC.message("Saving #{inventory_type} data for #{@active_character}!")
+    # .to_yaml limits to 80 chars by default, line_width: -1 bypasses this limit
+    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml(line_width: -1)) }
+  end
+
   def get_inv_count(desc)
     count, closed = 0, 0
-    # Counting all items in inventory
     if desc.nil?
-      DRC.bput('inv list', 'You have:')
-      while (line = get)
-        break if line =~ /INVENTORY HELP/i
-
+      # Counting all items in inventory
+      capture = Lich::Util.issue_command('inv list', /^You have:/)
+      capture.each do |line|
         item = line.lstrip
+
+        next if item.empty?
+        next if item.start_with?(*@inventory_ignores)
+
         count += 1
         closed += 1 if item.match?(/(closed)/)
       end
       DRC.message("You have #{count} items, #{closed} of which are (closed) containers.")
     else
       # Counting items matching the description, i.e., inv count pouch
-      DRC.bput("inv search #{desc}", 'You rummage')
-      while (line = get)
-        break if line =~ /INVENTORY HELP/i
+      capture = Lich::Util.issue_command("inv search #{desc}", /rummage about your person/)
+      capture.each do |line|
+        item = line.lstrip
+
+        next if item.empty?
+        next if item.start_with?(*@inventory_ignores)
 
         count += 1
       end
@@ -170,15 +192,12 @@ class InventoryManager
       using_sorter = true
     end
 
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? "(#{inventory_type})" }
-    else
-      @item_data[@active_character] = []
-    end
+    get_item_data(inventory_type)
 
     capture = Lich::Util.issue_command(command, end_pattern)
 
     lines = capture
+    # when rummaging, this block splits the items, including the last two that are split by and instead of a comma
     if command.start_with?("rummage")
       container = capture[0]
       lines = container[rummage_length, container.length - (rummage_length + 1)].split(",")
@@ -198,13 +217,16 @@ class InventoryManager
       next if item.empty?
       next if item.start_with?(*@inventory_ignores)
 
+      # if the item starts with a -, it's in a container
       if item[0].eql? '-'
         item[0] = ''
         item.concat(" (in container - #{container})")
       elsif inventory_type == 'character'
+        # We don't want the inventory_type here as it's extra noise, so we do a .to_s so container doesn't get updated by changing item later
         container = (item.include?("eddy") ? "eddy" : item).to_s
         item.concat(' (worn)')
       elsif command == "read my vault book"
+        # When reading the vault book, items in a container are prefixed by 6 spaces
         if line =~ /\s{6}(?:a|an|some) /
           item.concat(" (in container - #{container})")
         else
@@ -225,8 +247,7 @@ class InventoryManager
       @item_data[@active_character] << item
     end
 
-    DRC.message("Saving #{inventory_type} data for #{@active_character}!")
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml(line_width: -1)) }
+    save_item_data(inventory_type)
 
     if using_sorter
       start_script('sorter') unless Script.running?('sorter')
@@ -234,6 +255,7 @@ class InventoryManager
   end
 
   def clean_home_string(string)
+    # We remove the category by finding the : in the string, plus drop the period at the end
     colon = string.index(":") + 2
     string[colon..-2]
   end
@@ -285,15 +307,11 @@ class InventoryManager
   def add_scrolls
     stacker_container = (@settings.scroll_sorter['stacker_container'] || @settings.stacker_container)
     unless stacker_container
-      DRC.message("You have no stacker_container defined for sort-scrolls!")
+      DRC.message("You have no stacker_container defined for sort-scrolls or stack-scrolls!")
       exit
     end
 
-    if @item_data[@active_character]
-      @item_data[@active_character] = @item_data[@active_character].select { |line| !line.include? "(spell_scroll)" }
-    else
-      @item_data[@active_character] = []
-    end
+    get_item_data(spell_scroll)
 
     stacker = @settings.scroll_sorter['stacker']
     scroll_stackers = @settings.scroll_stackers
@@ -303,12 +321,14 @@ class InventoryManager
     spells = []
 
     if stacker
+      # stacker is defined, so they're using sort-scrolls - get all ten books and parse them
       10.times do
         DRCI.get_item_safe?("tenth #{stacker}", stacker_container)
         spells.concat(check_scroll_stacker(stacker))
         DRCI.put_away_item?(stacker, stacker_container)
       end
     else
+      # no stacker variable, so they are using stack-scrolls. loop through their scroll stackers and parse them
       for scroll_stacker in scroll_stackers
         DRCI.get_item_safe?(scroll_stacker, stacker_container)
         spells.concat(check_scroll_stacker(scroll_stacker))
@@ -320,14 +340,9 @@ class InventoryManager
       @item_data[@active_character] << spell
     end
 
-    DRC.message("Saving spell_scroll data for #{@active_character}!")
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml(line_width: -1)) }
+    save_item_data(spell_scroll)
 
     DRCI.close_container?("my #{stacker_container}") if @settings.scroll_sorter['close_container']
-  end
-
-  def add_home
-    check_inventory("home recall", /^The home contains:/, 'home')
   end
 
   def check_scroll_stacker(stacker)
@@ -341,6 +356,10 @@ class InventoryManager
       end
     end
     spells
+  end
+
+  def add_home
+    check_inventory("home recall", /^The home contains:/, 'home')
   end
 
   def list_character_inv(name)
@@ -388,7 +407,7 @@ class InventoryManager
     return if name_to_remove == "version"
 
     @item_data.delete(name_to_remove.capitalize.to_sym)
-    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml) }
+    File.open(@item_db_path, 'w') { |file| file.write(@item_data.to_yaml(line_width: -1)) }
     DRC.message("Removed #{name_to_remove.capitalize}'s data!")
   end
 end

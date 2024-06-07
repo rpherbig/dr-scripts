@@ -237,6 +237,7 @@ class Bescort
 
     @settings = get_settings
     @equipment_manager = EquipmentManager.new(@settings)
+    @flying_mount = @settings.flying_mount
 
     pause
 
@@ -323,7 +324,7 @@ class Bescort
     mode = mode.downcase
     case mode
     when 'mount'
-      DRC.bput("get my #{type}", /You get/, /You pick up/, /You are already holding/, /What were you referring/)
+      DRCI.get_item?(type)
       case type
       when /broom|dirigible/i
         case DRC.bput("mount my #{type}", /You mount your/, /You are already mounted/, /What were you referring/)
@@ -349,15 +350,14 @@ class Bescort
       case type
       when /broom|dirigible/i
         DRC.bput('dismount', /Your .* floats down to the ground/, /You climb off/)
-        @equipment_manager.empty_hands
       when /carpet|rug/i
         DRC.bput('dismount', /Your .* floats down to the ground/, /You climb off/)
         DRC.bput("roll #{type}", /You roll up/, /You can't roll/)
-        DRC.bput("stow my #{type}", /You put/, /You pick up/, /Stow what?/)
       else
         DRC.message("#{type} is not a valid type of flying mount.")
         exit
       end
+      DRCI.put_away_item?(type)
     end
   end
 
@@ -468,18 +468,16 @@ class Bescort
     manual_go2(start_room)
     move('go stream bank')
     # Once in the stream then you're in a safe room, get mount or remove gear.
-    flying_mount = @settings.flying_mount
     @equipment_manager.empty_hands
-    have_changed_gear = flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount')
+    have_changed_gear = @flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount')
       move(moveset.first) # mount travels all three rooms at once
     else
       moveset.each { |dir| swim(dir) }
     end
-    use_flying_mount(flying_mount, 'dismount') if flying_mount
+    use_flying_mount(@flying_mount, 'dismount') if @flying_mount
     # While in the stream then you're in a safe room, dismount or wear gear.
-    @equipment_manager.empty_hands
     @equipment_manager.wear_equipment_set?('standard') if have_changed_gear
     move('go stream bank')
     # You're now among cave trolls!
@@ -1076,13 +1074,12 @@ class Bescort
   end
 
   def faldesu(mode)
-    flying_mount = @settings.flying_mount
     unless mode =~ /haven|crossing/i
       echo 'You must specify haven or crossing for traversing the faldesu river'
       exit
     end
 
-    if flying_mount
+    if @flying_mount
       swim_faldesu(mode =~ /haven/i)
       return
     end
@@ -1108,40 +1105,45 @@ class Bescort
     path = mode == 'shard' ? $ICE_PATH_SHARD : $ICE_PATH_HIB
 
     @equipment_manager.empty_hands
-    settings = get_settings
-    footwear = settings.footwear
+    footwear = @settings.footwear
     move_fast = false
     footwear_removed = false
     skates_worn = false
 
-    # If the footwear setting has been defined then respect that
-    # and only try to remove it. If you're not wearing this item
-    # then obviously nothing on your feet will be removed.
-    # You might:
-    #   - have incorrect yaml
-    #   - put something else on (or nothing on)
-    #   - already wearing your skates
-    if footwear
-      if DRCI.remove_item?(footwear)
-        footwear_removed = true
-        DRCI.put_away_item?(footwear)
+    if @flying_mount
+      move_fast = true
+      use_flying_mount(@flying_mount, 'mount', 'glide')
+      path = mode == 'shard' ? %w[se se sw sw se] : %w[nw ne ne nw sw]
+    else
+      # If the footwear setting has been defined then respect that
+      # and only try to remove it. If you're not wearing this item
+      # then obviously nothing on your feet will be removed.
+      # You might:
+      #   - have incorrect yaml
+      #   - put something else on (or nothing on)
+      #   - already wearing your skates
+      if footwear
+        if DRCI.remove_item?(footwear)
+          footwear_removed = true
+          DRCI.put_away_item?(footwear)
+        end
       end
-    end
 
-    # If you have some skates then try to get and wear them.
-    # Note, if you're already wearing the skates then we won't
-    # be able to "get" them, and that's why the attempt to wear
-    # is not conditional upon you getting them to your hands.
-    if DRCI.exists?('skates')
-      DRCI.get_item?('skates')
-      if DRCI.wear_item?('skates')
-        skates_worn = true
-      else
-        DRCI.put_away_item?('skates')
+      # If you have some skates then try to get and wear them.
+      # Note, if you're already wearing the skates then we won't
+      # be able to "get" them, and that's why the attempt to wear
+      # is not conditional upon you getting them to your hands.
+      if DRCI.exists?('skates')
+        DRCI.get_item?('skates')
+        if DRCI.wear_item?('skates')
+          skates_worn = true
+        else
+          DRCI.put_away_item?('skates')
+        end
       end
-    end
 
-    move_fast = skates_worn
+      move_fast = skates_worn
+    end
 
     # Despite our best efforts, if bescort starts moving you fast
     # and the game gives you warnings to slow down, SLOW DOWN!
@@ -1174,6 +1176,10 @@ class Bescort
       DRCI.get_item?(footwear)
       DRCI.wear_item?(footwear)
     end
+
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'dismount')
+    end
   end
 
   def swim(dir)
@@ -1183,13 +1189,12 @@ class Bescort
   end
 
   def swim_faldesu(north)
-    flying_mount = @settings.flying_mount
     start = north ? 1375 : 473
     manual_go2(start)
     moveset = north ? %w[north northwest northeast] : %w[south southwest southeast]
     move 'dive river'
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount')
       if north
         move n
         move nw
@@ -1198,8 +1203,7 @@ class Bescort
         move sw
       end
       move 'go bridge'
-      use_flying_mount(flying_mount, 'dismount')
-      @equipment_manager.empty_hands
+      use_flying_mount(@flying_mount, 'dismount')
     else
       swim(moveset[0]) while XMLData.room_exits.include?(moveset[0])
       swim(moveset[1]) while XMLData.room_exits.include?('east')
@@ -1477,9 +1481,8 @@ class Bescort
   end
 
   def segoltha(mode)
-    flying_mount = @settings.flying_mount
     @equipment_manager.empty_hands
-    have_changed_gear = flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
+    have_changed_gear = @flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
     move_count = 0
     if mode =~ /^n/i
       dir_of_travel = 'north'
@@ -1495,8 +1498,8 @@ class Bescort
       exit
     end
 
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount', 'skim')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount', 'skim')
       if dir_of_travel == 'south'
         move 'go bank'
         move 'west'
@@ -1511,7 +1514,7 @@ class Bescort
         move 'east'
         move 'go slope'
       end
-      use_flying_mount(flying_mount, 'dismount')
+      use_flying_mount(@flying_mount, 'dismount')
       return
     end
 
@@ -1640,7 +1643,7 @@ class Bescort
     DRCA.release_cyclics
     unless DRCA.cast_spell({ 'abbrev' => 'rezz',
                              'mana'   => 5,
-                             'cyclic' => true }, get_settings)
+                             'cyclic' => true }, @settings)
       echo('Failed to cast Resurrection! Try again or use the puzzle to enter.')
       exit
     end
@@ -2014,7 +2017,6 @@ class Bescort
   def get_fare?(amount, town, room)
     return false unless @settings.bescort_fare_handling
 
-    settings = get_settings
     echo 'GETTING MONEY, YOU SLOB.'
     echo "Heading to #{town} for public transportation fare"
     pause 1
@@ -2025,7 +2027,7 @@ class Bescort
       echo 'You might be a necromancer!  Get some money manually!'
       return false
     end
-    settings.hometown = town
+    @settings.hometown = town
     succeeded = false
     DRCM.minimize_coins(amount).each { |each_amount| succeeded = DRCM.get_money_from_bank(each_amount, settings) }
     echo "Put some fare money in the #{town} bank!" unless succeeded

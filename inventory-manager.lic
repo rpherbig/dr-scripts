@@ -6,27 +6,6 @@ custom_require.call(%w[common common-items])
 
 class InventoryManager
   def initialize
-    @inventory_ignores = ['[',
-                          '<',
-                          'Roundtime',
-                          'You have',
-                          'Vault Inventory',
-                          'Done',
-                          'The last note',
-                          'a brass hook',
-                          'a steel wire rack',
-                          'a small shelf',
-                          'a top drawer',
-                          'a middle drawer',
-                          'a bottom drawer',
-                          'a large shelf',
-                          'Inside a',
-                          'Page',
-                          'Stored Deeds',
-                          'Currently store',
-                          'Maximum:',
-                          'The home contains']
-
     @active_character = Char.name.to_sym
     @item_db_path = "data/inventory.yaml"
 
@@ -44,7 +23,9 @@ class InventoryManager
         { name: 'register', regex: /register/i, optional: true, description: "Reads contents of deed register." },
         { name: 'eddy', regex: /eddy/i, optional: true, description: "Save the contents of an eddy (HE 436 Gift)." },
         { name: 'scrolls', regex: /scrolls/i, optional: true, description: "Save spell scrolls tracked with sort-scrolls or stack-scrolls." },
-        { name: 'home', regex: /home/i, optional: true, description: "Save home inventory." }
+        { name: 'home', regex: /home/i, optional: true, description: "Save home inventory." },
+        { name: 'servant', regex: /servant/i, optional: true, description: "Save shadow servant inventory." },
+        { name: 'shop', regex: /shop/i, optional: true, description: "Save your Trader shop inventory." }
       ],
       [
         { name: 'search', regex: /search/i, description: 'Start a search across all characters for specified item.' },
@@ -62,6 +43,7 @@ class InventoryManager
 
     args = parse_args(arg_definitions)
     @settings = get_settings
+    @inventory_ignores = @settings.inventory_manager_ignores
 
     setup
 
@@ -82,6 +64,10 @@ class InventoryManager
       add_scrolls
     elsif args.home
       add_home
+    elsif args.servant
+      add_shadow_servant
+    elsif args.shop
+      add_trader_shop
     elsif args.save
       add_current_inv
     elsif args.count
@@ -225,14 +211,14 @@ class InventoryManager
         # We don't want the inventory_type here as it's extra noise, so we do a .to_s so container doesn't get updated by changing item later
         container = (item.include?("eddy") ? "eddy" : item).to_s
         item.concat(' (worn)')
-      elsif command == "read my vault book"
+      elsif command == 'read my vault book' || inventory_type == 'shadow_servant'
         # When reading the vault book, items in a container are prefixed by 6 spaces
         if line =~ /\s{6}(?:a|an|some) /
           item.concat(" (in container - #{container})")
         else
           container = item.to_s
         end
-      elsif inventory_type == "home"
+      elsif inventory_type == 'home'
         if !item.start_with?("Attached:")
           item = clean_home_string(item)
           container = item.to_s
@@ -311,7 +297,7 @@ class InventoryManager
       exit
     end
 
-    get_item_data(spell_scroll)
+    get_item_data('spell_scroll')
 
     stacker = @settings.scroll_sorter['stacker']
     scroll_stackers = @settings.scroll_stackers
@@ -340,7 +326,7 @@ class InventoryManager
       @item_data[@active_character] << spell
     end
 
-    save_item_data(spell_scroll)
+    save_item_data('spell_scroll')
 
     DRCI.close_container?("my #{stacker_container}") if @settings.scroll_sorter['close_container']
   end
@@ -360,6 +346,58 @@ class InventoryManager
 
   def add_home
     check_inventory("home recall", /^The home contains:/, 'home')
+  end
+
+  def add_shadow_servant
+    unless DRStats.moon_mage?
+      DRC.message("You're not a Moon Mage!")
+      exit
+    end
+
+    unless DRRoom.npcs.include?('Servant')
+      DRC.message("Your Shadow Servant isn't present.")
+      exit
+    end
+
+    DRC.bput('prepare PG', 'You raise')
+    pause 3
+
+    check_inventory('cast servant', /^Within the belly/, 'shadow_servant')
+  end
+
+  def add_trader_shop
+    unless DRStats.trader?
+      DRC.message("You're not a Trader!")
+      exit
+    end
+
+    get_item_data('trader_shop')
+
+    surfaces = Hash.new
+    capture = Lich::Util.issue_command("shop customer", /^The following items contain goods for sale:/)
+    capture.each do |line|
+      line = line.lstrip
+
+      # this extracts the command from the shop surface and uses that to find what's on/in it
+      # because the surfaces aren't always just 'a glass table' (ex: a knotted flax cargo net)
+      # command looks like shop #123456789
+      if line =~ /^<d cmd='(.*?)'>(.*?)<\/d>/
+        surfaces[Regexp.last_match(2)] = Regexp.last_match(1)
+      end
+    end
+
+    for surface in surfaces
+      capture = Lich::Util.issue_command(surface[1], /, you see:/)
+      capture.each do |line|
+        line = line.lstrip
+
+        if line =~ /^<d cmd='(.*?)'>(.*?)<\/d>/
+          @item_data[@active_character] << "#{Regexp.last_match(2)} (#{surface[0]}) (trader_shop)"
+        end
+      end
+    end
+
+    save_item_data('trader_shop')
   end
 
   def list_character_inv(name)

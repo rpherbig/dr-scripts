@@ -1,0 +1,353 @@
+=begin
+  Zone Trainer
+
+  ## Training Zones
+
+  Training zones are environments that train skills.
+
+  A training zone is selected based on priority skills.
+
+  a zone is an environment in this context, with whatever parameters duck type that environment, e.g. you might be at the mm urn which is an outdoors zone, or you might be in combat with rock trolls which is a combat zone with range 90-110 etc, much is not yet implemented RE zones but they are all just functions that check
+
+  A zone may train more than one skill passively.
+
+  It may take time to enter a training zone, so it may be advantageous to train multiple skills available in that zone.
+
+  Training zone examples: hunting in a room, standing in a foraging area, powerwalking, sigil walking
+
+  Need to deal with many 'not in zone' statements too: 
+    - not in combat
+    - not in justice
+
+  Zones:
+  - can_see_sky (exists)
+  - engaged? (at_pole or at_melee)
+  - in_combat? (at_missile at_pole_ or at_melee or mobs_in_room)??
+  - at_forge?
+  - room_allows_spells?
+  - in_justice?
+  - in_water? (shadow web)
+  - in_ankle_water? (hunt)
+  - has trash bin (need type though)
+  - has_hunt_target (societies are a good indiciator, probably many more)
+    - this can probably be a distillation of room data
+    - prototype as a list of rooms, maybe generate with a function from room data
+    - this might go better in the hunt script actually, since scripts can change rooms
+
+  ## Mutiple Training Options
+
+  Training options should be in-zone first, then have an ordered preference.  Timered trainings should be unvailable rather than failing out.
+
+  This means that the selected training option might need to go into the queue and be filtered out of the queue before going on there, and allows for queue priority changes based on current zone or anything else.
+
+
+  ## Training Rooms
+
+  Training rooms are not zones, but they have zone properties.  A training room is selected to get to the zones with the properties required by the queue.  This does require queue inspection, so a queue construction function is where we will do zone selection which means any room move will happen after queue construction.
+
+  Training rooms are also selected based on distance from current location, particularly if the route is always in the ways or has some obstruction (islands, gondola).
+
+  New queues are constantly constructed and queues aren't completely drained before they become invalid, so it is never needed to change rooms inside of a queue, although individual scripts may change rooms, and the queue does move the character back to the "current room" for every single queue item. This can be replaced by a zone check, and if the zone of the room is bad, then either dump the item or go back to the room, depending on if some flag is set "pqtrainer_move_character_allowed". Queue items could also have some metadata about whether they move the character between rooms and could be discarded if the flag is disabled.
+
+
+  ## Skill priority queue
+
+  Training a skill to a certain mindstate has a higher priority than training it to the next available mindstate.
+
+  For example:
+    - all skills should eventually be moving
+    - astrology should never be empty
+
+  From this ruleset we can extract the priority queue:
+    - [[['Astrology', 3], 0], [[all_other_skills, 3], 100]]
+    - If astrology ever falls below 3, it should go to the top of the queue
+    - All training actions should only last a few seconds so that
+    - the priority queue can take over quickly.
+    - Limitations: crafting workorders takes a few minutes, warming up a combat area takes a minute or two.
+    - Proposal: training actions can carry estimated time metadata and queue fast tasks earlier than longer tasks if the priorities are similar.
+
+  Situation: four requests are in the priority queue for 2 zones. We should do both requests in the current zone before moving to another zone.
+
+  - Ideas:
+    - Keep a priority queue for each zone, use `has_priority?` on other zones
+
+  Situation: we want to load up the queue to evenly train all skills. The queue can be loaded with all skills having priority 34. After a training event we can clear the queue, and then rebuild the queue with priority (34-mindstate). The top zone priority can go into a zone priority queue as (zone, priority), then the new zone can be selected from the zone_queue. Then we pull skills from that zone's priority queue.
+
+  1. build queues per zone in skill_queues[zone] Hash, build zone_queue
+  2. move to priority zone in zone_queue
+  3. execute each skill in skill_queues[zone], put back on queue at (34-mindstate)
+  4. after each skill execution, rebuild all skill queues and zone queue, pick a new zone, your zone may not change, if not you will now grab the next skill for this zone. if it changes, this is equivalent to (1), but left in plain english here for illustration. oop to 2
+
+  requirements:
+    - map of skill, zone
+
+  The priority queue should be a queue of skill training requests.
+  If the skill request is in the current zone it will be done in priority order
+  If the request is higher priority than the current zone, the zone will be changed.
+  Requests of equal or lower priority should be grouped by zone
+  So the actual queue priority is the "request priority" + zone_state
+
+=end
+
+require 'rubygems'
+require 'algorithms'
+
+custom_require.call(%w[drinfomon common combat_methods util_methods])
+
+
+class PriorityTrainer
+
+  include Combat
+  include UtilMethods
+
+  # API: http://kanwei.github.io/algorithms/
+  @training_queue = Containers::PriorityQueue.new
+
+  settings = get_settings
+
+  @pq_no_use_scripts = settings.pq_no_use_scripts
+  @pq_no_use_rooms = settings.pq_no_use_rooms
+
+  @pq_zone_map = settings.pq_zone_map
+  @pq_skills = settings.pq_skills
+  @pq_priority_skills = settings.pq_priority_skills
+  @pq_penalty_skills = settings.pq_penalty_skills
+  @pq_methods = settings.pq_methods
+  # consider training anything in @pq_methods, rather than using this list
+  @pqtrainer_skills = (@pq_skills + @pq_priority_skills + @pq_penalty_skills).uniq
+
+  @pq_methods.each do |skill, actions|
+    actions.each do |a|
+      # fix bug in drinfomon
+      if skill == "Bows"
+        skill = "Bow"
+      end
+      a['skill'] = skill
+    end
+  end
+
+  # not yet used
+  def get_nearest_zone(zonetype)
+    # does nothing today, intended to get the nearest zone of a particular type
+    # this is for zone duck typing
+  end
+
+  # first reference @pq_zone_map then use the check method if not in those rooms
+  # the @pq_zone_map will provide 2 features: cache, override
+  def is_zone?(zone_type)
+    # can use switch/case
+
+    # check if current room is in zone_type in @pq_zone_map
+    if @pq_zone_map.key?(zone_type)
+      if @pq_zone_map[zone_type].include?(Room.current.id)
+        return true
+      end
+    end
+
+    case zone_type
+    when 'any'
+      return true
+    when 'has_sky'
+      if can_see_sky?
+        return true
+      end
+    when 'not_engaged'
+      if not !engaged?
+        return true
+      end
+    # might want some logic leave justice at some point, for now it pares lawless skills (sorcery)
+    when 'lawless'
+      if !justicearea?
+        return true
+      end
+    when 'urn'
+      if Room.current.id == 19162
+        return true
+      end
+    # not yet used/tested
+    when 'outdoors'
+      if can_see_sky?
+        return true
+      end
+    end
+    #echo("Not in zone #{zone_type}.")
+    return false # fall through
+  end
+
+  def go2_zone(zone)
+    # how can we use bescort ways on a timer, also tell if it is needed?
+    # can maintain a map or list of zones that should have bescort ways before go2...
+    # if you are already in the zone, don't go to the zone...
+    if !@pq_zone_map[zone].include?(Room.current.id) and !is_zone?(zone)
+      # all zones are through zoluren right now but this will eventually need to be smarter
+      #wait_for_script_to_complete('crossing-repair', ['force'])
+      wait_for_script_to_complete('crossing-repair')
+      wait_for_script_to_complete('restock')
+      wait_for_script_to_complete('go2', [@pq_zone_map[zone][0]]) # temporary until zone selection is smarter
+    end
+    #pause 2
+  end
+
+  def is_training_method_ready?(action)
+    #echo("Check method is_ready?: #{action['method']} (skill: #{action['skill']})")
+    # rudimentary timer check, should be extended
+    if DRSkill.getxp(action['skill']) >= 33
+      echo "Exp too high! Skill pared: [#{action['skill']}]"
+      return false
+    end
+    if !is_ready?(action['function'])
+      echo "Timer not ready! Skill pared: [#{action['skill']}]"
+      return false
+    end
+    #if !is_zone?(action['zone'])
+    #  echo "Not in zone! Skill pared: [#{action['skill']}]"
+    #  return false
+    #end
+    return true
+  end
+
+  def set_priority(action)
+    priority_skill_bonus = 1
+    penalty_skill_penalty = 4
+    first_distance_penalty = 3
+    second_distance_penalty = 7
+    # rough prioritization rules, can be optimized when needed
+    skill = action['skill']
+    #echo("Setting priority for skill #{skill}, action: #{action}")
+    mindstate = DRSkill.getxp(skill)
+    priority = 34 - mindstate
+    if priority == 34 and @pq_priority_skills.include?(skill)
+      priority = 34 + priority_skill_bonus # put empty priority skills ahead of other skills
+    elsif priority == 34 and @pq_penalty_skills.include?(skill)
+      priority = 34 - penalty_skill_penalty # these skills don't train until everything else is moving
+    end
+    if !is_zone?(action['zone'])
+      if priority >= 34 - (penalty_skill_penalty + 1) # must be lower than penalty skills + distance or they will never train
+        priority -= first_distance_penalty
+      # much higher switching cost if skill is already moving
+      else
+        priority -= second_distance_penalty
+      end
+    end
+    #echo("Priority set to #{priority} for skill #{skill} (mindstate: #{mindstate}); action: #{action}")
+    return priority
+  end
+
+  def naive_load_queue(skills)
+    # preserve some order from yaml, not sure if queue implementation will preserve it further
+    skills.each do |skill|
+      @pq_methods[skill].each do |action|
+        priority = set_priority(action)
+        # avoid putting unready methods on the queue
+        if is_training_method_ready?(action)
+          action['priority'] = priority
+          @training_queue.push(action, priority)
+        end
+      end
+    end
+  end
+
+  def train(action)
+    # TODO: zoneless training (appraise pouch, perc moons, perc mana, ??)
+    # TODO: timered training (perc moons, app pouch, perc mana, hunt)
+    # TODO: stay in current zone or pick the actual zone a smarter way
+    # TODO: many zone training (anywhere outdoors for observe celestial)
+    zone = action['zone']
+    skill = action['skill']
+    tfunc = action['function']
+    tmethod = method(tfunc.to_sym)
+    params = action['params']
+
+    echo(action)
+
+    # but once we get into repetitive actions, the abstractions will pay off
+    # TODO: abstract this, so the goal mindstate is not hardcoded
+    # TODO: many do_if_below-learning_goal actions are shorter than this mindstate
+    #       and many do not use it at all, this is a guard for functions that
+    #       actuall use set_goal_mindstate (anything using repeat or do_while inside
+    #       so it's not clear exactly which ones use it. abstracting all the learning
+    #       methods can happen later under-the-hood. for now just keep this.
+    set_goal_mindstate(skill, 3)
+    do_if_below_learning_goal(skill, tmethod, params)
+    return true
+  end
+
+  # TODO: zone changes
+  #       today, skills in other zones are discarded
+  #       instead, skills at a certain priority should be tallied
+  #       and the zone should be updated before building the queue
+  #       this adds a skill tally and zone change before every queue rebuild
+  #       however, the skill tally comes after the set_priority method
+  #       it is something like 'tally all skills for all priorities for each zone'
+  #       then 'take the zone with the most skills at the highest priority'
+  #       however, zone switching should have a penalty, so skills outside of
+  #       the current zone should have a -1 penalty, which ensures all zone skills
+  #       are at least moving before changing zones
+  #       changing zones is intended to be cheap and frequent!!
+  #       however, not all zone changes are easy, entering combat might take a bit
+  #       but my experience is that mob spawn is pretty good, should be ok? test it.
+  def naive_train_next_skill(next_action)
+    echo("Now training #{next_action['skill']}, priority: #{next_action['priority']}")
+    train(next_action)
+  end
+
+  def no_use_scripts
+    if @pq_no_use_scripts.any? { |name| Script.running?(name) }
+      return true
+    else
+      return false
+    end
+  end
+
+  def no_use_rooms
+    if @pq_no_use_rooms.any? { |name| /#{name}/ =~ DRRoom.title || name.to_s == Room.current.id.to_s }
+      return true
+    else
+      return false
+    end
+  end
+
+  def check_available
+    if no_use_scripts
+      pause 3
+      return false
+    elsif no_use_rooms
+      pause 3
+      return false
+    end
+    return true
+  end
+
+  def main
+    loop {
+      loop { break if check_available }
+      naive_load_queue(@pqtrainer_skills)
+      #echo("Queue state: #{@training_queue}") # does not work: doesn't have a repr
+
+      # find the next skill that is_ready? and train() it
+      if @training_queue.empty?
+        echo("Queue empty! Make a new queue. note: probably need to change zones?")
+        pause
+        next
+      end
+      next_action = @training_queue.pop
+      # currently grabs the first zone inside the method
+      # TODO: grab a zone more intelligently based on all queued actions
+      go2_zone(next_action['zone'])
+      naive_train_next_skill(next_action)
+
+      # queue is shuffled after every learning action, so there is no problem
+      # with secondary skills or drain causing a stale queue
+      # although there is an edge case where drain causes skills to train longer
+      # or a long queue action should be aborted because a priority skill drained
+      # so far queue skills except workorders are so short that abort is not needed
+      # the queue is not really used at this point except to select the top
+      # this makes sense though. in the future we might do all queue items
+      # with a zone in the room before moving on
+      @training_queue.clear
+    }
+  end
+
+end
+
+PriorityTrainer.main

@@ -1,0 +1,562 @@
+require 'securerandom'
+
+custom_require.call(%w[drinfomon common common-arcana combat_methods util_classes])
+
+
+include UtilClasses
+
+module UtilMethods
+
+  def repeat_action(action_method, action_params=nil, setup_method=nil, setup_params=nil, teardown_method=nil, teardown_params=nil, t=3)
+    setup_method.call(*setup_params) unless setup_method.nil?
+    t.times do
+      action_method.call(*action_params)
+    end
+    teardown_method.call(*teardown_params) unless teardown_method.nil?
+  end
+
+  # Various script variables, this could be broken out into a game state module
+  # FUTURE: explicitly unset these, on login?? When?
+  # FUTURE: move to Timers hash
+
+  @combat_scripts = UserVars.combat_scripts
+  @settings = get_settings
+  @sano_no_use_rooms = @settings.sanowret_no_use_rooms
+
+  if not UserVars.sano_no_use_rooms_inmemory
+    UserVars.sano_no_use_rooms_inmemory = Array.new
+  end
+
+  # These are maps of uuids containing the skill maps for a particular learning set
+  if not UserVars.learning_checks
+    UserVars.learning_checks = Hash.new(nil)
+  end
+  if not UserVars.learning_marks
+    UserVars.learning_marks = Hash.new(nil)
+  end
+  if not UserVars.goal_mindstate
+    UserVars.goal_mindstate = Hash.new(34)
+  end
+
+  # this object is persistent and needs deleted if it is changed
+  # consider garbage collecting daily or something
+  if not UserVars.Timers
+    UserVars.Timers = Hash.new
+    # initalize timers as ready (subtract interval from now)
+    # these are persisted so between restarts they do not get mixed up
+    UserVars.Timers['percmoons'] = {
+      'timer' => Time.now - 210,
+      'interval' => 210
+    }
+    UserVars.Timers['percmana'] = {
+      'timer' => Time.now - 60,
+      'interval' => 60
+    }
+    UserVars.Timers['appraise_gem_pouch'] = {
+      'timer' => Time.now - 298,
+      'interval' => 298
+    }
+    UserVars.Timers['hunt'] = {
+      'timer' => Time.now - 75,
+      'interval' => 75
+    }
+    # separate timer from hunt
+    UserVars.Timers['hunt_first'] = {
+      'timer' => Time.now - 75,
+      'interval' => 75
+    }
+    UserVars.Timers['pq_burgle'] = {
+      'timer' => Time.now - (3+35)*60,
+      'interval' => (3+35)*60
+    }
+    UserVars.Timers['pq_sigilwalk'] = {
+      'timer' => Time.now - (10+1)*60,
+      'interval' => (10+1)*60
+    }
+  end
+
+
+  def timer_expired?(timer)
+    if (Time.now - timer['timer']) > timer['interval']
+      return true
+    else
+      return false
+    end
+  end
+
+  def reset_timer(timer)
+    timer['timer'] = Time.now
+  end
+
+  def set_goal_mindstate_fixed(skill, goal=34)
+    # set the desired mindstate or 34
+    UserVars.goal_mindstate[skill] = (goal > 34) ? 34 : goal
+  end
+
+  def set_goal_mindstate(skill, increment, max=34)
+    # set the desired increase in mindstate and optional max
+    goal = DRSkill.getxp(skill) + increment
+    goal = goal > max ? max : goal
+    UserVars.goal_mindstate[skill] = goal
+    echo("Goal Mindstate Set: #{skill} to #{goal}")
+  end
+
+  def achieved_goal_mindstates?(uuid, skills)
+    # usage: first use set_goal_mindstate for each skill, then test with this
+    # be sure to use decide_if_learned style decider - for the case that what you are doing isn't teaching
+    if skills.is_a?(String)
+      skills = [skills]
+    end
+    skills.each do |skill|
+      if DRSkill.getxp(skill) < UserVars.goal_mindstate[skill]
+        return false
+      end
+    end
+    return true # fall through to success case
+  end
+
+  def simple_decide_if_learned(uuid, skills)
+    # does not do anything new, just a demo
+    if skills.is_a?(String)
+      skills = [skills]
+    end
+    skills.each do |skill|
+      if !learned_between_marks?(uuid, skill)
+        echo("Skill #{skill} was not learned! Moving on.")
+        return false
+      end
+    end
+    return true # fall through to success case
+  end
+
+  def simple_decide_if_any_learned(uuid, skills)
+    # does not do anything new, just a demo
+    if skills.is_a?(String)
+      skills = [skills]
+    end
+    skills.each do |skill|
+      if learned_between_marks?(uuid, skill)
+        return true
+      end
+    end
+    echo("No skill in list #{skills} was learned! Moving on.")
+    return false # fall through to failed case
+  end
+
+  def mark_learning(uuid, skills)
+    # update mindstate map; update checks map with the difference since last mark
+    # usage:
+    #   - mark the skill(s) before and after a training action
+    #   - check with learned_between_marks? for each skill
+    if skills.is_a?(String)
+      skills = [skills]
+    end
+    skills.each do |skill|
+      UserVars.learning_checks[uuid][skill] = DRSkill.getxp(skill) - UserVars.learning_marks[uuid][skill]
+      UserVars.learning_marks[uuid][skill] = DRSkill.getxp(skill)
+    end
+  end
+
+  def learned_between_marks?(uuid, skill)
+    # just takes 1 skill, helper method
+    if UserVars.learning_checks[uuid][skill] > 0
+      return true
+    else
+      return false
+    end
+  end
+
+  def _setup_checks_and_marks(uuid)
+    UserVars.learning_checks[uuid] = Hash.new(0)
+    UserVars.learning_marks[uuid] = Hash.new(0)
+  end
+
+  def _cleanup_checks_and_marks(uuid)
+    UserVars.learning_checks.delete(uuid)
+    UserVars.learning_marks.delete(uuid)
+  end
+
+  def do_if_below_learning_goal(skills, action, params=nil)
+    # usage: pass the method as method(:methodname)
+    # TODO: pass a list of lists of methods, parameters, and skills
+    # FUTURE: consider setup, action, teardown approach to this
+    uuid = SecureRandom.uuid
+    _setup_checks_and_marks(uuid)
+
+    unless achieved_goal_mindstates?(uuid, skills)
+      mark_learning(uuid, skills)
+      action.call(*params)
+      mark_learning(uuid, skills)
+    end
+    _cleanup_checks_and_marks(uuid)
+  end
+
+  def do_while_below_learning_goal(skills, action, params=nil, decider=method(:simple_decide_if_learned))
+    # TODO: should we pass iterations here?
+    # usage: pass the method as method(:methodname)
+    # TODO: pass a list of lists of methods, parameters, and skills
+    # FUTURE: consider setup, action, teardown approach to this
+    uuid = SecureRandom.uuid
+    _setup_checks_and_marks(uuid)
+
+    until achieved_goal_mindstates?(uuid, skills)
+      mark_learning(uuid, skills)
+      action.call(*params)
+      mark_learning(uuid, skills)
+      # skip if no learning happened
+      # use a decider here, see dissect in combat_methods
+      # FUTURE: pass the decider function in with the other functions
+      # FUTURE: the decider would be a context manager for the action
+      # (currently we get info about before state with with explicit mark actions)
+      if !decider.call(uuid, skills)
+        _cleanup_checks_and_marks(uuid)
+        break
+      end
+    end
+  end
+
+  def turn_tarantula(skill)
+    # TODO: expand logic
+    
+    # fix this one for now
+    if skill == "Lunar Magic"
+      skill = "magic"
+    end
+    pause
+    waitrt?
+    put "turn my tarantula to #{skill}"
+  end
+
+  def rub_tarantula
+    # TODO: expand logic
+    pause
+    waitrt?
+    put "rub my tarantula"
+    pause
+    waitrt?
+    put "exp 0" # reset lich utility tracking for the skill that was drained
+  end
+
+  def use_tarantula_if_full(skillname)
+    if DRSkill.getxp(skillname) >= 34
+      turn_tarantula(skillname)
+      rub_tarantula
+      return 1
+    end
+    return 0
+  end
+
+  def collect_rock(item)
+    pause
+    waitrt?
+    fput "kick pile", "...wait", "You take a step back and run up to the pile of rocks.", "I could not find what you were referring to.", "Assuming you mean"
+    fput "kick pile", "...wait", "You take a step back and run up to the pile of rocks.", "I could not find what you were referring to.", "Assuming you mean"
+    pause
+    result = fput "collect #{item}", "Your concentration slips", "You feel fully prepared", "You manage", "You move", "You manage to collect a pile of rocks.", "You wander around and poke your fingers", "Mindlessly you begin to forage the area before you.", "With skill and nimble fingers you avoid the centipede that runs along in front of your fingers.", "You begin scanning the area before you, trying to find just the right spot to forage.", "You move slightly to the right, hoping to find a better foraging spot.", "Hawkishly", "The room is too cluttered to find anything here!"
+    #if result == "The room is too cluttered to find anything here!"
+    # TODO add dump junk and a janitor timer on further collect in this room
+    # "The janitor was recently summoned to this room."
+    # "You should just kick yourself in the shin.  There is no junk here."
+  end
+
+  def train_outdoors_rocks
+    repeat_action(method('collect_rock'.to_sym), ['rock'])
+  end
+
+  def hunt_first
+    if timer_expired?(UserVars.Timers['hunt'])
+      pause
+      waitrt?
+      put('hunt')
+      reset_timer(UserVars.Timers['hunt'])
+      # only if we hunted in the first place
+      if timer_expired?(UserVars.Timers['hunt_first'])
+        pause
+        waitrt?
+        put('hunt 1')
+        pause
+        waitrt?
+        reset_timer(UserVars.Timers['hunt'])
+      end
+    end
+  end
+
+  def buy(item, cost)
+    # typically offer a higher cost so you don't have to deal with barter
+    # this can be fixed later to read and say the price the merchant offers
+    # item -> string, cost -> string
+    waitrt?
+    pause
+    put("order #{item}")
+    waitrt?
+    pause
+    put("offer #{cost}")
+    waitrt?
+    pause
+    put("offer #{cost}")
+  end
+
+  def buy_fast(item)
+    # for merchants with no negotiation step
+    waitrt?
+    pause
+    put("buy #{item}")
+  end
+
+  def stowheld
+    @@held_text = ""
+    while @@held_text != "Both of your hands are empty."
+      pause
+      waitrt?
+      fput "stow right", "you", "Stow what?"
+      pause
+      waitrt?
+      fput "stow left", "you", "Stow what?"
+      pause
+      waitrt?
+      @@held_text = fput "inv held", "Both of your hands are empty.", "You", "you"
+    end
+  end
+
+  def stowfeet
+    fput "stow feet", "you", "Stow what?"
+  end
+
+  def getmyitem(item)
+    pause
+    waitrt?
+    fput "get my #{item}", "You", "What were you referring to?"
+  end
+
+  def getitem(item, container="")
+    if container == ""
+      pause
+      waitrt?
+      fput "get #{item}", "You", "What were you referring to?"
+    else
+      pause
+      waitrt?
+      fput "get #{item} from #{container}", "You", "What were you referring to?"
+    end
+  end
+
+  def stowmyitem(item)
+    pause
+    waitrt?
+    fput "stow my #{item}", "You", "Stow what?"
+  end
+
+  def stowitem(item)
+    pause
+    waitrt?
+    fput "stow #{item}", "You", "Stow what?"
+  end
+
+  def unpause_other_scripts
+    #resume the previously paused scripts
+    Script.running.find_all { |s| s.paused? && !s.no_pause_all && $scripts_to_unpause.include?(s.name) }.each(&:unpause)
+  end
+
+  def pause_other_scripts
+    #Pause all running scripts, that do not have no_pause_all flag set
+    #Do not use pause_all/unpause_all, as when resuming this could resume scripts that were not paused by this script
+    $scripts_to_unpause = []
+    Script.running.find_all { |s| !s.paused? && !s.no_pause_all && s.name != Script.self.name}.each do  |s|
+      s.pause
+      $scripts_to_unpause << s.name
+    end
+  end
+
+  def justicearea?
+    justicearea = bput("justice", "You're fairly certain this area is lawless and unsafe.", "After assessing the area, you think local law enforcement keeps an eye on what's going on here.", "You", "you")
+    if justicearea == "You're fairly certain this area is lawless and unsafe."
+      return false
+    else
+      return true
+    end
+  end
+
+  def tattoo_training_cast(cambrinth, cambrinth_charge)
+    waitrt?
+    fput "prep symbiosis", "You recall", "But you've already prepared"
+    waitrt?
+    fput "invoke my tattoo", "Closing your eyes,"
+    waitrt?
+    fput "charge my #{cambrinth} #{cambrinth_charge}", "You harness"
+    waitrt?
+    fput "invoke my #{cambrinth} #{cambrinth_charge}", "link", "null"
+    pause 16 # finish spell prep
+
+    if !justicearea?
+      pause
+      waitrt?
+      fput "cast", "You gesture.", "You"
+    else
+      # note: check on the containing loop to actually abort - is there a lich exit script command?
+      echo "You are in a justice area!! Aborting."
+      pause
+      waitrt?
+      put "release"
+    end
+  end
+
+  def in_combat?
+    return if @combat_scripts.any? { |name| Script.running?(name) }
+  end
+
+  def appraise_gem_pouch(pouch)
+    if timer_expired?(UserVars.Timers['appraise_gem_pouch'])
+      pause_other_scripts
+      if engaged?
+        # if advanced on too quickly then appraise timer will not be reset and function will repeat shortly
+        retreat_to_missile
+      end
+      result = bput("app my #{pouch}", "Roundtime:", "You cannot appraise that when you are in combat!")
+
+      if result != "You cannot appraise that when you are in combat!" # let this fail out, it runs constantly
+        reset_timer(UserVars.Timers['appraise_gem_pouch'])
+      end
+      unpause_other_scripts
+    end
+  end
+
+  def is_ready?(skill_method)
+    # currently a grab bag of checks, intended to be more intelligent once some use cases are discovered
+
+    # check if sanowret crystal can be used
+    # multiline or, why is ruby this way...
+    if skill_method == "pq_sanowret_crystal" && (!sanowret_crystal_allowed?(Room.current.id) ||
+      DRStats.concentration < 100 ||
+      DRSkill.getxp('Arcana') >= 25 ||
+      hiding? ||
+      invisible? ||
+      @no_use_scripts.any? { |name| Script.running?(name) } ||
+      @no_use_rooms.any? { |name| /#{name}/ =~ DRRoom.title || name.to_s == Room.current.id.to_s })
+      return false
+    end
+
+    # requires timers to have the same name as their methods, not great unless we reference, single source of truth!! currently hunt_first and appraise_gem_pouch have this problem
+    # move to special generic for timer ready with named timers and timer metadat
+    timer = UserVars.Timers[skill_method]
+    if timer.nil? #or timer.empty? # should not be needed due to nil hash init
+      return true # no timer means good to go
+    elsif timer_expired?(timer)
+      return true
+    else
+      return false
+    end
+  end
+
+  def percmoons
+    if timer_expired?(UserVars.Timers['percmoons'])
+      bput('perc moons', 'Roundtime:', 'Katamba')
+      reset_timer(UserVars.Timers['percmoons'])
+    end
+  end
+
+  def percmana
+    if timer_expired?(UserVars.Timers['percmana'])
+      bput("perc mana", "Roundtime:")
+      reset_timer(UserVars.Timers['percmana'])
+    end
+  end
+
+  def do_waggle_set(setname)
+    DRCA.do_buffs(get_settings, setname)
+  end
+
+  def repeat_magic_training(skill)
+    if skill == 'Utility'
+      setname = 'utility'
+    elsif skill == 'Augmentation'
+      setname = 'augmentation'
+    elsif skill == 'Sorcery'
+      setname = 'sorcery'
+    else
+      echo("Invalid skillset #{skill} for magic training! No corresponding waggle set: skipping...")
+    end
+    repeat_action(method('do_waggle_set'.to_sym), [setname])
+  end
+
+  def wrap_workorders(ordertype)
+    starting_room = Room.current.id
+    # only works for enchanting right now
+    wait_for_script_to_complete('buff',['enchanting'])
+    wait_for_script_to_complete('workorders', [ordertype])
+
+    # replace with @settings.enchanting_tools
+    wait_for_script_to_complete('repair-tool',['imbuement rod'])
+    wait_for_script_to_complete('repair-tool',['precise burin'])
+    wait_for_script_to_complete('repair-tool',['uthamar brazier'])
+    wait_for_script_to_complete('repair-tool',['augmenting loop'])
+    wait_for_script_to_complete('repair-tool',['basic stamp'])
+
+    wait_for_script_to_complete('go2', [starting_room])
+  end
+
+  # replace with first-aid script once you check it out
+  def wrap_studyfa(mindstate_delta)
+    wait_for_script_to_complete('study', [mindstate_delta])
+  end
+
+  def pq_studyfa
+    fatrainer = FirstAidTrainer.new
+    #fatrainer.study_n_times(4)
+    fatrainer.study_goal(3)
+  end
+  def sanowret_crystal_allowed?(room_id)
+    if @sano_no_use_rooms.include?(Room.current.id) or UserVars.sano_no_use_rooms_inmemory.include?(Room.current.id)
+      return false
+    end
+    return true
+  end
+  def pq_sanowret_crystal(sano="sanowret crystal")
+    if !sanowret_crystal_allowed?(Room.current.id)
+      DRC.message("Will not use crystal in room #{DRRoom.title}.")
+      return false
+    end
+    response = DRC.bput("exhale my #{sano}", 'you come away from the experience with a further understanding of Arcana as the scintillating lights fade again.', 'However, nothing much else happens, as you lack the concentration to focus.', 'This is not a good place for that.', 'Doing that would give away your hiding place.', 'That would be difficult to do while you attempt to keep the trail in sight.')
+    if response =~ /This is not a good place for that\./
+      DRC.message("Could not use crystal in room #{DRRoom.title}.")
+      DRC.message("Consider adding this room to your sanowret_no_use_rooms settings.")
+      UserVars.sano_no_use_rooms_inmemory += Room.current.id
+      return false
+    end
+  end
+  # the timer is a little messed up, it needs to only be reset if the script does a burgle. how can i detect?
+  # TODO: for now I added 3 minutes to the timer, remove it again when fixed.
+  def pq_burgle(*params)
+    # also use a Flag for timer notification, to short circuit timer check
+    if timer_expired?(UserVars.Timers['pq_burgle'])
+      starting_room = Room.current.id
+      wait_for_script_to_complete('burgle', params)
+      reset_timer(UserVars.Timers['pq_burgle'])
+      wait_for_script_to_complete('go2', [starting_room])
+    end
+  end
+  def pq_sigilwalk
+    # also use a Flag for timer notification, to short circuit timer check
+    if timer_expired?(UserVars.Timers['pq_sigilwalk'])
+      starting_room = Room.current.id
+      wait_for_script_to_complete('attunement', ['sigil'])
+      reset_timer(UserVars.Timers['pq_sigilwalk'])
+      wait_for_script_to_complete('go2', [starting_room])
+    end
+  end
+  def pq_performance(mindstate_goal)
+    mindstate_goal = DRSkill.getxp('Performance') + Integer(mindstate_goal)
+    params = ["mindstate_goal=#{mindstate_goal}"]
+    wait_for_script_to_complete('performance', params)
+  end
+  def training_noop
+    # how can this test passive learning in parallel with RT learning?
+    # essentially just by being in the area we are training these skills
+    # evasion, shield, parry, armors, etc.
+    # evasion/shield/parry do need some settings set
+    # this training_noop can be called in the queue but just do nothing
+    # it means if we only have training noops in the queue, there should be a pause
+    # but we really only want one pause since they would add up
+    # for now we can pause as a stub but replace it later
+    pause 3
+  end
+end

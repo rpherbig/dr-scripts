@@ -16,9 +16,10 @@ class InventoryManager
       ],
       [
         { name: 'save', regex: /save/i, description: "Save new or update current character's items to the database." },
-        { name: 'vault_book', regex: /vault_book/i, optional: true, description: "DEPRECATED. Will call vault_standard." },
+        { name: 'vault_book', regex: /vault_book/i, optional: true, description: "Uses vault book for inventory." },
         { name: 'vault_regular', regex: /vault_regular/i, optional: true, description: "Rummages your vault to save items NOTE: must be standing by your open vault." },
         { name: 'storage_box', regex: /storage_box/i, optional: true, description: "Rummages caravan storage box for items." },
+        { name: 'storage_book', regex: /storage_book/i, optional: true, description: "Uses storage book for caravan items instead of rummaging." },
         { name: 'family_vault', regex: /family_vault/i, optional: true, description: "Rummages your family vault to save items NOTE: must be standing by your open vault." },
         { name: 'register', regex: /register/i, optional: true, description: "Reads contents of deed register." },
         { name: 'eddy', regex: /eddy/i, optional: true, description: "Save the contents of an eddy (HE 436 Gift)." },
@@ -26,6 +27,7 @@ class InventoryManager
         { name: 'home', regex: /home/i, optional: true, description: "Save home inventory." },
         { name: 'servant', regex: /servant/i, optional: true, description: "Save shadow servant inventory." },
         { name: 'shop', regex: /shop/i, optional: true, description: "Save your Trader shop inventory." },
+        { name: 'pocket', regex: /pocket/i, optional: true, description: "Rummages your secret pocket container to save items." },
         { name: 'vault_standard', regex: /vault_standard/i, optional: true, description: "Uses VAULT STANDARD to get a list of items." }
       ],
       [
@@ -45,12 +47,11 @@ class InventoryManager
     args = parse_args(arg_definitions)
     @settings = get_settings
     @inventory_ignores = @settings.inventory_manager_ignores
-
+    @vault_surfaces = @settings.inventory_manager_vault_surfaces
     setup
 
     if args.vault_book
-      DRC.message('Vault Book support has been removed in favor of VAULT STANDARD.')
-      add_vault_standard
+      add_vault_book
     elsif args.vault_standard
       add_vault_standard
     elsif args.vault_regular
@@ -64,6 +65,8 @@ class InventoryManager
       add_eddy_inv
     elsif args.storage_box
       add_storage_box_inv
+    elsif args.storage_book
+      add_storage_book
     elsif args.scrolls
       add_scrolls
     elsif args.home
@@ -72,6 +75,8 @@ class InventoryManager
       add_shadow_servant
     elsif args.shop
       add_trader_shop
+    elsif args.pocket
+        add_pocket_inv
     elsif args.save
       add_current_inv
     elsif args.count
@@ -124,7 +129,7 @@ class InventoryManager
   end
 
   def valid_data_row(item)
-    if item.include?('(vault)') || item.include?('(register)') || item.include?('(eddy)') || item.include?('(caravan_box)') || item.include?('(Family)')
+    if item.include?('(vault)') || item.include?('(register)') || item.include?('(eddy)') || item.include?('(caravan_box)') || item.include?('(Family)') || item.include?('(pocket)')
       true
     else
       false
@@ -185,7 +190,6 @@ class InventoryManager
     get_item_data(inventory_type)
 
     capture = Lich::Util.issue_command(command, end_pattern)
-
     lines = capture
     # when rummaging, this block splits the items, including the last two that are split by and instead of a comma
     if command.start_with?("rummage")
@@ -207,7 +211,10 @@ class InventoryManager
 
       next if item.empty?
       next if item.start_with?(*@inventory_ignores)
-
+      if item.start_with?(*@vault_surfaces)
+        container = item.to_s
+        next
+      end
       # if the item starts with a -, it's in a container
       if item[0].eql? '-'
         item[0] = ''
@@ -218,6 +225,20 @@ class InventoryManager
         item.concat(' (worn)')
       elsif inventory_type == 'shadow_servant'
         # items in a container are prefixed by 6 spaces
+        if line =~ /\s{6}(?:a|an|some) /
+          item.concat(" (in container - #{container})")
+        else
+          container = item.to_s
+        end
+      elsif /vault book/.match(command)
+        # items in vault book output are prefixed by 6 spaces
+        if line =~ /\s{6}(?:a|an|some) /
+          item.concat(" (in container - #{container})")
+        else
+          container = item.to_s
+        end
+      elsif /storage book/.match(command)
+        # items in a storage book are prefixed by 6 spaces
         if line =~ /\s{6}(?:a|an|some) /
           item.concat(" (in container - #{container})")
         else
@@ -242,6 +263,7 @@ class InventoryManager
 
       item.concat(" (#{inventory_type})")
 
+      next if item.start_with?(*@inventory_ignores)
       @item_data[@active_character] << item
     end
 
@@ -260,6 +282,15 @@ class InventoryManager
 
   def add_vault_standard
     check_inventory("vault standard", /^Vault Inventory:/, 'vault')
+  end
+
+  def add_vault_book
+    unless DRCI.get_item_if_not_held?("vault book")
+      DRC.message("Unable to find your vault book, exiting!")
+      exit
+    end
+    check_inventory("read my vault book", /^Vault Inventory/, 'vault')
+    DRCI.stow_item?("book")
   end
 
   def add_current_inv
@@ -284,7 +315,16 @@ class InventoryManager
   end
 
   def add_storage_box_inv
-    check_inventory("rummage storage boc", /^You rummage through a storage box/, 'caravan_box', 41)
+    check_inventory("rummage storage box", /^You rummage through a storage box/, 'caravan_box', 41)
+  end
+
+  def add_storage_book
+    unless DRCI.get_item_if_not_held?("storage book")
+      DRC.message("Unable to find your storage book, exiting!")
+      exit
+    end
+    check_inventory("read my storage book", /^\W+in the known realms since 402/, 'caravan_box')
+    DRCI.stow_item?("book")
   end
 
   def add_family_vault
@@ -293,6 +333,10 @@ class InventoryManager
 
   def add_vault_regular_inv
     check_inventory("rummage vault", /^You rummage through a secure vault/, 'vault', 42)
+  end
+
+  def add_pocket_inv
+    check_inventory("rummage my pocket", /^You rummage through a pocket/, 'pocket', 36)
   end
 
   def add_scrolls

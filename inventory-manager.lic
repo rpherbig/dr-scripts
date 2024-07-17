@@ -16,9 +16,10 @@ class InventoryManager
       ],
       [
         { name: 'save', regex: /save/i, description: "Save new or update current character's items to the database." },
-        { name: 'vault_book', regex: /vault_book/i, optional: true, description: "DEPRECATED. Will call vault_standard." },
+        { name: 'vault_book', regex: /vault_book/i, optional: true, description: "Uses vault book to get a list of items from your vault." },
         { name: 'vault_regular', regex: /vault_regular/i, optional: true, description: "Rummages your vault to save items NOTE: must be standing by your open vault." },
         { name: 'storage_box', regex: /storage_box/i, optional: true, description: "Rummages caravan storage box for items." },
+        { name: 'storage_book', regex: /storage_book/i, optional: true, description: "Uses storage book to get a list of items from your caravan storage box." },
         { name: 'family_vault', regex: /family_vault/i, optional: true, description: "Rummages your family vault to save items NOTE: must be standing by your open vault." },
         { name: 'register', regex: /register/i, optional: true, description: "Reads contents of deed register." },
         { name: 'eddy', regex: /eddy/i, optional: true, description: "Save the contents of an eddy (HE 436 Gift)." },
@@ -26,15 +27,18 @@ class InventoryManager
         { name: 'home', regex: /home/i, optional: true, description: "Save home inventory." },
         { name: 'servant', regex: /servant/i, optional: true, description: "Save shadow servant inventory." },
         { name: 'shop', regex: /shop/i, optional: true, description: "Save your Trader shop inventory." },
+        { name: 'pocket', regex: /pocket/i, optional: true, description: "Rummages your secret pocket container for list of items. NOTE: Must be wearing the container." },
         { name: 'vault_standard', regex: /vault_standard/i, optional: true, description: "Uses VAULT STANDARD to get a list of items." }
       ],
       [
         { name: 'search', regex: /search/i, description: 'Start a search across all characters for specified item.' },
-        { name: 'item', regex: /\w+/i, optional: false, description: 'Item to find.' }
+        { name: 'item', regex: /\w+/i, optional: false, description: 'Item to find.' },
+        { name: 'nest', regex: /nest|-n/i, optional: true, description: 'Print the nesting container data', default: false }
       ],
       [
         { name: 'list', regex: /list/i, description: "Print out a list of names in the database." },
-        { name: 'name', regex: /\w+/i, optional: true, description: "List full inventory for specified character. (Can spam!)" }
+        { name: 'name', regex: /\w+/i, optional: true, description: "List full inventory for specified character. (Can spam!)" },
+        { name: 'nest', regex: /nest|-n/i, optional: true, description: 'Print the nesting container data', default: false }
       ],
       [
         { name: 'remove', regex: /remove/i, description: "Remove character's inventory." },
@@ -45,12 +49,11 @@ class InventoryManager
     args = parse_args(arg_definitions)
     @settings = get_settings
     @inventory_ignores = @settings.inventory_manager_ignores
-
+    @vault_surfaces = @settings.inventory_manager_vault_surfaces
     setup
 
     if args.vault_book
-      DRC.message('Vault Book support has been removed in favor of VAULT STANDARD.')
-      add_vault_standard
+      add_vault_book
     elsif args.vault_standard
       add_vault_standard
     elsif args.vault_regular
@@ -64,6 +67,8 @@ class InventoryManager
       add_eddy_inv
     elsif args.storage_box
       add_storage_box_inv
+    elsif args.storage_book
+      add_storage_book
     elsif args.scrolls
       add_scrolls
     elsif args.home
@@ -72,6 +77,8 @@ class InventoryManager
       add_shadow_servant
     elsif args.shop
       add_trader_shop
+    elsif args.pocket
+      add_pocket_inv
     elsif args.save
       add_current_inv
     elsif args.count
@@ -79,9 +86,9 @@ class InventoryManager
     elsif args.remove
       remove_character_data(args.name)
     elsif args.search
-      search_for_item(args.item)
+      search_for_item(args.item, args.nest)
     elsif args.list
-      list_character_inv(args.name)
+      list_character_inv(args.name, args.nest)
     else
       DRC.message('Type ;inventory-manager help for a usage guide')
     end
@@ -124,7 +131,7 @@ class InventoryManager
   end
 
   def valid_data_row(item)
-    if item.include?('(vault)') || item.include?('(register)') || item.include?('(eddy)') || item.include?('(caravan_box)') || item.include?('(Family)')
+    if item.include?('(vault)') || item.include?('(register)') || item.include?('(eddy)') || item.include?('(caravan_box)') || item.include?('(Family)') || item.include?('(pocket)')
       true
     else
       false
@@ -149,7 +156,10 @@ class InventoryManager
     count, closed = 0, 0
     if desc.nil?
       # Counting all items in inventory
-      capture = Lich::Util.issue_command('inv list', /^You have:/)
+      capture = []
+      until capture != []
+        capture = Lich::Util.issue_command('inv list', /^You have:/, timeout: 3) unless waitrt?
+      end
       capture.each do |line|
         item = line.lstrip
 
@@ -162,7 +172,10 @@ class InventoryManager
       DRC.message("You have #{count} items, #{closed} of which are (closed) containers.")
     else
       # Counting items matching the description, i.e., inv count pouch
-      capture = Lich::Util.issue_command("inv search #{desc}", /rummage about your person/)
+      capture = []
+      until capture != []
+        capture = Lich::Util.issue_command("inv search #{desc}", /rummage about your person/, timeout: 3) unless waitrt?
+      end
       capture.each do |line|
         item = line.lstrip
 
@@ -184,8 +197,10 @@ class InventoryManager
 
     get_item_data(inventory_type)
 
-    capture = Lich::Util.issue_command(command, end_pattern)
-
+    capture = []
+    until capture != []
+      capture = Lich::Util.issue_command(command, end_pattern, timeout: 3) unless waitrt?
+    end
     lines = capture
     # when rummaging, this block splits the items, including the last two that are split by and instead of a comma
     if command.start_with?("rummage")
@@ -201,6 +216,7 @@ class InventoryManager
     end
 
     container = ""
+    sub_container = ""
     lines.each do |line|
       line.sub!(/\(\d+\)/, '') if command == 'vault standard'
       item = line.lstrip
@@ -208,25 +224,42 @@ class InventoryManager
       next if item.empty?
       next if item.start_with?(*@inventory_ignores)
 
+      if item.start_with?(*@vault_surfaces)
+        container = item.to_s
+        next
+      end
       # if the item starts with a -, it's in a container
       if item[0].eql? '-'
         item[0] = ''
-        item.concat(" (in container - #{container})")
+        if line =~ /\s{8,}-(?:a|an|some|the|several|clusters|one) /
+          item.concat(" (nested container - #{sub_container})")
+        elsif line =~ /\s{5}-(?:a|an|some|the|several|clusters|one) /
+          item.concat(" (in container - #{container})")
+          sub_container = item.to_s
+        else
+          container = item.to_s
+        end
       elsif inventory_type == 'character'
         # We don't want the inventory_type here as it's extra noise, so we do a .to_s so container doesn't get updated by changing item later
         container = (item.include?("eddy") ? "eddy" : item).to_s
         item.concat(' (worn)')
-      elsif inventory_type == 'shadow_servant'
-        # items in a container are prefixed by 6 spaces
-        if line =~ /\s{6}(?:a|an|some) /
+      elsif command == "read my storage book" || command == "read my vault book" || inventory_type == "shadow_servant"
+        # Vault book, storage book and shadow servant via PG all have same output formatting
+        if line =~ /\s{8,}(?:a|an|some|the|several|clusters|one) /
+          item.concat(" (nested container - #{sub_container})")
+        elsif line =~ /\s{6}(?:a|an|some|the|several|clusters|one) /
           item.concat(" (in container - #{container})")
+          sub_container = item.to_s
         else
           container = item.to_s
         end
       elsif command == 'vault standard'
         # items in a container are prefixed by 11 spaces once the item count is removed
-        if line =~ /\s{11}(?:a|an|some) /
+        if line =~ /\s{16,}(?:a|an|some|the|several|clusters|one) /
+          item.concat(" (nested container - #{sub_container})")
+        elsif line =~ /\s{11}(?:a|an|some|the|several|clusters|one) /
           item.concat(" (in container - #{container})")
+          sub_container = item.to_s
         else
           container = item.to_s
         end
@@ -262,6 +295,17 @@ class InventoryManager
     check_inventory("vault standard", /^Vault Inventory:/, 'vault')
   end
 
+  def add_vault_book
+    unless DRCI.get_item_if_not_held?("vault book")
+      DRC.message("Unable to find your vault book, exiting!")
+      exit
+    end
+
+    check_inventory("read my vault book", /^Vault Inventory/, 'vault')
+
+    DRCI.stow_item?("book")
+  end
+
   def add_current_inv
     check_inventory("inv list", /^You have:/, 'character')
   end
@@ -274,17 +318,28 @@ class InventoryManager
 
     DRC.bput("turn my register to contents", 'You flip your deed register', 'already at the table of contents')
 
-    check_inventory("read my register", /^Stored Deeds:/, 'register')
+    check_inventory("read my register", /^Stored Deeds:|You haven't stored any deeds in this register/, 'register')
 
     DRCI.stow_item?("register")
   end
 
   def add_eddy_inv
-    checkInventory("inv eddy", /^Inside a/, 'eddy')
+    check_inventory("inv eddy", /^Inside a/, 'eddy')
   end
 
   def add_storage_box_inv
-    check_inventory("rummage storage boc", /^You rummage through a storage box/, 'caravan_box', 41)
+    check_inventory("rummage storage box", /^You rummage through a storage box/, 'caravan_box', 41)
+  end
+
+  def add_storage_book
+    unless DRCI.get_item_if_not_held?("storage book")
+      DRC.message("Unable to find your storage book, exiting!")
+      exit
+    end
+
+    check_inventory("read my storage book", /^\W+in the known realms since 402/, 'caravan_box')
+
+    DRCI.stow_item?("book")
   end
 
   def add_family_vault
@@ -293,6 +348,10 @@ class InventoryManager
 
   def add_vault_regular_inv
     check_inventory("rummage vault", /^You rummage through a secure vault/, 'vault', 42)
+  end
+
+  def add_pocket_inv
+    check_inventory("rummage my pocket", /^You rummage through a pocket/, 'pocket', 36)
   end
 
   def add_scrolls
@@ -338,7 +397,10 @@ class InventoryManager
 
   def check_scroll_stacker(stacker)
     spells = []
-    capture = Lich::Util.issue_command("flip my #{stacker.split.last}", /^You flip through the #{stacker.split.last}, checking each section before closing it.$/)
+    capture = []
+    until capture != []
+      capture = Lich::Util.issue_command("flip my #{stacker.split.last}", /^You flip through the #{stacker.split.last}, checking each section before closing it.$/, timeout: 3) unless waitrt?
+    end
     capture.each do |line|
       if line =~ /The (.+) section has (\d+)/
         spell = "#{Regexp.last_match(1)} (#{Regexp.last_match(2)})"
@@ -379,7 +441,10 @@ class InventoryManager
     get_item_data('trader_shop')
 
     surfaces = Hash.new
-    capture = Lich::Util.issue_command("shop customer", /^The following items contain goods for sale:/)
+    capture = []
+    until capture != []
+      capture = Lich::Util.issue_command("shop customer", /^The following items contain goods for sale:/, timeout: 3) unless waitrt?
+    end
     capture.each do |line|
       line = line.lstrip
 
@@ -392,7 +457,10 @@ class InventoryManager
     end
 
     surfaces.each do |surface|
-      capture = Lich::Util.issue_command(surface[1], /, you see:/)
+      capture = []
+      until capture != []
+        capture = Lich::Util.issue_command(surface[1], /, you see:/, timeout: 3) unless waitrt?
+      end
       capture.each do |line|
         line = line.lstrip
 
@@ -405,7 +473,7 @@ class InventoryManager
     save_item_data('trader_shop')
   end
 
-  def list_character_inv(name)
+  def list_character_inv(name, nested)
     if name.nil?
       DRC.message("There is inventory data for:")
       @item_data.each do |k, v|
@@ -423,13 +491,18 @@ class InventoryManager
     name_sym = name.capitalize.to_sym
     if @item_data.has_key?(name_sym)
       DRC.message("Inventory for #{name.capitalize}")
-      @item_data[name_sym].each { |item| DRC.message("   - #{item}") }
+      @item_data[name_sym].each { |item|
+        if !nested
+          item = strip_nesting(item)
+        end
+        DRC.message("   - #{item}")
+      }
     else
       DRC.message("No data found for the character #{name.capitalize}!")
     end
   end
 
-  def search_for_item(item)
+  def search_for_item(item, nested)
     total_found = 0
     @item_data.each do |k, v|
       next if k == @version_string
@@ -437,12 +510,23 @@ class InventoryManager
       total_found = 0
       DRC.message("Checking #{k}:")
       v.each { |data|
+        if !nested
+          data = strip_nesting(data)
+        end
         if data.downcase.include?(item)
           total_found += 1
           DRC.message("Match #{total_found}): #{data}")
         end
       }
       DRC.message("Found #{total_found} match#{(total_found > 1 ? 'es' : '')} on #{k}\n")
+    end
+  end
+
+  def strip_nesting(item)
+    if (match = /^(?<tap>[a-z "':!-]*(?<closed>\(closed\))?)\s\((?<nest1>(?<nest2>nested container[a-z "':!-]*)\s\()?(?<main>in container[a-z "':!-]*)\)?\)\s(?<origin>\(.*\))$/i.match(item))
+      return "#{match["tap"]} #{match["origin"]}"
+    else
+      return item
     end
   end
 

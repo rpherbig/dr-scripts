@@ -15,7 +15,7 @@ class Burgle
         { name: 'start', regex: /start/, optional: false, description: 'Required: prevents accidentally running burgle and protects against burgle typo for starting script' },
         { name: 'entry', options: %w[lockpick rope cycle prioritylockpick priorityrope], optional: true, description: 'Override yaml setting for entry_type.' },
         { name: 'roomid', regex: /\d+/, optional: true, description: 'Override yaml setting and go to room id (#) specified.  The room should be chosen VERY carefully.' },
-        { name: 'loot_type', options: %w[drop keep pawn bin], optional: true, description: 'Override yaml setting for loot. (items on item_whitelist are always kept.)' },
+        { name: 'loot_type', options: %w[drop keep pawn bin trashcan], optional: true, description: 'Override yaml setting for loot. (items on item_whitelist are always kept.)' },
         { name: 'hometown', options: $HOMETOWN_LIST, optional: true, description: 'Override yaml hometown settings for bin and pawn.  If no bin or pawnshop in that hometown, loot_type will revert to drop.' },
         { name: 'follow', options: %w[follow], optional: true, description: "Follow another player, don't actually burgle.  You must group with them first." }
       ]
@@ -68,11 +68,20 @@ class Burgle
     @max_priority_mindstate = @burgle_settings['max_priority_mindstate'] || 26
     @rope_adjective = @burgle_settings['rope_adjective'] || 'heavy'
     @loot_room_id = nil
+    @worn_trashcan = @settings.worn_trashcan
+    @worn_trashcan_verb = @settings.worn_trashcan_verb
 
     # set yaml settings unless being overridden from the command line arguments
     @entry_type = args.entry || @burgle_settings['entry_type']
     @burgle_room = args.roomid ? args.roomid.to_i : @burgle_settings['room']
     @loot_type = args.loot_type || @burgle_settings['loot']
+    case @loot_type
+    when /trashcan/
+      if !@worn_trashcan || !@worn_trashcan_verb
+        echo("The `loot_type: trashcan` setting requires the base.yaml`worn_trashcan:` and `worn_trashcan_verb:` settings to be set in your yaml.")
+        exit
+      end
+    end
     @hometown = args.hometown || @burgle_settings['hometown'] || @settings.burgle_town || @settings.fang_cove_override_town || @settings.hometown
     @burgle_before_scripts = @burgle_settings['before']
     @burgle_after_scripts = @burgle_settings['after']
@@ -449,8 +458,13 @@ class Burgle
     when *@burgle_settings['item_whitelist']
       put_item?(DRC.right_hand)
     else
-      temp_loot = DRC.right_hand
-      @loot_list.push(temp_loot) if put_item?(DRC.right_hand)
+      case @loot_type
+      when 'drop', 'bin', 'pawn', 'keep'
+        temp_loot = DRC.right_hand
+        @loot_list.push(temp_loot) if put_item?(DRC.right_hand)
+      when 'trashcan'
+        DRCI.dispose_trash(DRC.right_hand, @worn_trashcan, @worn_trashcan_verb)
+      end
     end
 
     # if you've seen footsteps, don't bother still storing items, and just get out if in safe mode
@@ -463,8 +477,13 @@ class Burgle
     when *@burgle_settings['item_whitelist']
       put_item?(DRC.left_hand)
     else
-      temp_loot = DRC.left_hand
-      @loot_list.push(temp_loot) if put_item?(DRC.left_hand)
+      case @loot_type
+      when 'drop', 'bin', 'pawn', 'keep'
+        temp_loot = DRC.left_hand
+        @loot_list.push(temp_loot) if put_item?(DRC.left_hand)
+      when 'trashcan'
+        DRCI.dispose_trash(DRC.left_hand, @worn_trashcan, @worn_trashcan_verb)
+      end
     end
   end
 
@@ -479,10 +498,10 @@ class Burgle
 
   # ripped out of steal.lic
   def put_item?(item)
-    case DRC.bput("put my #{item} in my #{@loot_container}", 'What were you', 'You put', "You can't do that", "You can't put that there", 'no matter how you arrange it', 'even after stuffing', 'The .* is *.* too \w+ to fit in', 'There isn\'t any more room', 'perhaps try doing that again', 'That\'s too heavy to go in there', "^Weirdly, you can't manage", "^There's no room")
+    case DRC.bput("put my #{item} in my #{@loot_container}", 'What were you', 'You put', 'You drop', "You can't do that", "You can't put that there", 'no matter how you arrange it', 'even after stuffing', 'The .* is *.* too \w+ to fit in', 'There isn\'t any more room', 'perhaps try doing that again', 'That\'s too heavy to go in there', "^Weirdly, you can't manage", "^There's no room")
     when 'perhaps try doing that again'
       return put_item?(item)
-    when 'You put'
+    when 'You put', 'You drop'
       return true
     when 'What were you'
       handheld = held_item(item)
@@ -546,7 +565,7 @@ class Burgle
 
   def process_loot
     # return if loot_type isn't one of the supported process kind
-    return if @loot_type !~ /drop|pawn|bin/
+    return if @loot_type !~ /drop|pawn|bin|trashcan/
     # return if loot_list is empty.
     return if @loot_list.empty?
 
@@ -563,7 +582,7 @@ class Burgle
         when 'drop'
           drop_item(item)
         end
-      when /^What were you referring to/  # handle items that stack/missing items
+      when /^What were you referring to/ # handle items that stack/missing items
         next
       end
     end

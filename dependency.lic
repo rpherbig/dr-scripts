@@ -10,8 +10,9 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '1.7.3'
+$DEPENDENCY_VERSION = '1.7.5'
 $MIN_RUBY_VERSION = '3.2.2'
+DRINFOMON_IN_CORE_LICH ||= false
 
 no_pause_all
 no_kill_all
@@ -241,7 +242,44 @@ class ScriptManager
   end
 
   def update_status_url
-    @status_url = 'https://api.github.com/repos/' + @status_repo + '/git/trees/' + @status_branch
+    defaulturl = 'https://api.github.com/repos/' + @status_repo + '/git/trees/' + @status_branch
+    mainurl = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/main'
+    fallbackurl = 'https://api.github.com/repos/rpherbig/dr-scripts/git/trees/master'
+    eo_drscripts = 'https://api.github.com/repos/elanthia-online/dr-scripts/git/trees/main'
+
+    unless url_exist?(defaulturl)
+      _respond Lich::Messaging.monsterbold("Default URL #{defaulturl} not responding. Using an alternate repo+branch combindation.")
+      _respond Lich::Messaging.monsterbold("Unsetting custom repo settings, if any.")
+      Settings['status_repo'] = nil if Settings['status_repo']
+      Settings['status_branch'] = nil if Settings['status_branch']
+    end
+
+    if url_exist?(defaulturl)
+      @status_url = defaulturl
+      _respond Lich::Messaging.monsterbold("Using set Status URL. #{defaulturl}")
+    elsif url_exist?(mainurl)
+      _respond Lich::Messaging.monsterbold("Using alternate Status URL. #{mainurl}")
+      @status_url = mainurl
+    elsif url_exist?(fallbackurl)
+      _respond Lich::Messaging.monsterbold("Using fallback Status URL. #{fallbackurl}")
+      @status_url = fallbackurl
+    elsif url_exist?(eo_drscripts)
+      _respond Lich::Messaging.monsterbold("Using Elanthia Online Status URL. #{eo_drscripts}")
+      @status_url = eo_drscripts
+    else
+      _respond Lich::Messaging.monsterbold("Could not set Status URL. Please seek help on Discord.")
+    end
+  end
+
+  def url_exist?(url_string)
+    url = URI.parse(url_string)
+    req = Net::HTTP.new(url.host, url.port)
+    req.use_ssl = (url.scheme == 'https')
+    path = url.path
+    res = req.request_head(path || '/')
+    res.code != "404" # false if returns 404 - not found
+  rescue Errno::ENOENT, URI::InvalidURIError
+    false # false if can't find the server, or URI invalid somehow
   end
 
   def set_custom_status_repo(repo, branch)
@@ -1567,6 +1605,10 @@ def custom_require
   lambda do |script_names|
     script_names = [script_names] unless script_names.is_a?(Array)
     respond("CR:starting:#{script_names}") if UserVars.bootstrap_debug
+    if DRINFOMON_IN_CORE_LICH
+      echo("DRInfomon in core lich detected. Skipping loading drinfomon.lic") if UserVars.bootstrap_debug
+      script_names -= ['drinfomon']
+    end
     bootstrapper = force_start_script('bootstrap', script_names)
     pause 0.05
     while Script.running.include?(bootstrapper)
@@ -1794,9 +1836,19 @@ force_start_script('bootstrap', ['wipe_constants'])
 # Proactively starting DRinfomon as script zero to prevent
 # race conditions involving this script which so many other
 # scripts depend on, and which is slow to start on its own
-echo("Starting DRinfomon, this will take a few seconds.")
-custom_require.call('drinfomon')
-echo("DRinfomon ready.")
+unless DRINFOMON_IN_CORE_LICH
+  echo("Starting DRinfomon, this will take a few seconds.")
+
+  custom_require.call('drinfomon')
+
+  echo("DRinfomon ready.")
+end
+
+if DRINFOMON_IN_CORE_LICH
+  Lich::Util.issue_command("exp all 0", /^Circle: \d+/, /^Rested EXP Stored|Unlock Rested Experience|type: AWAKEN/, quiet: true)
+  Lich::Util.issue_command("info", /^Name/, /^<output class=""/, quiet: true)
+  Lich::Util.issue_command("ability", /^You (know the Berserks|recall the spells you have learned from your training)/, /^You (recall that you have 9 training sessions|can use SPELL STANCE [HELP])/, quiet: true)
+end
 
 $manager.check_base_files
 $manager.check_data_files

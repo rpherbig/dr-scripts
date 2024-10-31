@@ -2,31 +2,59 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#mine
 =end
 
-custom_require.call(%w[common equipmanager events common-travel])
+custom_require.call(%w[common common-crafting common-items events common-travel])
 
 class Mine
-  include DRC
-  include DRCT
-
   def initialize
-    setup
+    Flags.add('mine-danger', 'The ground rumbles ominously', 'A bitter smell seeps into the air', 'The floor shudders briefly', 'continued mining .* hazardous', 'slightly dangerous because the ground')
+    Flags.add('mine-exit', 'The entire wall of rock fractures at your blow and comes crashing down atop you')
+    Flags.add('mine-pinned', 'You seem to be pinned in place', 'You finally manage to clear away enough rubble')
+    Flags.add('resource-level',
+              'certain a scattering of resources', 'enormous quantity remains to be found', 'substantial quantity remains to be found',
+              'good quantity remains to be found', 'decent quantity remains to be found', 'small quantity remains to be found',
+              'enormous quantity \(5/5\) remains to be found', 'substantial quantity \(4/5\) remains to be found', 'good quantity \(3/5\) remains to be found',
+              'decent quantity \(2/5\) remains to be found', 'small quantity \(1/5\) remains to be found', 'scattering of resources \(0/5\) remains to be found')
+    settings = get_settings
+    @mining_skip_populated = settings.mining_skip_populated
+    @mining_implement = settings.mining_implement
+    @forging_belt = settings.forging_belt
+    @loot_list = settings.mining_buddy_vein_list
+    @use_packet = settings.mine_use_packet
+    @ignored_rock_sizes = settings.mining_ignored_stone_sizes
+    @ignored_deed = settings.mining_ignored_deed_sizes
+    @mining_attempt_timer = settings.mining_attempt_timer
+    @bag = settings.crafting_container
+    @bag_items = settings.crafting_items_in_container
+    @belt = settings.forging_belt
+    DRCI.stow_hands
+    unless settings.adjustable_tongs && @mining_implement.include?('tongs') && DRCC.get_adjust_tongs?('reset shovel', @bag, @bag_items, @belt)
+      @mining_implement.sub!(/.* tongs/, "shovel")
+    end
+    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @belt)
 
-    get_mining_tool
-
-    bput('prospect', 'roundtime', 'You carefully scan')
+    DRC.wait_for_script_to_complete('buff', ['mining'])
+    if DRStats.trader? && DRStats.circle >= 65
+      DRC.bput('speculate luck',
+               /^You focus your mind on the world around you/,
+               /^You are already focusing on the world around you/,
+               /^Your pattern-matching skills are still exhausted/,
+               /^The world already seems less chaotic and capricious than normal/)
+    end
+    DRC.bput('prospect', 'roundtime', 'You carefully scan')
 
     @multiplier = @mining_implement =~ /pick/i ? 4 : 5
 
     mine(@multiplier * resource_level)
-    while bput('prospect careful', 'roundtime', 'You carefully scan')
-      bput('prospect', 'roundtime', 'You carefully scan')
+    while DRC.bput('prospect careful', 'roundtime', 'You carefully scan')
+      DRC.bput('prospect', 'roundtime', 'You carefully scan')
       results = reget(10, 'can be mined here')
       waitrt?
       break if results.nil?
+
       mine(@multiplier * resource_level)
     end
 
-    store_mining_tool
+    DRCC.stow_crafting_item(@mining_implement, @bag, @belt)
   end
 
   def resource_level
@@ -48,43 +76,56 @@ class Mine
 
   def handle_danger
     fput('exit') if Flags['mine-exit']
-    fix_standing
+    DRC.fix_standing
+    Flags.reset('mine-pinned')
 
     if bleeding?
       snapshot = Room.current.id
-      bput("get #{@mining_implement}", 'You get', 'You are already')
-      store_mining_tool
-      wait_for_script_to_complete('safe-room')
-      walk_to(snapshot)
+      DRC.bput("get #{@mining_implement}", 'You get', 'You are already')
+      DRCC.stow_crafting_item(@mining_implement, @bag, @belt)
+      DRC.wait_for_script_to_complete('safe-room')
+      DRCT.walk_to(snapshot)
       if @mining_skip_populated && !DRRoom.pcs.empty?
         DRC.message("Returned from healing and another player is in the room. Returning to mining-buddy to move on!")
       end
-      get_mining_tool
+      DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @belt)
     end
 
     return unless Flags['mine-danger']
+
     waitrt?
-    until /danger|find nothing of concern/ =~ bput('prospect danger', 'Unfortunately', 'shown a way to significantly reduce the danger', 'find nothing of concern')
-      pause
+
+    10.times do
       waitrt?
+      next unless /danger|find nothing of concern/ =~ DRC.bput('prospect danger', 'Unfortunately', 'shown a way to significantly reduce the danger', 'find nothing of concern')
+
+      Flags.reset('mine-danger')
+      return
     end
-    Flags.reset('mine-danger')
+    DRC.message("Couldn't clear danger, exiting this node for safety.")
+    exit
   end
 
   def mine(count)
     waitrt?
+    if Flags['mine-pinned']
+      Flags.reset('mine-pinned')
+      pause 5 until Flags['mine-pinned']
+      Flags.reset('mine-pinned')
+    end
     handle_danger
 
     if count.zero?
-      bput('prospect', 'roundtime', 'You carefully scan')
+      DRC.bput('prospect', 'roundtime', 'You carefully scan')
       results = reget(10, 'can be mined here')
       waitrt?
       return if results.nil?
+
       mine(@multiplier * resource_level)
       return
     end
 
-    bput('mine', 'roundtime')
+    DRC.bput('mine', 'roundtime')
     pause @mining_attempt_timer
     waitrt?
 
@@ -92,13 +133,14 @@ class Mine
       matches = DRRoom.room_objs.grep(/(?:\b|^)#{item}(?:\b|$)/i)
       matches.each do |match|
         next if @ignored_rock_sizes.any? { |x| match =~ /\b#{x}\b/i }
+
         noun = match.scan(/\w+/).last
         if @use_packet && @ignored_deed.none? { |x| match =~ /\b#{x}\b/i } && packet?
-          bput("push #{item} #{noun} with my packet", 'You push')
-          bput('stow my packet', 'You put', 'Stow what')
-          bput('stow deed', 'You put')
+          DRC.bput("push #{item} #{noun} with my packet", 'You push')
+          DRC.bput('stow my packet', 'You put', 'Stow what')
+          DRC.bput('stow deed', 'You put')
         else
-          bput("stow #{noun}", 'You put')
+          DRC.bput("stow #{noun}", 'You put')
         end
       end
     end
@@ -107,45 +149,7 @@ class Mine
   end
 
   def packet?
-    bput('get my packet', 'You get', 'What were you referring to') == 'You get'
-  end
-
-  def get_mining_tool
-    if @forging_belt['items'].grep(/#{@mining_implement}/i).any?
-      bput("untie my #{@mining_implement}", 'You remove', 'You untie')
-    else
-      bput("get my #{@mining_implement}", 'You get', 'You are already')
-    end
-  end
-
-  def store_mining_tool
-    waitrt?
-    if @forging_belt['items'].grep(/#{@mining_implement}/i).any?
-      fput("tie my #{@mining_implement} to #{@forging_belt['name']}")
-    else
-      fput("stow my #{@mining_implement}")
-    end
-  end
-
-  def setup
-    EquipmentManager.new.empty_hands
-    Flags.add('mine-danger', 'The ground rumbles ominously', 'A bitter smell seeps into the air', 'The floor shudders briefly', 'continued mining .* hazardous', 'slightly dangerous because the ground')
-    # Flags.add('mine-stand', 'clear away enough rubble to lever yourself free', 'You probably would have better luck while standing', 'You peacefully awaken, feeling refreshed', 'The world slowly comes into focus again, followed swiftly by a throbbing headache')
-    Flags.add('mine-exit', 'The entire wall of rock fractures at your blow and comes crashing down atop you')
-    Flags.add('resource-level',
-              'certain a scattering of resources', 'enormous quantity remains to be found', 'substantial quantity remains to be found',
-              'good quantity remains to be found', 'decent quantity remains to be found', 'small quantity remains to be found',
-              'enormous quantity \(5/5\) remains to be found', 'substantial quantity \(4/5\) remains to be found', 'good quantity \(3/5\) remains to be found',
-              'decent quantity \(2/5\) remains to be found', 'small quantity \(1/5\) remains to be found', 'scattering of resources \(0/5\) remains to be found')
-    settings = get_settings
-    @mining_skip_populated = settings.mining_skip_populated
-    @mining_implement = settings.mining_implement
-    @forging_belt = settings.forging_belt
-    @loot_list = settings.mining_buddy_vein_list
-    @use_packet = settings.mine_use_packet
-    @ignored_rock_sizes = settings.mining_ignored_stone_sizes
-    @ignored_deed = settings.mining_ignored_deed_sizes
-    @mining_attempt_timer = settings.mining_attempt_timer
+    DRC.bput('get my packet', 'You get', 'What were you referring to') == 'You get'
   end
 end
 
@@ -153,6 +157,7 @@ before_dying do
   Flags.delete('mine-danger')
   Flags.delete('mine-exit')
   Flags.delete('resource-level')
+  Flags.delete('mine-pinned')
 end
 
 Mine.new

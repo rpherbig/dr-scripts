@@ -5,20 +5,18 @@
 custom_require.call(%w[common common-items])
 
 class EquipmentManager
-  include DRC
-  include DRCI
-
   def initialize(settings = nil)
     items(settings)
   end
 
   def items(settings = nil)
     return @items if @items
+
     settings ||= get_settings
     @gear_sets = {}
     settings.gear_sets.each { |set_name, gear_list| @gear_sets[set_name] = gear_list.flatten.uniq }
     @sort_head = settings.sort_auto_head
-    @items = settings.gear.map { |item| Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges], ranged: item[:ranged], needs_unloading: item[:needs_unloading], skip_repair: item[:skip_repair], container: item[:container]) }
+    @items = settings.gear.map { |item| DRC::Item.new(name: item[:name], leather: item[:is_leather], hinders_locks: item[:hinders_lockpicking], worn: item[:is_worn], swappable: item[:swappable], tie_to: item[:tie_to], adjective: item[:adjective], bound: item[:bound], wield: item[:wield], transforms_to: item[:transforms_to], transform_verb: item[:transform_verb], transform_text: item[:transform_text], lodges: item[:lodges], ranged: item[:ranged], needs_unloading: item[:needs_unloading], skip_repair: item[:skip_repair], container: item[:container]) }
   end
 
   def remove_gear_by(&_block)
@@ -31,7 +29,7 @@ class EquipmentManager
   def wear_items(items_list)
     items_list.each { |item| wear_item?(item) }
 
-    fput('sort auto head') if @sort_head
+    DRC.bput('sort auto head', /^Your inventory is now arranged/) if @sort_head
   end
 
   def wear_equipment_set?(set_name)
@@ -51,7 +49,7 @@ class EquipmentManager
     lost_items = wear_missing_items(worn_items, combat_items)
     notify_missing(lost_items)
 
-    fput('sort auto head') if @sort_head
+    DRC.bput('sort auto head', /^Your inventory is now arranged/) if @sort_head
 
     lost_items.empty?
   end
@@ -65,14 +63,13 @@ class EquipmentManager
   end
 
   def notify_missing(lost_items)
-    return unless lost_items
-    return if lost_items.empty?
+    return unless lost_items && !lost_items.empty?
 
-    beep
+    DRC.beep
     echo 'MISSING EQUIPMENT: Please verify these items are in a closed container and not lost:'
     echo lost_items.map(&:short_name).join(', ').to_s
     pause
-    beep
+    DRC.beep
   end
 
   def wear_missing_items(worn_items, combat_items)
@@ -84,7 +81,7 @@ class EquipmentManager
 
     missing_items = worn_items
                     .reject { |item| combat_items.find { |c_item| item.short_regex =~ c_item } }
-                    .reject { |item| [right_hand, left_hand].grep(item.short_regex).any? ? (stow_weapon(item.short_name) || true) : false }
+                    .reject { |item| [DRC.right_hand, DRC.left_hand].grep(item.short_regex).any? ? (stow_weapon(item.short_name) || true) : false }
 
     echo("wear missing items #{missing_items}") if !missing_items.empty? && UserVars.equipmanager_debug
     missing_items.reject { |item| wear_item?(item) }
@@ -104,14 +101,14 @@ class EquipmentManager
   end
 
   def get_combat_items
-    bput('inv combat', 'Use INVENTORY HELP for more options')
+    DRC.bput('inv combat', 'Use INVENTORY HELP for more options')
     snapshot = reget(40)
     if snapshot.grep(/All of your combat|You aren't wearing anything like that/).any? &&
        snapshot.grep(/Use INVENTORY HELP/).any?
       snapshot
         .map(&:strip)
         .reverse
-        .take_while { |item| !['All of your combat:', "You aren't wearing anything like that."].include?(item) }
+        .take_while { |item| !['All of your combat equipment:', "You aren't wearing anything like that."].include?(item) }
         .drop_while { |item| item != '[Use INVENTORY HELP for more options.]' }
         .drop(1)
         .reverse
@@ -127,7 +124,7 @@ class EquipmentManager
   end
 
   def remove_item(item)
-    result = bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide', 'Without any effort', 'you manage to loosen', "You need a free hand for that", "You'll need both hands free to do that", "then constricts tighter around your")
+    result = DRC.bput("remove my #{item.short_name}", "You .*#{item.name}", 'The leather gauntlets slide', 'Without any effort', 'you manage to loosen', "You need a free hand for that", "You'll need both hands free to do that", "then constricts tighter around your")
     waitrt?
     case result
     when /then constricts tighter around your/
@@ -153,19 +150,19 @@ class EquipmentManager
       DRCI.get_item_if_not_held?(temp_right_item)
       DRCI.get_item_if_not_held?(temp_left_item)
       # In case they end up in different hands, swap.
-      DRC.bput('swap', 'You move') if (DRC.left_hand != temp_left_item || DRC.right_hand != temp_right_item)
+      DRC.bput('swap', /You move/, /^Will alone cannot conquer the paralysis/) if (DRC.left_hand != temp_left_item || DRC.right_hand != temp_right_item)
     else
       # If removing item transforms it (e.g. exoskeletal armor => orb) then continue with the transformed item.
       if item.transforms_to && DRCI.in_hands?(item.transforms_to)
         item = item_by_desc(item.transforms_to)
       end
       if item.tie_to
-        stow_helper("tie my #{item.short_name} to #{item.tie_to}", item.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that', 'You must be holding')
+        stow_helper("tie my #{item.short_name} to my #{item.tie_to}", item.short_name, *DRCI::TIE_ITEM_SUCCESS_PATTERNS, *DRCI::TIE_ITEM_FAILURE_PATTERNS)
       elsif item.wield
         stow_helper("sheath my #{item.short_name}", item.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap', "Sheathe your .* where?")
       elsif item.container
-        stow_helper("put my #{item.short_name} into #{item.container}", item.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your', 'You hang')
-      elsif /more room|too long to fit/ =~ bput("stow my #{item.short_name}", 'You put', 'You should unload', 'You easily strap', 'You secure your', 'There isn\'t any more room', 'straps have all been used', 'is too long to fit')
+        stow_helper("put my #{item.short_name} into my #{item.container}", item.short_name, *DRCI::PUT_AWAY_ITEM_SUCCESS_PATTERNS, *DRCI::PUT_AWAY_ITEM_FAILURE_PATTERNS)
+      elsif /more room|too long to fit/ =~ DRC.bput("stow my #{item.short_name}", 'You put', 'You should unload', 'You easily strap', 'You secure your', 'There isn\'t any more room', 'straps have all been used', 'is too long to fit')
         wear_item?(item)
       end
     end
@@ -192,7 +189,7 @@ class EquipmentManager
   # Wields weapon into your left hand.
   # Handles swapping the weapon to desired weapon skill (e.g. bastard swords, bar maces, ristes).
   def wield_weapon_offhand?(description, skill = nil)
-    return if description.empty?
+    return unless description && !description.empty?
 
     weapon = item_by_desc(description)
     unless weapon
@@ -202,8 +199,14 @@ class EquipmentManager
 
     if get_item?(weapon)
       swap_to_skill?(weapon.name, skill) if skill && weapon.swappable
-      DRC.bput('swap', 'You move') if DRCI.in_right_hand?(weapon)
-      return true
+      if DRCI.in_right_hand?(weapon)
+        case DRC.bput('swap', /^You move/, /^Will alone cannot conquer the paralysis/)
+        when /^You move/
+          return true
+        else
+          return false
+        end
+      end
     end
 
     return false
@@ -218,7 +221,7 @@ class EquipmentManager
   # If the skill to swap to is 'Offhand Weapon' then will swap it to your left hand.
   # Handles swapping the weapon to desired weapon skill (e.g. bastard swords, bar maces, ristes).
   def wield_weapon?(description, skill = nil)
-    return if description.empty?
+    return unless description && !description.empty?
 
     offhand = skill == 'Offhand Weapon'
     weapon = item_by_desc(description)
@@ -227,14 +230,21 @@ class EquipmentManager
       return false
     end
 
-    if [left_hand, right_hand].grep(weapon.short_regex).any?
+    if [DRC.left_hand, DRC.right_hand].grep(weapon.short_regex).any?
       stow_weapon
     end
 
     if get_item?(weapon)
       swap_to_skill?(weapon.name, skill) if skill && weapon.swappable
-      DRC.bput('swap', 'You move') if offhand && right_hand
-      return true
+
+      if offhand && DRC.right_hand
+        case DRC.bput('swap', /^You move/, /^Will alone cannot conquer the paralysis/)
+        when /^You move/
+          return true
+        else
+          return false
+        end
+      end
     end
 
     return false
@@ -242,8 +252,9 @@ class EquipmentManager
 
   def get_item?(item)
     return true if DRCI.in_hands?(item)
+
     if item.wield
-      case bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'With a flick of your wrist you stealthily unsheathe', 'Wield what', 'Your right hand is too injured', 'Your left hand is too injured')
+      case DRC.bput("wield my #{item.short_name}", 'You draw', 'You deftly remove', 'You slip', 'With a flick of your wrist you stealthily unsheathe', 'Wield what', 'Your right hand is too injured', 'Your left hand is too injured')
       when 'Your right hand is too injured', 'Your left hand is too injured', 'Wield what'
         return false
       else
@@ -266,24 +277,25 @@ class EquipmentManager
   end
 
   def return_held_gear(gear_set = 'standard')
-    return unless right_hand || left_hand
-    todo = [left_hand, right_hand].compact
+    return unless DRC.right_hand || DRC.left_hand
+
+    todo = [DRC.left_hand, DRC.right_hand].compact
 
     worn_items = desc_to_items(@gear_sets[gear_set])
 
     todo.all? do |held_item|
-      if info = worn_items.find { |item| item.short_regex =~ held_item }
+      if (info = worn_items.find { |item| item.short_regex =~ held_item })
         unload_weapon(info.short_name) if info.needs_unloading
-        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your', 'You slip')
+        stow_helper("wear my #{info.short_name}", info.short_name, 'You sling', 'You attach', 'You .* unload', 'You strap', 'You slide', 'You work your way into', 'You spin', '^You ', 'You carefully loop', 'slide effortlessly onto your', 'You slip', /^A brisk chill rushes through you/)
         true
-      elsif info = items.find { |item| item.short_regex =~ held_item }
+      elsif (info = items.find { |item| item.short_regex =~ held_item })
         unload_weapon(info.short_name) if info.needs_unloading
         if info.tie_to
           stow_helper("tie my #{info.short_name} to #{info.tie_to}", info.short_name, 'You attach', 'you tie', 'You are a little too busy', 'Your wounds hinder your ability to do that')
         elsif info.wield
           stow_helper("sheath my #{info.short_name}", info.short_name, 'Sheathing', 'You sheathe', 'You .* unload', 'You secure your', 'You slip', 'You hang', 'You .* strap')
         elsif info.container
-          stow_helper("put my #{info.short_name} into my #{info.container}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your', 'You hang')
+          stow_helper("put my #{info.short_name} into my #{info.container}", info.short_name, *DRCI::PUT_AWAY_ITEM_SUCCESS_PATTERNS, *DRCI::PUT_AWAY_ITEM_FAILURE_PATTERNS)
         else
           stow_helper("stow my #{info.short_name}", info.short_name, 'You put', 'You should unload', 'You easily strap', 'You secure your')
         end
@@ -295,30 +307,30 @@ class EquipmentManager
   end
 
   def empty_hands
-    return_held_gear || stow_hands
+    return_held_gear || DRCI.stow_hands
   end
 
   def verb_data(item)
     {
       worn: {
         verb: 'remove',
-        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank|unbuckle).*#{item.name}/, 'Remove what', "You aren't wearing that", 'slide themselves off of your', 'you manage to loosen'],
+        matches: [/^You .*#{item.short_regex}/, /^You (get|sling|pull|work|loosen|slide|remove|yank|unbuckle).*#{item.name}/, 'you tug', 'Remove what', "You aren't wearing that", 'slide themselves off of your', 'you manage to loosen', /^A brisk chill leaves you as you/],
         failures: [/^You (get|sling|pull|work|slide|remove|yank|unbuckle) $/],
-        failure_recovery: proc { |noun| bput("wear my #{noun}", '^You ') },
+        failure_recovery: proc { |noun| DRC.bput("wear my #{noun}", '^You ') },
         exhausted: ['Remove what', "You aren't wearing that"]
       },
       tied: {
         verb: 'untie',
         matches: [/^You .*#{item.short_regex}/, "^You remove.*#{item.name}", /^.*you untie your .*#{item.short_regex} from it./, '^What were you referring', '^Untie what', '^You are a little too busy', '^You are a bit too busy'],
         failures: ['You remove', /^You are a little too busy/, /^You are a bit too busy/],
-        failure_recovery: proc { |_noun, item, *matches|
+        failure_recovery: proc { |_noun, item_to_recover, *matches|
                             case matches
                             when ['You are a little too busy']
-                              retreat
-                              get_item?(item)
+                              DRC.retreat
+                              get_item?(item_to_recover)
                             when ['You are a bit too busy']
                               DRC.stop_playing
-                              get_item?(item)
+                              get_item?(item_to_recover)
                             else
                               stow_weapon
                             end
@@ -329,7 +341,7 @@ class EquipmentManager
         verb: 'get',
         matches: [/^You .*#{item.short_regex}/, "^You .*#{item.name}", '^The.* slides easily out', '^What were you referring', 'But that is already', 'You are already'],
         failures: ['You get', /But that is already/],
-        failure_recovery: proc { |noun| bput("stow my #{noun}", 'You put', 'But that is already in') },
+        failure_recovery: proc { |noun| DRC.bput("stow my #{noun}", 'You put', 'But that is already in') },
         exhausted: ['What were you referring']
       },
       transform: {
@@ -337,10 +349,10 @@ class EquipmentManager
         matches: [item.transform_text],
         failures: ["You'll need a free hand to do that!", "You don't seem to be holding"],
         failure_recovery: proc do |noun|
-                            fput('stow left') if left_hand && left_hand !~ /#{noun}/i
-                            fput('stow right') if right_hand && right_hand !~ /#{noun}/i
-                            item.worn ? bput("remove my #{noun}", '^You') : bput("get my #{noun}", '^You')
-                            bput("#{item.transform_verb} my #{item.short_name}", verb_data(item)[:matches])
+                            fput('stow left') if DRC.left_hand && DRC.left_hand !~ /#{noun}/i
+                            fput('stow right') if DRC.right_hand && DRC.right_hand !~ /#{noun}/i
+                            item.worn ? DRC.bput("remove my #{noun}", '^You') : DRC.bput("get my #{noun}", '^You')
+                            DRC.bput("#{item.transform_verb} my #{item.short_name}", verb_data(item)[:matches])
                           end,
         exhausted: ['What were you referring']
       }
@@ -349,10 +361,11 @@ class EquipmentManager
 
   def get_item_helper(item, type)
     return false unless item
+
     data = verb_data(item)[type]
-    snapshot = [left_hand, right_hand]
+    snapshot = [DRC.left_hand, DRC.right_hand]
     waitrt?
-    response = bput("#{data[:verb]} my #{item.short_name}", *data[:matches])
+    response = DRC.bput("#{data[:verb]} my #{item.short_name}", *data[:matches])
     waitrt?
     case response
     when 'You are already holding'
@@ -362,7 +375,7 @@ class EquipmentManager
     when *data[:failures]
       data[:failure_recovery].call(item.name, item, response)
     else
-      pause 0.05 while snapshot == [left_hand, right_hand]
+      pause 0.05 while snapshot == [DRC.left_hand, DRC.right_hand]
       return true
     end
   end
@@ -371,6 +384,7 @@ class EquipmentManager
   # Examples include Damaris weapons.
   def turn_to_weapon?(old_noun, new_noun)
     return true if old_noun == new_noun
+
     result = DRC.bput("turn my #{old_noun} to #{new_noun}", /^Turn what?/i, /^Which weapon did you want to pull out/i, /^Your .*\b#{old_noun}.* shifts .*/i)
     waitrt? # turning may incur roundtime
     case result
@@ -386,7 +400,7 @@ class EquipmentManager
   def swap_to_skill?(noun, skill)
     if noun =~ /\bfan\b/i
       command = skill =~ /edged/i ? 'open' : 'close'
-      bput("#{command} my fan", 'you snap', 'already')
+      DRC.bput("#{command} my fan", 'you snap', 'already')
       return true
     end
     proper_skill = case skill
@@ -446,11 +460,12 @@ class EquipmentManager
       pause 0.25
       # Avoid infinite loop where weapon can't swap to desired skill.
       return false if swapped_count > weapon_skills.length
+
       # Try to swap weapon to desired skill.
-      case bput("swap my #{noun}", skill_match, /\b#{noun}\b.*(#{weapon_skills.join('|')})/, "You must have two free hands", *failure_matches)
+      case DRC.bput("swap my #{noun}", skill_match, /\b#{noun}\b.*(#{weapon_skills.join('|')})/, "You must have two free hands", *failure_matches)
       when /You must have two free hands/
-        fput('stow left') if left_hand && left_hand !~ /#{noun}/i
-        fput('stow right') if right_hand && right_hand !~ /#{noun}/i
+        fput('stow left') if DRC.left_hand && DRC.left_hand !~ /#{noun}/i
+        fput('stow right') if DRC.right_hand && DRC.right_hand !~ /#{noun}/i
         next
       when *failure_matches
         return false
@@ -467,32 +482,34 @@ class EquipmentManager
     #   (hidden) You unload your <weapon> while blended in with your surroundings, but cannot shake the feeling that you drew attention to yourself.
     #   (one hand empty) You unload the <weapon>.
     #   (hands full) Your <ammo> falls from your <weapon> to your feet.
-    case bput("unload my #{name}", 'You unload', 'Your .* fall.*', 'As you release the string', 'You .* unloading', 'But your .* isn\'t loaded', 'You can\'t unload such a weapon', 'You don\'t have a ranged weapon to unload', 'You must be holding the weapon to do that')
-    when /^(?:Your .*?\b(?<ammo>[\w]+)\b fall.* from your .* to your feet.)$/
+    case DRC.bput("unload my #{name}", /^You unload/, /^Your .* fall.*to your feet\.$/, 'As you release the string', /^You .* unloading/, 'But your .* isn\'t loaded', 'You can\'t unload such a weapon', 'You don\'t have a ranged weapon to unload', 'You must be holding the weapon to do that')
+    when /^(?:Your .*?\b(?<ammo>[\w]+)\b fall.* from your .* to your feet\.)$/
       # Ammo fell to ground because hands are full.
       # Lower weapon, stow ammo, then pick it back up.
       ammo = Regexp.last_match[:ammo]
-      bput("lower ground left", "You lower") if DRCI.in_left_hand?(name)
-      bput("lower ground right", "You lower") if DRCI.in_right_hand?(name)
+      DRC.bput("lower ground left", "You lower") if DRCI.in_left_hand?(name)
+      DRC.bput("lower ground right", "You lower") if DRCI.in_right_hand?(name)
       DRCI.put_away_item?(ammo)
-      bput("get my #{name}", "You get", "You pick")
-    when /(You unload|You .* unloading)/
+      DRC.bput("get my #{name}", "You get", "You pick")
+    when /^(You unload|You .* unloading)/
       # Ammo is in hand, stow whichever hand isn't holding the weapon.
-      bput("stow left", "You put") unless DRCI.in_left_hand?(name)
-      bput("stow right", "You put") unless DRCI.in_right_hand?(name)
+      DRC.bput("stow left", "You put") unless DRCI.in_left_hand?(name)
+      DRC.bput("stow right", "You put") unless DRCI.in_right_hand?(name)
     end
     waitrt?
   end
 
   def stow_weapon(description = nil)
     unless description
-      return unless right_hand || left_hand
-      stow_weapon(right_hand) if right_hand
-      stow_weapon(left_hand)  if left_hand
+      return unless DRC.right_hand || DRC.left_hand
+
+      stow_weapon(DRC.right_hand) if DRC.right_hand
+      stow_weapon(DRC.left_hand)  if DRC.left_hand
       return
     end
     weapon = item_by_desc(description)
     return unless weapon
+
     # Is this a weapon that needs to be unloaded before it is put away?
     # This is an optimization attempt so that the script
     # isn't trying to unload every weapon that gets put away.
@@ -508,14 +525,14 @@ class EquipmentManager
       stow_helper("#{weapon.transform_verb} my #{weapon.short_name}", weapon.short_name, weapon.transform_text)
       stow_weapon(weapon.transforms_to)
     elsif weapon.container
-      stow_helper("put my #{weapon.short_name} in my #{weapon.container}", weapon.short_name, "You put .*#{weapon.name}", 'You .* unload', 'close the fan', 'You easily strap', "You don't seem to be able to move", 'You secure', 'is too small to hold that', 'is too wide to fit', 'You hang', '^The .* slides easily', "There's no room")
+      stow_helper("put my #{weapon.short_name} in my #{weapon.container}", weapon.short_name, "You put .*#{weapon.name}", *DRCI::PUT_AWAY_ITEM_SUCCESS_PATTERNS, *DRCI::PUT_AWAY_ITEM_FAILURE_PATTERNS)
     else
       stow_helper("stow my #{weapon.short_name}", weapon.short_name, "You put .*#{weapon.name}", 'You .* unload', 'close the fan', 'You easily strap', "You don't seem to be able to move", 'You secure', 'is too small to hold that', 'is too wide to fit', 'You hang', '^The .* slides easily', "There's no room")
     end
   end
 
   def stow_helper(action, weapon_name, *accept_strings)
-    case bput(action, accept_strings)
+    case DRC.bput(action, accept_strings)
     when /unload/
       unload_weapon(weapon_name)
       stow_helper(action, weapon_name, accept_strings)
@@ -523,7 +540,7 @@ class EquipmentManager
       fput("close my #{weapon_name}")
       stow_helper(action, weapon_name, accept_strings)
     when /You are a little too busy/
-      retreat
+      DRC.retreat
       stow_helper(action, weapon_name, accept_strings)
     when /You don't seem to be able to move/
       pause 1

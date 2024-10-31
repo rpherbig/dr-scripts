@@ -2,10 +2,12 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#astrology
 =end
 
-custom_require.call(%w[common common-arcana common-travel common-moonmage drinfomon equipmanager spellmonitor events])
-
+custom_require.call(%w[common common-arcana common-travel common-moonmage equipmanager spellmonitor events])
+%w(play sanowret-crystal).each do |script|
+  stop_script(script) if Script.running?(script)
+  pause 0.5
+end
 class Astrology
-
   def initialize
     exit unless DRStats.moon_mage?
 
@@ -16,7 +18,7 @@ class Astrology
     ]
     args = parse_args(arg_definitions)
 
-    # Make sure that our Cirlce is up-to-date - avoid using stale data for new characters who joined the guild
+    # Make sure that our Circle is up-to-date - avoid using stale data for new characters who joined the guild
     DRC.bput('info', 'Circle:') if DRStats.circle.zero?
 
     @equipment_manager = EquipmentManager.new
@@ -41,6 +43,7 @@ class Astrology
     DRC.message("Flags['rtr-expire'] = #{Flags['rtr-expire']}") if UserVars.astrology_debug
 
     do_buffs(@settings)
+
     if args.rtr
       check_ripples(@settings)
     else
@@ -53,19 +56,31 @@ class Astrology
     return unless settings.waggle_sets['astrology']
 
     empty_hands
-    # Pop out rtr data from buffs and save it for later
     buffs = settings.waggle_sets['astrology']
     @rtr_data = buffs.select { |spell| spell.eql?('Read the Ripples') }
                      .values
                      .first
     buffs.reject! { |spell| spell.eql?('Read the Ripples') }
 
+    # Check if all buffs are already active
+    all_buffs_active = buffs.all? do |_, value|
+      value['use_auto_mana'] && DRSpells.active_spells.include?(value['name'])
+    end
+
+    if all_buffs_active
+      DRC.message("All buffs are already active") if UserVars.astrology_debug
+      return
+    end
+
     buffs.each_value do |value|
       next unless value['use_auto_mana']
+
       DRCA.check_discern(value, settings)
     end
 
-    DRCA.cast_spells(buffs, settings)
+    buffs.reject! { |_, value| DRSpells.active_spells.include?(value['name']) }
+
+    DRCA.cast_spells(buffs, settings) unless buffs.empty?
   end
 
   def visible_bodies
@@ -73,7 +88,7 @@ class Astrology
     all_bodies = @constellations
     case DRCMM.observe('heavens')
     when "That's a bit hard to do while inside"
-     DRC.message("Must be outdoors to observe sky")
+      DRC.message("Must be outdoors to observe sky")
       exit
     end
 
@@ -85,7 +100,8 @@ class Astrology
 
   def check_attunement
     return if DRSkill.getxp('Attunement') > 30
-    ['', 'mana', 'moons', 'planets'].each do |target|
+
+    ['', 'mana', 'moons', 'planets', 'psychic', 'transduction', 'perception', 'moonlight'].each do |target|
       DRC.bput("perceive #{target}", 'roundtime')
       waitrt?
     end
@@ -93,25 +109,25 @@ class Astrology
 
   def check_pools
     pools = {
-      'lore' => 0,
-      'magic' => 0,
-      'survival' => 0,
+      'lore'             => 0,
+      'magic'            => 0,
+      'survival'         => 0,
       'offensive combat' => 0,
       'defensive combat' => 0,
-      'future events' => 0
+      'future events'    => 0
     }
     pools_to_size = {
-      /You have no understanding of the celestial influences over/ => 0,
-      /You have a feeble understanding of the celestial influences over/ => 1,
-      /You have a weak understanding of the celestial influences over/ => 2,
-      /You have a fledgling understanding of the celestial influences over/ => 3,
-      /You have a modest understanding of the celestial influences over/ => 4,
-      /You have a decent understanding of the celestial influences over/ => 5,
+      /You have no understanding of the celestial influences over/            => 0,
+      /You have a feeble understanding of the celestial influences over/      => 1,
+      /You have a weak understanding of the celestial influences over/        => 2,
+      /You have a fledgling understanding of the celestial influences over/   => 3,
+      /You have a modest understanding of the celestial influences over/      => 4,
+      /You have a decent understanding of the celestial influences over/      => 5,
       /You have a significant understanding of the celestial influences over/ => 6,
-      /You have a potent understanding of the celestial influences over/ => 7,
+      /You have a potent understanding of the celestial influences over/      => 7,
       /You have an insightful understanding of the celestial influences over/ => 8,
-      /You have a powerful understanding of the celestial influences over/ => 9,
-      /You have a complete understanding of the celestial influences over/ => 10
+      /You have a powerful understanding of the celestial influences over/    => 9,
+      /You have a complete understanding of the celestial influences over/    => 10
     }
     DRCMM.predict('all')
     lines = reget(50).reverse
@@ -126,15 +142,19 @@ class Astrology
   def check_events(pools)
     waitrt?
     prev_size = pools['future events']
-    result = nil
-    until ['You are unable to sense additional information'].include? result
+    start_time = Time.now
+    timeout = 10 # Timeout in seconds
+
+    until Time.now - start_time > timeout
       result = DRCMM.study_sky
       waitrt?
-      return if ['detect any portents'].include? result
-      pools = check_pools
-      break if pools['future events'] == prev_size
-      break if pools['future events'] == 10
-      prev_size = pools['future events']
+      return if ['You are unable to sense additional information', 'detect any portents'].include? result
+
+      new_pools = check_pools
+      break if new_pools['future events'] == prev_size
+      break if new_pools['future events'] == 10
+
+      prev_size = new_pools['future events']
     end
     DRCMM.predict('event')
   end
@@ -194,20 +214,20 @@ class Astrology
     @equipment_manager.empty_hands
   end
 
-
   def predict_all(pools)
     skillset_to_pool = {
       'offensive combat' => @astrology_prediction_skills_offense,
       'defensive combat' => @astrology_prediction_skills_defense,
-      'magic' => @astrology_prediction_skills_magic,
-      'survival' => @astrology_prediction_skills_survival,
-      'lore' => @astrology_prediction_skills_lore,
-      'future events' => 'future events'
+      'magic'            => @astrology_prediction_skills_magic,
+      'survival'         => @astrology_prediction_skills_survival,
+      'lore'             => @astrology_prediction_skills_lore,
+      'future events'    => 'future events'
     }
 
     pools.reject { |_skill, size| (size < @prediction_pool_target) }
          .each_key do |skill|
       break if DRSkill.getxp('Astrology') > 30
+
       align_routine(skillset_to_pool[skill])
     end
   end
@@ -248,6 +268,7 @@ class Astrology
         until @finished_messages.include?(result)
           return check_heavens if Flags['bad-search'] == 'is foiled by the daylight'
           next if Flags['bad-search'] == 'turns up fruitless'
+
           result = observe_routine(data['name'])
         end
 
@@ -308,7 +329,8 @@ class Astrology
     end
   end
 
-  def align_routine(skill)
+  def align_routine(skill = nil)
+    DRC.message("align_routine called with skill: #{skill.inspect}") if UserVars.astrology_debug
     if skill == 'future events'
       DRCMM.predict('event')
       return
@@ -329,30 +351,38 @@ class Astrology
   end
 
   def train_astrology(settings)
-    return unless settings
-    return unless settings.astrology_training.is_a?(Array)
-    return if settings.astrology_training.none?
+    loop do
+      return unless settings
+      return unless settings.astrology_training.is_a?(Array)
+      return if settings.astrology_training.none?
 
-    settings.astrology_training.each do |task|
-      break if DRSkill.getxp('Astrology') > 30
-      case task
-      when 'ways'
-        check_astral
-      when 'observe'
-        check_heavens
-      when 'rtr'
-        check_ripples(settings)
-      when 'weather'
-        check_weather
-      when 'events'
-        check_events(check_pools)
-      when 'attunement'
-        check_attunement
+      settings.astrology_training.each do |task|
+        break if DRSkill.getxp('Astrology') >= 32
+
+        case task
+        when 'ways'
+          check_astral
+        when 'observe'
+          check_heavens
+        when 'rtr'
+          check_ripples(settings)
+        when 'weather'
+          check_weather
+        when 'events'
+          check_events(check_pools)
+        when 'attunement'
+          check_attunement
+        end
+      end
+
+      if DRSkill.getxp('Astrology') >= 32
+        break
+      else
+        predict_all(check_pools)
+        DRCMM.predict('analyze')
+        waitrt? # Wait for 60 seconds before looping again
       end
     end
-    predict_all(check_pools)
-    DRCMM.predict('analyze')
-    waitrt?
   end
 end
 

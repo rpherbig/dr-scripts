@@ -1,0 +1,438 @@
+custom_require.call(%w[events common common-arcana common-crafting common-healing common-items common-money common-summoning common-theurgy common-moonmage common-travel drinfomon equipmanager])
+
+no_pause_all
+no_kill_all
+
+arg_definitions = [
+  [
+    { name: 'debug', regex: /debug/i, optional: true, description: 'Run trigger-watcher in debug mode.' },
+    { name: 'script_summary', optional: true, description: 'Trigger implementation script. Works with Charname-triggers.yaml. See: https://github.com/rpherbig/dr-scripts/wiki/Lich-Triggers ' }
+  ]
+]
+
+args = parse_args(arg_definitions)
+$debug_mode_tw = UserVars.trigger_watcher_debug || args.debug
+
+# When trigger command =exec has been used. Executes a specified script with no wait to complete.
+def execute_script(name, args = [], flags = {})
+  verify_script(name)
+  echo "Starting script #{name}, don't wait to complete" if $debug_mode_tw
+  waitrt?
+  start_script(name, args.map { |arg| arg =~ /\s/ ? "\"#{arg}\"" : arg }, flags)
+end
+
+# When trigger command =execw has been used. Executes a specified script and waits until complete.
+def execute_script_wait(name, args = [])
+  verify_script(name)
+  echo "Starting script #{name}, wait to complete" if $debug_mode_tw
+  waitrt?
+  DRC.wait_for_script_to_complete(name, args)
+end
+
+# When trigger command =uvar has been used
+#   set - set or update a UserVar
+#   delete - delete an existing UserVar
+#   Note: access a UserVar via $<UserVarName> in any trigger response
+def execute_uservar(data)
+  if data[0] =~ /^set\b/i
+    echo "=uvar SET" if $debug_mode_tw
+    echo "input to vars script is: #{['set', data[1], '=', data[2..-1].join(' ')]}" if $debug_mode_tw
+
+    # If trigger response has enclosed curly braces, eval as code
+    unless data.grep(/\{/).empty?
+      data_to_set = eval(data[2..-1].join(' ').gsub!(/(\{|\})/, ''))
+    else
+      data_to_set = data[2..-1].join(' ')
+    end
+
+    UserVars.send("#{data[1]}=", data_to_set)
+    DRC.message("  UserVar #{data[1]} set to #{data_to_set}")
+  elsif data[0] =~ /^delete\b/i
+    echo "=uvar DELETE" if $debug_mode_tw
+    start_script('vars', ['delete', data.drop(1)])
+    DRC.message("  UserVar #{data[1]} deleted")
+  end
+end
+
+# When trigger command =logf has been used. Logs to a file of specified name.
+def execute_logf(data)
+  echo "Logging to file" if $debug_mode_tw
+
+  echo "preparsed data is: #{data}" if $debug_mode_tw
+
+  if data =~ /\}\}/
+    DRC.message("  Warning, nested curly braces not supported for =logf. Only simple code eval inside braces.")
+    exit
+  end
+
+  split_data = data.split(/^([\w\-]+)/)
+                   .reject(&:empty?)
+                   .collect(&:strip)
+
+  echo "split data is: #{split_data}" if $debug_mode_tw
+
+  filename = split_data[0]
+  parsed_data = split_data.drop(1)
+
+  echo "filename is: #{filename}" if $debug_mode_tw
+
+  # Eval any nested code blocks
+  parsed_data.each do |string|
+    string.gsub!(/\{(.*?)\}/) do |_match|
+      eval($1)
+    end
+  end
+
+  echo "parsed_data is: #{parsed_data}" if $debug_mode_tw
+
+  open("#{filename}.txt", 'a') do |f|
+    f.puts "#{Time.now.strftime("%Y-%m-%d %I:%M%P")} #{parsed_data}"
+  end
+  DRC.message("  Logged to file name: #{filename}")
+end
+
+# When trigger command =logw has been used. Logs to a window of specified name. Creates window
+# if it doesn't exist.
+def execute_logw(data)
+  echo "Logging to window" if $debug_mode_tw
+
+  if data =~ /\}\}/
+    DRC.message("  Warning, nested curly braces not supported for =logw. Only simple code eval inside braces.")
+    exit
+  end
+
+  split_data = data.split(/^([\w\-]+)/)
+                   .reject(&:empty?)
+                   .collect(&:strip)
+
+  echo "split data is: #{split_data}" if $debug_mode_tw
+
+  window_name = split_data[0]
+  parsed_data = split_data.drop(1)
+
+  echo "window name is: #{window_name}" if $debug_mode_tw
+
+  # Eval any nested code blocks
+  parsed_data.each do |string|
+    string.gsub!(/\{(.*?)\}/) do |_match|
+      eval($1)
+    end
+  end
+
+  echo "parsed_data is: #{parsed_data}" if $debug_mode_tw
+
+  DRC.log_window(parsed_data.join(' '), window_name, true, true, false)
+end
+
+# When trigger command =pause has been used. Pauses the specified amount of time.
+def execute_pause(data)
+  echo "Pausing #{data[0]} seconds" if $debug_mode_tw
+  DRC.message("  Pausing #{data} seconds.")
+  pause data[0].to_i
+end
+
+# When trigger command =if starts the response line. Also parses =elsif and =else.
+# Allows multiple actions for each if/elsif/else.
+def execute_if(data)
+  echo "Recognized if block" if $debug_mode_tw
+  # Split at each =if/elsif/else, reject empty array elements, strip whitespace from each element
+  new_data = data.split(/=(?=if|elsif|else)/).reject(&:empty?).collect(&:strip)
+
+  # Break our if/elsif/else data apart for parsing
+  if_data = new_data.select { |n| n =~ /^if\b/ }
+                    .map { |n| n.gsub(/^if/, '') }
+                    .collect(&:strip)
+  elsif_data = new_data.select { |n| n =~ /^elsif\b/ }
+                       .map { |n| n.gsub(/^elsif/, '') }
+                       .collect(&:strip)
+  else_data = new_data.select { |n| n =~ /^else\b/ }
+                      .map { |n| n.gsub(/^else/, '') }
+                      .collect(&:strip)
+
+  echo "if data: #{if_data}" if $debug_mode_tw          # One if, should be array with 1 element, if to check, then response(s)
+  echo "elsif data: #{elsif_data}" if $debug_mode_tw    # Could be any number of elsif, array with multiple elements, elsif to check, then response(s)
+  echo "else data: #{else_data}" if $debug_mode_tw      # One else, array with single element, only response(s)
+
+  # Some complex parsing because triggers require we enclose elements in curly braces, but
+  # we also need to properly evaluate Ruby elements within them, which may also utilize
+  # curly braces.
+  if_elements = if_data.map { |element| element.split(/}\s{/) }.flatten(1)
+  if_elements[0].gsub!(/^{/, '')
+  if_elements[-1].gsub!(/}$/, '')
+
+  echo "if_elements: #{if_elements}" if $debug_mode_tw
+
+  if_break_out = false
+
+  # Parse IF elements. If true, set break out boolean and don't continue to elsif or else.
+  if eval(if_elements[0])
+    if_elements.drop(1).each do |val|
+      waitrt?
+      eval(val)
+    end
+    if_break_out = true
+  end
+
+  elsif_elements = []
+
+  # Parse enclosing curly braces
+  elsif_data.each do |val|
+    element = val.split(/}\s{/)
+    element[0].gsub!(/^{/, '')
+    element[-1].gsub!(/}$/, '')
+    elsif_elements.push(element)
+  end
+
+  echo "elsif_elements is: #{elsif_elements}" if $debug_mode_tw
+
+  # Parse ESLIF elements, with a check first for break out if our IF parsing was true.
+  unless if_break_out
+    unless elsif_elements.empty?
+      elsif_elements.each do |val|
+        unless if_break_out
+          if eval(val[0].to_s)
+            if_break_out = true
+            val.drop(1).each do |each_val|
+              waitrt?
+              eval(each_val)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  else_elements = else_data.map { |element| element.split(/}\s{/) }.flatten(1)
+  else_elements[0].gsub!(/^{/, '')
+  else_elements[-1].gsub!(/}$/, '')
+
+  echo "else_elements is: #{else_elements}" if $debug_mode_tw
+
+  # Parse ELSE elements, with a check first for break out if our IF or ELSIF parsing was true.
+  unless if_break_out
+    unless else_elements.empty?
+      else_elements.each do |val|
+        waitrt?
+        eval(val)
+      end
+    end
+  end
+end
+
+# When trigger command =eval has been used. Evaluates the response as Lich/Ruby code.
+def execute_eval(data)
+  echo "Evaluate as code: #{data}" if $debug_mode_tw
+
+  eval(data)
+end
+
+# When trigger command =reload has been used. Reloads trigger data.
+def execute_reload
+  new_data = get_settings('triggers').lich_triggers
+  diff_data = new_data.reject { |k, v| @trigger_data[k] == v }
+
+  diff_data.empty? ? DRC.message("  No updated triggers.") : DRC.message("  Updated triggers are: #{diff_data}")
+
+  @trigger_data = new_data
+  pull_trigger_data
+  DRC.message("  Triggers reloaded.")
+end
+
+def parse_enclosing_curly_braces(data)
+  echo "parsing curly braces" if $debug_mode_tw
+  echo "pre-parsed data is: #{data}" if $debug_mode_tw
+
+  elements = data.split
+  elements[0].gsub!(/^{/, '')
+  elements[-1].gsub!(/}$/, '')
+  elements.reject!(&:empty?)
+  elements = elements.join(" ")
+
+  echo "returning parsed elements: #{elements}" if $debug_mode_tw
+
+  return elements
+end
+
+def pull_trigger_data
+  @trigger_data.each do |name, values|
+    echo "Trigger name:  #{name}" if $debug_mode_tw
+    echo "Triggers are:  #{values['triggers']}" if $debug_mode_tw
+    echo "Responses are: #{values['responses']}" if $debug_mode_tw
+
+    Flags.add(name.to_s, *values['triggers'])
+  end
+end
+
+# Load our triggers and response(s) from yaml file.
+# Parse each of them and set a Flag based on the trigger.
+@trigger_data = get_settings('triggers').lich_triggers
+
+unless @trigger_data
+  DRC.message("  WARNING: You have no lich_triggers defined. Exiting the trigger watcher script.")
+  exit
+end
+
+pull_trigger_data
+
+# Primary trigger monitoring block. Keep script persistent. Monitor for Flags.
+# Did we trigger? If so, send the responses. Reset the flag for next trigger.
+until script.gets.nil?
+  @trigger_data.each do |name, values|
+    if Flags[name.to_s] && values['responses'] # If no trigger responses, don't bother processing trigger
+      use_with_scripts = values['use_with_scripts'].collect(&:strip).reject(&:empty?)
+      echo "USE WITH SCRIPTS: #{use_with_scripts}" if $debug_mode_tw
+
+      no_use_scripts = values['no_use_scripts'].collect(&:strip).reject(&:empty?)
+      echo "NO USE SCRIPTS: #{no_use_scripts}" if $debug_mode_tw
+
+      use_with_scripts_continue = false
+      no_use_scripts_continue = true
+
+      # If user has specified that this trigger should only run when certain scripts are running
+      unless use_with_scripts.nil? || use_with_scripts.empty?
+        use_with_scripts.each do |script|
+          echo "checking if scripts are running for use_with_scripts: #{script}" if $debug_mode_tw
+          if Script.running?("#{script}")
+            echo "We found #{script} running for use_with_scripts" if $debug_mode_tw
+            use_with_scripts_continue = true
+          end
+        end
+      else
+        use_with_scripts_continue = true
+      end
+
+      echo "use_with_scripts_continue: #{use_with_scripts_continue}" if $debug_mode_tw
+
+      # Check to see if any no_use_scripts are running
+      unless no_use_scripts.nil? || no_use_scripts.empty?
+        no_use_scripts.each do |script|
+          echo "checking if scripts are running for no_use_scripts: #{script}" if $debug_mode_tw
+          if Script.running?("#{script}")
+            echo "We found #{script} running for no_use_scripts" if $debug_mode_tw
+            no_use_scripts_continue = false
+          end
+        end
+      end
+
+      echo "no_use_scripts_continue: #{no_use_scripts_continue}" if $debug_mode_tw
+
+      # Final process trigger check
+      process_trigger = use_with_scripts_continue && no_use_scripts_continue
+      echo "process_trigger final is: #{process_trigger}" if $debug_mode_tw
+
+      if process_trigger
+        DRC.message("  PROCESSING TRIGGER NAMED: #{name}") if $debug_mode_tw
+        DRC.message("  TRIGGER SEEN: #{Flags[name.to_s][0]}") if $debug_mode_tw
+
+        # Clone the array elements to avoid modifying the original array
+        responses = values['responses'].map(&:clone)
+
+        # Below we'll look for both regex capture and UserVar subsitutions in trigger responses,
+        # and substitute appropriately if so. Regex subs can be $1-$9. uvar subs can be named anything
+        # but the first character can NOT be a number.
+        num_subs = responses.join(' ').scan(/\$([0-9])\b/)
+        uvar_subs = responses.join(' ').scan(/\$([a-zA-Z]\w+)\b/)
+
+        echo "num_subs are: #{num_subs}" if $debug_mode_tw
+        echo "uvar_subs are: #{uvar_subs}" if $debug_mode_tw
+
+        # Process regex substitutions
+        unless num_subs.empty?
+          echo "Recognized regex capture subsitutions" if $debug_mode_tw
+          num_subs.each do |num|
+            regex_capture = Flags[name.to_s][num.first.to_i]
+            echo "capture group ##{num.first.to_i} is #{Flags[name.to_s][num.first.to_i]}" if $debug_mode_tw
+            responses.map { |string| string.gsub!(/\$#{num.first}\b/, regex_capture) if regex_capture }
+            if regex_capture.nil?
+              DRC.message("  Warning, you're referencing capture group $#{num.first}, which does not exist.")
+            end
+          end
+        end
+
+        # Process UserVar substitutions
+        unless uvar_subs.empty?
+          echo "Recognized UserVar variable subsititions" if $debug_mode_tw
+          uvar_subs.each do |uvar|
+            var_value = eval("UserVars." + "#{uvar[0]}")
+            unless var_value == nil
+              responses.map { |string| string.gsub!(/\$#{uvar[0]}\b/, "#{var_value}") }
+            else
+              DRC.message("  Warning, User Variable #{uvar[0]} is not set, but your trigger is attempting to use it.")
+            end
+          end
+        end
+
+        # Send our trigger responses. Parse any trigger commands. With the exception of if/elsif/else,
+        # all trigger commands are expected only at the beginning of a trigger response line. If/elsif/else
+        # expects =if at the beginning of the line.
+        responses.each_with_index do |string, counter|
+          DRC.message("    Processing response number #{counter + 1} for trigger #{name}") if $debug_mode_tw
+          DRC.message("    Response is: #{string}") if $debug_mode_tw
+
+          # Verify trigger command responses are properly enclosed in curly braces
+          if string.start_with?('=')
+            unless string =~ /\=\w+ \{|=reload/
+              DRC.message('  NOTE: Trigger command responses must be wrapped in curly braces.')
+              DRC.message("   The following response for trigger #{name} is not formatted correctly:")
+              DRC.message("    - #{string}")
+              exit
+            end
+          end
+
+          if string =~ /^=exec\b/i
+            echo "=exec trigger response" if $debug_mode_tw
+            exec_script = string.gsub('=exec', '').strip
+            exec_script = parse_enclosing_curly_braces(exec_script)
+            exec_script = exec_script.split
+            execute_script(exec_script[0], exec_script.drop(1))
+          elsif string =~ /^=execw\b/i
+            echo "=execw trigger response" if $debug_mode_tw
+            execw_script = string.gsub('=execw', '').strip
+            execw_script = parse_enclosing_curly_braces(execw_script)
+            execw_script = execw_script.split
+            execute_script_wait(execw_script[0], execw_script.drop(1))
+          elsif string =~ /^=uvar\b/i
+            echo "=uvar trigger response" if $debug_mode_tw
+            exec_uvar = string.gsub('=uvar', '').strip
+            exec_uvar = parse_enclosing_curly_braces(exec_uvar)
+            exec_uvar = exec_uvar.split
+            execute_uservar(exec_uvar)
+          elsif string =~ /^=logf\b/i
+            echo "=logf trigger response" if $debug_mode_tw
+            exec_logf = string.gsub('=logf', '').strip
+            exec_logf = parse_enclosing_curly_braces(exec_logf)
+            execute_logf(exec_logf)
+          elsif string =~ /^=logw\b/i
+            echo "=logw trigger response" if $debug_mode_tw
+            exec_logw = string.gsub('=logw', '').strip
+            exec_logw = parse_enclosing_curly_braces(exec_logw)
+            execute_logw(exec_logw)
+          elsif string =~ /^=pause\b/i
+            echo "=pause trigger response" if $debug_mode_tw
+            exec_pause = string.gsub('=pause', '').strip
+            exec_pause = parse_enclosing_curly_braces(exec_pause)
+            execute_pause(exec_pause)
+          elsif string =~ /^=if\b/i
+            echo "=if/elsif/else trigger response" if $debug_mode_tw
+            execute_if(string)
+          elsif string =~ /^=eval\b/i
+            echo "=eval trigger response" if $debug_mode_tw
+            exec_eval = string.gsub('=eval', '').strip
+            exec_eval = parse_enclosing_curly_braces(exec_eval)
+            execute_eval(exec_eval)
+          elsif string =~ /^=reload\b/i
+            echo "=reload trigger response" if $debug_mode_tw
+            execute_reload()
+          else
+            echo "regular trigger response (default fput)" if $debug_mode_tw
+            fput(string)
+            waitrt?
+          end
+        end
+      end
+      # Reset flag, ready for next occurrence of trigger
+      Flags.reset(name.to_s)
+      echo "Flag #{name} reset." if $debug_mode_tw
+    end
+  end
+end

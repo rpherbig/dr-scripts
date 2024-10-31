@@ -8,24 +8,20 @@ no_pause_all
 custom_require.call(%w[common common-items])
 
 class WandWatcher
-  include DRC
-  include DRCI
-
   def initialize
-
     arg_definitions = [
       [
         {
-          name: 'delay', 
-          regex: /^\d+$/, 
-          optional: true, 
-          description: 'Override wand_watcher_startup_delay from yaml' 
+          name: 'delay',
+          regex: /^\d+$/,
+          optional: true,
+          description: 'Override wand_watcher_startup_delay from yaml'
         },
         {
-          name: 'reset', 
-          regex: /^reset$/, 
-          optional: true, 
-          description: 'Clear timing variables' 
+          name: 'reset',
+          regex: /^reset$/,
+          optional: true,
+          description: 'Clear timing variables'
         }
       ]
     ]
@@ -35,11 +31,11 @@ class WandWatcher
     settings = get_settings
     @wand_list = settings.wands
     @queued_wands = []
-    @no_use_scripts = settings.wand_watcher_no_use_scripts 
-    @no_use_rooms = settings.wand_watcher_no_use_rooms 
-    @startup_delay = args.delay || settings.wand_watcher_startup_delay 
+    @no_use_scripts = settings.wand_watcher_no_use_scripts
+    @no_use_rooms = settings.wand_watcher_no_use_rooms
+    @startup_delay = args.delay || settings.wand_watcher_startup_delay
     @passive_delay = settings.wand_watcher_passive_delay
-    @activation_failure_messages = [/^The .* remains inert/]
+    @activation_failure_messages = [/^(The|An|A) .* remains inert/]
     @activation_blocked_messages = [/^Something in the area is interfering/,
                                     /^This is not a good place for that/,
                                     /^This is not the best place to be doing that/,
@@ -47,8 +43,20 @@ class WandWatcher
                                     /^You really shouldn't be loitering in here/,
                                     /^As you begin to do that an assistant scowls at you and motions for you to stop/,
                                     /^You cannot .* while maintaining the effort to stay hidden/,
+                                    /You'll interrupt your research/,
                                     /^You are in no condition to do that/]
     UserVars.wand_watcher_timers = {} if !(UserVars.wand_watcher_timers) || args.reset
+
+    # check to ensure wands are defined in gear, and warn user if not
+    wands_not_in_gear = @wand_list.reject { |wand, _details| settings.gear.find { |item| wand =~ /#{item[:adjective]}\s*#{item[:name]}/i } }
+    if wands_not_in_gear.size > 0
+      message = "To minimize the possibility that items that you hold in your hands could be lost they should be listed in your `gear:`. The following wands are not listed in your `gear:` settings:"
+      message += "\n  - #{wands_not_in_gear.collect { |k, _v| k }.join("\n  - ")}"
+      message += "\nIf you need assistance with this, please ask in the lich discord (listed in #{$clean_lich_char}links) for help."
+      message += "\n\n---The script will now abort.---"
+      DRC.message(message)
+      exit
+    end
 
     # Don't allow users to make foolish mistakes, always prevent use during go2/burgle
     @no_use_scripts << 'go2'
@@ -59,7 +67,7 @@ class WandWatcher
     # - removes timers for wands no longer in the yaml
     # - sets any new wand next use timers to now
     temp_timers = {}
-    @wand_list.each do |key,item|
+    @wand_list.each do |key, _item|
       if UserVars.wand_watcher_timers[key]
         temp_timers[key] = UserVars.wand_watcher_timers[key]
       else
@@ -73,7 +81,7 @@ class WandWatcher
 
     # Run passively in a loop
     passive_run
-    #TODO: run once option
+    # TODO: run once option
   end
 
   def passive_run
@@ -81,7 +89,7 @@ class WandWatcher
       if @wand_list == nil || @wand_list.empty?
         # @wand_list = nil when no wands configured in yaml
         # @wand_list = empty when all wands are deleted due to problems finding wands
-        message "No wands to check.  Ending script.  Double check your settings."
+        DRC.message "No wands to check.  Ending script.  Double check your settings."
         exit
       end
       check_timers
@@ -89,16 +97,17 @@ class WandWatcher
     end
   end
 
-  def check_timers  
-    # If any no_use_scripts are running, or you are in any of the no_use_rooms, 
+  def check_timers
+    # If any no_use_scripts are running, or you are in any of the no_use_rooms,
     # loop every 10 seconds checking until not
     loop do
-      break if !(@no_use_scripts.any? { |name| Script.running?(name) }) && !( @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id} )
+      break if !(@no_use_scripts.any? { |name| Script.running?(name) }) && !(@no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id })
+
       pause 10
     end
 
     # Loop through the wand timers in the UserVars, and queue up any wands that are ready to go
-    UserVars.wand_watcher_timers.each do |wand,next_use_time|
+    UserVars.wand_watcher_timers.each do |wand, next_use_time|
       if Time.now > next_use_time
         @queued_wands << wand
       end
@@ -113,14 +122,17 @@ class WandWatcher
 
   def use_wands
     # Pause scripts to prevent interference
-    scripts_to_unpause = []
-    scripts_to_unpause = smart_pause_all
-    temp_left_item = nil    
+    until (scripts_to_unpause = DRC.safe_pause_list)
+      echo("Cannot pause, trying again in 30 seconds.")
+      pause 30
+    end
+
+    temp_left_item = nil
     waitrt?
 
-    if /nothing in your left hand\.$|at your empty hands\.$/ !~ bput('glance', /You glance down .*/)
-      # If both hands are full, store the left hand item in a variable for future 
-      # use and lower the left hand to the feet slot.  
+    if /nothing in your left hand\.$|at your empty hands\.$/ !~ DRC.bput('glance', /You glance down .*/)
+      # If both hands are full, store the left hand item in a variable for future
+      # use and lower the left hand to the feet slot.
       # - Left causes less problems with combat (less likely to be a loaded weapon)
       # - Feet slot causes less space/correct container issues
       if DRC.right_hand && DRC.left_hand
@@ -136,37 +148,59 @@ class WandWatcher
       # Get wand settings
       activation_successful_message = @wand_list[wand]['activation message']
       activation_verb = @wand_list[wand]['activate verb'] || 'tap'
-      container = @wand_list[wand]['container'] 
+      container = @wand_list[wand]['container']
       cooldown = @wand_list[wand]['cooldown'] || 30
       count = @wand_list[wand]['count'] || 2
+      luck_item = @wand_list[wand]['luck_item'] || false
+      spell = @wand_list[wand]['spell']
+      min_duration = @wand_list[wand]['min duration'] || 1
+
+      # check if the wand has a visible spell set, and if the duration of that spell is above min duration, if so, delay activation
+      #   not all wand spells are visible, so leaving this value empty should bypass this check
+      if !spell.nil? && spell != '' && DRSpells.active_spells.has_key?(spell) && DRSpells.active_spells[spell] > min_duration
+        DRC.message "Spell duration above min duration to rebuff."
+        UserVars.wand_watcher_timers[wand] = Time.now + (DRSpells.active_spells[spell] - min_duration) * 60
+        next
+      end
 
       # cooldown is stored in minutes, but used in seconds
       cooldown *= 60
       # count is stored as number you own, but ordinals is based on 0 index
       count -= 1
 
+      if luck_item
+        fput("info")
+        pause 1
+      end
+
+      if luck_item && DRStats.luck.to_i > 0
+        DRC.message("SKipping luck item because luck greater than 0. Will recheck in 60 seconds.")
+        UserVars.wand_watcher_timers[wand] = Time.now + 60
+        next
+      end
+
       # If you fail getting the wand
       # - because you don't have the right number
       # - or it's not in the right container
       # - or you simply don't have them
       # message the user, and remove the wand from the list of wands checked
-      if !DRCI.get_item?("#{$ORDINALS[count]} #{wand}",container)
-        message "Could not find correct number of wands for #{wand} in #{container}."
-        message "Double check your wand name, count, and container settings." 
-        message "Removing this wand from the list."
+      if !DRCI.get_item?("#{$ORDINALS[count]} #{wand}", container)
+        DRC.message "Could not find correct number of wands for #{wand} in #{container}."
+        DRC.message "Double check your wand name, count, and container settings."
+        DRC.message "Removing this wand from the list."
         @wand_list.delete(wand)
         UserVars.wand_watcher_timers.delete(wand)
         next
       end
 
-      case bput("#{activation_verb} my #{wand}",activation_successful_message,@activation_failure_messages,@activation_blocked_messages)
+      case DRC.bput("#{activation_verb} my #{wand}", activation_successful_message, @activation_failure_messages, @activation_blocked_messages)
       when *activation_successful_message
         # Set next use timer to now + cooldown
         UserVars.wand_watcher_timers[wand] = Time.now + cooldown
       when *@activation_failure_messages
         # If activation fails, could just be a sort issue due login:
         # retry, until you succeed, or run out of wands
-        DRCI.put_away_item?(wand,container)
+        DRCI.put_away_item?(wand, container)
         redo_count += 1
         redo unless redo_count > count
         # If you run out of wands to try, set next attempt to be 1/2 the cooldown time
@@ -174,34 +208,34 @@ class WandWatcher
       when /^You are in no condition to do that/
         # Activation failed due to being too injured.
         # Message the user and push out the retry time a little bit.
-        message "Failed to activate due to being too injured."
+        DRC.message "Failed to activate due to being too injured."
         UserVars.wand_watcher_timers[wand] = Time.now + 60
       when /^You cannot .* while maintaining the effort to stay hidden/
         # Activation failed due to being invisible or hidden.
         # Message the user and push out the retry time a little bit.
-        message "Failed to activate due to being hidden or invisible."
+        DRC.message "Failed to activate due to being hidden or invisible."
         UserVars.wand_watcher_timers[wand] = Time.now + 60
       when *@activation_blocked_messages
         # Activation failed due to null-magic room or silenced room
         # Message the user and add the current room to the @no_use_rooms
-        message "Failed to activate due to room settings."
+        DRC.message "Failed to activate due to room settings."
         if Room.current.id == nil
-          message "Recommend you add room title: '#{DRRoom.title.to_s()[2..-3]}' to wand_watcher_no_use_rooms in your yaml."
+          DRC.message "Recommend you add room title: '#{DRRoom.title.to_s()[2..-3]}' to wand_watcher_no_use_rooms in your yaml."
           @no_use_rooms << DRRoom.title.to_s()[2..-3]
         else
-          message "Recommend you add room number: #{Room.current.id} to wand_watcher_no_use_rooms in your yaml."
+          DRC.message "Recommend you add room number: #{Room.current.id} to wand_watcher_no_use_rooms in your yaml."
           @no_use_rooms << Room.current.id
         end
         UserVars.wand_watcher_timers[wand] = Time.now + 60
       else
         # Catch all for Unknown errors  Message the user and ask them to open an issue with details
-        message "Unrecognized error when trying to activate wand."
-        message "Please open an issue on github with the details: https://github.com/rpherbig/dr-scripts/issues"
+        DRC.message "Unrecognized error when trying to activate wand."
+        DRC.message "Please open an issue on github with the details: https://github.com/rpherbig/dr-scripts/issues"
         UserVars.wand_watcher_timers[wand] = Time.now + 60
       end
 
       # Put away the wand and reset the redo counter for next wand
-      DRCI.put_away_item?(wand,container)
+      DRCI.put_away_item?(wand, container)
       redo_count = 0
     end
 
@@ -209,7 +243,7 @@ class WandWatcher
     DRCI.get_item?(temp_left_item) if temp_left_item
 
     # Resume scripts
-    unpause_all_list(scripts_to_unpause)
+    DRC.safe_unpause_list(scripts_to_unpause)
   end
 end
 

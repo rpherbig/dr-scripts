@@ -26,17 +26,23 @@ module DRCMM
 
   def get_telescope?(telescope_name = 'telescope', storage)
     return true if DRCI.in_hands?(telescope_name)
+
     if storage['tied']
       DRCI.untie_item?(telescope_name, storage['tied'])
     elsif storage['container']
-      DRCI.get_item?(telescope_name, storage['container'])
+      unless DRCI.get_item?(telescope_name, storage['container'])
+        echo("Telescope not found in container. Trying to get it from anywhere we can.")
+        return DRCI.get_item?(telescope_name)
+      end
+      true
     else
-      DRCI.get_item?(telescope_name)
+      return DRCI.get_item?(telescope_name)
     end
   end
 
   def store_telescope?(telescope_name = "telescope", storage)
     return true unless DRCI.in_hands?(telescope_name)
+
     if storage['tied']
       DRCI.tie_item?(telescope_name, storage['tied'])
     elsif storage['container']
@@ -67,7 +73,7 @@ module DRCMM
   end
 
   def peer_telescope
-    DRC.bput('peer telescope',
+    DRC.bput('peer my telescope',
              'The pain is too much',
              'You see nothing regarding the future',
              "You believe you've learned all that you can about",
@@ -78,16 +84,23 @@ module DRCMM
   end
 
   def center_telescope(target)
-    DRC.bput("center telescope on #{target}",
-             'Center what',
-             'You put your eye',
-             'open it to make any use of it',
-             'The pain is too much',
-             "That's a bit tough to do when you can't see the sky",
-             "You would probably need a periscope to do that",
-             'Your search for',
-             'Your vision is too fuzzy',
-             'You must have both hands free')
+    case DRC.bput("center telescope on #{target}",
+                  'Center what',
+                  'You put your eye',
+                  'open it to make any use of it',
+                  'The pain is too much',
+                  "That's a bit tough to do when you can't see the sky",
+                  "You would probably need a periscope to do that",
+                  'Your search for',
+                  'Your vision is too fuzzy',
+                  "You'll need to open it to make any use of it",
+                  'You must have both hands free')
+    when 'The pain is too much', "That's a bit tough to do when you can't see the sky"
+      echo("Planet #{target} not visible. Are you indoors perhaps?")
+    when "You'll need to open it to make any use of it"
+      fput("open my telescope")
+      fput("center telescope on #{target}")
+    end
   end
 
   def align(skill)
@@ -184,10 +197,10 @@ module DRCMM
 
     {
       'charts' => 'review',
-      'bones' => 'roll',
+      'bones'  => 'roll',
       'mirror' => 'gaze',
-      'bowl' => 'gaze',
-      'prism' => 'raise'
+      'bowl'   => 'gaze',
+      'prism'  => 'raise'
     }.select { |tool, _| tool_storage['name'].include?(tool) }
       .each   { |tool, verb| DRC.bput("#{verb} my #{tool}", 'roundtime'); waitrt? }
 
@@ -235,6 +248,7 @@ module DRCMM
   def hold_moon_weapon?
     return true if holding_moon_weapon?
     return false if [DRC.left_hand, DRC.right_hand].compact.length >= 2
+
     ['moonblade', 'moonstaff'].each do |weapon|
       glance = DRC.bput("glance my #{weapon}", "You glance at a .* #{weapon}", "I could not find")
       case glance
@@ -248,6 +262,7 @@ module DRCMM
   # Does the item appear to be a moon weapon?
   def is_moon_weapon?(item)
     return false unless item
+
     !(item =~ /^((black|red-hot|blue-white) moon(blade|staff))$/i).nil?
   end
 
@@ -269,9 +284,9 @@ module DRCMM
     return nil
   end
 
-## Migrating prediction/planet/moon defs from common-arcana to here.
-#Delete this line, and the defs from common-arcana after they've been
-#merged here and things look good.
+  ## Migrating prediction/planet/moon defs from common-arcana to here.
+  # Delete this line, and the defs from common-arcana after they've been
+  # merged here and things look good.
 
   def update_astral_data(data, settings = nil)
     if data['moon']
@@ -292,10 +307,7 @@ module DRCMM
     observed_planets = []
 
     planets.each do |planet|
-      case DRC.bput("center telescope on #{planet}", 'You put your eye', 'The pain is too much', "That's a bit tough to do when you can't see the sky")
-      when 'The pain is too much', "That's a bit tough to do when you can't see the sky"
-        break
-      end
+      center_telescope(planet)
       observed_planets << planet unless Flags['planet-not-visible']
       Flags.reset('planet-not-visible')
     end
@@ -314,6 +326,7 @@ module DRCMM
     data['stats'].each do |stat|
       cast_on = planets.map { |planet| planet['name'] if planet['stats'].include?(stat) && visible_planets.include?(planet['name']) }.compact.first
       next unless cast_on
+
       data['cast'] = "cast #{cast_on}"
       return data
     end
@@ -326,11 +339,27 @@ module DRCMM
     moon = visible_moons.first
     if moon
       data['cast'] = "cast #{moon}"
+    elsif !moon && data['name'].downcase == 'cage of light'
+      data['cast'] = "cast ambient"
     else
-      echo "No moon available to cast #{data['abbrev']}"
+      echo "No moon available to cast #{data['name']}"
       data = nil
     end
     data
+  end
+
+  # returns true if at least one bright moon (yavash, xibar) or the sun are
+  #  above the horizon and won't set for at least another ~4 minutes.
+  def bright_celestial_object?
+    check_moonwatch
+    (UserVars.sun['day'] && UserVars.sun['timer'] >= 4) || visible_moons.include?('xibar') || visible_moons.include?('yavash')
+  end
+
+  # returns true if at least one moon (katamba, yavash, xibar) or the sun are
+  #  above the horizon and won't set for at least another ~4 minutes.
+  def any_celestial_object?
+    check_moonwatch
+    (UserVars.sun['day'] && UserVars.sun['timer'] >= 4) || moons_visible?
   end
 
   # Returns true if at least one moon (e.g. katamba, yavash, xibar)
@@ -344,7 +373,7 @@ module DRCMM
   def visible_moons
     check_moonwatch
     UserVars.moons.select { |moon_name, moon_data| UserVars.moons['visible'].include?(moon_name) && moon_data['timer'] >= 4 }
-                  .map { |moon_name, moon_data| moon_name }
+            .map { |moon_name, _moon_data| moon_name }
   end
 
   def check_moonwatch
@@ -356,5 +385,4 @@ module DRCMM
     echo "Run `#{$clean_lich_char}e autostart('moonwatch')` to avoid this in the future"
     pause 0.5 while UserVars.moons.empty?
   end
-
 end

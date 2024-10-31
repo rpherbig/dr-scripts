@@ -1,11 +1,10 @@
 #   Documentation: https://elanthipedia.play.net/Lich_script_repository#bescort
 
-custom_require.call(%w[common common-arcana common-items common-travel common-money drinfomon equipmanager events skill-recorder])
+custom_require.call(%w[common common-arcana common-items common-travel common-money common-moonmage drinfomon equipmanager events skill-recorder])
 
 $turns_since_bad = 0
 
 class MazeRoom
-
   $CARDINALS = { 'n' => 's', 's' => 'n', 'ne' => 'sw', 'sw' => 'ne', 'nw' => 'se', 'se' => 'nw', 'e' => 'w', 'w' => 'e' }
   $ADJUSTMENTS = { 'n' => [0, 1], 's' => [0, -1], 'ne' => [1, 1], 'sw' => [-1, -1], 'nw' => [-1, 1], 'se' => [1, -1], 'e' => [1, 0], 'w' => [-1, 0] }
 
@@ -46,6 +45,7 @@ class MazeRoom
       current.exits.each do |dir, child|
         return current.parent || dir if child.nil?
         next if child.checked
+
         child.checked = true
         child.parent = current.parent || dir
         queue << child
@@ -74,7 +74,7 @@ class MazeRoom
 
     return @exits[dir_to_go] if @exits[dir_to_go]
 
-    if existing_room = find_room_by_coords(update_coords(@coords, dir_to_go))
+    if (existing_room = find_room_by_coords(update_coords(@coords, dir_to_go)))
       @exits[dir_to_go] = existing_room
       existing_room.exits[$CARDINALS[dir_to_go]] = self
       return existing_room
@@ -85,7 +85,6 @@ class MazeRoom
 end
 
 class Bescort
-
   $ICE_PATH_HIB = %w[nw ne ne e ne ne ne nw sw w w nw]
   $ICE_PATH_SHARD = %w[se e e ne se sw sw sw w sw sw se]
 
@@ -229,12 +228,16 @@ class Bescort
         { name: 'asketis_mount', regex: /asketis_mount/i, description: "Climb up or down Asketi's Mount to Black Marble Gargoyles." },
         { name: 'mode', options: %w[up down], description: "Climb up or climb down?" }
       ],
+      [
+        { name: 'coffin', regex: /coffin/i, description: "Enter the abyss via coffin for lanky grey lachs, et al." }
+      ]
     ]
 
     args = parse_args(arg_definitions)
 
     @settings = get_settings
     @equipment_manager = EquipmentManager.new(@settings)
+    @flying_mount = @settings.flying_mount
 
     pause
 
@@ -310,6 +313,8 @@ class Bescort
       cave_trolls(args.mode)
     elsif args.asketis_mount
       asketis_mount(args.mode)
+    elsif args.coffin
+      coffin
     end
   end
 
@@ -319,7 +324,7 @@ class Bescort
     mode = mode.downcase
     case mode
     when 'mount'
-      DRC.bput("get my #{type}", /You get/, /You pick up/, /You are already holding/, /What were you referring/)
+      DRCI.get_item?(type)
       case type
       when /broom|dirigible/i
         case DRC.bput("mount my #{type}", /You mount your/, /You are already mounted/, /What were you referring/)
@@ -345,16 +350,100 @@ class Bescort
       case type
       when /broom|dirigible/i
         DRC.bput('dismount', /Your .* floats down to the ground/, /You climb off/)
-        @equipment_manager.empty_hands
       when /carpet|rug/i
         DRC.bput('dismount', /Your .* floats down to the ground/, /You climb off/)
         DRC.bput("roll #{type}", /You roll up/, /You can't roll/)
-        DRC.bput("stow my #{type}", /You put/, /You pick up/, /Stow what?/)
       else
         DRC.message("#{type} is not a valid type of flying mount.")
         exit
       end
+      DRCI.put_away_item?(type)
     end
+  end
+
+  def coffin
+    # Check time of day
+    DRCMM.check_moonwatch
+    time = UserVars.sun['day']
+    time ? look_at = 'sunlight' : look_at = 'starlight'
+
+    # Hash of images along with the light and dark symbols
+    image_hash = {
+      'boar': ['longbow', 'berserking barbarian'],
+      'cat': ['grimacing woman', 'twin crossed swords with jagged blades'],
+      'cobra': ['shattered egg', 'the image of an erupting volcano'],
+      'dolphin': ['deer drinking from a flowing stream', 'great tidal wave'],
+      'lion': ['pack of well-groomed battle hounds', 'bloodstained stiletto'],
+      'panther': ['cluster of twinkling stars', 'child shivering fearfully in the throes of a nightmare'],
+      'ram': ['flourishing rose garden', 'jagged crystalline blade'],
+      'raven': ['bowl of striped peppermint', 'shattered caravan wheel'],
+      'wolf': ['charred black stave', 'long flowing skirt'],
+      'wren': ['plump opera singer', 'cracked mirror']
+    }
+
+    # Populate white and black tapestry images
+    white_tapestry = image_hash.map { |_key, value| value[0] }
+    black_tapestry = image_hash.map { |_key, value| value[1] }
+
+    lever_pulled = false
+
+    # There is a slight possibility that someone else is running the puzzle and resets
+    # the lever/coffin. This loop helps detect that.
+    until lever_pulled
+      DRCT.walk_to(13600)
+      DRC.bput('look behind satin tapestry', 'Peeking behind the tapestry')
+      DRC.bput('turn steel crank', 'Roundtime', 'You step behind the blood red tapestry')
+
+      # Find our primary image
+      image = DRC.bput("look #{look_at}", 'I could not find what', *image_hash.keys)
+
+      # Set our light and dark images based on primary image
+      light = image_hash[image.to_sym][0]
+      dark = image_hash[image.to_sym][1]
+
+      dseen = false
+      lseen = false
+
+      # Black tapestry
+      DRCT.walk_to(13602)
+      until dseen
+        wheel = DRC.bput("look wooden wheel", *black_tapestry)
+        if wheel == dark
+          dseen = true
+          break
+        end
+      end
+
+      # Light tapestry
+      DRCT.walk_to(13601)
+      until lseen == true
+        wheel = DRC.bput("look wooden wheel", *white_tapestry)
+        if wheel == light
+          lseen = true
+          break
+        end
+      end
+
+      # Back to coffin
+      DRCT.walk_to(13600)
+      DRC.bput('look behind satin tapestry', 'Peeking behind the tapestry')
+      lever = DRC.bput('pull iron lever', 'Roundtime', 'it won\'t budge')
+      if lever == 'Roundtime'
+        lever_pulled = true
+      else
+        echo "Someone reset the coffin."
+      end
+    end
+
+    waitrt?
+    @equipment_manager.empty_hands
+    DRC.bput('open coffin', 'You open the heavy lid', 'The coffin is already open')
+    DRC.bput('go coffin', 'Obvious exits', 'The lid of the coffin is closed')
+    waitfor 'You suddenly feel the presence of cold stone'
+    pause while stunned?
+    DRC.fix_standing
+    fput('look')
+    fput('look')
   end
 
   def asketis_mount(mode)
@@ -379,18 +468,16 @@ class Bescort
     manual_go2(start_room)
     move('go stream bank')
     # Once in the stream then you're in a safe room, get mount or remove gear.
-    flying_mount = @settings.flying_mount
     @equipment_manager.empty_hands
-    have_changed_gear = flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount')
+    have_changed_gear = @flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount')
       move(moveset.first) # mount travels all three rooms at once
     else
       moveset.each { |dir| swim(dir) }
     end
-    use_flying_mount(flying_mount, 'dismount') if flying_mount
+    use_flying_mount(@flying_mount, 'dismount') if @flying_mount
     # While in the stream then you're in a safe room, dismount or wear gear.
-    @equipment_manager.empty_hands
     @equipment_manager.wear_equipment_set?('standard') if have_changed_gear
     move('go stream bank')
     # You're now among cave trolls!
@@ -398,14 +485,14 @@ class Bescort
   end
 
   def take_m_m_galley(mode)
-    unless [6555, 6656].include?(Room.current.id) || ["[[The Galley Cercorim]]","[[The Galley Sanegazat]]" ].include?(DRRoom.title)
+    unless [6555, 6656].include?(Room.current.id) || ["[[The Galley Cercorim]]", "[[The Galley Sanegazat]]"].include?(DRRoom.title)
       echo 'You are not at the galley docks, or on the galley.'
       return
     end
 
-    #if you're on the mer'kresh side, check for money (no bank in m'riss.  you're screwed without funds)
+    # if you're on the mer'kresh side, check for money (no bank in m'riss.  you're screwed without funds)
     if (Room.current.id == 6555)
-      if DRCM.wealth("Mer'Kresh") < 120  #enough to go over and back 2x
+      if DRCM.wealth("Mer'Kresh") < 120 # enough to go over and back 2x
         echo('Get money you slob!')
         return unless get_fare?(300, "Mer'Kresh", 6555)
       end
@@ -413,48 +500,48 @@ class Bescort
 
     loop do
       echo 'at top of loop'
-      #at your destination
+      # at your destination
       if (Room.current.id == 6555 && mode == 'merkresh') || (Room.current.id == 6656 && mode == 'mriss')
         echo "You're there."
         exit
 
-      #Not there, but at the transport waiting room
+      # Not there, but at the transport waiting room
       elsif Room.current.id == 6555 || Room.current.id == 6656
         echo 'waiting for transport'
-        hide? unless DRRoom.room_objs.find {|obj| obj =~ /the galley (Sanegazat|Cercorim)/}
-        pause 1 until DRRoom.room_objs.find {|obj| obj =~ /the galley (Sanegazat|Cercorim)/}
-        case DRC.bput('go galley','You hand him your lirums and climb aboard', 'Come back when you can afford the fare','The galley has just left the harbor','You look around in vain for the')
+        hide? unless DRRoom.room_objs.find { |obj| obj =~ /the galley (Sanegazat|Cercorim)/ }
+        pause 1 until DRRoom.room_objs.find { |obj| obj =~ /the galley (Sanegazat|Cercorim)/ }
+        case DRC.bput('go galley', 'You hand him your lirums and climb aboard', 'Come back when you can afford the fare', 'The galley has just left the harbor', 'You look around in vain for the')
         when 'The galley has just left the harbor'
-          pause 1 until !DRRoom.room_objs.find {|obj| obj =~ /the galley (Sanegazat|Cercorim)/}
+          pause 1 until !DRRoom.room_objs.find { |obj| obj =~ /the galley (Sanegazat|Cercorim)/ }
         when 'Come back when you can afford the fare'
           echo('Get money you slob!')
           return
         when 'You hand him your lirums and climb aboard'
-          pause 1 #allow catch up
+          pause 1 # allow catch up
         end
 
-      #Not there, but on the transport
-      elsif ["[[The Galley Cercorim]]","[[The Galley Sanegazat]]"].include?(DRRoom.title)
+      # Not there, but on the transport
+      elsif ["[[The Galley Cercorim]]", "[[The Galley Sanegazat]]"].include?(DRRoom.title)
         echo 'waiting for dock'
         if mode == 'merkresh'
           echo "On transport, headed to merkresh"
-          hide? unless DRRoom.room_objs.find {|obj| obj =~ /Mer'Kresh dock/}
+          hide? unless DRRoom.room_objs.find { |obj| obj =~ /Mer'Kresh dock/ }
           echo "On transport, waiting for merkresh dock"
-          pause 1 until DRRoom.room_objs.find {|obj| obj =~ /Mer'Kresh dock/}
+          pause 1 until DRRoom.room_objs.find { |obj| obj =~ /Mer'Kresh dock/ }
           echo "On transport, found merkresh dock!"
-          case DRC.bput('go dock','Obvious paths:','The galley has just pulled away from the dock','You see no dock','What were you referring to')
-          when 'The galley has just pulled away from the dock','You see no dock','What were you referring to'
-            pause 1 until !DRRoom.room_objs.find {|obj| obj =~ /Mer'Kresh dock/}
+          case DRC.bput('go dock', 'Obvious paths:', 'The galley has just pulled away from the dock', 'You see no dock', 'What were you referring to')
+          when 'The galley has just pulled away from the dock', 'You see no dock', 'What were you referring to'
+            pause 1 until !DRRoom.room_objs.find { |obj| obj =~ /Mer'Kresh dock/ }
           end
         elsif mode == 'mriss'
           echo "on transport, headed to mriss"
-          hide? unless DRRoom.room_objs.find {|obj| obj =~ /M'Riss dock/}
+          hide? unless DRRoom.room_objs.find { |obj| obj =~ /M'Riss dock/ }
           echo "On transport, waiting for mriss dock"
-          pause 1 until DRRoom.room_objs.find {|obj| obj =~ /M'Riss dock/}
+          pause 1 until DRRoom.room_objs.find { |obj| obj =~ /M'Riss dock/ }
           echo "On transport, found mriss dock!"
-          case DRC.bput('go dock','Obvious paths:','The galley has just pulled away from the dock','You see no dock','What were you referring to')
-          when 'The galley has just pulled away from the dock','You see no dock','What were you referring to'
-            pause 1 until !DRRoom.room_objs.find {|obj| obj =~ /M'Riss dock/}
+          case DRC.bput('go dock', 'Obvious paths:', 'The galley has just pulled away from the dock', 'You see no dock', 'What were you referring to')
+          when 'The galley has just pulled away from the dock', 'You see no dock', 'What were you referring to'
+            pause 1 until !DRRoom.room_objs.find { |obj| obj =~ /M'Riss dock/ }
           end
         end
       end
@@ -479,8 +566,8 @@ class Bescort
 
     if [5555, 5557, 5558, 15863].include?(Room.current.id)
       move "go currach"
-      DRC.bput('get oars', 'You grab hold of the oars', 'But you already have a firm grip on the oars', 'What were you referring to',  "You can't do that right now")
-      DRC.bput('untie currach', 'You untie the', "But it's not tied to anything!", 'What were you referring to',  "You can't do that right now")
+      DRC.bput('get oars', 'You grab hold of the oars', 'But you already have a firm grip on the oars', 'What were you referring to', "You can't do that right now")
+      DRC.bput('untie currach', 'You untie the', "But it's not tied to anything!", 'What were you referring to', "You can't do that right now")
     end
 
     loop do
@@ -489,13 +576,13 @@ class Bescort
         move "go #{row_direction}"
         exit
       else
-        DRC.bput("row #{row_direction}", 'You pull strongly', 'What were you referring to',  "You can't do that right now")
+        DRC.bput("row #{row_direction}", 'You pull strongly', 'What were you referring to', "You can't do that right now")
       end
     end
   end
 
   def jolas(mode)
-    #Boat has multiple rooms: 15450, 15451, 15452, 15453, 15454
+    # Boat has multiple rooms: 15450, 15451, 15452, 15453, 15454
     unless [15253, 6542, 15450, 15451, 15452, 15453, 15454].include?(Room.current.id)
       echo "You are not at the correct dock to ride The Jolas."
       return
@@ -507,7 +594,7 @@ class Bescort
     elsif (mode.include?('merkresh') && Room.current.id == 15253) || (mode.include?('harajaal') && Room.current.id == 6542)
       hide? unless DRRoom.room_objs.find { |x| x =~ /The Jolas/ }
       pause 1 until DRRoom.room_objs.find { |x| x =~ /The Jolas/ }
-      DRC.bput('go Jolas', 'You climb','What were you referring')
+      DRC.bput('go Jolas', 'You climb', 'What were you referring')
       waitfor 'The captain barks the order to tie off the Jolas to the docks'
       DRCT.walk_to(15450) if Room.current.id != 15450
       if DRRoom.room_objs.include?('Sumilo Dock') && mode.include?('harajaal')
@@ -617,6 +704,7 @@ class Bescort
 
   def manual_go2(goal_room)
     return if Room.current.id == goal_room
+
     path = Map.findpath(Room.current.id, Map[goal_room])
     path.each { |step| do_map_move(Room.current.wayto[step.to_s]) }
     do_map_move(Room.current.wayto[goal_room.to_s])
@@ -638,6 +726,7 @@ class Bescort
           break if DRRoom.room_objs.find { |obj| obj.include?(pathname) || obj.include?('other stuff') }
         end
         break if move "#{movetype} #{pathname}"
+
         pause
       end
       pause
@@ -651,7 +740,7 @@ class Bescort
   end
 
   def move_direction?(dir_priority, force_match = nil)
-    if choice = dir_priority.find { |dir| XMLData.room_exits.include?(dir) }
+    if (choice = dir_priority.find { |dir| XMLData.room_exits.include?(dir) })
       $turns_since_bad = 0
       move choice
       true
@@ -660,6 +749,7 @@ class Bescort
         if force_match.find { |msg| XMLData.room_description.include?(msg) }
           return false
         end
+
         move(dir)
         pause 0.5
         waitrt?
@@ -680,6 +770,7 @@ class Bescort
       error_rooms[Room.current.id].call if error_rooms[Room.current.id]
       return if DRRoom.pcs.empty? && DRRoom.npcs.empty? && (target.nil? || XMLData.room_title.include?(target))
       return if !DRRoom.pcs.empty? && (DRRoom.pcs - UserVars.friends).empty? && DRRoom.pcs.size <= 2 && (target.nil? || XMLData.room_title.include?(target))
+
       exits = XMLData.room_exits.dup.shuffle
       exits = %w[nw n ne e se s sw w].shuffle if exits.empty?
       exits.rotate! until valid_move.call(exits.first)
@@ -692,6 +783,7 @@ class Bescort
     moves.each do |dir|
       count += 1
       break if DRRoom.pcs.empty? && DRRoom.npcs.empty? && count > min
+
       move dir
       pause 0.5
     end
@@ -770,57 +862,57 @@ class Bescort
     end
     case mode
     when /oasis/
-    loop do
-      desert_enter
-      path = %w[s ne ne s s ne e]
-      path.each do |movement|
-        if DRRoom.room_objs.include?('shimmering oasis')
-          move 'go oasis'
-          exit
-        else
-          move(movement)
+      loop do
+        desert_enter
+        path = %w[s ne ne s s ne e]
+        path.each do |movement|
+          if DRRoom.room_objs.include?('shimmering oasis')
+            move 'go oasis'
+            exit
+          else
+            move(movement)
+          end
         end
-      end
-      move 'go trail'
-      path = %w[ne n ne n ne n n ne n ne n]
-      path.each do |movement|
-        if DRRoom.room_objs.include?('shimmering oasis')
-          move 'go oasis'
-          exit
-        else
-          move(movement)
+        move 'go trail'
+        path = %w[ne n ne n ne n n ne n ne n]
+        path.each do |movement|
+          if DRRoom.room_objs.include?('shimmering oasis')
+            move 'go oasis'
+            exit
+          else
+            move(movement)
+          end
         end
-      end
-      move 'go path'
-      path = %w[sw e s s ne s se n ne ne ne]
-      path.each do |movement|
-        if DRRoom.room_objs.include?('shimmering oasis')
-          move 'go oasis'
-          exit
-        else
-          move(movement)
+        move 'go path'
+        path = %w[sw e s s ne s se n ne ne ne]
+        path.each do |movement|
+          if DRRoom.room_objs.include?('shimmering oasis')
+            move 'go oasis'
+            exit
+          else
+            move(movement)
+          end
         end
-      end
-      move 'go trail'
-      path = %w[n sw ne s sw n up n s s n n down n s s sw s]
-      path.each do |movement|
-        if DRRoom.room_objs.include?('shimmering oasis')
-          move 'go oasis'
-          exit
-        else
-          move(movement)
+        move 'go trail'
+        path = %w[n sw ne s sw n up n s s n n down n s s sw s]
+        path.each do |movement|
+          if DRRoom.room_objs.include?('shimmering oasis')
+            move 'go oasis'
+            exit
+          else
+            move(movement)
+          end
         end
-      end
-      path = %w[n ne up e s ne nw ne e nw]
-      path.each do |movement|
-        if DRRoom.room_objs.include?('shimmering oasis')
-          move 'go oasis'
-          exit
-        else
-          move(movement)
+        path = %w[n ne up e s ne nw ne e nw]
+        path.each do |movement|
+          if DRRoom.room_objs.include?('shimmering oasis')
+            move 'go oasis'
+            exit
+          else
+            move(movement)
+          end
         end
-      end
-      move 'go road'
+        move 'go road'
       end
     when /juvenile/
       desert_enter
@@ -852,8 +944,7 @@ class Bescort
       end
       if XMLData.room_title.include?('High Dunes') # Juvie Area or Elder
         move_direction?(priority_directions) until DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley') || DRRoom.room_objs.include?('faint path that stretches towards a sand-filled valley')
-        if DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
-        else
+        unless DRRoom.room_objs.include?('faint trail that stretches towards a sand-filled valley')
           move 'go path'
           desert(mode)
           exit
@@ -983,13 +1074,12 @@ class Bescort
   end
 
   def faldesu(mode)
-    flying_mount = @settings.flying_mount
     unless mode =~ /haven|crossing/i
       echo 'You must specify haven or crossing for traversing the faldesu river'
       exit
     end
 
-    if flying_mount
+    if @flying_mount
       swim_faldesu(mode =~ /haven/i)
       return
     end
@@ -1015,49 +1105,53 @@ class Bescort
     path = mode == 'shard' ? $ICE_PATH_SHARD : $ICE_PATH_HIB
 
     @equipment_manager.empty_hands
-    settings = get_settings
-    footwear = settings.footwear
+    footwear = @settings.footwear
     move_fast = false
     footwear_removed = false
     skates_worn = false
 
-    # If the footwear setting has been defined then respect that
-    # and only try to remove it. If you're not wearing this item
-    # then obviously nothing on your feet will be removed.
-    # You might:
-    #   - have incorrect yaml
-    #   - put something else on (or nothing on)
-    #   - already wearing your skates
-    if footwear
-      if DRCI.remove_item?(footwear)
-        footwear_removed = true
-        DRCI.put_away_item?(footwear)
+    if @flying_mount
+      move_fast = true
+      use_flying_mount(@flying_mount, 'mount', 'glide')
+      path = mode == 'shard' ? %w[se se sw sw se] : %w[nw ne ne nw sw]
+    else
+      # If the footwear setting has been defined then respect that
+      # and only try to remove it. If you're not wearing this item
+      # then obviously nothing on your feet will be removed.
+      # You might:
+      #   - have incorrect yaml
+      #   - put something else on (or nothing on)
+      #   - already wearing your skates
+      if footwear
+        if DRCI.remove_item?(footwear)
+          footwear_removed = true
+          DRCI.put_away_item?(footwear)
+        end
       end
-    end
 
-    # If you have some skates then try to get and wear them.
-    # Note, if you're already wearing the skates then we won't
-    # be able to "get" them, and that's why the attempt to wear
-    # is not conditional upon you getting them to your hands.
-    if DRCI.exists?('skates')
-      DRCI.get_item?('skates')
-      if DRCI.wear_item?('skates')
-        skates_worn = true
-      else
-        DRCI.put_away_item?('skates')
+      # If you have some skates then try to get and wear them.
+      # Note, if you're already wearing the skates then we won't
+      # be able to "get" them, and that's why the attempt to wear
+      # is not conditional upon you getting them to your hands.
+      if DRCI.exists?('skates')
+        DRCI.get_item?('skates')
+        if DRCI.wear_item?('skates')
+          skates_worn = true
+        else
+          DRCI.put_away_item?('skates')
+        end
       end
-    end
 
-    move_fast = skates_worn
+      move_fast = skates_worn
+    end
 
     # Despite our best efforts, if bescort starts moving you fast
     # and the game gives you warnings to slow down, SLOW DOWN!
     Flags.add('bescort-move-slow',
-      /^You had better slow down!/,
-      /^At the speed you are traveling, you are going to slip and fall sooner/,
-      /^Your excessive speed causes you to lose your footing/,
-      /^Falling down you/
-    )
+              /^You had better slow down!/,
+              /^At the speed you are traveling, you are going to slip and fall sooner/,
+              /^Your excessive speed causes you to lose your footing/,
+              /^Falling down you/)
 
     path.each do |movement|
       move(movement)
@@ -1082,6 +1176,10 @@ class Bescort
       DRCI.get_item?(footwear)
       DRCI.wear_item?(footwear)
     end
+
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'dismount')
+    end
   end
 
   def swim(dir)
@@ -1091,13 +1189,12 @@ class Bescort
   end
 
   def swim_faldesu(north)
-    flying_mount = @settings.flying_mount
     start = north ? 1375 : 473
     manual_go2(start)
     moveset = north ? %w[north northwest northeast] : %w[south southwest southeast]
     move 'dive river'
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount')
       if north
         move n
         move nw
@@ -1106,8 +1203,7 @@ class Bescort
         move sw
       end
       move 'go bridge'
-      use_flying_mount(flying_mount, 'dismount')
-      @equipment_manager.empty_hands
+      use_flying_mount(@flying_mount, 'dismount')
     else
       swim(moveset[0]) while XMLData.room_exits.include?(moveset[0])
       swim(moveset[1]) while XMLData.room_exits.include?('east')
@@ -1284,6 +1380,7 @@ class Bescort
 
       if DRRoom.room_objs.include?(target)
         return if exit_command == nil
+
         unless move(exit_command)
           DRC.fix_standing
           wander_maze_until(target, exit_command)
@@ -1311,8 +1408,8 @@ class Bescort
         manual_go2(13_625)
         find_room_list(%w[sw e e e se s sw w w w w nw n ne se s ne se n ne w nw])
       elsif XMLData.room_title.include?('The Fangs of Ushnish')
-          wander_maze_until('steep cliff', 'climb cliff')
-          manual_go2(13_625)
+        wander_maze_until('steep cliff', 'climb cliff')
+        manual_go2(13_625)
       else
         echo('Must start at Gate of Souls, room number 1784, or within the Fangs of Ushnish Area')
         exit
@@ -1368,7 +1465,7 @@ class Bescort
       push_boulder
       return gos_tunnel
     end
-    waitfor /^After a seemingly interminable length of time/
+    waitfor(/^After a seemingly interminable length of time/)
     DRC.fix_standing
   end
 
@@ -1384,9 +1481,8 @@ class Bescort
   end
 
   def segoltha(mode)
-    flying_mount = @settings.flying_mount
     @equipment_manager.empty_hands
-    have_changed_gear = flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
+    have_changed_gear = @flying_mount ? false : @equipment_manager.wear_equipment_set?('swimming')
     move_count = 0
     if mode =~ /^n/i
       dir_of_travel = 'north'
@@ -1402,8 +1498,8 @@ class Bescort
       exit
     end
 
-    if flying_mount
-      use_flying_mount(flying_mount, 'mount', 'skim')
+    if @flying_mount
+      use_flying_mount(@flying_mount, 'mount', 'skim')
       if dir_of_travel == 'south'
         move 'go bank'
         move 'west'
@@ -1418,7 +1514,7 @@ class Bescort
         move 'east'
         move 'go slope'
       end
-      use_flying_mount(flying_mount, 'dismount')
+      use_flying_mount(@flying_mount, 'dismount')
       return
     end
 
@@ -1432,7 +1528,7 @@ class Bescort
       if XMLData.room_exits.length == 2 || XMLData.room_exits.length == 1
         move 'west'
         move_count -= 1
-      elsif dir_of_travel == 'north' && move_count == 16 && UserVars.segoltha_shortcut == 'true'
+      elsif dir_of_travel == 'north' && move_count == 16
         move 'east'
         break if Room.current.id == 15888
       elsif XMLData.room_exits.include?(dir_of_travel)
@@ -1440,6 +1536,7 @@ class Bescort
       elsif XMLData.room_exits.length == 0
         break if Room.current.id == 19373 && dir_of_travel == 'south'
         break if Room.current.id == 19457 && dir_of_travel == 'north'
+
         if !(move dir_of_travel)
           move 'west'
           move_count -= 1
@@ -1545,8 +1642,8 @@ class Bescort
     end
     DRCA.release_cyclics
     unless DRCA.cast_spell({ 'abbrev' => 'rezz',
-                        'mana' => 5,
-                        'cyclic' => true }, get_settings)
+                             'mana'   => 5,
+                             'cyclic' => true }, @settings)
       echo('Failed to cast Resurrection! Try again or use the puzzle to enter.')
       exit
     end
@@ -1564,6 +1661,7 @@ class Bescort
     result =~ pattern
     waitrt
     return if result.eql?('You are already at the end of the conduit.')
+
     if Flags['pattern-shift']
       Flags.reset('pattern-shift')
     else
@@ -1578,6 +1676,7 @@ class Bescort
 
   def know_shard?(shard_name, shard_list)
     return true if UserVars.known_shards.include?(shard_name)
+
     DRC.bput('recall heavens grazhir', shard_name, 'Roundtime')
     lines = reget(30).map(&:strip)
     UserVars.known_shards = lines & shard_list
@@ -1627,9 +1726,9 @@ class Bescort
 
     room_id_to_shard = {
       9999 => "Asharshpar'i",
-      607 => 'Rolagi',
+      607  => 'Rolagi',
       2493 => 'Marendin',
-      306 => 'Taniendar',
+      306  => 'Taniendar',
       3002 => 'Mintais',
       3105 => 'Dinegavren',
       4542 => 'Tamigen',
@@ -1637,45 +1736,45 @@ class Bescort
       6867 => 'Auilusi',
       8302 => 'Vellano',
       3777 => "Dor'na'torna",
-      287 => 'Tabelrem',
+      287  => 'Tabelrem',
       6991 => 'Besoge'
     }
 
     mode_to_shard = {
-      'shard' => 'Marendin',
-      'crossing' => 'Rolagi',
-      'leth' => "Asharshpar'i",
-      'theren' => 'Dinegavren',
-      'throne' => 'Mintais',
-      'raven' => 'Tamigen',
+      'shard'      => 'Marendin',
+      'crossing'   => 'Rolagi',
+      'leth'       => "Asharshpar'i",
+      'theren'     => 'Dinegavren',
+      'throne'     => 'Mintais',
+      'raven'      => 'Tamigen',
       'riverhaven' => 'Taniendar',
-      'taisgath' => 'Erekinzil',
-      'aesry' => 'Auilusi',
-      'fang' => 'Vellano',
-      'muspari' => 'Tabelrem',
-      'steppes' => "Dor'na'torna",
-      'merkresh' => 'Besoge'
+      'taisgath'   => 'Erekinzil',
+      'aesry'      => 'Auilusi',
+      'fang'       => 'Vellano',
+      'muspari'    => 'Tabelrem',
+      'steppes'    => "Dor'na'torna",
+      'merkresh'   => 'Besoge'
     }
 
     mode_to_pillar_roomid = {
-      'shard' => 9806,
-      'merkresh' => 9806,
-      'crossing' => 9764,
-      'muspari' => 9764,
-      'aesry' => 9807,
-      'steppes' => 9807,
-      'fang' => 9805,
-      'leth' => 9803,
-      'raven' => 9803,
-      'theren' => 9762,
+      'shard'      => 9806,
+      'merkresh'   => 9806,
+      'crossing'   => 9764,
+      'muspari'    => 9764,
+      'aesry'      => 9807,
+      'steppes'    => 9807,
+      'fang'       => 9805,
+      'leth'       => 9803,
+      'raven'      => 9803,
+      'theren'     => 9762,
       'riverhaven' => 9762,
-      'throne' => 9808,
-      'taisgath' => 9808
+      'throne'     => 9808,
+      'taisgath'   => 9808
     }
 
     direction_to_pattern = {
       'center' => /the microcosm is to the (?<direction>.*)\.$/,
-      'exit' => /You believe the end of the conduit lies (?<direction>.*)\.$|^You are already at the end of the conduit\.$/
+      'exit'   => /You believe the end of the conduit lies (?<direction>.*)\.$|^You are already at the end of the conduit\.$/
     }
 
     destination_shard = mode_to_shard[mode]
@@ -1705,6 +1804,7 @@ class Bescort
   def ride_gondola(mode)
     case DRC.bput('go gondola', 'There is no wooden gondola here', 'Gondola, Cab')
     when /no wooden gondola here/i
+      DRC.bput('look gondola', 'The wooden gondola')
       hide?
       waitfor 'The gondola stops on the platform and the door silently swings open'
       ride_gondola(mode)
@@ -1917,8 +2017,7 @@ class Bescort
 
   def get_fare?(amount, town, room)
     return false unless @settings.bescort_fare_handling
-    settings = get_settings
-    town_data = get_data('town')
+
     echo 'GETTING MONEY, YOU SLOB.'
     echo "Heading to #{town} for public transportation fare"
     pause 1
@@ -1929,9 +2028,9 @@ class Bescort
       echo 'You might be a necromancer!  Get some money manually!'
       return false
     end
-    settings.hometown = town
+    @settings.hometown = town
     succeeded = false
-    DRCM.minimize_coins(amount).each { |each_amount| succeeded = DRCM.get_money_from_bank(each_amount, settings) }
+    DRCM.minimize_coins(amount).each { |each_amount| succeeded = DRCM.get_money_from_bank(each_amount, @settings) }
     echo "Put some fare money in the #{town} bank!" unless succeeded
     manual_go2(room)
     succeeded
@@ -1939,6 +2038,7 @@ class Bescort
 
   def hide?
     return false if @settings.bescort_hide == false
+
     DRC.hide?
   end
 end

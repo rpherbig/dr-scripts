@@ -5,13 +5,6 @@
 custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel common-validation drinfomon events])
 
 class SafeRoom
-  include DRC
-  include DRCH
-  include DRCI
-  include DRCM
-  include DRCT
-  include DRCA
-
   def initialize
     arg_definitions = [
       [
@@ -24,7 +17,16 @@ class SafeRoom
     settings = get_settings
     @health_threshold = settings.saferoom_health_threshold
     @withdraw_amount = settings.safe_room_withdraw_amount
-    @keep_bank_amount = settings.safe_room_keep_bank_amount 
+    @keep_bank_amount = settings.safe_room_keep_bank_amount
+    @performance_while_healing = settings.performance_while_healing
+    @stop_performance_after_heal = false
+    @tome_while_healing = settings.tome_while_healing
+    @stop_tome_after_heal = false
+    @plant_adjectives = settings.healing_plant_adjectives
+    @plant_nouns = settings.healing_plant_nouns
+    @adjectives_regex = Regexp.union(settings.healing_plant_adjectives)
+    @noun_regex = Regexp.union(settings.healing_plant_nouns)
+    @plant_regex = Regexp.new("#{@adjectives_regex} #{@noun_regex}")
 
     return unless args.force || need_healing?
 
@@ -42,27 +44,29 @@ class SafeRoom
     if use_pc_empaths?(pc_empaths, settings)
       # If the player is healed via use_pc_empaths? then no further action is needed
     elsif DRStats.empath?
-      walk_to(settings.safe_room) unless args.skip
-      wait_for_script_to_complete('healme')
+      DRCT.walk_to(settings.safe_room) unless args.skip
+      DRC.wait_for_script_to_complete('healme')
     elsif !DRStats.necromancer? || settings.necro_force_safe_room
       Flags.add('npc-idle', '^Dokt glances around the room')
       Flags.add('healthy',
-        'Dokt waves a large hand at you',
-        'Dokt gives you a quick glance',
-        'go have yourself a birthday party',
-        'you are well',
-        'have other patients',
-        /Arthianna says "#{Regexp.quote(checkname)}, you look fine and healthy to me/,
-        'A little rest and exercise',
-        'There is nothing I can do for you',
-        'Up and out',
-        'What are you doing lying there with the wounded',
-        'Come along.  Leave room for the others.',
-        "I think you don't really need healing",
-        "Now move along, I can't do anything more for you now",
-        "You're in good enough shape, #{Regexp.quote(checkname)}",
-        'Gaktrhn bends down as if to touch you',
-        'After a quick diagnosis')
+                'Dokt waves a large hand at you',
+                /^The last of your wounds knit shut/,
+                'Dokt gives you a quick glance',
+                'go have yourself a birthday party',
+                'you are well',
+                'have other patients',
+                /Arthianna says "#{Regexp.quote(checkname)}, you look fine and healthy to me/,
+                'A little rest and exercise',
+                'There is nothing I can do for you',
+                'Up and out',
+                'What are you doing lying there with the wounded',
+                'Come along.  Leave room for the others.',
+                "I think you don't really need healing",
+                "Now move along, I can't do anything more for you now",
+                "You're in good enough shape, #{Regexp.quote(checkname)}",
+                'Gaktrhn bends down as if to touch you',
+                'After a quick diagnosis',
+                'Kaiva crosses your name off the waiting list')
       Flags.add('moved', 'grabs you and drags you', 'grabs your arm and drags you .* with')
       Flags.add('idle', 'you have been idle too long')
 
@@ -75,15 +79,17 @@ class SafeRoom
         hometown = town_data[settings.hometown]
       end
 
-      ensure_copper_on_hand(@withdraw_amount, settings, hometown_name)
+      DRCM.ensure_copper_on_hand(@withdraw_amount, settings, hometown_name)
       wait_at_empath(hometown['npc_empath']['id'])
-      fix_standing
+      stop_script('performance')  if Script.running?('performance') && @stop_performance_after_heal
+      stop_script('tome')         if Script.running?('tome')        && @stop_tome_after_heal
+      DRC.fix_standing
       if (settings.hometown != hometown_name)
-        bank_amount, bank_currency = deposit_coins(0, settings, hometown_name)
+        bank_amount, _ = DRCM.deposit_coins(0, settings, hometown_name)
         if @keep_bank_amount && bank_amount > @keep_bank_amount
-          DRCM.minimize_coins(bank_amount-@keep_bank_amount).each { |amount| 
-            DRCM.withdraw_exact_amount?(amount, settings,hometown_name) 
-            }
+          DRCM.minimize_coins(bank_amount - @keep_bank_amount).each { |amount|
+            DRCM.withdraw_exact_amount?(amount, settings, hometown_name)
+          }
         end
       end
     elsif settings.necro_safe_room_use_devour
@@ -95,7 +101,7 @@ class SafeRoom
   end
 
   def need_healing?
-    health = check_health
+    health = DRCH.check_health
     if bleeding? || (health['poisoned'] && !DRSpells.active_spells['Devour'])
       echo "***STATUS*** Bleeding: #{bleeding?}, poison: #{health['poisoned']}"
       return true
@@ -116,13 +122,13 @@ class SafeRoom
     return unless settings.necromancer_healing['Devour']
     return unless settings.thanatology['harvest_container']
 
-    walk_to(settings.safe_room) unless skip
-    release_invisibility
-    devours = count_items_in_container('material', settings.thanatology['harvest_container'])
+    DRCT.walk_to(settings.safe_room) unless skip
+    DRC.release_invisibility
+    devours = DRCI.count_items_in_container('material', settings.thanatology['harvest_container'])
     return if devours.zero?
 
-    stow_hands
-    return if right_hand
+    DRCI.stow_hands
+    return if DRC.right_hand
 
     while need_healing? && devours > 0
       while mana < 40
@@ -130,32 +136,34 @@ class SafeRoom
         pause 10
       end
 
-      result = bput("get material in my #{settings.thanatology['harvest_container']}", 'You get', 'You are already', 'What were you') unless right_hand
+      result = DRC.bput("get material in my #{settings.thanatology['harvest_container']}", 'You get', 'You are already', 'What were you') unless DRC.right_hand
       break if result =~ /^What were you/
+
       unless DRSpells.active_spells['Devour']
-        cast_spell(settings.necromancer_healing['Devour'], settings)
-        devours -= 1 unless right_hand
+        # we want to force camb because otherwise high nerve damage casts will always result in min prep due to lost held mana
+        DRCA.cast_spell(settings.necromancer_healing['Devour'], settings, true)
+        devours -= 1 unless DRC.right_hand
       end
       pause 5
     end
 
-    bput("put my material in my #{settings.thanatology['harvest_container']}", 'You put', 'What were') if right_hand
+    DRC.bput("put my material in my #{settings.thanatology['harvest_container']}", 'You put', 'What were') if DRC.right_hand
   end
 
   def use_divine_charm?
-    return false unless exists?("divine charm")   # charm gone (likely too high circle/skill), couldn't heal, return false, heal normal way
+    return false unless DRCI.exists?("divine charm") # charm gone (likely too high circle/skill), couldn't heal, return false, heal normal way
 
-    if /is currently "facing" left/ !~ bput('look my divine charm', /^Suspended along a rawhide cord is a .*/)
-      while /You get an intuitive sense from the charm that it will now heal you if invoked/ !~ bput('turn my divine charm',/^You get an intuitive sense from.*/)
+    if /is currently "facing" left/ !~ DRC.bput('look my divine charm', /^Suspended along a rawhide cord is a .*/)
+      while /You get an intuitive sense from the charm that it will now heal you if invoked/ !~ DRC.bput('turn my divine charm', /^You get an intuitive sense from.*/)
       end
     end
-    case bput('invoke my divine charm','However, nothing happens', 'A helix of blue and white light swirls around you as your flesh shudders and knits with supernatural force','Your charm shimmers and with a quiet thrumming sound disappears entirely')
+    case DRC.bput('invoke my divine charm', 'However, nothing happens', 'A helix of blue and white light swirls around you as your flesh shudders and knits with supernatural force', 'Your charm shimmers and with a quiet thrumming sound disappears entirely')
     when /A helix of blue and white light swirls around you as your flesh shudders and knits with supernatural force/
       return true
     when /However, nothing happens/     # tried too soon to heal, still in cooldown, return false, heal normal way
       return false
     when /Your charm shimmers and with a quiet thrumming sound disappears entirely/
-      message("Your divine charm has gone.  Be sure to unset heal_with_divine_charm")
+      DRC.message("Your divine charm has gone.  Be sure to unset heal_with_divine_charm")
       return false
     else                                # don't panic! unknown failure, return false, heal normal way
       return false
@@ -173,15 +181,14 @@ class SafeRoom
     Flags.reset('healthy')
     Flags.reset('moved')
 
-
-    if Room.current.id == 8393 #Fang Cove Healer fix
+    if Room.current.id == 6870 || Room.current.id == 8393 # Fang Cove Healer fix
       fput "join list"
       until Flags['healthy'] || Flags['moved']
         pause 1
         check_idle
       end
       wait_for_healing if Flags['moved']
-    else #all others
+    else # all others
       lie_down
       start_script('tendme')
 
@@ -196,15 +203,33 @@ class SafeRoom
   end
 
   def wait_at_empath(room_id)
-    walk_to room_id
+    DRCT.walk_to room_id
     unless Room.current.id == room_id
-      beep
-      beep
+      DRC.beep
+      DRC.beep
       echo 'ERROR Navigating to safe room'
       return
     end
 
-    release_invisibility
+    DRC.release_invisibility
+
+    # Match room objects against the full regex to find and capture the noun
+    if /#{@adjectives_regex} (\w+)/ =~ DRRoom.room_objs.grep(@plant_regex).to_s
+      plant_type = Regexp.last_match(1)
+
+      # Send touch command for the captured noun
+      fput("touch #{plant_type}") if @plant_nouns.include?(plant_type)
+    end
+
+    # check for safe-room idle thing to do
+    if @performance_while_healing && !(Script.running?('performance') || Script.running?('play'))
+      start_script('performance', ['noclean'])
+      @stop_performance_after_heal = true
+    end
+    if @tome_while_healing && !Script.running?('tome')
+      start_script('tome', ['active'])
+      @stop_tome_after_heal = true
+    end
 
     if DRRoom.pcs.empty? || DRRoom.pcs_prone.empty? || Room.current.id == 8393
       wait_for_healing
@@ -219,7 +244,7 @@ class SafeRoom
       pause 10
     end
 
-    fix_standing
+    DRC.fix_standing
 
     counter = 0
     while counter < 10
@@ -241,40 +266,84 @@ class SafeRoom
   end
 
   def lie_down
-    bput('lie', 'You lie') if standing?
+    DRC.bput('lie', 'You lie') if standing?
   end
 
   def use_pc_empaths?(pc_empaths, settings)
     return false if pc_empaths.empty?
+
     # Sort pc empaths list by nearest first
-    sort_destinations(pc_empaths.map { |empath| empath['id'] })
-      .map { |room| pc_empaths.select { |empath| empath['id'] == room } }
-      .flatten
-      .each do |empath|
-      next unless DRRoom.pcs.include?(empath['name'].capitalize!) || @validator.in_game?(empath['name'])
-      next unless use_pc_empath?(empath['id'], empath['name'])
-      ensure_copper_on_hand(settings.safe_room_tip_threshold || 0, settings)
+    DRCT.sort_destinations(pc_empaths.map { |empath| empath['id'] })
+        .map { |room| pc_empaths.select { |empath| empath['id'] == room } }
+        .flatten
+        .each do |empath|
+      next unless empath['name'].upcase == 'EV' || DRRoom.pcs.include?(empath['name'].capitalize!) || @validator.in_game?(empath['name'])
+      next unless use_pc_empath?(empath)
+
+      DRCM.ensure_copper_on_hand(settings.safe_room_tip_threshold || 0, settings)
       tip(settings.safe_room_tip_threshold, settings.safe_room_tip_amount, empath['name'], settings.hometown)
       return true
     end
     false
   end
 
-  def use_pc_empath?(room_id, empath)
-    return false unless room_id
-    return false unless empath
+  def use_pc_empath?(empath)
+    return false unless empath['id']
+    return false unless empath['name']
 
-    walk_to room_id
-    return false unless DRRoom.pcs.include?(empath)
+    DRCT.walk_to empath['id']
 
-    fput("whisper #{empath} heal")
-    fput("listen to #{empath}")
-    Flags.add('doneheal', '"Done!"', 'All set', 'not even injured', 'in good enough shape', 'All better')
-    24.times do
-      pause 5
-      break if Flags['doneheal']
+    if !DRRoom.pcs.include?(empath) && /.*vela.tohr (\w+)/ =~ DRRoom.room_objs.grep(@plant_regex).to_s
+      Flags.add('doneheal', /You sense that this particular .* has healed all that it can.$/, /^You no longer feel the warmth from the touch of the/, /^The last of your wounds knit shut/)
+      while /.*vela.tohr (\w+)/ =~ DRRoom.room_objs.grep(@plant_regex).to_s
+        fput("touch #{Regexp.last_match(1)}")
+
+        if @performance_while_healing && !(Script.running?('performance') || Script.running?('play'))
+          start_script('performance', ['noclean'])
+          @stop_performance_after_heal = true
+        end
+        if @tome_while_healing && !Script.running?('tome')
+          start_script('tome', ['active'])
+          @stop_tome_after_heal = true
+        end
+
+        120.times do
+          pause 5
+          break if Flags['doneheal']
+        end
+
+        if !Flags['doneheal'] || Flags['doneheal'].to_s =~ /You sense that this particular .* has healed all that it can|You no longer feel the warmth from the touch of the/
+          Flags.reset('doneheal')
+          next
+        end
+
+        stop_script('performance')  if Script.running?('performance') && @stop_performance_after_heal
+        stop_script('tome')         if Script.running?('tome')        && @stop_tome_after_heal
+
+        Flags.delete('doneheal')
+        return !need_healing?
+      end
+    elsif DRRoom.pcs.include?(empath['name'])
+      if empath['start_heal_action']
+        fput(empath['start_heal_action'])
+      else
+        fput("whisper #{empath['name']} heal")
+      end
+      fput("listen to #{empath['name']}")
+
+      if empath['done_healing_matches'] && empath['done_healing_matches'].is_a?(Array)
+        Flags.add('doneheal', *empath['done_healing_matches'])
+      else
+        Flags.add('doneheal', '"Done!"', 'All set', 'not even injured', 'in good enough shape', 'All better')
+      end
+      24.times do
+        pause 5
+        break if Flags['doneheal']
+      end
+      Flags.delete('doneheal')
+    else
+      return false
     end
-    Flags.delete('doneheal')
 
     !need_healing?
   end
@@ -283,7 +352,7 @@ class SafeRoom
     return unless room_id
     return unless give_items || take_items
 
-    walk_to room_id
+    DRCT.walk_to room_id
     give(give_items)
     take(take_items)
   end
@@ -294,7 +363,7 @@ class SafeRoom
     return unless tip_amount
     return unless empath
 
-    minimize_coins(tip_amount).each do |amount|
+    DRCM.minimize_coins(tip_amount).each do |amount|
       fput "give #{empath} #{amount}"
     end
   end
@@ -302,7 +371,7 @@ class SafeRoom
   def give(items)
     items.each do |item|
       loop do
-        case bput("get my #{item}", 'You get', 'What were you referring')
+        case DRC.bput("get my #{item}", 'You get', 'What were you referring')
         when 'You get'
           fput "drop #{item}"
         else
@@ -322,7 +391,8 @@ class SafeRoom
     DRRoom.room_objs.grep(/#{item}/).each do |_|
       fput "stow #{item}"
       pause 1
-      next unless [right_hand, left_hand].grep(/#{item}/i)
+      next unless [DRC.right_hand, DRC.left_hand].grep(/#{item}/i)
+
       fput "drop #{item}"
       pause 1
       return false

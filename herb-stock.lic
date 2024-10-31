@@ -1,26 +1,67 @@
-#   Documentation: https://elanthipedia.play.net/Lich_script_repository#restock
+#   Documentation: https://elanthipedia.play.net/Lich_script_repository#herb-stock
 
 custom_require.call(%w[common common-items common-travel common-money])
 
-class Herbstock
-  include DRC
-  include DRCM
-  include DRCI
-  include DRCT
-
+class HerbStock
   def initialize
-    setup
-    items = parse_restockable_items
+    arg_definitions = [
+      [
+        { name: 'town', regex: $HOMETOWN_REGEX, optional: true, description: 'Town to restock in' }
+      ]
+    ]
+    args = parse_args(arg_definitions)
 
-    custom_loc_items = items.select { |k| k['hometown'] }
+    @settings = get_settings
+    @hometown = DRC.get_town_name(args.town || @settings.hometown)
+    amount, denom = @settings.sell_loot_money_on_hand.split(' ')
+    @keep_copper = DRCM.convert_to_copper(amount, denom)
+    @remedy_container = @settings.remedy_container
+    herbs_override_herbstock = @settings.herbs_override_herbstock
+    user_herbs = @settings.herbs
 
-    items -= custom_loc_items
-    restock_items(items, @settings.hometown)
+    if @hometown == 'Riverhaven' && DRSkill.getrank('Athletics') < 150
+      echo "Cannot swim the Jantspyre River."
+      echo "You are athletic enough to handle herb shopping in Therengia."
+      exit
+    end
 
-    custom_loc_items.map { |k| k['hometown'] }.uniq
-                    .each do |_hometown|
-      custom_loc_items.group_by { |v| v['hometown'] }
-                      .each { |hometown, items| restock_items(items, hometown) }
+    if (@hometown != 'Crossing' && @hometown != 'Shard' && @hometown != 'Riverhaven' && @hometown != 'Ratha') && !(herbs_override_herbstock && user_herbs)
+      echo 'Only Crossing, Riverhaven (150+ athletics), Ratha, and Shard hometowns supported. You may provide Crossing or Shard as an argument to override your hometown.'
+      echo 'Alternatively, define custom herbs in your yaml\'s herbs setting and set herbs_override_herbstock to true.'
+      exit
+    end
+
+    @settings.storage_containers.each { |container| fput("open my #{container}") }
+
+    herbs = []
+
+    if herbs_override_herbstock
+      herbs = parse_user_herbs(user_herbs)
+    else
+      base_herbs = get_data('healingherbs').herb_stocks[@hometown]
+
+      extra_herbs = parse_user_herbs(user_herbs)
+
+      herbs = (base_herbs + extra_herbs).uniq
+    end
+
+    herbs_with_locations = herbs.select { |k| k['location'] } # find any herbs that have a specific location defined
+
+    herbs -= herbs_with_locations
+
+    restock_items(herbs, @hometown) # restock herbs that do not have a specific location
+
+    herbs_with_locations.group_by { |v| v['location'] }
+                        .each do |location, herb_to_stock|
+      if location != 'Crossing' && UserVars.subscription == 'F2P'
+        next
+      end
+
+      if location == 'Riverhaven' && DRSkill.getrank('Athletics') < 150
+        next
+      end
+
+      restock_items(herb_to_stock, location)
     end
   end
 
@@ -29,8 +70,9 @@ class Herbstock
     coin_needed = 0
 
     item_list.each do |item|
-      remaining = count_combinable_item(item['name'])
+      remaining = DRCI.count_item_parts(item['name'])
       next unless remaining < item['quantity']
+
       num_needed = item['quantity'] - remaining
       buy_num = (num_needed / item['size'].to_f).ceil
       coin_needed += buy_num * item['price']
@@ -38,78 +80,55 @@ class Herbstock
       items_to_restock.push(item)
     end
 
+    if items_to_restock.length == 0
+      echo "*** No Herbs Needed from #{town} ***"
+      return
+    end
+
     DRCM.ensure_copper_on_hand(coin_needed, @settings, town)
 
     items_to_restock.each do |item|
       item['buy_num'].times do
-        stow_hands
+        DRCI.stow_hands
         DRCI.get_item?(item['name'], @remedy_container) if item['stackable']
         DRCT.buy_item(item['room'], item['name'])
         split_name = item['name'].split(' ')
-        bput("combine #{split_name.last} with #{split_name.last}", 'You combine', 'You must be holding') if item['stackable']
+        DRC.bput("combine #{split_name.last} with #{split_name.last}", 'You combine', 'You must be holding') if item['stackable']
         [DRC.left_hand, DRC.right_hand].compact.each { DRCI.put_away_item?(item['name'], @remedy_container) }
       end
     end
-    deposit_coins(@keep_copper, @settings, "#{town}")
+
+    DRCM.deposit_coins(@keep_copper, @settings, town)
   end
 
-  def setup
-    @settings = get_settings
-    @restock = @settings.herbs
-    @hometown = @settings.hometown
-    amount, denom = @settings.sell_loot_money_on_hand.split(' ')
-    @keep_copper = convert_to_copper(amount, denom)
-    @remedy_container = @settings.remedy_container
-    get_settings.storage_containers.each { |container| fput("open my #{container}") }
-  end
+  # The original impementation of herb-stock / HerbUser setup the herb list as a hash, but there's no need to treat it this way.
+  # Checking for hashes to maintain backwards compatibility.
+  def parse_user_herbs(herbs)
+    extra_herbs = []
 
-  def parse_restockable_items
-    item_list = @restock
-    hometown_data = get_data('consumables')[@hometown]
-    items = []
-    item_list.each do |key, value|
-      if hometown_data.key?(key) && !value.key?('hometown')
-        ht_data = hometown_data[key]
-        data = ht_data.each_key { |k| ht_data[k] = value[k] if value.key?(k) }
-        items.push(data)
-      elsif valid_item_data?(value)
-        items.push(value)
-      else
-        echo "No hometown of explicit data for '#{key}'"
-      end
+    return extra_herbs unless herbs.kind_of?(Array) || herbs.kind_of?(Hash)
+
+    if herbs.kind_of?(Array)
+      herbs.each { |herb| extra_herbs.push(herb) if valid_item_data?(herb) }
+    elsif herbs.kind_of?(Hash)
+      extra_herbs = process_herb_hash(herbs)
     end
-    items
+    extra_herbs
   end
 
-  def count_combinable_item(item)
-    count = 0
-    $ORDINALS.each do |ordinal|
-      count_msg = bput("count my #{ordinal} #{item}", 'I could not find what you were referring to.', 'tell you much of anything.', 'There is only one part', 'There are (.+) parts left of the ', 'You count out (.+) pieces ')
-      case count_msg
-      when 'I could not find what you were referring to.'
-        break
-      when 'tell you much of anything.'
-        echo "#{item} is marked as stackable but is not!"
-        break
-      when 'There is only one part'
-        count += 1
-      else
-        count_txt = count_msg.match(/There \w+ (.+) \w+ left of the / || /You count \w+ (.+) \w+ /).captures.first.tr('-', ' ')
-        count += text2num(count_txt)
-      end
-      waitrt?
-    end
-    count
+  def process_herb_hash(herbs)
+    extra_herbs = []
+
+    herbs.each { |_key, value| extra_herbs.push(value) if valid_item_data?(value) }
+
+    extra_herbs
   end
 
   def valid_item_data?(item_data)
-    return true if  item_data.key?('name') && \
-                    item_data.key?('size') && \
-                    item_data.key?('room') && \
-                    item_data.key?('price') && \
-                    item_data.key?('stackable') && \
-                    item_data.key?('quantity')
-    false
+    echo "Validating custom item data: #{item_data}" if @debug
+
+    %w[name size room price stackable quantity].all? { |x| item_data.key?(x) }
   end
 end
-Herbstock.new
+
+HerbStock.new

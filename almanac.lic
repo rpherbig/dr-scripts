@@ -2,10 +2,9 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#almanac
 =end
 
-custom_require.call(%w[common common-items drinfomon])
+custom_require.call(%w[common common-items])
 
 class Almanac
-
   def initialize
     settings = get_settings
     UserVars.almanac_last_use ||= Time.now - 600
@@ -13,8 +12,19 @@ class Almanac
     @no_use_rooms = settings.almanac_no_use_rooms
     @almanac_skills = settings.almanac_skills
     @almanac = settings.almanac_noun
+    @priority_skills = settings.almanac_priority_skills
 
     startup_delay = settings.almanac_startup_delay
+
+    # check to ensure almanac is defined in gear, and warn user if not
+    if settings.gear.find { |item| @almanac =~ /#{item[:adjective]}\s*#{item[:name]}/i }.nil?
+      message = "To minimize the possibility that items that you hold in your hands could be lost they should be listed in your `gear:`. Your almanac is not listed in your `gear:` settings:"
+      message += "\n  - #{@almanac}"
+      message += "\nIf you need assistance with this, please ask in the lich discord (listed in #{$clean_lich_char}links) for help."
+      message += "\n\n---The script will now abort.---"
+      DRC.message(message)
+      exit
+    end
 
     pause startup_delay
     passive_loop
@@ -22,22 +32,42 @@ class Almanac
 
   def passive_loop
     loop do
-      use_almanac if should_use_almanac?
-      pause 20
+      use_almanac unless should_not_use_almanac?
+      pause
     end
+  end
+
+  def almanac_sort_by_rate_then_rank(skills)
+    skills
+      .select { |skill| DRSkill.getxp(skill) < 18 }
+      .min_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }
+  end
+
+  def skill_with_lowest_mindstate
+    list = []
+    DRSkill.list
+           .map { |skill| [skill.name, skill.exp, skill.rank] }
+           .select { |element| element[1] }
+           .reject { |_skill, _exp, rank| (rank.to_i == 1750 || rank.to_i == 0) }
+           .reject { |skill, _exp| skill == "Mechanical Lore" }
+           .select { |skill, exp| list.append [skill, exp] }
+    skill = list.sort_by(&:last).first[0].sub(/(Lunar|Life|Arcane|Holy|Elemental)\s/, '')
+    return skill
   end
 
   def use_almanac
     unless @almanac_skills.empty?
-      training_skill = @almanac_skills
-                       .select { |skill| DRSkill.getxp(skill) < 18 }
-                       .sort_by { |skill| [DRSkill.getxp(skill), DRSkill.getrank(skill)] }.first
+      training_skill = almanac_sort_by_rate_then_rank(@priority_skills) || almanac_sort_by_rate_then_rank(@almanac_skills) || skill_with_lowest_mindstate
+      echo("training skill is #{training_skill}")
       return unless training_skill
     end
 
     # Pause scripts to prevent interference
-    scripts_to_unpause = []
-    scripts_to_unpause = DRC.smart_pause_all
+    until (scripts_to_unpause = DRC.safe_pause_list)
+      echo('Cannot pause, trying again in 30 seconds.')
+      pause 30
+    end
+
     waitrt?
 
     # Wait for any last output from paused scripts to resolve
@@ -53,31 +83,44 @@ class Almanac
     unless DRCI.get_item_if_not_held?(@almanac) && DRCI.in_hands?(@almanac)
       if DRCI.exists?(@almanac)
         DRC.message('Hands full, will try again later')
-        DRC.unpause_all_list(scripts_to_unpause)
+        DRC.safe_unpause_list(scripts_to_unpause)
         return
       else
         DRC.message('Almanac not found, exiting')
-        DRC.unpause_all_list(scripts_to_unpause)
+        DRC.safe_unpause_list(scripts_to_unpause)
         exit
       end
     end
 
-    if training_skill
-      DRC.bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn')
-    end
+    DRC.bput("turn #{@almanac} to #{training_skill}", 'You turn', 'You attempt to turn', /^What topic/) if training_skill
 
-    DRC.bput("study my #{@almanac}", 'You set about', 'gleaned all the insight you can', 'Study what', 'interrupt your research', 'The pages of the .* seem worn')
-    waitrt?
+    study_almanac
 
     DRCI.put_away_item?(@almanac)
 
-    UserVars.almanac_last_use = Time.now
-
-    DRC.unpause_all_list(scripts_to_unpause)
+    DRC.safe_unpause_list(scripts_to_unpause)
   end
 
-  def should_use_almanac?
-    !(hidden? || invisible? || almanac_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
+  def study_almanac
+    case DRC.bput("study my #{@almanac}", /You believe you've learned something significant/, /^You've gleaned all the insight you can/, /^Study what/, 'interrupt your research', /^The pages of the .* seem worn/, /is only usable by a character with a Premium subscription/, /STUDY its contents\./)
+    when /^You've gleaned all the insight you can/, /^The pages of the .* seem worn/
+      UserVars.almanac_last_use = Time.now - 540
+    when /You believe you've learned something significant/
+      UserVars.almanac_last_use = Time.now
+    when /is only usable by a character with a Premium subscription/
+      DRC.message('Premium almanac detected in a non-premium account.')
+      DRC.message('Exiting')
+      DRCI.put_away_item?(@almanac)
+      exit
+    when /STUDY its contents\./
+      DRC.bput("open my #{@almanac}", /^You open/)
+      study_almanac
+    end
+    waitrt?
+  end
+
+  def should_not_use_almanac?
+    (hidden? || invisible? || almanac_on_cooldown? || hands_full? || running_no_use_scripts? || inside_no_use_room?)
   end
 
   def running_no_use_scripts?
@@ -85,17 +128,16 @@ class Almanac
   end
 
   def inside_no_use_room?
-    @no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id }
+    @no_use_rooms.any? { |room| room.is_a?(Integer) ? room == Room.current.id : DRRoom.title.to_s[2..-3].match?(room) }
   end
 
   def almanac_on_cooldown?
-    (Time.now - UserVars.almanac_last_use) < 600
+    (Time.now - UserVars.almanac_last_use.to_i).to_i < 600
   end
 
   def hands_full?
     DRC.left_hand && DRC.right_hand && !DRCI.in_hands?(@almanac)
   end
-
 end
 
 Almanac.new

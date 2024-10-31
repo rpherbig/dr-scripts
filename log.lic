@@ -1,76 +1,114 @@
 =begin
 
-	logs the game to lich\logs\<game code>-<char name>\<date>-<number>.log
-	starts a new file after 30,000 lines (somewhere around 1mb)
+  logs the game to lich\logs\<game code>-<char name>\<date>-<number>.log
+  starts a new file after 30,000 lines (somewhere around 1mb)
 
-	author: Tillmen (tillmen@lichproject.org)
-	game: any
-	version: 0.4
+  SYNTAX:  ;log
+           ;log --timestamp="%F %T %Z"
+           ;autostart add --global log --timestamp=\"%F %T %Z\"
+           log format based on https://apidock.com/ruby/DateTime/strftime
 
-	changelog:
-		0.4 (2022-01-10):
-			Making datetime stamps customizeable, and tuneable in a character's yaml.
-		0.3 (2022-01-04):
-			prepend datetime stamps to logged lines
-		0.2 (2015-01-13):
-			create log directory if needed
+       author: elanthia-online
+ contributors: Tillmen, Tysong, Xanlin
+         game: gs
+      version: 0.7
+     required: Lich > 5.0.1
+
+  changelog:
+    0.7 (2023-03-31):
+      * Rubocop code cleanup
+      * Adjust filename to include hours, minutes, seconds
+      * Save into subdirectories by year/month
+      * Starts a new file when the day changes
+      * Add log timestamp CLI option for non-DragonRealms
+    0.6 (2023-01-23):
+      * Update for Ruby v3 compatibility
+    0.5 (2022-11-24):
+      * Remove reference to $SAFE
+    0.4 (2022-01-10):
+      * Making datetime stamps customizeable, and tuneable in a character's yaml.
+    0.3 (2022-01-04):
+      * prepend datetime stamps to logged lines
+    0.2 (2015-01-13):
+      * create log directory if needed
 
 =end
 
-unless defined?(script.want_script_output)
-	echo 'your version of Lich is too old for this script'
-	exit
+unless defined?(Script.current.want_script_output)
+  echo 'Your version of Lich is too old for this script.'
+  exit
 end
 
-unless $SAFE == 0
-	echo 'this script must be trusted to work (;trust log)'
-	exit
+unless (Gem::Version.new(RUBY_VERSION) > Gem::Version.new('2.0.0')) || $SAFE == 0
+  echo "This script must be trusted to be allowed to write to log files."
+  echo "You can trust it with the following command: #{$lich_char}trust #{script.name}"
+  exit
 end
 
 hide_me
+if defined?(get_settings)
+  settings = get_settings
+  stamp_enable = settings.log_timestamp
+  stamp_format = settings.log_timestamp_format
+end
+Script.current.want_script_output = true
+Script.current.want_upstream = true
 
-settings = get_settings
-stamp_enable = settings.log_timestamp
-stamp_format = settings.log_timestamp_format
-    
-script.want_script_output = true
-script.want_upstream = true
+if Script.current.vars[0] =~ /\-\-timestamp="(.*)"/
+  stamp_format = Regexp.last_match[1]
+  stamp_enable = true
+end
 
 Thread.new {
-	begin
-		loop {
-			script.downstream_buffer.push ">#{upstream_get.sub(/^<c>/, '')}"
-		}
-	rescue
-		echo $!
-	end
+  begin
+    loop {
+      Script.current.downstream_buffer.push ">#{upstream_get.sub(/^<c>/, '')}"
+    }
+  rescue
+    echo $!
+  end
 }
 
-Dir.mkdir("#{$lich_dir}logs") unless File.exists?("#{$lich_dir}logs")
-dir = "#{$lich_dir}logs/#{XMLData.game}-#{XMLData.name}"
-Dir.mkdir(dir) unless File.exists?(dir)
-
+started = false
 loop {
-	num = 1
-	filename = "#{dir}/#{Time.now.strftime("%Y-%m-%d")}-#{num}.log"
-	filename = "#{dir}/#{Time.now.strftime("%Y-%m-%d")}-#{num+=1}.log" while File.exists?(filename)
-	file = File.open(filename, 'a')
-	file.sync = true
-	file.puts "#{Time.now.strftime("%Y-%m-%d %I:%M%P").sub(/0([0-9]+\:)/) {"#{$1}"}}\n"
-	file.puts(reget) if (Time.now - $login_time) < 30
-	begin
-		30000.times {
-			line = get
- 			unless line =~ /^<(?:push|pop|clear)Stream/
-			  if stamp_enable
-			    file.puts "#{Time.now.strftime("#{stamp_format}")}: #{line}"
-			  else
-			    file.puts line
-			  end
-			end
-		}
-		file.puts "#{Time.now.strftime("%Y-%m-%d %I:%M%P").sub(/0([0-9]+\:)/) {"#{$1}"}}\n"
-	ensure
-		file.close rescue()
-	end
+  dir = File.join(LICH_DIR, 'logs', "#{XMLData.game}-#{XMLData.name}", Time.now.strftime("%Y"), Time.now.strftime("%m"))
+  FileUtils.mkdir_p(dir) unless File.exist?(dir)
+  thisdate = Time.now.strftime("%Y-%m-%d")
+  filename = File.join(dir, "#{Time.now.strftime("%Y-%m-%d_%H-%M-%S")}.log")
+  file = File.open(filename, 'a')
+  file.sync = true
+  file.puts "#{Time.now.strftime("%Y-%m-%d %H:%M:%S.%L %:z")}\n"
+  unless started
+    if (Time.now - $login_time) < 30
+      file.puts(reget)
+      file.puts "<!-- Above contents from reget; full logging now active -->\n"
+    end
+
+    echo "Non-XML Logging started, currently logging to #{filename}"
+    started = true
+  end
+  begin
+    30000.times {
+      line = get
+      unless line =~ /^<(?:push|pop)Stream/
+        unless defined?(stamp_enable)
+          file.puts line
+        else
+          if stamp_enable
+            file.puts "#{Time.now.strftime("#{stamp_format}")}: #{line}"
+          else
+            file.puts line
+          end
+        end
+      end
+      break if Time.now.strftime("%Y-%m-%d") != thisdate
+    }
+    file.puts "#{Time.now.strftime("%Y-%m-%d %H:%M:%S.%L %:z")}\n"
+  ensure
+    begin
+      file.close
+    rescue
+      Lich.log "Can't close file!"
+    end
+  end
 }

@@ -2,19 +2,18 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#pick
 =end
 
-custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel drinfomon equipmanager events spellmonitor])
+custom_require.call(%w[common common-arcana common-healing common-items common-money common-travel equipmanager events spellmonitor])
 
 class Pick
-
   def initialize
     arg_definitions = [
       [
-        { name: 'debug', regex: /debug/, optional: true, description: ''},
+        { name: 'debug', regex: /debug/, optional: true, description: '' },
         { name: 'refill', regex: /refill/, optional: true, description: 'Refills your lockpick ring.' },
-        { name: 'source', regex: /(source=(\w+))/, optional: true, description: 'Container with boxes to pick.'},
-        { name: 'all', regex: /all/, optional: true, description: 'Overwrite for @stop_pick_on_mindlock to keep picking'},
-        { name: 'assume', regex: /(quick|normal|careful)/, optional: true, description: 'Skips identification - assumes given difficulty'},
-        { name: 'stand', regex: /stand/i, optional: true, description: 'Stand to pop boxes. Default is sit.'}
+        { name: 'source', regex: /(source=(\w+))/, optional: true, description: 'Container with boxes to pick.' },
+        { name: 'all', regex: /all/, optional: true, description: 'Overwrite for @stop_pick_on_mindlock to keep picking' },
+        { name: 'assume', regex: /(quick|normal|careful)/, optional: true, description: 'Skips identification - assumes given difficulty' },
+        { name: 'stand', regex: /stand/i, optional: true, description: 'Stand to pop boxes. Default is sit.' }
       ]
     ]
 
@@ -24,11 +23,11 @@ class Pick
     @debug = args.debug || @settings.pick['debug'] || false
 
     if args.source
-      @sources = [ args.source.split('=')[1] ]
+      @sources = [args.source.split('=')[1]]
     elsif @settings.pick['picking_box_sources']
       @sources = @settings.pick['picking_box_sources']
     elsif @settings.picking_box_source
-      @sources = [ @settings.picking_box_source ]
+      @sources = [@settings.picking_box_source]
     end
 
     if @sources.nil?
@@ -65,7 +64,6 @@ class Pick
     @has_pick_waggle = @settings.waggle_sets['pick']
 
     picking_data = get_data('picking').picking
-    @lockpick_costs = picking_data['lockpick_costs'][@settings.hometown]
 
     @pick_identify_messages = picking_data['pick_messages_by_difficulty'];
     @pick_retry = picking_data['pick_retry']
@@ -90,7 +88,7 @@ class Pick
 
     @trap_blacklist = @settings.pick['trap_blacklist'] || []
     @blacklist_container = @settings.pick['blacklist_container']
-    
+
     @trap_greylist = @settings.pick['trap_greylist'] || []
 
     @all_trap_messages = picking_data['traps']
@@ -103,6 +101,8 @@ class Pick
     @tend_own_wounds = @settings.pick['tend_own_wounds'] || false
 
     @picking_room_id = Room.current.id
+
+    @lockpick_costs = picking_data['lockpick_costs'][@settings.refill_town || @settings.fang_cove_override_town || @settings.hometown]
 
     if @debug
       echo "Settings..."
@@ -254,6 +254,7 @@ class Pick
 
   def balance_lockpick_container
     return unless @use_lockpick_ring and @balance_lockpick_container
+
     DRC.bput("turn my #{@settings.lockpick_container} to best", "You fiddle with", "You think about it")
   end
 
@@ -318,20 +319,29 @@ class Pick
       return
     end
 
-    DRCM.ensure_copper_on_hand(cost * lockpicks_needed, @settings)
-    DRCT.refill_lockpick_container(@settings.lockpick_type, @settings.hometown, @lockpick_container, lockpicks_needed)
+    if @refill_town.nil?
+      DRCM.ensure_copper_on_hand(cost * lockpicks_needed, @settings)
+    else
+      DRCM.ensure_copper_on_hand(cost * lockpicks_needed, @settings, @refill_town)
+    end
+
+    if @refill_town.nil?
+      DRCT.refill_lockpick_container(@settings.lockpick_type, @settings.fang_cove_override_town || @settings.hometown, @lockpick_container, lockpicks_needed)
+    else
+      DRCT.refill_lockpick_container(@settings.lockpick_type, @refill_town, @lockpick_container, lockpicks_needed)
+    end
   end
 
   def attempt_open(box_noun)
     echo "attempt_open(#{box_noun})" if @debug
 
     current_box = {
-      'noun' => box_noun,
+      'noun'            => box_noun,
       'trap_difficulty' => nil,
-      'trap' => nil,
-      'trapped' => true,
+      'trap'            => nil,
+      'trapped'         => true,
       'lock_difficulty' => nil,
-      'locked' => true
+      'locked'          => true
     }
 
     if @settings.use_skeleton_key
@@ -366,7 +376,7 @@ class Pick
           if current_box['trap'] && @trap_greylist.include?(current_box['trap'])
             # force disarm careful on specific trap_greylist of traps types.
             current_box['trap_difficulty'] = @disarm_careful_threshold
-          end        
+          end
           disarm_trap(current_box)
         end
 
@@ -405,7 +415,11 @@ class Pick
 
   def try_unlock_box_with_key(box)
     return unless @settings.use_skeleton_key
-    return unless DRCI.get_item_if_not_held?(@settings.skeleton_key)
+
+    unless DRCI.get_item_if_not_held?(@settings.skeleton_key)
+      echo("Couldn't get skeleton key. Exiting.")
+      exit
+    end
 
     result = DRC.bput("turn my #{@settings.skeleton_key} at my #{box['noun']}", "^You turn", "that doesn't seem to do much", "I could not find", "What were you referring")
     waitrt?
@@ -424,7 +438,7 @@ class Pick
     Flags.reset('glance-no-traps')
     Flags.reset('glance-no-locks')
 
-    DRC.bput("glance my #{box['noun']}", "Looking more closely you see", "It looks like there are no locks")
+    DRC.bput("glance my #{box['noun']}", "Looking more closely you see", "It looks like there are no locks", /^You glance/)
 
     box['trapped'] = false if Flags['glance-no-traps']
     box['locked'] = false if Flags['glance-no-locks']
@@ -437,12 +451,13 @@ class Pick
     Flags.reset('disarm-trap-type')
 
     disarm_identify_match = DRC.bput("disarm my #{box['noun']} identify",
-      'Thanks to an instinct provided by your sense of security',
-      @disarm_lost_box_matches,
-      @trap_sprung_matches,
-      @disarm_identify_failed,
-      @disarm_identify_messages,
-      @disarmed_trap_messages.values)
+                                     'Thanks to an instinct provided by your sense of security',
+                                     @disarm_lost_box_matches,
+                                     @trap_sprung_matches,
+                                     @disarm_identify_failed,
+                                     @disarm_identify_messages,
+                                     @disarmed_trap_messages.values,
+                                     /^You're in no shape to be disarming anything/)
 
     trapped = true
     trap = nil
@@ -450,8 +465,8 @@ class Pick
 
     case disarm_identify_match
     when 'Thanks to an instinct provided by your sense of security'
-      echo 'Dodged a trap with Safe...'
-      trapped = false
+      echo 'Detected a trap with Safe...' if @debug
+      trapped = true
     when *@disarm_lost_box_matches
       DRC.message('Lost your box somehow...')
       trapped = false # Flag the box as not trapped, so it will fall through and move on...
@@ -465,6 +480,9 @@ class Pick
       trap = @disarmed_trap_messages.key("#{disarm_identify_match}")
       trapped = false
       difficulty = 0
+    when /^You're in no shape to be disarming anything/
+      DRC.message("Too injured to pick. Exiting script now.")
+      exit
     else
       echo "Identified trap: #{Flags['disarm-trap-type']} - #{disarm_identify_match}" if @debug
       trap = @all_trap_messages.key("#{Flags['disarm-trap-type']}")
@@ -488,13 +506,13 @@ class Pick
 
     if @assumed_difficulty.nil?
       case box['trap_difficulty']
-      when 0..(@disarm_quick_threshold-1)
+      when 0..(@disarm_quick_threshold - 1)
         echo 'identified box trap as blind difficulty' if @debug
         speed = 'blind'
-      when @disarm_quick_threshold..(@disarm_normal_threshold-1)
+      when @disarm_quick_threshold..(@disarm_normal_threshold - 1)
         echo 'identified box trap as quick difficulty' if @debug
         speed = 'quick'
-      when @disarm_normal_threshold..(@disarm_careful_threshold-1)
+      when @disarm_normal_threshold..(@disarm_careful_threshold - 1)
         echo 'identified box trap as normal difficulty' if @debug
         speed = ''
       when @disarm_careful_threshold..Float::INFINITY
@@ -510,11 +528,11 @@ class Pick
     Flags.reset('disarm-shift')
 
     disarm_result = DRC.bput("disarm my #{box['noun']} #{speed}",
-      'Thanks to an instinct provided by your sense of security',
-      @trap_sprung_matches,
-      @disarmed_trap_messages.values,
-      @disarm_retry,
-      @disarm_succeeded)
+                             'Thanks to an instinct provided by your sense of security',
+                             @trap_sprung_matches,
+                             @disarmed_trap_messages.values,
+                             @disarm_retry,
+                             @disarm_succeeded)
 
     echo "disarm_result: #{disarm_result}" if @debug
 
@@ -526,12 +544,9 @@ class Pick
     when *@disarmed_trap_messages.values
       echo "Identified already disarmed trap: #{disarm_result}" if @debug
       trapped = false
-    when *@disarm_retry
+    when *@disarm_retry, 'Thanks to an instinct provided by your sense of security'
       echo 'Failed to disarm trap' if @debug
       trapped = true
-    when 'Thanks to an instinct provided by your sense of security'
-      echo 'Dodged a trap with Safe...' if @debug
-      trapped = false
     when *@disarm_succeeded
       echo 'Successfully disarmed trap' if @debug
       trapped = false
@@ -578,6 +593,7 @@ class Pick
   def handle_trap_too_hard_or_blacklisted(box, container)
     if container
       return if DRCI.put_away_item?(box['noun'], container)
+
       DRC.message("Throwing away box cause it was not disarmed and stowing in #{container} failed")
     end
 
@@ -588,12 +604,12 @@ class Pick
     echo "identify_lock(#{box})" if @debug
 
     pick_identify_match = DRC.bput("pick my #{box['noun']} ident",
-      @trap_sprung_matches,
-      @pick_identify_messages,
-      @pick_retry,
-      'better have an empty hand first',
-      /Find a more appropriate tool and try again/,
-      /It's not even locked, why bother/)
+                                   @trap_sprung_matches,
+                                   @pick_identify_messages,
+                                   @pick_retry,
+                                   'better have an empty hand first',
+                                   /Find a more appropriate tool and try again/,
+                                   /It's not even locked, why bother/)
 
     case pick_identify_match
     when 'better have an empty hand first'
@@ -619,13 +635,13 @@ class Pick
   def pick(box)
     if @assumed_difficulty.nil?
       case box['lock_difficulty']
-      when 0..(@pick_quick_threshold-1)
+      when 0..(@pick_quick_threshold - 1)
         echo 'identified box lock as blind difficulty' if @debug
         speed = 'blind'
-      when @pick_quick_threshold..(@pick_normal_threshold-1)
+      when @pick_quick_threshold..(@pick_normal_threshold - 1)
         echo 'identified box lock as quick difficulty' if @debug
         speed = 'quick'
-      when @pick_normal_threshold..(@pick_careful_threshold-1)
+      when @pick_normal_threshold..(@pick_careful_threshold - 1)
         echo 'identified box lock as normal difficulty' if @debug
         speed = ''
       when @pick_careful_threshold..Float::INFINITY
@@ -642,9 +658,9 @@ class Pick
     locked = true
 
     pick_result = DRC.bput("pick my #{box['noun']} #{speed}", @trap_sprung_matches, 'not even locked',
-                      'you remove your lockpick and open and remove the lock', 'You discover another lock protecting',
-                      'You are unable to make any progress towards opening the lock', 'Find a more appropriate tool and try again',
-                      'better have an empty hand first', /Pick what/)
+                           'you remove your lockpick and open and remove the lock', 'You discover another lock protecting',
+                           'You are unable to make any progress towards opening the lock', 'Find a more appropriate tool and try again',
+                           'better have an empty hand first', /Pick what/)
     echo "Pick Result: #{pick_result}" if @debug
 
     case pick_result
@@ -708,7 +724,7 @@ class Pick
 
   def loot(box_noun)
     echo "Looting #{box_noun}..." if @debug
-    if DRC.bput("open my #{box_noun}", /You open/, /^In the .* you see .*\./, 'That is already open', 'It is locked') == 'It is locked'
+    if DRC.bput("open my #{box_noun}", /^In the .* you see .*\./, 'That is already open', 'It is locked') == 'It is locked'
       echo 'Bug: Tried to loot locked box...'
       return
     end
@@ -716,7 +732,7 @@ class Pick
     if (@settings.fill_pouch_with_box || @settings.loot_specials.empty?)
       # Don't handle full pouches here, cause if we do, we can't tie them (when they're empty)
       DRC.bput("fill my #{@settings.gem_pouch_adjective} #{@settings.gem_pouch_noun} with my #{box_noun}",
-        'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)
+               'You fill your', 'You open your', 'What were you referring to', /any gems/, /too full to fit/)
     end
 
     box_items = DRCI.get_item_list(box_noun, 'look');
@@ -817,8 +833,8 @@ class Pick
     echo "Harvesting: #{box} - container: #{@component_container}" if @debug
 
     harvest_result = DRC.bput("disarm my #{box['noun']} harvest",
-      /You fumble around with the trap apparatus/, /much for it to be successfully harvested/,
-      /completely unsuitable for harvesting/, /previous trap have already been completely harvested/, 'Roundtime')
+                              /You fumble around with the trap apparatus/, /much for it to be successfully harvested/,
+                              /completely unsuitable for harvesting/, /previous trap have already been completely harvested/, 'Roundtime')
     echo "Harvest Result: #{harvest_result}" if @debug
 
     case harvest_result

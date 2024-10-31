@@ -1,0 +1,94 @@
+custom_require.call(%w[common events])
+
+no_pause_all
+no_kill_all
+
+class HeroicTattoo
+  settings = get_settings
+  no_use_rooms = settings.heroic_tattoo_no_use_rooms
+  no_use_scripts = settings.heroic_tattoo_no_use_scripts
+
+  downtime = settings.heroic_tattoo_downtime_override || (DRSkill.getrank('Arcana') < 1400 ? (60 - DRSkill.getrank('Arcana') / 24) * 60 : 0)
+  timer = 3600 + downtime
+  next_invoke = UserVars.herotatt_next_invoke || Time.now
+  Flags.add("tattoo-down", 'You suddenly feel less heroic')
+
+  arg_definitions = [[
+    { name: 'once', regex: /once/i, optional: true, description: "One activation, however long that takes" },
+    { name: 'try', regex: /try/i, optional: true, description: "One ATTEMPT at activation, regardless of success or failure, and does not continue attempting" },
+    { name: 'cycle', regex: /cycle/i, optional: true, description: "Outputs information about your tattoo cooldown, uptime, downtime, cycle time" },
+    { name: 'script_summary', optional: true, description: "Script activates and maintains heroic tattoo buffs, running in the background. Best used as an autostart." }
+  ]]
+  args = parse_args(arg_definitions)
+  if args.cycle
+    DRC.message("Heroic Tattoo uptime is 60 minutes per activation")
+    DRC.message("Approximate downtime on your Heroic Tattoo is : #{downtime / 60} minutes")
+    DRC.message("So total cycle from activation to next possible activation is #{(downtime / 60) + 60} minutes")
+    exit
+  end
+
+  loop do
+    pause 10 # brief startup delay
+    while next_invoke > Time.now || no_use_scripts.any? { |name| Script.running?(name) } || (no_use_rooms.any? { |room| room === DRRoom.title.to_s()[2..-3] || room == Room.current.id })
+      pause 15
+      if Flags["tattoo-down"]
+        next_invoke = Time.now + downtime
+        UserVars.herotatt_next_invoke = next_invoke
+        Flags.reset("tattoo-down")
+      end
+    end
+    scripts = DRC.safe_pause_list
+    unless scripts
+      echo("Cannot pause, trying again shortly.")
+      next_invoke = Time.now + 15
+      next
+    end
+
+    case DRC.bput("invoke my tattoo",
+                  'as its magic washes over you',
+                  'Its magic appears depleted',
+                  'already under a heroic effect',
+                  'Closing your eyes, you carefully bend',
+                  'seem to be able to move to do that',
+                  /^Are you sure you want to do that/,
+                  'Invoke what')
+    when 'as its magic washes over you'
+      next_invoke = Time.now + timer
+      DRC.message("Next attempt in #{(next_invoke - Time.now).to_i / 60} minutes")
+      DRC.safe_unpause_list(scripts)
+      break if args.once
+    when 'Its magic appears depleted'
+      next_invoke = Time.now + [300, downtime].min
+      DRC.message("Next attempt in #{(next_invoke - Time.now).to_i / 60} minutes")
+      DRC.safe_unpause_list(scripts)
+    when 'already under a heroic effect'
+      DRC.safe_unpause_list(scripts)
+      break if args.once
+
+      next_invoke = Time.now + 3600
+      DRC.message("Next attempt will be made #{downtime / 60} minutes after your heroic effect falls.")
+    when 'Closing your eyes, you carefully bend'
+      DRC.message("Your tattoo is NOT a heroic tattoo, exiting for your safety.")
+      fput('release spell')
+      DRC.safe_unpause_list(scripts)
+      break
+    when 'Invoke what'
+      DRC.message("You have no magical tattoo of any kind.")
+      DRC.safe_unpause_list(scripts)
+      break
+    else
+      DRC.message("Something went wrong, we'll try again in 5 minutes.")
+      next_invoke = Time.now + 300
+      DRC.safe_unpause_list(scripts)
+    end
+    break if args.try
+
+    UserVars.herotatt_next_invoke = next_invoke
+  end
+end
+
+before_dying do
+  Flags.delete("tattoo-down")
+end
+
+HeroicTattoo.new

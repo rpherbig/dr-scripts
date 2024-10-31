@@ -2,19 +2,17 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#stack-scrolls
 =end
 
-custom_require.call(%w[common common-items drinfomon])
+custom_require.call(%w[common common-items])
 
 class ScrollStack
-  include DRC
-  include DRCI
-
   def initialize
     settings = get_settings
-    scroll_nouns = get_data('items').scroll_nouns
-    scroll_nouns += settings.custom_scrolls if settings.custom_scrolls
     scroll_stackers = settings.scroll_stackers
     @discard_scrolls = settings.discard_scrolls
+    @keep_scrolls = settings.keep_scrolls
     stacker_container = settings.stacker_container
+    @worn_trashcan = settings.worn_trashcan
+    @worn_trashcan_verb = settings.worn_trashcan_verb
 
     arg_definitions =
       [
@@ -23,7 +21,7 @@ class ScrollStack
         ],
         [
           { name: 'get', regex: /get/i, description: 'get one copy of a specific spell' },
-          { name: 'query', regex: /^[A-z\s\-\']+$/i, description: 'spell to search for, use quotes for multiple words' }
+          { name: 'query', regex: /^[A-z\s\-']+$/i, description: 'spell to search for, use quotes for multiple words' }
         ],
         [
           { name: 'mana', regex: /mana/i, description: 'find scrolls of a specific mana type' },
@@ -44,14 +42,14 @@ class ScrollStack
       exit
     end
 
-    stow_hands
+    DRCI.stow_hands
     populate_stackers(scroll_stackers, stacker_container)
-    search_container(args.container, scroll_nouns, stacker_container)
+    search_container(args.container, stacker_container)
   end
 
   def display_scrolls(scroll_stackers, stacker_container = '', mana_type = '')
     unless UserVars.stackers
-      stow_hands
+      DRCI.stow_hands
       populate_stackers(scroll_stackers, stacker_container)
     end
     normalized_data = normalize_stacker_data
@@ -62,10 +60,10 @@ class ScrollStack
     end
 
     normalized_data.each do |data|
-      respond('  ' + "#{data.first} (#{data[1]})".ljust(30) + "#{data[2]} -".ljust(15) + " Page:#{data[3]}")
+      respond("  #{data.first.to_s.ljust(30)} #{data[1].to_s.ljust(30)}#{data[2].to_s.ljust(15)} Page:#{data[3]}")
     end
 
-    respond('  Free Slots Remaining: ' + UserVars.stackers.flat_map { |stacker| stacker['contents'] }.select(&:empty?).size.to_s)
+    respond("  Free Slots Remaining: #{UserVars.stackers.flat_map { |stacker| stacker['contents'] }.select(&:empty?).size}")
   end
 
   def search_scrolls(query, stacker_container)
@@ -76,20 +74,18 @@ class ScrollStack
     end
 
     if stacker_container
-      bput("get my #{target['name']} in my #{stacker_container}", 'You get')
+      DRCI.get_item?(target['name'], stacker_container)
     else
-      bput("get my #{target['name']}", 'You get')
+      DRCI.stow_item?(target['name'])
     end
     fput("flip my #{target['name']}")
     fput("open my #{target['name']}")
 
     slot = target['contents'].find_index { |data| data.first =~ /#{query}/i }
 
-    slot.times do
-      bput("turn my #{target['name']}", 'You turn to a new')
-    end
+    DRC.bput("turn #{DRC.get_noun(target['name'])} to #{query}", /^You turn/)
 
-    case bput("pull my #{target['name']}", 'This was the last copy', 'Carefully')
+    case DRC.bput("pull my #{target['name']}", 'This was the last copy', 'Carefully')
     when /This was the last/i
       target['contents'][slot] = []
     when /Carefully/i
@@ -98,9 +94,9 @@ class ScrollStack
     end
 
     if stacker_container
-      bput("put my #{target['name']} in my #{stacker_container}", 'You put')
+      DRCI.put_away_item?(target['name'], stacker_container)
     else
-      bput("stow my #{target['name']}", 'You put')
+      DRCI.put_away_item?(target['name'])
     end
     fput('look my scroll')
   end
@@ -118,13 +114,13 @@ class ScrollStack
     stackers.each do |stacker|
       new_stacker = { 'name' => stacker, 'contents' => [] }
       if stacker_container
-        bput("get #{stacker} in my #{stacker_container}", 'You get')
+        DRCI.get_item?(stacker, stacker_container)
       else
-        bput("get #{stacker}", 'You get')
+        DRCI.get_item?(stacker)
       end
       fput("flip my #{stacker}")
       pause
-      while line = get?
+      while (line = get?)
         case line
         when /The (.*) section has (\d+)/
           new_stacker['contents'] << [Regexp.last_match(1), Regexp.last_match(2).to_i]
@@ -135,62 +131,63 @@ class ScrollStack
       UserVars.stackers << new_stacker
       fput("open my #{stacker}")
       if stacker_container
-        bput("put my #{stacker} in my #{stacker_container}", 'You put')
+        DRCI.put_away_item?(stacker, stacker_container)
       else
-        bput("stow my #{stacker}", 'You put')
+        DRCI.put_away_item?(stacker)
       end
     end
   end
 
-  def search_container(container, scroll_nouns, stacker_container)
+  def search_container(container, stacker_container)
     @excess_scrolls = []
-    scroll_nouns.each do |scroll|
+    DRCI.get_scroll_list_in_container(container).each do |scroll|
       stack_scrolls(container, scroll, stacker_container)
     end
 
     return if @excess_scrolls.empty?
+
     respond("  No room for: #{@excess_scrolls.join(', ')}")
   end
 
   private
 
   def stack_scrolls(container, scroll, stacker_container)
-    $ORDINALS.each do |ordinal|
-      break if bput("get #{ordinal} #{scroll} from my #{container}", 'You get', 'What were') == 'What were'
-
-      case bput("look my #{scroll}", 'It is labeled ".*\."', '.* of the \w*\s*\w* spell.', 'three-dimensional shapes cover much of the', 'You see nothing unusual.', 'I could not find what you were referring to')
-      when 'three-dimensional shapes cover much of the'
-        /of the (.*) spell/ =~ bput("read my #{scroll}", 'The .* contains a complete description of the .* spell')
-        spell_name = Regexp.last_match(1)
-      when /It is labeled "(.*)\."/i
-        spell_name = Regexp.last_match(1)
-      end
-      waitrt?
-
-      if @discard_scrolls.find { |discard| spell_name =~ /#{discard}/i }
-        dispose_trash(scroll)
-      elsif target = UserVars.stackers.find { |stacker| stacker['contents'].find { |data| data.first == spell_name } }
-        stack_existing_scroll(target, scroll, spell_name, stacker_container)
-      elsif target = UserVars.stackers.find { |stacker| stacker['contents'].find(&:empty?) }
-        stack_new_scroll(target, scroll, spell_name, stacker_container)
-      end
-
-      if checkleft || checkright
-        fput("stow my #{scroll}")
-        @excess_scrolls << spell_name
-      else
-        redo
-      end
+    unless DRCI.get_item?(scroll, container)
+      DRC.message("Could not get scroll: #{scroll} from #{container}. Exiting.")
+      exit
     end
+    case DRC.bput("look my #{scroll}", 'It is labeled ".*\."', '.* of the \w*\s*\w* spell.', 'three-dimensional shapes cover much of the', 'You see nothing unusual.', 'I could not find what you were referring to')
+    when 'three-dimensional shapes cover much of the'
+      /of the (.*) spell/ =~ DRC.bput("read my #{scroll}", 'The .* contains a complete description of the .* spell')
+      spell_name = Regexp.last_match(1)
+    when /It is labeled "(.*)\."/i
+      spell_name = Regexp.last_match(1)
+    end
+    waitrt?
+
+    if @discard_scrolls.find { |discard| spell_name == discard } || (@keep_scrolls.any? && !@keep_scrolls.any?(/#{spell_name}/i))
+      DRC.message("Scroll in discards, or not in keep list.")
+      DRC.message("Scroll is #{spell_name}")
+      DRCI.dispose_trash(scroll, @worn_trashcan, @worn_trashcan_verb)
+    elsif (target = UserVars.stackers.find { |stacker| stacker['contents'].find { |data| data.first == spell_name } })
+      stack_existing_scroll(target, scroll, spell_name, stacker_container)
+    elsif (target = UserVars.stackers.find { |stacker| stacker['contents'].find(&:empty?) })
+      stack_new_scroll(target, scroll, spell_name, stacker_container)
+    end
+
+    return unless checkleft || checkright
+
+    DRCI.put_away_item?(scroll)
+    @excess_scrolls << spell_name
   end
 
   def stack_new_scroll(target, scroll, spell_name, stacker_container)
     if stacker_container
-      bput("get my #{target['name']} in my #{stacker_container}", 'You get')
+      DRCI.get_item?(target['name'], stacker_container)
     else
-      bput("get my #{target['name']}", 'You get')
+      DRCI.get_item?(target['name'])
     end
-    case bput("push my #{target['name']} with my #{scroll}", 'Not finding a match', 'you realize there')
+    case DRC.bput("push my #{target['name']} with my #{scroll}", 'Not finding a match', 'you realize there')
     when /you realize/i
       echo('Unexpected, please report error')
       exit
@@ -198,20 +195,20 @@ class ScrollStack
       slot = target['contents'].index([])
       target['contents'][slot] = [spell_name, 1]
       if stacker_container
-        bput("put my #{target['name']} in my #{stacker_container}", 'You put')
+        DRCI.put_away_item?(target['name'], stacker_container)
       else
-        bput("stow my #{target['name']}", 'You put')
+        DRCI.put_away_item?(target['name'])
       end
     end
   end
 
   def stack_existing_scroll(target, scroll, spell_name, stacker_container)
     if stacker_container
-      bput("get my #{target['name']} in my #{stacker_container}", 'You get')
+      DRCI.get_item?(target['name'], stacker_container)
     else
-      bput("get my #{target['name']}", 'You get')
+      DRCI.get_item?(target['name'])
     end
-    case bput("push my #{target['name']} with my #{scroll}", 'you find room', 'you realize there')
+    case DRC.bput("push my #{target['name']} with my #{scroll}", 'you find room', 'you realize there')
     when /you realize/i
       # todo
     when /you find room/i
@@ -224,12 +221,11 @@ class ScrollStack
     end
 
     if stacker_container
-      bput("put my #{target['name']} in my #{stacker_container}", 'You put')
+      DRCI.put_away_item?(target['name'], stacker_container)
     else
-      bput("stow my #{target['name']}", 'You put')
+      DRCI.put_away_item?(target['name'])
     end
   end
 end
 
-# Call this last to avoid the need for forward declarations
 ScrollStack.new

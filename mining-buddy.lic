@@ -2,33 +2,53 @@
   Documentation: https://elanthipedia.play.net/Lich_script_repository#mining-buddy
 =end
 
-custom_require.call(%w[common common-items common-money common-travel drinfomon])
+custom_require.call(%w[common common-items common-crafting common-money common-travel drinfomon events])
 
 class MiningBuddy
-  include DRC
-  include DRCI
-  include DRCM
-  include DRCT
-
   def initialize
-    setup
+    settings = get_settings
+    @area_list = get_data('mining').mining_buddy_rooms
+    @forging_belt = settings.forging_belt
+    @bag = settings.crafting_container
+    @bag_items = settings.crafting_items_in_container
+    @areas = settings.mines_to_mine
+    @skip_populated = settings.mining_skip_populated
+    @mine_every_room = settings.mining_buddy_mine_every_room
+    @vein_list = settings.mining_buddy_vein_list
+    @mining_implement = settings.mining_implement
+    @use_packet = settings.mine_use_packet
+    @hometown = settings.hometown
+    deeds_data = get_data('crafting').deeds[@hometown]
+    @deeds_room = deeds_data['room']
+    @deeds_number = deeds_data['medium_number']
+    @mine_repair_own_tools = settings.mine_repair_own_tools
+    DRC.message("#{@areas}:#{@vein_list}") if UserVars.mining_debug
+    Flags.add('proper-repair', 'Your excellent training in the ways of tool repair')
 
-    ensure_copper_on_hand(10_000, @settings)
+    # checks yaml settings against tools
+    # corrects settings when tongs are wrongly set as adjustable, and/or when implement is tongs.
+    unless settings.adjustable_tongs && @mining_implement.include?('tongs') && DRCC.get_adjust_tongs?('reset shovel', @bag, @bag_items, @forging_belt)
+      @mining_implement.sub!(/.* tongs/, "shovel")
+    end
+    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt) if DRCI.in_hands?(@mining_implement)
+
+    DRCM.ensure_copper_on_hand(10_000, settings)
 
     if @use_packet
-      buy_deed_packet unless exists?('packet')
-      buy_deed_packet unless exists?('second packet')
+      buy_deed_packet unless DRCI.exists?('packet')
+      buy_deed_packet unless DRCI.exists?('second packet')
 
-      first = bput('look first packet', 'You count \d+').scan(/\d+/).first.to_i
-      second = bput('look second packet', 'You count \d+').scan(/\d+/).first.to_i
+      first = DRC.bput('look first packet', 'You count \d+').scan(/\d+/).first.to_i
+      second = DRC.bput('look second packet', 'You count \d+').scan(/\d+/).first.to_i
 
       if second < first
-        fput('get my second packet')
-        fput('stow my packet')
+        DRCC.get_crafting_item('second packet', @bag, @bag_items, @forging_belt)
+        DRCC.stow_crafting_item('packet', @bag, @forging_belt)
       end
     end
-    wait_for_script_to_complete('buff', ['mining'])
-    bput('speculate luck', '^You focus your mind on the world around you', '^You are already focusing on the world around you.', '^Your pattern-matching skills are still exhausted') if DRStats.trader? && DRStats.circle >= 65
+    check_repair
+    DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
+    DRC.bput('speculate luck', '^You focus your mind on the world around you', '^You are already focusing on the world around you.', '^Your pattern-matching skills are still exhausted') if DRStats.trader? && DRStats.circle >= 65
     @areas.each { |area_name| mine_rooms(@area_list[area_name]) }
   end
 
@@ -42,70 +62,42 @@ class MiningBuddy
     fput('stow my packet')
   end
 
-  def setup
-    @settings = get_settings
-    @area_list = get_data('mining').mining_buddy_rooms
-    @forging_belt = @settings.forging_belt
-    @areas = @settings.mines_to_mine
-    @skip_populated = @settings.mining_skip_populated
-    @mine_every_room = @settings.mining_buddy_mine_every_room
-    @vein_list = @settings.mining_buddy_vein_list
-    @mining_implement = @settings.mining_implement
-    @use_packet = @settings.mine_use_packet
-    @hometown = @settings.hometown
-    deeds_data = get_data('crafting').deeds[@hometown]
-    @deeds_room = deeds_data['room']
-    @deeds_number = deeds_data['medium_number']
-    echo("#{@areas}:#{@vein_list}") if UserVars.mining_debug
-  end
-
-  def get_mining_tool
-    if @forging_belt['items'].grep(/#{@mining_implement}/i).any?
-      bput("untie my #{@mining_implement}", 'You remove', 'You untie')
-    else
-      bput("get my #{@mining_implement}", 'You get', 'You are already')
-    end
-  end
-
-  def store_mining_tool
-    waitrt?
-    if @forging_belt['items'].grep(/#{@mining_implement}/i).any?
-      fput("tie my #{@mining_implement} to #{@forging_belt['name']}")
-    else
-      fput("stow my #{@mining_implement}")
-    end
-  end
-
   def check_repair
-    get_mining_tool
-    result = bput("anal my #{@mining_implement}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
+    # Self repair begins here
+    if @mine_repair_own_tools # Yaml setting of same name
+      DRCC.repair_own_tools(get_data('crafting')['blacksmithing'][@hometown], @mining_implement, @bag, @bag_items, @forging_belt)
+      return
+    end
+    # Store repair begins here
+    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt) unless DRCI.in_hands?(@mining_implement)
+    result = DRC.bput("analyze my #{@mining_implement}", 'practically in mint', 'pristine condition', 'in good condition', 'crafting tool and it is rather scuffed up', 'Roundtime')
     waitrt?
 
-    store_mining_tool
+    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
     return unless /roundtime/i =~ result
+
     repair = get_data('town')[@hometown]['metal_repair']
-    walk_to(repair['id'])
-    get_mining_tool
-    fput("give #{repair['name']}")
-    fput("give #{repair['name']}")
-    pause 10 until bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
-    fput("give #{repair['name']}")
-    store_mining_tool
+    DRCT.walk_to(repair['id'])
+    DRCC.get_crafting_item(@mining_implement, @bag, @bag_items, @forging_belt)
+    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
+    DRC.bput("give #{repair['name']}", 'Just give it to me again', "If you agree, give it to me again", "You don't need to specify the object", "Please don't lose this ticket!", "You hand.*")
+    pause 10 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
+    DRC.bput("give #{repair['name']}", 'You hand', 'takes your ticket')
+    DRCC.stow_crafting_item(@mining_implement, @bag, @forging_belt)
   end
 
   def mine_rooms(rooms)
     rooms.each do |room|
-      wait_for_script_to_complete('safe-room') if bleeding?
+      DRC.wait_for_script_to_complete('safe-room') if bleeding?
       next unless mine?(room)
+
       check_repair
-      DRCA.do_buffs(@settings, 'mining')
-      bput('speculate luck', '^You focus your mind on the world around you', '^You are already focusing on the world around you.', '^Your pattern-matching skills are still exhausted') if DRStats.trader? && DRStats.circle >= 65
     end
   end
 
   def mine?(room)
     waitrt?
-    walk_to(room)
+    DRCT.walk_to(room)
     unless DRRoom.pcs.empty?
       return false if @skip_populated
 
@@ -113,8 +105,10 @@ class MiningBuddy
     end
 
     unless @mine_every_room
-      bput('prospect', 'Roundtime')
+      DRC.bput('prospect', 'Roundtime')
       results = reget(20, 'can be mined here')
+
+      waitrt?
 
       echo(results) if UserVars.mining_debug
 
@@ -128,9 +122,14 @@ class MiningBuddy
 
     waitrt?
 
-    wait_for_script_to_complete('mine')
+    DRC.wait_for_script_to_complete('mine')
+    DRC.wait_for_script_to_complete('buff', ['mining-buddy'])
     true
   end
+end
+
+before_dying do
+  Flags.delete('proper-repair')
 end
 
 MiningBuddy.new

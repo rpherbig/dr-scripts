@@ -5,16 +5,25 @@
         and thresholds in which the scripts should be started
 =end
 
-custom_require.call(%w[common common-arcana drinfomon equipmanager])
+custom_require.call(%w[common common-arcana equipmanager])
 
 class T2
-
   def initialize
+    arg_definitions = [
+      [
+        { name: 'nodelay', regex: /nodelay/i, optional: true, description: 'Skip settings.t2_startup_delay' }
+      ]
+    ]
+
+    @args = parse_args(arg_definitions, true)
+
+    @settings = get_settings(@args.flex)
+
     @shutdown = false
-    fput('awaken')
+
+    fput('awaken') unless @settings.t2_skip_awaken
 
     @counter = 0
-    @settings = get_settings
     UserVars.t2_timers ||= {}
 
     @settings.t2_avoids.each do |avoid|
@@ -24,14 +33,26 @@ class T2
         fput("avoid #{avoid['type']}")
       end
     end
+
+    if !@args.nodelay && @settings.t2_startup_delay.to_i > 0
+      pause until Time.now - DRSkill.start_time > @settings.t2_startup_delay
+    end
+
+    unless @settings.t2_before_startup.empty?
+      echo "***STATUS*** Performing Pre-startup activities."
+      execute_actions(@settings.t2_before_startup)
+    end
   end
 
   def run
     loop do
       break if @shutdown
+
       trainables = @settings['training_list']
       EquipmentManager.new.empty_hands
 
+      # should only stay true if it gets through the below loop without executing anything.
+      warn_user = true
       trainables.each do |trainable|
         # Skip if learning rate is above start threshold for this trainable
         if trainable['skill'].is_a?(Array)
@@ -55,10 +76,20 @@ class T2
         end
         echo "***STATUS*** Starting (#{trainable['start']}) #{trainable_title}"
         trainable_start_time = Time.now
+        if @settings.t2_burgle_every_block
+          echo "***STATUS*** Trying to burgle"
+          DRC.wait_for_script_to_complete("burgle", ["start"])
+        end
         execute_actions(trainable['scripts'])
         update_cooldown(trainable['skill']) if has_cooldown?(trainable['skill'])
         echo "***STATUS*** Completed #{trainable_title} in #{Time.at(Time.now - trainable_start_time).strftime("%Mm:%Ss")}"
+        warn_user = false
         break
+      end
+      if warn_user
+        DRC.message("Ran out of things to do - please read the T2 tutorial if you see this message.\n  https://github.com/rpherbig/dr-scripts/wiki/T2-Tutorial")
+        DRC.message("Sleeping 5 seconds.")
+        pause 5
       end
     end
     if !@settings.t2_after_shutdown.empty?
@@ -108,7 +139,7 @@ class T2
   end
 
   def reload_settings(debug = false)
-    temp_settings = get_settings
+    temp_settings = get_settings(@args.flex)
 
     if temp_settings.training_list.nil? ||
        temp_settings.training_list.class != Array ||
@@ -120,7 +151,6 @@ class T2
     DRC.message("T2 training_list reloaded.")
     echo @settings.training_list.to_yaml if debug
   end
-
 end
 
 before_dying do

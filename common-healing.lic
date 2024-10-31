@@ -10,6 +10,7 @@ module DRCH
   def has_tendable_bleeders?
     health_data = check_health
     return true if health_data['bleeders'].values.flatten.any? { |wound| wound.tendable? }
+
     return false
   end
 
@@ -41,9 +42,9 @@ module DRCH
         # This line is your spirit health.
         # We don't need to parse this line, just use implicit `spirit` numeric variable.
         next
-      when /^You have (?!no significant injuries)(?!.* lodged .* into your)(?!.* infection)(?!.* poison(?:ed)?)(?!.* #{parasites_regex})/
+      when /^You have (?!no significant injuries)(?!.* lodged .* in(?:to)? your)(?!.* infection)(?!.* poison(?:ed)?)(?!.* #{parasites_regex})/
         wounds_line = line
-      when /^You have .* lodged .* into your/
+      when /^You have .* lodged .* in(?:to)? your/
         lodged_line = line
       when /^You have a .* on your/, parasites_regex
         parasites_line = line
@@ -61,13 +62,13 @@ module DRCH
     score = calculate_score(wounds)
 
     return {
-      'wounds' => wounds,
-      'bleeders' => bleeders,
+      'wounds'    => wounds,
+      'bleeders'  => bleeders,
       'parasites' => parasites,
-      'lodged' => lodged_items,
-      'poisoned' => poisoned,
-      'diseased' => diseased,
-      'score' => score
+      'lodged'    => lodged_items,
+      'poisoned'  => poisoned,
+      'diseased'  => diseased,
+      'score'     => score
     }
   end
 
@@ -99,8 +100,8 @@ module DRCH
   def perceive_health_other(target)
     return unless DRStats.empath?
 
-    case DRC.bput("touch #{target}", 'Touch what', 'feels cold and you are unable to sense anything', 'avoids your touch', 'You sense a successful empathic link has been forged between you and (?<name>\w+)\.')
-    when 'avoids your touch', 'feels cold and you are unable to sense anything', 'Touch what'
+    case DRC.bput("touch #{target}", 'Touch what', 'feels cold and you are unable to sense anything', 'avoids your touch', 'You sense a successful empathic link has been forged between you and (?<name>\w+)\.', /^You quickly recoil/)
+    when 'avoids your touch', 'feels cold and you are unable to sense anything', 'Touch what', /^You quickly recoil/
       return nil
     when /You sense a successful empathic link has been forged between you and (?<name>\w+)\./
       # The target passed to the method might be abbreviated
@@ -115,10 +116,9 @@ module DRCH
 
   # Examples of what this parses can be found in test/test_check_health.rb
   def parse_perceived_health(target = nil)
-
     pause 0.5 # Pause to wait for the full response to come back from the server
 
-    stop_line = target.nil? ? 'Your injuries include...' : "#{target}'s injuries include..."
+    stop_line = target.nil? ? 'Your injuries include...' : "You sense a successful empathic link has been forged between you and #{target}\."
     health_lines = reget(100).map(&:strip).reverse
     if !health_lines.include?(stop_line)
       return
@@ -127,28 +127,35 @@ module DRCH
     parasites_regex = Regexp.union($DRCH_PARASITES_REGEX_LIST)
 
     poisons_regex = Regexp.union([
-      /^[\w]+ (?:has|have) a .* poison/,
-      /having trouble breathing/,
-      /Cyanide poison/
-    ])
+                                   /^[\w]+ (?:has|have) a .* poison/,
+                                   /having trouble breathing/,
+                                   /Cyanide poison/
+                                 ])
 
     diseases_regex = Regexp.union([
-      /^[\w]+ wounds are (badly )?infected/,
-      /^[\w]+ (?:has|have) a dormant infection/,
-      /^[\w]+ (?:body|skin) is covered (?:in|with) open oozing sores/
-    ])
+                                    /^[\w]+ wounds are (badly )?infected/,
+                                    /^[\w]+ (?:has|have) a dormant infection/,
+                                    /^[\w]+ (?:body|skin) is covered (?:in|with) open oozing sores/
+                                  ])
+
+    dead_regex = Regexp.union([
+                                /^(He|She) is dead/
+                              ])
 
     perceived_wounds = Hash.new { |h, k| h[k] = [] }
     perceived_parasites = Hash.new { |h, k| h[k] = [] }
     perceived_poison = false
     perceived_disease = false
     wound_body_part = nil
+    dead = false
 
     health_lines
       .take_while { |line| line != stop_line }
       .reverse # put back in normal order so we parse <body part> line then <wound> lines
       .each do |line|
         case line
+        when dead_regex
+          dead = true
         when diseases_regex
           perceived_disease = true
         when poisons_regex
@@ -187,11 +194,12 @@ module DRCH
     end
 
     return {
-      'wounds' => wounds,
+      'wounds'    => wounds,
       'parasites' => perceived_parasites,
-      'poisoned' => perceived_poison,
-      'diseased' => perceived_disease,
-      'score' => calculate_score(wounds)
+      'poisoned'  => perceived_poison,
+      'diseased'  => perceived_disease,
+      'dead'      => dead,
+      'score'     => calculate_score(wounds)
     }
   end
 
@@ -296,7 +304,7 @@ module DRCH
         body_part = Regexp.last_match.names.find { |x| Regexp.last_match[x.to_sym] }
         body_part = Regexp.last_match[:part] if body_part == 'part'
         # Check for the lodged severity.
-        severity = /\blodged\s+(.*)\s+into your\b/.match(wound)[1]
+        severity = /\blodged\s+(.*)\s+in(?:to)? your\b/.match(wound)[1]
         severity = $DRCH_LODGED_TO_SEVERITY_MAP[severity]
         lodged_items[severity] << Wound.new(
           body_part: body_part,
@@ -320,19 +328,21 @@ module DRCH
     tend_failure = [
       /You fumble/,
       /too injured for you to do that/,
-      /TEND allows for the tending of wounds/
+      /TEND allows for the tending of wounds/,
+      /^You must have a hand free/
     ]
-    # You dislodged ammo or a parasite, discard it.
+    # You dislodged ammo or a parasite, discard it. Note, some parasites go away and don't
+    # end up in your hand. Fine, it'll just fail to dispose.
     tend_dislodge = [
-      /You \w+ remove/
+      /^You \w+ remove (a|the|some) (.*) from/,
+      /^As you reach for the clay fragment/
     ]
-    snap = [DRC.left_hand, DRC.right_hand]
+
     result = DRC.bput("tend #{person} #{body_part}", *tend_success, *tend_failure, *tend_dislodge)
     waitrt?
     case result
     when *tend_dislodge
-      DRCI.dispose_trash(DRC.left_hand, get_settings.worn_trashcan, get_settings.worn_trashcan_verb) if DRC.left_hand != snap.first
-      DRCI.dispose_trash(DRC.right_hand, get_settings.worn_trashcan, get_settings.worn_trashcan_verb) if DRC.right_hand != snap.last
+      DRCI.dispose_trash(Regexp.last_match(2), get_settings.worn_trashcan, get_settings.worn_trashcan_verb)
       bind_wound(body_part, person)
     when *tend_failure
       false
@@ -352,6 +362,7 @@ module DRCH
     skill_target = internal ? :skill_to_tend_internal : :skill_to_tend
     min_skill = $DRCH_BLEED_RATE_TO_SEVERITY_MAP[bleed_rate][skill_target]
     return false if min_skill.nil?
+
     DRSkill.getrank('First Aid') >= min_skill
   end
 
@@ -410,6 +421,7 @@ module DRCH
       return false if @body_part =~ /skin/
       return false if !bleeding?
       return false if @bleeding_rate =~ /tended|clotted/
+
       return DRCH.skilled_to_tend_wound?(@bleeding_rate, internal?)
     end
 

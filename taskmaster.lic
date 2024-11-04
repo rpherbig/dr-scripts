@@ -19,6 +19,8 @@ class TaskMaster
     @rooms = [16_145, 16_146, 16_148, 16_150, 16_153, 16_154, 16_147, 16_276, 16_277, 16_278, 16_290, 16_291, 16_292, 16_293, 16_295, 16_296, 16_294, 16_159, 16_161, 16_166, 16_169]
     tools = { 'poltu' => ['forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'], 'bradyn' => ['bone saw', 'chisels', 'wood shaper', 'rasp', 'carving knife', 'drawknife', 'forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'], 'zasele' => ['knitting needles', 'sewing needles', 'awl', 'slickstone', 'yardstick', 'scissors'], 'shaping' => ['wood shaper', 'rasp', 'carving knife', 'drawknife'] }
     @bag = @settings.crafting_container
+    @worn_trashcan = @settings.worn_trashcan
+    @worn_trashcan_verb = @settings.worn_trashcan_verb
     @bag_items = @settings.crafting_items_in_container
     @lootbag = @settings.task_loot_bag || 'backpack'
     @gem = @settings.gem_pouch_adjective
@@ -28,6 +30,7 @@ class TaskMaster
     @self_repair = @settings.task_self_repair
     @pickup_tools = @settings.task_get_tools_on_completion
     @boost = @settings.task_use_boost
+    DRCM.ensure_copper_on_hand(110000, @settings, "Crossing")
     @stockdata = get_data('crafting')['stock']
     @stackmap = { 'leather' => ['rat', 16667], 'cloth' => ['burlap', 16667], 'stack' => ['deer', 8864], 'ingot' => ['bronze', 8775], 'stone' => ['alabaster', 8864], 'yarn' => ['wool', 16667], 'lumber' => ['balsa', 8864] }
     Flags.add("wrap-up", /^You say, "Finish your tasks."/)
@@ -90,7 +93,7 @@ class TaskMaster
       @npc = 'zasele'
       restock
       tool_pickup if !@self_repair && DRCI.exists?("rangu ticket")
-      DRCM.ensure_copper_on_hand(80000, @settings, "Crossing")
+      DRCM.ensure_copper_on_hand(8000, @settings, "Crossing")
       loop do
         item, count, volume_per_item, base, type = get_task
         unless check_stock(count * volume_per_item, type, base)
@@ -126,6 +129,15 @@ class TaskMaster
     tool_pickup if @pickup_tools && DRCI.exists?("rangu ticket") # if indicated, and you have tickets, picks up any tools you may have dropped off previously, all disciplines
   end
 
+  def exchange_coins
+    DRCT.walk_to(get_data('town')["Crossing"]['exchange']['id'])
+    DRC.release_invisibility
+    exchange_to = get_data('town')["Crossing"]['currency']
+    $CURRENCIES
+      .reject { |currency| currency =~ /#{exchange_to}/i }
+      .each { |currency| fput("exchange all #{currency} for #{exchange_to}") }
+  end
+
   def restock
     info = get_data('crafting')['tailoring']["Crossing"]
     DRCC.check_consumables('pins', info['tool-room'], 5, @bag, @bag_items, nil, 40)
@@ -153,7 +165,10 @@ class TaskMaster
     end
     return if cost == 0
 
-    DRCM.ensure_copper_on_hand(cost + 100000, @settings, "Crossing")
+    exchange_coins
+    DRCM.deposit_coins(5000, @settings, "Crossing")
+    DRCM.ensure_copper_on_hand(8000, @settings, "Crossing")
+    DRCM.ensure_copper_on_hand(cost + 8000, @settings, "Crossing")
     ## now we have a hash with stock=># to order, and cash on hand
     need.each do |stock, number|
       next unless number > 0
@@ -317,28 +332,33 @@ class TaskMaster
     when /if you agree to (his|her) terms/, /To whom are you speaking/
       get_task
     when /You are already on a task/
-      fput("task")
-      DRC.message("You already appear to be on a task. Running this script with the task npc and finish arg will complete the task for you\nEG: ;taskmaster zasele finish")
+      @dispose, @remainder = [false, false]
+      get_instructions # picks up a fresh set of instructions from the task master
+      item, count, volume_per_item, base, type = finish # gets the relevant information from the task verb to send to the worker methods
+      send(@npc.to_sym, item, count, volume_per_item, base, type)
+      complete_task(item, count)
       exit
     when /utterly ignoring you/, /give you a chance a little later/
       DRC.message("Task on cooldown or recently canceled a task, either way, going to have to wait.")
-      pause 30
+      pause 15
       get_task
     when /you must wait before I can give you a task/
       if @boost
-        DRC.bput("boost task", "You've activated")
-        pause 5
+        fput("boost task")
+        pause 2
         @boost = false
         get_task
       else
-        pause 30
+        pause 15
         get_task
       end
     when /You may accept by typing ACCEPT TASK/
       DRC.bput("accept task", /You can check your progress with the TASK verb/)
-      /wanted you to craft (.*) and indicated that (\d+) would suffice/ =~ DRC.bput("task", /wanted you to craft (.*) and indicated that (\d+) would suffice/)
+      /wanted you to craft (.*) and indicated that (\d+) would suffice.\s+So far, you have returned (\d+)/ =~ DRC.bput("task", /wanted you to craft (.*) and indicated that (\d+) would suffice.\s+So far, you have returned (\d+)/)
       item = Regexp.last_match(1).split.last
       count = Regexp.last_match(2).to_i
+      already_returned = Regexp.last_match(3).to_i
+      count = count - already_returned
       DRC.message("Making #{count} #{item}s")
       case DRC.bput("read my #{item} instructions", /(cloth|bone|stone|yarn|wood|leather|metal).* \(((\d+) .*|boulder|large rock|small rock|stone|pebble)\)/)
       when /(cloth|bone|yarn|wood|leather|metal).* \(((\d+) .*)\)/
@@ -412,6 +432,7 @@ class TaskMaster
     info = get_data('crafting')['blacksmithing']["Crossing"]
     DRCC.check_consumables('oil', info['finisher-room'], info['finisher-number'], @bag, @bag_items, nil, count)
     DRCC.find_anvil(@anvil_town)
+    DRCC.clean_anvil?
     count.times do
       DRC.wait_for_script_to_complete('forge', ['instructions', type, item, 'skip'])
       DRC.bput("put my #{item} in my #{@bag}", "You put")
@@ -421,7 +442,7 @@ class TaskMaster
 
   def carve_stone(item, count)
     Flags.add("thieving-fog", "A low fog rolls in, then just as quickly rolls out")
-    DRCC.find_shaping_room("Crossing")
+    DRCC.find_shaping_room(@anvil_town)
     DRCC.get_crafting_item("chisels", @bag, @bag_items, @settings.engineering_belt)
     remaining = count
     count.times do
@@ -436,7 +457,7 @@ class TaskMaster
       DRCC.stow_crafting_item("instructions", @bag, @settings.engineering_belt)
       DRC.bput("get alabaster deed from my #{@bag}", '^You get')
       fput('tap my deed')
-      DRC.bput("touch my #{@cube}", /^Warm vapor swirls around your head in a misty halo/, /^A thin cloud of vapor manifests with no particular effect./, /^Touch what/) if @cube
+      DRC.bput("touch my #{@cube}", /^Warm vapor swirls around your head in a misty halo/, /You reach out and touch/, /You are not attuned to this particular enchantment/, /^A thin cloud of vapor manifests with no particular effect./, /^Touch what/, /^You reach out and touch/) if @cube
       DRC.bput("carve boulder with my chisels", "Roundtime")
       loop do
         case DRC.bput("carve #{item} with my chisels", "Roundtime", "You cannot figure out how to do that", "It would be better to find")
@@ -447,7 +468,7 @@ class TaskMaster
       end
       if Flags["thieving-fog"]
         buy_rocks(1)
-        DRCC.find_shaping_room("Crossing")
+        DRCC.find_shaping_room(@anvil_town)
         count = remaining
         Flags.reset("thieving-fog")
         redo
@@ -495,7 +516,7 @@ class TaskMaster
   end
 
   def shape_item(item, count, _base, type)
-    DRCC.find_shaping_room("Crossing")
+    DRCC.find_shaping_room(@anvil_town)
     count.times do
       DRC.wait_for_script_to_complete('shape', ['stow', 'instructions', type, item])
     end
@@ -505,10 +526,13 @@ class TaskMaster
   def complete_task(item, _count)
     loop do
       find_npc(@rooms, @npc)
-      DRC.bput("get #{item} from my #{@bag}", "^You get")
+      unless DRCI.get_item?(item, @bag)
+        exit
+      end
       break if DRC.bput("give my #{item} to #{@npc}", "more .* needed", "hands you a") =~ /hands you a/
     end
     sort_sack(item)
+    fput('dump junk')
   end
 
   def repair(tools, belt)
@@ -541,7 +565,7 @@ class TaskMaster
 
   def tool_pickup # picks up all your tools from repair shop
     DRCT.walk_to(19209)
-    while DRC.bput("get my Rangu ticket", 'You get', 'What were') == 'You get'
+    while DRCI.get_item?("rangu ticket")
       pause 30 until DRC.bput('look at my ticket', 'should be ready by now', 'Looking at the') == 'should be ready by now'
       DRC.bput("give Rangu", 'You hand')
       pause 0.01 until (tool = [DRC.right_hand, DRC.left_hand].compact.first) # waits for tool to hit your hand
@@ -552,20 +576,23 @@ class TaskMaster
   end
 
   def sort_sack(_item)
-    DRC.bput("fill my #{@gem} pouch with my sack", /^You open your/, /gem pouch is too full/, /^You fill your/)
+    DRCI.fill_gem_pouch_with_container(@settings.gem_pouch_adjective, @settings.gem_pouch_noun, 'sack', @settings.full_pouch_container, @settings.spare_gem_pouch_container, @settings.tie_gem_pouches)
+
     4.times do
       DRC.bput("get coin from my sack", "You pick up", "What were you")
     end
     result = DRC.bput("look in my sack", /^In the .* you see.*/)
     if result.split(' ').any? { |word| @keeplist.include?(word) }
-      DRC.message("Found a keeper: #{result.split(' ').select { |word| @keeplist.include?(word) }}")
+      result.sub!(/In the woven sack you see (a|an|some) /, '').sub!(/\.$/, '')
+      DRC.message("Found a keeper: #{result}")
+      DRCI.put_away_item?('sack', @lootbag)
     else
       DRC.message("Nothing special: #{result}")
+      DRCI.dispose_trash('sack', @worn_trashcan, @worn_trashcan_verb)
     end
     result.sub!('In the woven sack you see', '')
     DRC.log_window(result, "Task Master", true, true)
     UserVars.taskmaster_sacks[@npc] << result
-    DRC.bput("put my sack in my #{@lootbag}", "You put your sack")
   end
 end
 

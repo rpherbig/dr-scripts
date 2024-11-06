@@ -5,6 +5,8 @@
   task_self_repair: true/false # use own brush and oil for repairs
   task_get_tools_on_completion: true/false # If you want taskmaster to pickup any remaining tools in the repair shop. Useful if you're using clerk-tools after each task
   task_use_boost: true/false # use boost to eliminate task cooldowns, useful if you have a few and you're doing a lot of tasks
+  task_keep_list: list of items to keep. See default in base.yaml
+  task_crafting_room: <room number> # Room to craft in. Ensure it meets specifications for tooling required...
   crafting_items_in_container: ['oil', 'glue'] # list of items you might have duplicates of in other bags, but which you only want drawn from crafting bag
   crafting_container: bagname
    ## Important: set default stow to the same bag as your crafting bag ##
@@ -15,9 +17,10 @@ custom_require.call(%w[common common-items common-money common-travel common-cra
 class TaskMaster
   def initialize
     @settings = get_settings
-    @keeplist = ['blackened-bone', 'fey-bone', 'sprite-bone', 'crystal bone', 'cloth', 'puffy-white', 'punka-hide', 'diamond-hide', 'shadowleaf', 'morgawr-scale', 'mammoth-hide', 'corrugated-hide', 'demonscale', 'tyrium', 'agonite', 'animite', 'damite', 'haralun', 'icesteel', 'indurium', 'quelium', 'vardite', 'coralite', 'telothian', 'silversteel', 'niello', 'loimic', 'tomiek', 'kiralan', 'kertig', 'kadepa', 'haledroth', 'orichalcum', 'audrualm', 'diamondique', 'senci', 'felstone', 'diamondwood', 'greenheart', 'bloodwood', 'mistwood', 'silverwood', 'rockwood']
+    @keeplist = @settings.task_keep_list
     @rooms = [16_145, 16_146, 16_148, 16_150, 16_153, 16_154, 16_147, 16_276, 16_277, 16_278, 16_290, 16_291, 16_292, 16_293, 16_295, 16_296, 16_294, 16_159, 16_161, 16_166, 16_169]
     tools = { 'poltu' => ['forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'], 'bradyn' => ['bone saw', 'chisels', 'wood shaper', 'rasp', 'carving knife', 'drawknife', 'forging hammer', 'bellows', 'tongs', 'stirring rod', 'shovel'], 'zasele' => ['knitting needles', 'sewing needles', 'awl', 'slickstone', 'yardstick', 'scissors'], 'shaping' => ['wood shaper', 'rasp', 'carving knife', 'drawknife'] }
+    @keeplist_regex = Regexp.union(@keeplist)
     @bag = @settings.crafting_container
     @worn_trashcan = @settings.worn_trashcan
     @worn_trashcan_verb = @settings.worn_trashcan_verb
@@ -30,6 +33,9 @@ class TaskMaster
     @self_repair = @settings.task_self_repair
     @pickup_tools = @settings.task_get_tools_on_completion
     @boost = @settings.task_use_boost
+    @crafting_room = @settings.task_crafting_room
+    @username = get_settings.slack_username
+
     DRCM.ensure_copper_on_hand(110000, @settings, "Crossing")
     @stockdata = get_data('crafting')['stock']
     @stackmap = { 'leather' => ['rat', 16667], 'cloth' => ['burlap', 16667], 'stack' => ['deer', 8864], 'ingot' => ['bronze', 8775], 'stone' => ['alabaster', 8864], 'yarn' => ['wool', 16667], 'lumber' => ['balsa', 8864] }
@@ -110,7 +116,6 @@ class TaskMaster
       tool_pickup if @pickup_tools && DRCI.exists?("rangu ticket")
       exit
     end
-    DRCM.ensure_copper_on_hand(5000, @settings, "Crossing")
 
     loop do
       @dispose, @remainder = [false, false]
@@ -177,7 +182,7 @@ class TaskMaster
       DRCC.get_crafting_item("#{@stackmap[stock].first} #{stock}", @bag, @bag_items, nil) if DRCI.exists?("#{@stackmap[stock].first} #{stock}")
       number.times do
         DRCT.order_item(@stackmap[stock].last, (stock == 'yarn' || stock == 'thread') ? @stockdata[stock]['stock-number'] : @stockdata[@stackmap[stock].first]['stock-number'])
-        fput("combine #{stock}")
+        DRC.bput("combine #{stock}", /you (combine|must)/i)
       end
       DRCC.stow_crafting_item("#{@stackmap[stock].first} #{stock}", @bag, nil)
     end
@@ -402,7 +407,7 @@ class TaskMaster
     DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
     base_to_buy.times do
       DRCT.order_item(@stackmap[base].last, @stockdata[@stackmap[base].first]['stock-number'])
-      fput("combine #{base}")
+      DRC.bput("combine #{base}", /you (combine|must)/i)
     end
     DRCC.stow_crafting_item(base, @bag, @settings.engineering_belt)
   end
@@ -414,7 +419,7 @@ class TaskMaster
     DRCM.ensure_copper_on_hand(cost, @settings, "Crossing")
     base_to_buy.times do
       DRCT.order_item(@stackmap[base].last, @stockdata[base]['stock-number'])
-      fput("combine #{base}")
+      DRC.bput("combine #{base}", /you (combine|must)/i)
     end
     DRCC.stow_crafting_item(base, @bag, @settings.engineering_belt)
   end
@@ -429,9 +434,13 @@ class TaskMaster
   end
 
   def forge_item(item, count, type)
-    info = get_data('crafting')['blacksmithing']["Crossing"]
-    DRCC.check_consumables('oil', info['finisher-room'], info['finisher-number'], @bag, @bag_items, nil, count)
-    DRCC.find_anvil(@anvil_town)
+    unless @crafting_room
+      info = get_data('crafting')['blacksmithing']["Crossing"]
+      DRCC.check_consumables('oil', info['finisher-room'], info['finisher-number'], @bag, @bag_items, nil, count)
+      DRCC.find_anvil(@anvil_town)
+    else
+      DRCT.walk_to(@crafting_room)
+    end
     DRCC.clean_anvil?
     count.times do
       DRC.wait_for_script_to_complete('forge', ['instructions', type, item, 'skip'])
@@ -508,7 +517,11 @@ class TaskMaster
   end
 
   def tailor_item(item, count, base, type)
-    DRCT.walk_to(14886) unless @marathon
+    unless @crafting_room
+      DRCT.walk_to(14886) unless @marathon
+    else
+      DRCT.walk_to(@crafting_room)
+    end
     count.times do
       DRC.wait_for_script_to_complete('sew', ['stow', 'instructions', type, item, base == 'yarn' ? 'knit' : nil, @marathon ? 'skip' : nil])
     end
@@ -582,9 +595,10 @@ class TaskMaster
       DRC.bput("get coin from my sack", "You pick up", "What were you")
     end
     result = DRC.bput("look in my sack", /^In the .* you see.*/)
-    if result.split(' ').any? { |word| @keeplist.include?(word) }
+    if result.match?(@keeplist_regex)
       result.sub!(/In the woven sack you see (a|an|some) /, '').sub!(/\.$/, '')
       DRC.message("Found a keeper: #{result}")
+      SlackBot.new.direct_message(@username, "Found a keeper: #{result}")
       DRCI.put_away_item?('sack', @lootbag)
     else
       DRC.message("Nothing special: #{result}")

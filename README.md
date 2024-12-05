@@ -9,6 +9,6 @@ A series of [Lich](https://github.com/elanthia-online/lich-5) scripts for use wi
 
 If you have some feedback or suggestions, please [open an issue](https://github.com/elanthia-online/dr-scripts/issues). 
 
-[We're on Discord.](https://discord.gg/AXhcahpdnN)
+[We're on Discord.](https://discord.gg/uxZWxuX)
 
 We look forward to hearing from you!

@@ -1,0 +1,307 @@
+#!/usr/bin/env ruby
+require "ostruct"
+require "openssl"
+require "digest/md5"
+require "socket"
+require "tempfile"
+require "zlib"
+##
+## minimal options parser
+##
+module Opts
+  FLAG_PREFIX = "--"
+
+  def self.parse_command(h, c)
+    h[c.to_sym] = true
+  end
+
+  def self.parse_flag(h, f)
+    (name, val) = f[2..-1].split("=")
+    if val.nil?
+      h[name.to_sym] = true
+    else
+      val = val.split(",")
+
+      h[name.to_sym] = val.size == 1 ? val.first : val
+    end
+  end
+
+  def self.parse(args = ARGV)
+    config = OpenStruct.new
+
+    if args.size > 0
+      config = OpenStruct.new(**args.reduce(Hash.new) do |h, v|
+        if v.start_with?(FLAG_PREFIX)
+          parse_flag(h, v)
+        else
+          parse_command(h, v)
+        end
+        h
+      end)
+    end
+
+    config
+  end
+
+  @@cached = nil
+  def self.cached
+    @@cached ||= self.parse
+  end
+
+  def self.method_missing(method, *args)
+    cached.send(method, *args)
+  end
+end
+
+module Repo
+  ALLOWED_EXTENSIONS = /\.(rb|lic|xml|ui)$/
+  VERSION  = "2.32"
+  HOST     = "repo.lichproject.org"
+  PORT     = 7157
+  CERT     = OpenSSL::X509::Certificate.new("-----BEGIN CERTIFICATE-----\nMIIDoDCCAoigAwIBAgIUYwhIyTlqWaEd5mYGXoQQoC+ndKcwDQYJKoZIhvcNAQEL\nBQAwYTELMAkGA1UEBhMCVVMxETAPBgNVBAgMCElsbGlub2lzMRIwEAYDVQQKDAlN\nYXR0IExvd2UxDzANBgNVBAMMBlJvb3RDQTEaMBgGCSqGSIb3DQEJARYLbWF0dEBp\nbzQudXMwHhcNMjQwNjA1MTM1NzUxWhcNNDQwNTMxMTM1NzUxWjBhMQswCQYDVQQG\nEwJVUzERMA8GA1UECAwISWxsaW5vaXMxEjAQBgNVBAoMCU1hdHQgTG93ZTEPMA0G\nA1UEAwwGUm9vdENBMRowGAYJKoZIhvcNAQkBFgttYXR0QGlvNC51czCCASIwDQYJ\nKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJwhGfQgwI1h4vlqAqaR152AlewjJMlL\nyoqtjoS9Cyri23SY7c6v0rwhoOXuoV1D2d9InmmE2CgLL3Bn2sNa/kWFjkyedUca\nvd8JrtGQzEkVH83CIPiKFCWLE5SXLvqCVx7Jz/pBBL1s173p69kOy0REYAV/OAdj\nioCXK6tHqYG70xvLIJGiTrExGeOttMw2S+86y4bSxj2i35IscaBTepPv7BWH8JtZ\nyN4Xv9DBr/99sWSarlzUW6+FTcNqdJLP5W5a508VLJnevmlisswlazKiYNriCQvZ\nsnmPJrYFYMxe9JIKl1CA8MiUKUx8AUt39KzxkgZrq40VxIrpdxrnUKUCAwEAAaNQ\nME4wHQYDVR0OBBYEFJxuCVGIbPP3LO6GAHAViOCKZ4HIMB8GA1UdIwQYMBaAFJxu\nCVGIbPP3LO6GAHAViOCKZ4HIMAwGA1UdEwQFMAMBAf8wDQYJKoZIhvcNAQELBQAD\nggEBAGKn0vYx9Ta5+/X1WRUuADuie6JuNMHUxzYtxwEba/m5lA4nE5f2yoO6Y/Y3\nLZDX2Y9kWt+7pGQ2SKOT79gNcnOSc3SGYWkX48J6C1hihhjD3AfD0hb1mgvlJuij\nzNnZ7vczOF8AcvBeu8ww5eIrkN6TTshjICg71/deVo9HvjhiCGK0XvL+WL6EQwLe\n6/nVVFrPfd0sRZZ5OTJR5nM1kA71oChUw9mHCyrAc3zYyW37k+p8ADRFfON8th8M\n1Blel1SpgqlQ22WpYoHbUCSjGt6JKC/HrSHdKBezTuRahOSfqwncAE77Dz4FJaQ5\nWD2mk3SZbB2ytAHUDEy3xr697EI=\n-----END CERTIFICATE-----")
+
+  GAME     = "DR"
+  HEADER   = %{
+		THIS SCRIPT IS AUTOPUBLISHED FROM https://github.com/elanthia-online/dr-scripts
+		please open bug reports/issues there
+	}.split("\n")
+
+  def self.localized(file)
+    abs_file = File.join(
+      Dir.pwd,
+      file,
+    )
+
+    return nil unless File.exist?(file)
+
+    [File.basename(file), abs_file]
+  end
+
+  def self.tags(comments)
+    tags = nil
+    for line in comments
+      if line =~ /^[\s\t#]*tags:[\s\t]*([\w,\s\.\d]+)/i
+        tags = $1.strip
+        break
+      end
+    end
+    tags
+  end
+
+  def self.header(file, action:)
+    {
+      "action"   => action,
+      "client"   => VERSION,
+      "game"     => GAME,
+      "author"   => ENV.fetch("AUTHOR"),
+      "password" => ENV.fetch("PASSWORD"),
+      "file"     => file,
+    }
+  end
+
+  def self.comments(file)
+    fd = File.open(file, "rb")
+    contents = fd.read
+    if contents =~ /^=begin\r?\n?(.+?)^=end/m
+      return [HEADER] + $1.split("\n")
+    else
+      comments = Array.new
+      contents.to_s.split("\n").each do |line|
+        if line =~ /^[\t\s]*#/
+          comments.push(line)
+        elsif line !~ /^[\t\s]*$/
+          break
+        end
+      end
+      return [HEADER] + comments
+    end
+    # return [HEADER] # unreachable code per rubocop
+  end
+
+  def self.dial
+    begin
+      # if CERT.not_before > Time.now
+      #	respond "\n---\n--- warning: The current date is set incorrectly on your computer. This will\n---          cause the SSL certificate verification to fail and prevent this\n---          script from connecting to the server.  Fix it.\n---\n\n"
+      #	sleep 3
+      # end
+      # if CERT.not_after < Time.now
+      #	respond "\n---\n--- warning: Your computer thinks the date is #{Time.now.strftime("%m-%d-%Y")}.  If this is the\n---          correct date, you need an updated version of this script.  If \n---          this is not the correct date, you need to change it.  In either\n---          case, this date makes the SSL certificate in this script invalid\n---          and will prevent the script from connecting to the server.\n---\n\n"
+      #	sleep 3
+      # end
+      cert_store = OpenSSL::X509::Store.new
+      cert_store.add_cert(CERT)
+      ssl_context             = OpenSSL::SSL::SSLContext.new
+      ssl_context.options     = (OpenSSL::SSL::OP_NO_SSLv2 + OpenSSL::SSL::OP_NO_SSLv3)
+      ssl_context.cert_store  = cert_store
+      if OpenSSL::SSL::VERIFY_PEER == OpenSSL::SSL::VERIFY_NONE
+        # the plat_updater script redefines OpenSSL::SSL::VERIFY_PEER, disabling it for everyone
+        ssl_context.verify_mode = 1 # probably right
+        # else
+        #	ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      end
+      socket                  = TCPSocket.new(HOST, PORT)
+      ssl_socket              = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+      ssl_socket.connect
+      if (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == "CN" }[1] != "lichproject.org") and (ssl_socket.peer_cert.subject.to_a.find { |n| n[0] == "CN" }[1] != "Lich Repository")
+        if cmd_force
+          puts "warning: server certificate hostname mismatch"
+        else
+          puts "error: server certificate hostname mismatch"
+          ssl_socket.close rescue nil
+          socket.close rescue nil
+          exit
+        end
+      end
+      def ssl_socket.geth
+        hash = Hash.new
+        gets.scan(/[^\t]+\t[^\t]+(?:\t|\n)/).each { |s| s = s.chomp.split("\t"); hash[s[0].downcase] = s[1] }
+        return hash
+      end
+
+      def ssl_socket.puth(h)
+        puts h.to_a.flatten.join("\t")
+      end
+    rescue
+      puts "error connecting to server: #{$!}"
+      ssl_socket.close rescue nil
+      socket.close rescue nil
+      exit
+    end
+    [ssl_socket, socket]
+  end
+
+  def self.sync(files)
+    ## cast to Array from single file
+    files = [files] if files.is_a?(String)
+
+    uploads = files.select do |file| file =~ ALLOWED_EXTENSIONS end
+
+    if uploads.empty?
+      puts %{no changed scripts found}
+    else
+      uploads.map do |file|
+        Repo.localized(file)
+      end.compact.each do |file_data|
+        puts "uploading #{file_data}"
+        Repo.upload(*file_data)
+      end
+    end
+  end
+
+  def self.upload(file, abs_file)
+    puts %{[Repo.upload] #{file}}
+    md5sum   = Digest::MD5.file(abs_file).to_s
+    size     = File.stat(abs_file).size
+    comments = Repo.comments(abs_file)
+    tags     = Repo.tags(comments)
+    req      = Repo.header(file, action: "upload")
+    req.merge!({ "size" => size, "md5sum" => md5sum, "tags" => tags })
+    if size > 5000
+      tempfilename = Tempfile.new(file)
+      File.open(abs_file, "rb") do |f|
+        Zlib::GzipWriter.open(tempfilename) do |f_gz|
+          while (data = f.read(1_000_000))
+            f_gz.write(data)
+          end
+          nil
+        end
+      end
+      abs_file = tempfilename
+      size = File.stat(abs_file).size
+      req["size"] = size
+      req["compression"] = "gzip"
+    end
+    begin
+      ssl_socket, socket = Repo.dial
+      ssl_socket.puth(req)
+      response = ssl_socket.geth
+      ##
+      ## the rest of this is just taken from repository.lic
+      ##
+      if response["warning"]
+        puts "warning: server says: #{response["warning"]}"
+      end
+      if response["error"]
+        return puts "(Repo.upload): Error\n%s" % response["error"]
+      elsif not response["continue"]
+        return puts "(Repo.upload): Error\n%s" % response.inspect
+      end
+
+      puts %{[Repo.upload.local] #{abs_file}}
+
+      File.open(abs_file, "rb") do |f|
+        (size / 1_000_000).times { ssl_socket.write(f.read(1_000_000)) }
+        ssl_socket.write(f.read(size % 1_000_000)) unless (size % 1_000_000) == 0
+      end
+      response = ssl_socket.geth
+      if response["warning"]
+        puts "warning: server says: #{response["warning"]}"
+      end
+      if response["error"]
+        puts "error: server says: #{response["error"]}"
+      elsif response["success"]
+        puts "upload complete"
+      else
+        puts "error: unrecognized response from server: #{response.inspect}"
+      end
+    ensure
+      ssl_socket.close rescue nil
+      socket.close rescue nil
+    end
+  end
+
+  def self.delete(file)
+    req = Repo.header(file, action: "delete")
+    begin
+      ssl_socket, socket = Repo.dial
+      ssl_socket.puth(req)
+      response = ssl_socket.geth
+      if response["warning"]
+        puts "warning: server says: #{response["warning"]}"
+      end
+      if response["error"]
+        puts "error: server says: #{response["error"]}"
+      elsif response["success"]
+        puts "deleted #{file}"
+      else
+        puts "error: unrecognized response from server: #{response.inspect}"
+      end
+    ensure
+      ssl_socket.close rescue nil
+      socket.close rescue nil
+    end
+  end
+
+  def self.get_changes
+    puts %{
+			latest_commit: #{ENV.fetch("TRAVIS_COMMIT")}
+			 commit_range: #{ENV.fetch("TRAVIS_COMMIT_RANGE")}
+		}
+
+    %x{git diff --name-status #{ENV.fetch("TRAVIS_COMMIT_RANGE")}}.split("\n").map { |line|
+      line.split("\t")
+    }
+  end
+end
+
+files = unless Opts.files.nil?
+          Opts.files
+        else
+          Repo.get_changes.select do |info|
+            # info.last.include?("dependency.lic")
+	    info.last.to_s =~ /(?:dependency|noop).lic/
+          end
+        end
+
+to_delete = files.select { |info| info.first.eql? "D" }.map(&:last).map { |file| File.basename(file) }
+to_upload = files.reject { |info| info.first.eql? "D" }.map(&:last)
+
+if Opts["test"]
+  pp({ delete: to_delete, upload: to_upload })
+  exit(0)
+end
+
+Repo.sync to_upload
+to_delete.each { |file| Repo.delete(file) }
+
+exit(0)

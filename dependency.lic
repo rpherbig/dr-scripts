@@ -10,10 +10,10 @@ require 'ostruct'
 require 'digest/sha1'
 require 'monitor'
 
-$DEPENDENCY_VERSION = '2.0.3'
+$DEPENDENCY_VERSION = '2.0.4'
 $MIN_RUBY_VERSION = '3.2.2'
 DRINFOMON_IN_CORE_LICH ||= false
-DRINFOMON_CORE_LICH_DEFINES ||= []
+DRINFOMON_CORE_LICH_DEFINES ||= Array.new
 
 no_pause_all
 no_kill_all
@@ -33,7 +33,7 @@ end
 class ArgParser
   def parse_args(data, flex_args = false)
     raw_args = variable.first
-    baselist = variable.drop(1).dup || []
+    baselist = variable.drop(1).dup || Array.new
 
     unless baselist.size == 1 && baselist.grep(/^help$|^\?$|^h$/).any?
 
@@ -212,7 +212,7 @@ class ScriptManager
     UserVars.autostart_scripts ||= []
     UserVars.autostart_scripts.uniq!
     UserVars.autostart_scripts = UserVars.autostart_scripts - ['dependency']
-    Settings['autostart'] ||= []
+    Settings['autostart'] ||= Array.new
 
     unless Settings['autostart'] == Settings['autostart'].uniq
       echo("Duplicate autostarts found.")
@@ -343,6 +343,7 @@ class ScriptManager
   end
 
   def start_scripts(force = false)
+    start_time = Time.now
     @versions = nil
     repo_scripts.each { |(name, _)| get_script(name, force) }
     autostarts.each do |script|
@@ -357,6 +358,9 @@ class ScriptManager
         break unless !Script.running.find_all { |s| s.name =~ /bootstrap/ }.empty?
       end
     end
+    finish_time = Time.now
+    run_time = finish_time - start_time
+    echo("Time spent in start_scripts is #{run_time}") if @debug
   end
 
   def download_script(filename, force = false)
@@ -420,6 +424,7 @@ class ScriptManager
   end
 
   def check_base_files
+    start_time = Time.now
     verify_or_make_dir File.join(SCRIPT_DIR, 'profiles')
     profile_tree_url = get_status['tree'].find { |element| element['path'] == 'profiles' }['url']
     make_request(profile_tree_url)['tree']
@@ -433,21 +438,31 @@ class ScriptManager
         File.open(File.join(SCRIPT_DIR, "profiles/#{setup_file['path']}"), 'w') { |file| file.print(Base64.decode64(blob['content'])) }
         Settings['base_versions'][setup_file['path']] = setup_file['sha']
       end
+    Settings.save
+    finish_time = Time.now
+    run_time = finish_time - start_time
+    echo("Time spent in check_base_files is #{run_time}") if @debug
   end
 
   def check_data_files
+    start_time = Time.now
     verify_or_make_dir File.join(SCRIPT_DIR, 'data')
     profile_tree_url = get_status['tree'].find { |element| element['path'] == 'data' }['url']
     make_request(profile_tree_url)['tree']
       .select { |data| /^base.+yaml/ =~ data['path'] }
       # Reject files that exist, and have the same shasum as those on the repo.
-      .reject { |setup_file| File.exist?("data/#{setup_file['path']}") && setup_file['sha'] == Settings['base_versions'][setup_file['path']] }
+      .reject { |setup_file| File.exist?("data/#{setup_file['path']}") }
+      .reject { |setup_file| setup_file['sha'] == Settings['base_versions'][setup_file['path']] }
       .each do |setup_file|
         echo("downloading #{setup_file}") if @debug
         blob = make_request(setup_file['url'])
         File.open(File.join(SCRIPT_DIR, "data/#{setup_file['path']}"), 'w') { |file| file.print(Base64.decode64(blob['content'])) }
         Settings['base_versions'][setup_file['path']] = setup_file['sha']
       end
+    Settings.save
+    finish_time = Time.now
+    run_time = finish_time - start_time
+    echo("Time spent in check_data_files is #{run_time}") if @debug
   end
 
   def run_script(filename)
@@ -476,10 +491,15 @@ class ScriptManager
   end
 
   def get_status
-    return @status if @status && Time.now - @status_time <= 30 # prevent flooding
+    if Settings['status'] && Time.now - Settings['status_time'] <= 3600
+      echo("Returning cached status response") if @debug
+      return Settings['status']
+    end
 
-    @status_time = Time.now
-    @status = make_request(@status_url)
+    Settings['status_time'] = Time.now
+    Settings['status'] = make_request(@status_url)
+    Settings.save
+    return Settings['status']
   end
 
   def make_request(raw_uri)
@@ -1781,9 +1801,7 @@ unless DRINFOMON_IN_CORE_LICH
   custom_require.call('drinfomon')
 
   echo("DRinfomon ready.")
-end
-
-if DRINFOMON_IN_CORE_LICH
+else 
   Lich::Util.issue_command("exp all 0", /^Circle: \d+/, /^Rested EXP Stored|type: AWAKEN|Unlock Rested Experience/, quiet: true, timeout: 1)
   Lich::Util.issue_command("info", /^Name/, /^<output class=""/, quiet: true, timeout: 1)
   Lich::Util.issue_command("ability", /^You (know the Berserks|recall the spells you have learned from your training)|^From your apprenticeship you remember practicing/, /^You (recall that you have \d+ training sessions|can use SPELL STANCE \[HELP\]|have \d+ available slot)/, quiet: true, timeout: 1)

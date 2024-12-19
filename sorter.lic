@@ -2,190 +2,177 @@
   Documentation: https://elanthipedia.play.net/Lich_script_development#sorter
 =end
 
-custom_require.call(%w[common common-items])
-require 'terminal-table'
+custom_require.call(%w[common])
 
-class Sorter
-  def initialize(use_table)
-    @settings = get_settings
-    @settings.sorter['ignore_categories'] ||= 'nil'
-    @use_table = use_table
-    setup_downstream_hook
-  end
+@settings = get_settings
+@settings.sorter['ignore_categories'] ||= 'nil'
 
-  def setup_downstream_hook
-    action = proc { |line| process_line(line) }
-    DownstreamHook.add('sorter', action)
-  end
+script.want_downstream = false
+script.want_downstream_xml = true
+hide_me
 
-  def process_line(line)
-    if line =~ /^(You rummage .*? and see .*?|You rummage .*? but there is nothing in there\.)/
-      container_name, items = parse_rummage_output(line)
-      sorted_items = sort_items(items)
-      @use_table ? display_table(sorted_items, container_name) : display_default(sorted_items, container_name)
-      nil # Suppress the original line output
-    elsif line =~ /(?:In|On|Behind|Under) (?:an?|the) (.*?) you see (.*)\./
-      container_name = Regexp.last_match(1).strip
-      contents = Regexp.last_match(2)
-      items = DRC.list_to_array(contents)
-      sorted_items = sort_items(items)
-      @use_table ? display_table(sorted_items, container_name) : display_default(sorted_items, container_name)
-      nil # Suppress the original line output
-    elsif line =~ /^On (?:an?|the) (.*?), you see:/
-      container_name = $1.strip
-      shop_items = []
-      while (item_line = get) !~ /\[Type SHOP \[GOOD\] or click an item to see some details about it\.\]/
-        if item_line =~ /<d cmd='shop #\d+ on #\d+'>(.*?)<\/d>/
-          shop_items << $1.strip
-        end
-      end
-      sorted_items = sort_shop_items(shop_items)
-      display_shop_table(sorted_items, container_name)
-      nil
-    else
-      line # Allow non-matching lines to pass through
+best_column_count = proc { |list|
+  num_columns = 1
+  loop do
+    items_per_column = (list.length / num_columns.to_f).ceil
+    total_width = 0
+    for column_num in 0...num_columns
+      max_width = 0
+      list[(column_num * items_per_column)...((column_num + 1) * items_per_column)].each { |item| max_width = [max_width, item.length].max }
+      total_width += max_width
     end
-  end
-
-  def parse_rummage_output(line)
-    if line =~ /^You rummage through (.*?) and see (.*)\./
-      container_name = $1
-      items = DRC.list_to_array($2)
-      return container_name, items
-    elsif line =~ /^You rummage through (.*?) but there is nothing in there\./
-      container_name = $1
-      return container_name, []
+    total_width += (num_columns - 1) * 8
+    if total_width > @settings.sorter['width'].to_i - 8
+      num_columns -= 1
+      break
+    elsif num_columns >= list.length
+      break
     end
+    num_columns += 1
   end
-
-  def sort_items(items)
-    sorted = {}
-    items.each do |item|
-      clean_item = item.sub(/^\s*?\b(?:a|an|some|and|the)\b\s/, '').chomp('.').strip
-      noun = DRC.get_noun(clean_item)
-      type = get_item_type(clean_item, noun)
-
-      if sorted[type]
-        if sorted[type][clean_item]
-          sorted[type][clean_item][:qty] += 1
-        else
-          sorted[type][clean_item] = { noun: noun, qty: 1, full_description: item.chomp('.').strip }
-        end
-      else
-        sorted[type] = { clean_item => { noun: noun, qty: 1, full_description: item.chomp('.').strip } }
-      end
-    end
-    sorted
-  end
-
-  def sort_shop_items(items)
-    sorted = {}
-    items.each do |item|
-      if item =~ /(.*) for (.*?) (.*?) Kronars$/
-        full_description = $1.strip
-        price = $2
-        currency = $3
-        clean_item = full_description.sub(/^\s*?\b(?:a|an|some|and|the)\b\s/, '')
-        noun = DRC.get_noun(clean_item)
-        type = get_item_type(clean_item, noun)
-        sorted[type] ||= {}
-        sorted[type][clean_item] = {
-          noun: noun,
-          price: "#{price} #{currency}",
-          full_description: full_description
-        }
-      end
-    end
-    sorted
-  end
-
-  def get_item_type(item, noun)
-    item_data = get_data('sorting').to_h.merge(get_data('items').to_h)
-    category = 'Other'
-
-    item_data.each do |key, value|
-      if noun =~ /#{value.join('$|').concat('$')}/i || item =~ /(?:#{value.join('$|').concat('$')})/i
-        category = key.to_s.sub(/_nouns|_types/, '').capitalize
-        break
-      end
-    end
-
-    category
-  end
-
-  def display_table(sorted_items, container_name)
-    table = Terminal::Table.new do |t|
-      t.title = "Contents of #{container_name.strip}"
-      t.style = { border_x: "-", border_i: "+", border_y: "|" }
-
-      if sorted_items.empty?
-        t << [{ value: "This container is empty", alignment: :center, colspan: 2 }]
-      else
-        t.headings = ['Item', 'Qty.']
-        sorted_types = sorted_items.keys.sort_by { |type| type == "Other" ? [1, type] : [0, type] }
-
-        sorted_types.each do |type|
-          items = sorted_items[type]
-          t << :separator
-          t << [{ value: type.strip, alignment: :center, colspan: 2 }]
-          t << :separator
-          items.each do |data|
-            t << [data[:full_description].strip, data[:qty]]
-          end
-        end
-      end
-    end
-
-    table_string = table.to_s.gsub('[[MONSTERBOLD]]', monsterbold_start).gsub('[[/MONSTERBOLD]]', monsterbold_end)
-    Lich::Messaging.mono(table_string)
-  end
-
-  def display_shop_table(sorted_items, container_name)
-    table = Terminal::Table.new do |t|
-      t.title = "Items for sale on #{container_name}"
-      t.headings = ['Item', 'Type', 'Price']
-      sorted_items.each do |type, items|
-        t << :separator
-        t << [{ value: type, alignment: :center, colspan: 3 }]
-        t << :separator
-        items.each do |data|
-          t << [data[:full_description], data[:noun], data[:price]]
-        end
-      end
-    end
-
-    Lich::Messaging.mono(table.to_s)
-  end
-
-  def display_default(sorted_items, container_name)
-    output = "#{container_name}:\n"
-    sorted_items.sort.each do |category_name, category_contents|
-      count = category_contents.values.sum { |item| item[:qty] }
-      output << "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} "
-      category_contents.each do |_item, data|
-        output << if data[:qty] > 1
-                    "#{data[:full_description]} (#{data[:qty]}), "
-                  else
-                    "#{data[:full_description]}, "
-                  end
-      end
-      output.chomp!(', ')
-      output << ".\n"
-    end
-    Lich::Messaging.mono(output)
-  end
-
-  def cleanup_hook
-    DownstreamHook.remove('sorter')
-  end
-end
-
-use_table = script.vars.include?('table')
-sorter_instance = Sorter.new(use_table)
+  [num_columns, 1].max
+}
 
 begin
-  # Keep the script running in the background to monitor incoming lines.
-  while true; sleep(0.1); end
+  action = proc { |s|
+    if s =~ /^(?:[IO]n the .*? you see |You rummage .*? and see .*?(?:, | and )(?:a|an|some) |You take a moment to look for all the items in the area and see|(?:You are|He is|She is) wearing )/ && @settings.sorter['mute_old_inventory']
+      if s =~ /You take a moment to look for all the items in the area and see/ && !@settings.sorter['sort_look_items_command']
+        s
+      elsif s =~ /You are wearing/ && !@settings.sorter['sort_inv_command']
+        s
+      elsif s =~ /(?:He is|She is) wearing/ && !@settings.sorter['sort_look_others']
+        s
+      end
+    else
+      s
+    end
+  }
+  DownstreamHook.add('sorter', action)
+  while (line = get)
+    if line =~ /^([IO]n the .*?) (you see .*\.)/
+      container = Regexp.last_match(1)
+      contents = Regexp.last_match(2)
+      next if line =~ /In the/ && line =~ /On the/
+    elsif line =~ /^(You rummage .*?)( and see .*?\.)/
+      container = Regexp.last_match(1)
+      contents = Regexp.last_match(2)
+      next if line =~ /In the/ && line =~ /On the/
+    elsif line =~ /(You take a moment to look for all the items in the area)( and see .*?\.)/ && @settings.sorter['sort_look_items_command']
+      container = Regexp.last_match(1)
+      contents = Regexp.last_match(2)
+      next if line =~ /In the/ && line =~ /On the/
+    elsif line =~ /You are wearing (.*\.)/ && @settings.sorter['sort_inv_command']
+      container = 'Inventory'
+      contents = 'and see ' + Regexp.last_match(1)
+      next if line =~ /In the/ && line =~ /On the/
+    elsif line =~ /(?:He is|She is) wearing (.*\.)/ && @settings.sorter['sort_look_others']
+      container = 'Inventory'
+      contents = 'and see ' + Regexp.last_match(1)
+      next if line =~ /In the/ && line =~ /On the/
+    else
+      next
+    end
+    if contents =~ /(?:and|you) see (.*)\./
+      if (contents = DRC.list_to_array(Regexp.last_match(1)))
+        sorted_contents = {}
+        item_data = get_data('sorting').to_h
+        item_data.merge!(get_data('items').to_h.keep_if { |key, _value| key =~ /gem_nouns|scroll_nouns/ })
+
+        contents.each do |item|
+          item = item.sub(/^\s*?\b(?:a|an|some|and|the)\b\s/, '')
+          category_name = 'other'
+          item_data.each do |key, value|
+            if item =~ /pushBold|popBold/
+              category_name = 'NPC'
+              break
+            elsif DRC.get_noun(item) =~ /#{value.join('$|').concat('$')}/i || DRC.remove_flavor_text(item) =~ /(?:#{value.join('$|').concat('$')})/i
+              if key.to_s.sub(/_nouns|_types/, '') !~ /#{@settings.sorter['ignore_categories']}/i
+                category_name = key.to_s.sub(/_nouns|_types/, '')
+                break
+              end
+            end
+          end
+          sorted_contents[category_name] ||= {}
+          sorted_contents ||= {}
+          if sorted_contents[category_name][item].nil?
+            echo "Name: #{item.ljust(75)} Noun: #{DRC.get_noun(item).ljust(20)} Category: #{category_name}" if UserVars.sorter_debug == 'true'
+            sorted_contents[category_name][item] = {}
+            sorted_contents[category_name][item]['noun'] = DRC.get_noun(item)
+            # sorted_contents[category_name][item]['exist'] = item.id
+            sorted_contents[category_name][item]['count'] = 1
+          else
+            sorted_contents[category_name][item]['count'] += 1
+          end
+        end
+        output = if (@settings.sorter['width'].to_i > 0) && ($frontend == 'stormfront')
+                   "<output class=\"mono\"/>\n"
+                 else
+                   ''
+                 end
+        sorted_contents = sorted_contents.sort { |a, b| a[0].split(/\s/).last <=> b[0].split(/\s/).last }
+        output.concat "#{container}:\n"
+        if @settings.sorter['width'].to_i > 0
+          for category_name, category_contents in sorted_contents
+            count = 0
+            category_contents.each_value { |value| count += value['count'] }
+            output.concat "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} \n"
+            category_contents = category_contents.sort { |a, b| a[0].split(/\s/).last <=> b[0].split(/\s/).last }
+            column_count = best_column_count.call(category_contents.collect { |a| a[0] })
+            row_count = (category_contents.length / column_count.to_f).ceil
+            column_count = (category_contents.length / row_count.to_f).ceil
+            column_widths = []
+            for column_num in 0...column_count
+              category_contents[(column_num * row_count)...((column_num + 1) * row_count)].each { |item| column_widths[column_num] = [column_widths[column_num].to_i, item.length].max }
+            end
+            for row_num in 0...row_count
+              output.concat '    '
+              for column_num in 0...column_count
+                item, item_info = category_contents[(column_num * row_count) + row_num]
+                str = if item_info['count'] > 1
+                        "#{item} (#{item_info['count']})"
+                      else
+                        item.to_s
+                      end
+                str = str.ljust(column_widths[column_num] + str.length + 12)
+                str = str.strip if column_num == column_count - 1
+                output.concat str
+              end
+              output.concat "\n"
+            end
+            output.concat "\n"
+            end
+        else
+          for category_name, category_contents in sorted_contents
+            count = 0
+            category_contents.each_value { |value| count += value['count'] }
+            output.concat "#{monsterbold_start}#{category_name} (#{count}):#{monsterbold_end} "
+            category_contents = category_contents.sort { |a, b| a[0].split(/\s/).last <=> b[0].split(/\s/).last }
+            for item, item_info in category_contents
+              if item_info['count'] > 1
+                output.concat "#{item} (#{item_info['count']}), "
+              else
+                output.concat "#{item}, "
+              end
+            end
+            output.chop!
+            output.chop!
+            output.concat ".\n"
+            end
+        end
+        if (@settings.sorter['width'].to_i > 0) && ($frontend == 'stormfront')
+          output.concat "<output class=\"\"/>\n"
+        end
+        output.gsub!(/<.*?>/, '') unless $frontend =~ /^(?:stormfront|profanity)$/
+        if defined?(_respond)
+          _respond output
+        else
+          $stdout.puts output
+        end
+      else
+        echo 'fixme'
+      end
+    end
+  end
 ensure
-  sorter_instance.cleanup_hook # Clean up when the script exits.
+  DownstreamHook.remove('sorter')
 end
